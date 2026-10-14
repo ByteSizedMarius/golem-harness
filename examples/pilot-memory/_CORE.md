@@ -23,7 +23,7 @@ governs play; sanctioned cheats are for testing only.
 - Launch: server opens to LAN → get the port → `bash start.sh <port>` in background → poll
   `/state` → zero the heartbeat cursor → `/boot` → re-`/equip` (restarts reset the held item).
 - Heartbeat: tail `bot.log` filtered to `[chat]|[event]|disconnected|kicked|error`.
-- Chat: ASCII only, short, 2–3s between sends (kick risk). Restart drill: stop.flag → kill
+- Chat: short, 2–3s between sends (kick risk). Restart drill: stop.flag → kill
   node → rm flag → cursor 0 → start.sh → /boot.
 
 ## Campaign & resume  →  details: [[pilot-campaign]], world: [[pilot-world]], queue: [[pilot-fix-queue]]

@@ -7,27 +7,26 @@ const armorManager = require('mineflayer-armor-manager')
 const express = require('express')
 const fs = require('fs')
 const { Vec3 } = require('vec3')
-
-// .env support (07-20, the second pilot's report: "showing Claude not Vesper despite the
-// .env setting") — the README promised .env configuration but nothing ever LOADED the file.
-// Hand-rolled so there's no new dependency; explicit environment always wins over the file.
-try {
-  for (const line of fs.readFileSync(require('path').join(__dirname, '.env'), 'utf8').split('\n')) {
-    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/)
-    if (m && !(m[1] in process.env)) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '')
-  }
-} catch (e) {}
+const { installSecurity, BUNKER_MODES } = require('./lib/install')
+const { classifySound } = require('./lib/sounds')
+const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs } = require('./lib/shelter')
 
 const HOST = process.env.MC_HOST || 'localhost'
 const PORT = parseInt(process.env.MC_PORT || '25565')
 const VERSION = process.env.MC_VERSION || '1.21.8'
 const USERNAME = process.env.MC_USER || 'Claude'
 const CTRL_PORT = parseInt(process.env.CTRL_PORT || '3000')
-const VIEW_PORT = parseInt(process.env.VIEW_PORT || '3001')
-// The control API is UNAUTHENTICATED — anyone who can reach it can drive the body and speak
-// as it in chat. It binds loopback-only by default; set BIND_HOST=0.0.0.0 only if you truly
-// want remote pilots, and understand what that means on your network.
-const BIND_HOST = process.env.BIND_HOST || '127.0.0.1'
+const VIEW_PORT = parseInt(process.env.VIEW_PORT || String(CTRL_PORT + 1))
+// Set for a Forge 1.7.10 server behind ViaProxy: no attack charge, a sword block instead of a shield, no off-hand.
+const LEGACY_1710 = process.env.GOLEM_MC_1710 === '1'
+// On 1.7.10 a full hit lands every 10 ticks at most, and the bot attacks 11 ticks apart.
+const LEGACY_HIT_MS = 550
+// The HMAC key that signs every control API request and response.
+const GOLEM_TOKEN = process.env.GOLEM_TOKEN || ''
+if (GOLEM_TOKEN.length < 32) {
+  console.error('[bot] GOLEM_TOKEN is missing or shorter than 32 characters, refusing to start')
+  process.exit(1)
+}
 
 const bot = mineflayer.createBot({
   // MC_VERSION=auto lets mineflayer detect the server's version from the handshake
@@ -194,7 +193,17 @@ bot.once('spawn', () => {
     // NOTE: the old `version: '1.21.4'` "pin" here was a NO-OP (mineflayer.js never read that
     // option); the client was silently falling back to the 1.21.4 atlas on its own, which is why
     // most-but-not-all blocks rendered right. Rebuild recipe + rollback: backups/viewer-1.21.11-rebuild/.
-    viewer(bot, { port: VIEW_PORT, firstPerson: true })
+    // prismarine-viewer keeps its http server to itself and listens with no error listener.
+    const http = require('http')
+    const createServer = http.createServer
+    const viewServers = []
+    http.createServer = (...args) => { const s = createServer(...args); viewServers.push(s); return s }
+    try {
+      viewer(bot, { port: VIEW_PORT, firstPerson: true })
+    } finally {
+      http.createServer = createServer
+    }
+    for (const s of viewServers) s.on('error', (e) => console.log('[bot] viewer failed (non-fatal):', e.message))
     console.log(`[bot] viewer on http://localhost:${VIEW_PORT}`)
   } catch (e) { console.log('[bot] viewer failed (non-fatal):', e.message) }
 
@@ -324,19 +333,6 @@ bot.on('end', (r) => {
   setTimeout(() => process.exit(1), 500)
 })
 
-// ---- SSE PUSH STREAM (07-21 latency session): /stream holds the connection open and pushes
-// every chat line and event as it happens — one `data: {json}` line each. The pilot's old
-// heartbeat was a log file, a pipe, a regex, and a notification queue between the world and
-// the driver (and a truncation-wedge waiting to happen); this is the world speaking directly.
-// Zero dependencies: plain HTTP, drink it with `curl -N -s localhost:3000/stream`.
-const sseClients = new Set()
-function ssePush (payload) {
-  if (!sseClients.size) return
-  const line = 'data: ' + JSON.stringify(payload) + '\n\n'
-  for (const c of sseClients) { try { c.write(line) } catch (e) { sseClients.delete(c) } }
-}
-setInterval(() => { for (const c of sseClients) { try { c.write(':ka\n\n') } catch (e) { sseClients.delete(c) } } }, 15000)
-
 // ---- chat capture (so the driver can hear the world, not just speak to it) ----
 let chatSeq = 0
 const chatLog = []
@@ -344,7 +340,6 @@ function pushChat(from, message, kind) {
   chatLog.push({ id: ++chatSeq, t: Date.now(), from, msg: message, kind })
   if (chatLog.length > 300) chatLog.splice(0, chatLog.length - 300)
   console.log(`[chat] <${from}> ${message}`)
-  ssePush({ ch: 'chat', id: chatSeq, from, msg: message, kind })
 }
 bot.on('chat', (username, message) => { if (username !== USERNAME) pushChat(username, message, 'chat') })
 bot.on('whisper', (username, message) => pushChat(username, message, 'whisper'))
@@ -375,10 +370,6 @@ function emitEvent(kind, msg, data) {
     console.log('[event] ' + kind + ' ' + msg)   // stdout line so the log-tailing Monitor wakes the driver
     eventLog.push({ id: ++eventSeq, t: Date.now(), kind, msg, data: data || null })
     if (eventLog.length > 400) eventLog.splice(0, eventLog.length - 400)
-    // push carries CONTEXT (07-21): the wake-up call IS the briefing — no follow-up poll
-    // needed to learn where I stood and how hurt I was when the thing happened.
-    ssePush({ ch: 'event', id: eventSeq, kind, msg, data: data || null,
-      pos: ready ? round(bot.entity.position) : null, hp: ready ? bot.health : null, food: ready ? bot.food : null })
   } catch (e) {}
 }
 
@@ -616,10 +607,12 @@ const jobs = (() => {
 // pathfinder stays the "how", the graph is just the shape of the known world in ~a dozen lines.
 const waypoints = (() => {
   const FILE = './waypoints.json'
-  let map = {}
-  try { map = JSON.parse(fs.readFileSync(FILE, 'utf8')) || {} } catch (e) { map = {} }
+  // Prototype-free maps: a waypoint named __proto__ or constructor is just a key.
+  const dict = (from) => Object.assign(Object.create(null), from)
+  let map = dict()
+  try { map = dict(JSON.parse(fs.readFileSync(FILE, 'utf8'))) } catch (e) { map = dict() }
   for (const [n, w] of Object.entries(map)) {                 // normalize legacy {x,y,z} entries
-    if (w && typeof w === 'object') map[n] = { x: w.x, y: w.y, z: w.z, kind: w.kind || 'place', note: w.note || '', links: w.links || {} }
+    if (w && typeof w === 'object') map[n] = { x: w.x, y: w.y, z: w.z, kind: w.kind || 'place', note: w.note || '', links: dict(w.links) }
   }
   function persist() { try { fs.writeFileSync(FILE, JSON.stringify(map, null, 2)) } catch (e) {} }
   return {
@@ -629,7 +622,7 @@ const waypoints = (() => {
         x: coord.x, y: coord.y, z: coord.z,
         kind: extra.kind || prev.kind || 'place',
         note: extra.note !== undefined ? extra.note : (prev.note || ''),
-        links: prev.links || {}
+        links: prev.links || dict()
       }
       persist(); return map[name]
     },
@@ -646,7 +639,7 @@ const waypoints = (() => {
       map[a].links[b] = stamp; map[b].links[a] = stamp
       persist(); return true
     },
-    list() { return Object.assign({}, map) }
+    list() { return dict(map) }
   }
 })()
 let lastWaypoint = null   // the last waypoint I verifiably STOOD at (resets on restart — no false edges)
@@ -909,9 +902,12 @@ async function macroPlaceAt(Vec3, x, y, z, names, walk = true) {
   if (!it) return { done: false, noItem: true }
   try {
     if (walk) await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 3))
+    refuseWhileBuilding()
     await clearSoftCover(target)
+    refuseWhileBuilding()
     await bot.equip(it, 'hand')
     await bot.lookAt(target.offset(0.5, 0.5, 0.5), true)
+    refuseWhileBuilding()
     await bot.placeBlock(ref, face)
     return { done: true, placed: true }
   } catch (e) { return { done: false, error: e.message } }
@@ -1273,21 +1269,22 @@ bot.once('spawn', () => {
 // and a one-line Hear: in /scene. Entity sounds are categorized by SPECIES, counted not streamed.
 const HEARD = []
 const dangerHeard = {}
+let lastThunder = 0
+let lastThunderPos = null
 function onSound(name, position) {
   try {
     const n = String(name)
-    let cat = null
-    if (/lava/.test(n)) cat = 'lava'
-    else if (/fuse|primed/.test(n)) cat = 'fuse'
-    else if (/explo/.test(n)) cat = 'explosion'
-    else if (/water|drip/.test(n)) cat = 'water'
-    else { const m = n.match(/entity\.([a-z_]+)\./); if (m) cat = m[1] }
-    if (!cat || cat === 'player' || cat === 'item') return
+    const cat = classifySound(n, { legacy1710: LEGACY_1710 })
+    if (!cat) return
+    if (cat === 'thunder') { lastThunder = Date.now(); lastThunderPos = position || null }
     const here = bot.entity.position
     const dist = position ? Math.round(position.distanceTo(here)) : null
     const dir = position ? compass(position.x - here.x, position.z - here.z) : '?'
-    HEARD.push({ cat, dir, dist, t: Date.now(), raw: n })   // raw name kept for forensics — the
-    if (HEARD.length > 80) HEARD.shift()                    // "phantom on Peaceful" mystery (07-12)
+    HEARD.push({ cat, dir, dist, t: Date.now() })
+    if (HEARD.length > 80) HEARD.shift()
+    // 1.7.10 lightning plays an explosion where its thunder struck.
+    if (cat === 'explosion' && position && lastThunderPos && Date.now() - lastThunder < 2000 &&
+      position.distanceTo(lastThunderPos) <= 2) return
     if (cat === 'lava' || cat === 'fuse' || cat === 'explosion') {
       if (Date.now() - (dangerHeard[cat] || 0) > 45000) {
         dangerHeard[cat] = Date.now()
@@ -1447,12 +1444,19 @@ bot.on('health', async () => {
   try {
     if (bot.health < lastHp - 0.5) {
       const dmg = +(lastHp - bot.health).toFixed(1)
-      lastHit = { dmg, t: Date.now() }                   // feeds the reflex's ADAPTIVE tripwire (death #2 lesson)
+      // A sourceless hit beside a player gets its attribution once the swing window has closed.
+      if (swingWait) {
+        lastHp = bot.health                               // a health update during the wait counts from here
+        await swingWait
+      }
       // LAW AMENDED 07-14, built 07-15: hurt-FREEZE is for UNEXPLAINED damage only. When damage
       // attribution (damage_event wire below) has just named a living attacker, freezing is the
       // worst response — the combat reflex owns it; we only narrate.
       const attrib = (lastAttrib && Date.now() - lastAttrib.t < 1500) ? lastAttrib : null
-      if (attrib) {
+      // cls is the mobClass of the attacker the hit is attributed to, null for an unattributed hit and
+      // for an environmental one that kept an attribution.
+      lastHit = { dmg, t: Date.now(), cls: attrib && attrib.entity && !attrib.envHit ? mobClass(attrib.entity) : null }   // feeds the reflex's ADAPTIVE tripwire (death #2 lesson)
+      if (attrib && !attrib.env && !bunker.building) {
         // DEATH #9 (07-23): this line used to say "combat reflex has it" on attribution alone —
         // fourteen times, while the watcher was silently dropping the attacker at its distance
         // gate. Now the hurt event reports what the body is DOING, and a ranged hit triggers
@@ -1460,10 +1464,10 @@ bot.on('health', async () => {
         let action = 'combat reflex engaging'
         const cr = reflexes.find(r => r.name === 'combat')
         if (attrib.ranged) {
-          if (attrib.entity && cr && cr.on) { action = 'RANGED — breaking eye-line'; try { cr.takeCover(bot, attrib.entity.position, attrib.desc) } catch (e) {} }
+          if (attrib.entity && cr && cr.on) { action = 'RANGED — breaking eye-line'; try { cr.takeCover(bot, attrib.entity, attrib.desc) } catch (e) {} }
           else if (!attrib.entity) action = 'RANGED, shooter unseen — PILOT: move or seal NOW'
           else action = 'RANGED and combat reflex is OFF — PILOT: move or seal NOW'
-        } else if (attrib.entity && attrib.entity.position.distanceTo(bot.entity.position) > 48) {
+        } else if (attrib.entity && attrib.entity.position.distanceTo(bot.entity.position) > CONFIRMED_HORIZON) {
           action = 'attacker beyond reflex reach — PILOT must act'
         } else if (!cr || !cr.on) {
           action = 'combat reflex is OFF — PILOT must act'
@@ -1472,18 +1476,30 @@ bot.on('health', async () => {
           lastHurtEmit = Date.now()
           emitEvent('hurt', `took ${dmg} — ${attrib.desc} — HP ${bot.health}/20 — ${action}`)
         }
-        lastHp = bot.health
-        return
       }
-      try { jobs.stopAll() } catch (e) {}
-      safeStop()
-      try { bot.clearControlStates() } catch (e) {}
       const ws = waterState(bot)
-      const cause = ws && ws.buried ? 'SUFFOCATING inside a block' : ws && ws.inLava ? 'LAVA' : ws && ws.submerged ? 'drowning' : 'unknown — look around'
-      if (Date.now() - lastHurtEmit > 3000) {
+      // Every hit during a bunker build lands here, attributed or not.
+      if (bunker.building) {
+        onBuildHit(attrib)
+        if (Date.now() - lastHurtEmit > 3000) {
+          lastHurtEmit = Date.now()
+          emitEvent('hurt', `took ${dmg} damage while building the bunker${attrib ? `, ${attrib.desc}` : ''}, HP ${bot.health}/20`)
+        }
+      } else if (!attrib) {
+        try { jobs.stopAll() } catch (e) {}
+        safeStop()
+        try { bot.clearControlStates() } catch (e) {}
+        const cause = ws && ws.buried ? 'SUFFOCATING inside a block' : ws && ws.inLava ? 'LAVA' : ws && ws.submerged ? 'drowning' : 'unknown — look around'
+        if (Date.now() - lastHurtEmit > 3000) {
+          lastHurtEmit = Date.now()
+          emitEvent('hurt', `took ${dmg} damage (${cause}) — HP ${bot.health}/20 — FROZE all action; assess before moving`)
+        }
+      } else if (attrib.env && Date.now() - lastHurtEmit > 3000) {
+        // An environmental hit, or a sourceless one with no hostile near, never freezes the body.
         lastHurtEmit = Date.now()
-        emitEvent('hurt', `took ${dmg} damage (${cause}) — HP ${bot.health}/20 — FROZE all action; assess before moving`)
+        emitEvent('hurt', `took ${dmg} damage (${attrib.desc}), HP ${bot.health}/20`)
       }
+      // Every hit gets the rescues below, attributed or not.
       // SELF-RESCUE REFLEXES (the cases freezing makes WORSE — a frozen body suffocates or sinks):
       // buried = dig the head block NOW (my own cell, fairness-clean, like yanking a hand from fire)
       if (ws && ws.buried) {
@@ -1566,8 +1582,21 @@ async function drawAndLoose (target) {
   return true
 }
 const AGGRO_CONFIRMED = new Map()          // entityId -> {name, t} — fed by damage attribution
+// How far a mob that hit the body stays a threat.
+const CONFIRMED_HORIZON = 48
+// How long a mob that hit the body stays confirmed.
+const CONFIRMED_MS = 45000
 let threatDebugUntil = 0                   // /threatdebug window: score players, narrate only
 let lastHit = { dmg: 0, t: 0 }             // last hit taken (size + when) — scales the disengage tripwire while FRESH
+let lastAttackT = 0                        // when the bot last attacked
+// The raised guard, the off-hand shield or on 1.7.10 the sword block. up is true while it is raised,
+// slot is the hotbar slot it was raised from. On 1.7.10 /guard and the combat reflex share it, and
+// pilot is true while the pilot's last guard order was to raise it.
+const guardState = { up: false, slot: -1, pilot: false }
+// A 1.7.10 sword block ends once another hotbar slot or anything but a sword is in hand.
+bot.on('heldItemChanged', (item) => {
+  if (LEGACY_1710 && (bot.quickBarSlot !== guardState.slot || !item || !/_sword$/.test(item.name))) guardState.up = false
+})
 function mobClass (e) {
   if (!e || !e.name) return 'other'
   if (e.type === 'player' || (bot.players && Object.values(bot.players).some(p => p.entity === e))) return 'player'
@@ -1578,16 +1607,98 @@ function mobClass (e) {
   if (d && (d.type === 'hostile' || d.category === 'Hostile mobs')) return 'hostile'
   return 'passive'
 }
+// The nearest hostile within 4 blocks that the body can perceive, or undefined. A hit that names no
+// source is pinned on it.
+function nearestHostile () {
+  const here = bot.entity.position
+  const near = Object.values(bot.entities).filter(e => e && e !== bot.entity && e.position &&
+    ['hostile', 'creeper', 'heavy'].includes(mobClass(e)) && e.position.distanceTo(here) <= 4)
+  if (!near.length) return undefined
+  const fill = reflexes.find(r => r.name === 'combat').fairFill(bot)
+  return near.filter(e => entityPerceptible(e, fill))
+    .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0]
+}
+// The damage type names by registry id, from the registry the server sends before spawn. Via sends
+// generic as 16.
+let damageTypes = []
+// True once a damage_event named a type the registry lacks.
+let damageTypeMissed = false
+bot._client.on('registry_data', (packet) => {
+  try {
+    if (/^(minecraft:)?damage_type$/.test(packet.id)) damageTypes = packet.entries.map(e => e.key.replace(/^minecraft:/, ''))
+  } catch (e) { console.log('[combat] damage type registry unreadable: ' + e.message) }
+})
+// Each player's last arm swing by entity id: when it came (t), when the one before it came (prev),
+// and the player's yaw as it swung.
+const lastSwing = new Map()
+bot.on('entitySwingArm', (e) => {
+  if (e && e.type === 'player') lastSwing.set(e.id, { t: Date.now(), prev: (lastSwing.get(e.id) || { t: 0 }).t, yaw: e.yaw })
+})
+bot.on('entityGone', (e) => { if (e) lastSwing.delete(e.id) })
+// How far apart in ms a player's hit and its arm swing may arrive, in either order.
+const SWING_MS = 50
+// A swing counts only this many ms or more after the same player's previous one, which leaves out fast clicking.
+const SWING_GAP_MS = 300
+// How far in radians a swinger's facing may point past the bot.
+const SWING_FACING = Math.PI / 4
+// Resolves once a sourceless hit beside a player has its attribution.
+let swingWait = null
+// The players within 4 blocks who stand no farther from the bot than hostile.
+function playersNear (hostile) {
+  const here = bot.entity.position
+  const reach = hostile ? hostile.position.distanceTo(here) : 4
+  return Object.values(bot.entities).filter(e => e && e !== bot.entity && e.type === 'player' && e.position &&
+    e.position.distanceTo(here) <= reach)
+}
+// True when yaw, the facing of player e, points at the bot within SWING_FACING.
+function facesBot (e, yaw) {
+  const d = bot.entity.position.minus(e.position)
+  const off = ((yaw - Math.atan2(-d.x, -d.z)) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI
+  return Math.abs(off) <= SWING_FACING
+}
 // the wire: 1.21.11 sends damage_event with sourceCauseId = attacker entityId + 1 (0 = none).
 // Validation ritual (the helmsman's design): he punches the machine for science, we expect his name.
 bot.once('spawn', () => {
   try {
-    bot._client.on('damage_event', (packet) => {
+    // t is when the damage_event arrived. waited is true once a swing can no longer follow it.
+    const onDamage = (packet, t, waited) => {
       try {
         if (!bot.entity || packet.entityId !== bot.entity.id) return
         const causeId = (packet.sourceCauseId || 0) - 1
         const directId = (packet.sourceDirectId || 0) - 1
-        const cause = causeId >= 0 ? bot.entities[causeId] : null
+        const type = damageTypes[packet.sourceTypeId]
+        if (type === undefined && !damageTypeMissed) {
+          damageTypeMissed = true
+          console.log(`[combat] damage type ${packet.sourceTypeId} is not in the registry, a hit without a source counts as environmental`)
+        }
+        const noSource = causeId < 0 && directId < 0
+        // Every 1.7.10 hit through Via is sourceless, a mob's included.
+        const sourceless = noSource && type === 'generic'
+        // After the swing wait, a non-env attribution of a later hit stays in place.
+        const newer = waited && lastAttrib && !lastAttrib.env && lastAttrib.t > t
+        const hostile = sourceless ? nearestHostile() : undefined
+        // A sourceless hit is a player's when that player swung within SWING_MS of it, alone and facing
+        // the bot, with no hostile closer to the bot. The swing nearest in time wins.
+        const near = sourceless ? playersNear(hostile) : []
+        const swing = near.map(e => ({ e, s: lastSwing.get(e.id) }))
+          .filter(({ e, s }) => s && Math.abs(s.t - t) <= SWING_MS && s.t - s.prev >= SWING_GAP_MS && facesBot(e, s.yaw))
+          .sort((a, b) => Math.abs(a.s.t - t) - Math.abs(b.s.t - t))[0]
+        if (swing) {
+          const name = swing.e.username || 'a player'
+          if (!newer) lastAttrib = { t, desc: `no attacker named, ${name} swung nearby`, entity: null, ranged: false, env: true }
+          console.log(`[combat] sourceless hit, ${name} swung nearby`)
+          return
+        }
+        // The swing of a player beside the bot may still follow.
+        if (near.length && !waited) {
+          const wait = new Promise(r => setTimeout(r, SWING_MS)).then(() => {
+            if (swingWait === wait) swingWait = null
+            onDamage(packet, t, true)
+          })
+          swingWait = wait
+          return
+        }
+        const cause = sourceless ? hostile : causeId >= 0 ? bot.entities[causeId] : null
         const direct = directId >= 0 ? bot.entities[directId] : null
         // PROJECTILE TELL (07-23, death #9: the events said "zombie E ~33" while something plinked
         // me at bow range — almost certainly a skeleton wearing a misattributed name. Whatever the
@@ -1595,22 +1706,31 @@ bot.once('spawn', () => {
         // response must be ranged doctrine regardless of the name on the shaft.)
         const ranged = !!(direct && (!cause || direct.id !== cause.id))
         if (!cause) {
-          lastAttrib = ranged
-            ? { t: Date.now(), desc: 'projectile, shooter unseen', entity: null, ranged: true }
-            : { t: Date.now(), desc: 'no attacker (environmental)', entity: null, ranged: false }
+          if (ranged) lastAttrib = { t, desc: 'projectile, shooter unseen', entity: null, ranged: true }
+          // An attacker the bot doesn't track leaves the hit unattributed.
+          else if (!noSource) lastAttrib = null
+          // env marks a hit without a source entity. Such a hit keeps a fresh attribution to an attacker,
+          // and a lava, fire or fall hit marks it envHit, so the hit can't arm the bunker.
+          else if (lastAttrib && !lastAttrib.env && Date.now() - lastAttrib.t < 1500) {
+            if (!sourceless) lastAttrib = { ...lastAttrib, envHit: true }
+          } else {
+            lastAttrib = { t, desc: sourceless ? 'no attacker named, no hostile within 4' : type || 'no attacker named', entity: null, ranged: false, env: true }
+          }
           return
         }
         const here = bot.entity.position
         const dir = compass(cause.position.x - here.x, cause.position.z - here.z)
         const dist = Math.round(cause.position.distanceTo(here))
         const who = cause.username || cause.name || 'unknown'
+        const how = `${ranged ? ' (projectile)' : ''}${sourceless ? ' (nearest hostile)' : ''}`
         // ranged is STICKY per attacker: one proven arrow makes it a ranged threat for the episode
         const wasRanged = (AGGRO_CONFIRMED.get(cause.id) || {}).ranged || false
-        lastAttrib = { t: Date.now(), desc: `${who} ${dir} ~${dist}${ranged ? ' (projectile)' : ''}`, entity: cause, ranged: ranged || wasRanged }
+        if (!newer) lastAttrib = { t, desc: `${who} ${dir} ~${dist}${how}`, entity: cause, ranged: ranged || wasRanged }
         AGGRO_CONFIRMED.set(cause.id, { name: who, t: Date.now(), ranged: ranged || wasRanged })
-        console.log(`[combat] attributed: hit by ${who} ${dir} ~${dist}${ranged ? ' (projectile)' : ''}`)
+        console.log(`[combat] attributed: hit by ${who} ${dir} ~${dist}${how}`)
       } catch (e) {}
-    })
+    }
+    bot._client.on('damage_event', (packet) => onDamage(packet, Date.now(), false))
     console.log('[bot] damage attribution wired')
   } catch (e) { console.log('[bot] damage attribution wire failed: ' + e.message) }
 })
@@ -1624,13 +1744,35 @@ bot.once('spawn', () => {
 const pilotLane = { until: 0, why: null, hard: false, narrated: 0 }
 const claimLane = (why, ms, hard = false) => { pilotLane.until = Date.now() + ms; pilotLane.why = why; pilotLane.hard = hard }
 const releaseLane = () => { pilotLane.until = 0; pilotLane.hard = false }
+// The bunker being built, and the cell of the last one the body reached. stop is why the build
+// has to end early, set by /stop, by a death and by a mob's hit. mode is the mode being built, and
+// reached the blocks the body has risen or sunk so far.
+const bunker = { building: false, stop: null, cell: null, mode: null, reached: 0 }
+// Stops that end a build and leave the body where it is.
+const BUNKER_HALTS = ['stopped by the pilot', 'the body died']
+// What a route that walks or digs answers while a bunker is built.
+const BUNKER_WALK = 'refused while a bunker is being built, the stop tool ends the build'
+// Throws BUNKER_WALK while a bunker is built, unless own marks a step of the build itself.
+function refuseWhileBuilding (own = false) {
+  if (bunker.building && !own) throw new Error(BUNKER_WALK)
+}
+// True while a bunker is built or the body still stands in its cell. Flees, cover moves and chases wait then.
+function bunkerHolds () {
+  if (bunker.building) return true
+  if (!bunker.cell) return false
+  if (bot.entity && bot.entity.position.floored().equals(bunker.cell)) return true
+  bunker.cell = null
+  return false
+}
 const laneBlocks = (klass) => {              // klass: 'discretionary' | 'interrupt' | 'emergency'
+  if (bunkerHolds()) return true
   if (Date.now() >= pilotLane.until) return false
   if (klass === 'emergency') return false
   if (klass === 'interrupt') return pilotLane.hard
   return true
 }
 const laneNarrate = (what) => {
+  if (bunkerHolds()) return
   if (Date.now() - pilotLane.narrated < 6000) return
   pilotLane.narrated = Date.now()
   emitEvent('combat', `${what} deferred — pilot lane held (${pilotLane.why})`)
@@ -1654,30 +1796,30 @@ function entityEngageable (en) {
 reflexes.unshift({
   name: 'combat', on: true, active: false,
   _hist: new Map(), _lastNarrate: new Map(), _threat: null,
-  _fill: null, _fillT: 0, _fillSeed: null, _fleeUntil: 0, _coverUntil: 0,
+  // _fleeCls is the mobClass of the threat the last flee ran from.
+  _fill: null, _fillT: 0, _fillSeed: null, _fleeUntil: 0, _fleeT: 0, _fleeCls: null, _coverUntil: 0,
   // FLEE LATCH (07-16, the first-death autopsy: twelve 'disengaging' events, zero escape — every
   // 300ms re-entry safeStop'd the previous flee goal and re-planned from scratch, so the body
   // SHUFFLED IN PLACE while a same-speed drowned ate it 1.4 at a time. A flee is set ONCE, held
   // 6s, and RUN at a sprint; re-entries bounce off the latch instead of resetting the goal.)
-  fleeFrom (bot, threatPos, why, klass = 'discretionary') {
+  fleeFrom (bot, threat, why, klass = 'discretionary') {
     const now = Date.now()
     // PILOT LANE (07-21): discretionary flees defer to a held lane; interrupts pass the
     // soft lane only; emergencies (creeper fuse, HP-critical) always own the legs.
     if (laneBlocks(klass)) { laneNarrate(why || 'flee'); return }
     if (now < this._fleeUntil) return                    // a flee is already running — let it run
     this._fleeUntil = now + 6000
+    this._fleeT = now
+    this._fleeCls = mobClass(threat)
     try {
+      const threatPos = threat.position
       const here = bot.entity.position
-      // ALLY ANCHOR (07-21, deaths #7/#8: blind away-vectors in mansion corridors ran the body
-      // into corners and fresh packs. A friend's blade is the safest ground on the map — if one
-      // stands within 24 and isn't closer to the threat than I am, the flee runs TO them.)
-      const ally = Object.values(bot.entities).find(e =>
-        e && e.type === 'player' && e.username && e.username !== bot.username &&
-        e.position && e.position.distanceTo(here) <= 24 &&
-        e.position.distanceTo(threatPos) > here.distanceTo(threatPos))
-      safeStop()
+      const anchor = reflexes.find(r => r.name === 'flee_to_player')
+      const ally = anchor && anchor.on ? anchor.ally(bot, here, threatPos) : undefined
+      stopPath()
       if (ally) {
         bot.pathfinder.setGoal(new goals.GoalNear(ally.position.x, ally.position.y, ally.position.z, 2))
+        emitEvent('flee_to_player', `fleeing to ${ally.username} ${compass(ally.position.x - here.x, ally.position.z - here.z)} ~${Math.round(ally.position.distanceTo(here))}`)
       } else {
         const away = here.minus(threatPos).normalize().scaled(20)
         bot.pathfinder.setGoal(new goals.GoalNear(here.x + away.x, here.y, here.z + away.z, 2))
@@ -1693,14 +1835,14 @@ reflexes.unshift({
   // can't answer is GEOMETRY: stop being seen. Sidestep to the nearest standable cell the
   // attacker's eye can't reach; no such cell within 3 = flee the sightline at a sprint.
   // One cover move per 4s — re-entries bounce off the latch, like the flee latch.)
-  takeCover (bot, threatPos, who) {
+  takeCover (bot, threat, who) {
     const now = Date.now()
     if (now < this._coverUntil || now < this._fleeUntil) return
     if (laneBlocks('interrupt')) { laneNarrate('take-cover'); return }
     this._coverUntil = now + 4000
     try {
       const here = bot.entity.position.floored()
-      const eye = threatPos.offset(0, 1.62, 0)
+      const eye = threat.position.offset(0, 1.62, 0)
       const stand = (x, y, z) => {
         const f = bot.blockAt(new Vec3(x, y - 1, z)); if (!f || f.boundingBox !== 'block') return false
         const a = bot.blockAt(new Vec3(x, y, z)); const h = bot.blockAt(new Vec3(x, y + 1, z))
@@ -1719,14 +1861,14 @@ reflexes.unshift({
         }
       }
       if (bestCell) {
-        safeStop()
+        stopPath()
         bot.pathfinder.setGoal(new goals.GoalBlock(bestCell.x, bestCell.y, bestCell.z))
         emitEvent('combat', `ranged chip from ${who || '?'} — BREAKING EYE-LINE: cover ${compass(bestCell.x - here.x, bestCell.z - here.z)} at (${bestCell.x},${bestCell.y},${bestCell.z})`)
         return
       }
     } catch (e) {}
     this._coverUntil = 0                                 // no cover found — hand it to the flee latch
-    this.fleeFrom(bot, threatPos, `ranged chip from ${who || '?'} — no cover within 3, FLEEING the sightline`, 'interrupt')
+    this.fleeFrom(bot, threat, `ranged chip from ${who || '?'} — no cover within 3, FLEEING the sightline`, 'interrupt')
   },
   // FAIRNESS GATE fill (07-16, the confessed leak from the first Normal cave crawl): the watcher
   // read raw bot.entities — server x-ray — and tracked a zombie through solid rock that /entities
@@ -1742,6 +1884,7 @@ reflexes.unshift({
     return this._fill
   },
   check (bot) {
+    if (bunker.building) return false
     try {
       const now = Date.now()
       const here = bot.entity.position
@@ -1750,7 +1893,7 @@ reflexes.unshift({
         if (!e || e === bot.entity || !e.position) continue
         const cls = mobClass(e)
         const confirmed = AGGRO_CONFIRMED.get(e.id)
-        if (confirmed && now - confirmed.t > 45000) { AGGRO_CONFIRMED.delete(e.id); continue }
+        if (confirmed && now - confirmed.t > CONFIRMED_MS) { AGGRO_CONFIRMED.delete(e.id); continue }
         const scoreable = cls === 'hostile' || cls === 'creeper' || cls === 'heavy' || !!confirmed ||
           (cls === 'player' && now < threatDebugUntil)
         if (!scoreable) continue
@@ -1759,7 +1902,7 @@ reflexes.unshift({
         // from ~33 was discarded every cycle — fourteen hits, zero responses, while the hurt
         // line swore the reflex "has it". What HIT me stays scored out to 48; everything
         // unproven keeps the old 24-block horizon.
-        if (dist > (confirmed ? 48 : 24)) { this._hist.delete(e.id); continue }
+        if (dist > (confirmed ? CONFIRMED_HORIZON : 24)) { this._hist.delete(e.id); continue }
         // confirmed attackers bypass the sight gate (whatever HIT me announced itself); everything
         // else must share my connected air. History is kept, not wiped — brief occlusion mid-chase
         // shouldn't amnesia the pursuit evidence, the sample just doesn't accrue while unseen.
@@ -1820,26 +1963,44 @@ reflexes.unshift({
       // Lane classes: a creeper in berth is an EMERGENCY (fuses don't negotiate); a heavy's kite
       // is an INTERRUPT (passes the soft lane, defers to /brace's hard one).
       const fk = t.cls === 'creeper' ? 'emergency' : 'interrupt'
-      if (t.dist <= s.fleeDist) { this.fleeFrom(bot, t.e.position, null, fk); return }
+      if (t.dist <= s.fleeDist) { this.fleeFrom(bot, t.e, null, fk); return }
       const [lo, hi] = s.bowBand
       const bandLo = t.cls === 'heavy' ? Math.max(lo, 10) : lo   // heavies close FAST — bigger floor
       if (t.dist >= bandLo && t.dist <= hi) {
         try { if (await drawAndLoose(t.e)) return } catch (e) {}
       }
-      this.fleeFrom(bot, t.e.position, null, fk)
+      this.fleeFrom(bot, t.e, null, fk)
       return
     }
     // melee hostile: SHIELD POSTURE while it closes (the shield is a posture, not a parry —
     // settled with the helmsman 07-15: nobody blocks the arrow, you walk shield-up while threatened;
     // posture decisions are slow decisions, so the 300ms reflex holds it, not the pilot),
-    // then timed charged swings — shield must DROP for the swing window (Java can't do both).
+    // then a swing about every 850 ms, the shield dropped for each (Java can't do both).
+    // On 1.7.10 a sword block is the posture, held through swings LEGACY_HIT_MS apart.
     const sword = bot.inventory.items().find(i => /_sword$/.test(i.name))
-    const hasShield = () => { const s = bot.inventory.slots[45]; return s && s.name === 'shield' }
-    const guardUp = () => { if (!this._guarding && hasShield()) { try { bot.activateItem(true); this._guarding = true } catch (e) {} } }
-    const guardDown = () => { if (this._guarding) { try { bot.deactivateItem() } catch (e) {} ; this._guarding = false } }
+    const canGuard = () => {
+      if (LEGACY_1710) return !!bot.heldItem && /_sword$/.test(bot.heldItem.name)
+      const s = bot.inventory.slots[45]; return s && s.name === 'shield'
+    }
+    const guardUp = () => {
+      if (!guardState.up && canGuard()) { try { bot.activateItem(!LEGACY_1710); guardState.up = true; guardState.slot = bot.quickBarSlot } catch (e) {} }
+    }
+    const guardDown = () => { if (guardState.up) { try { bot.deactivateItem() } catch (e) {} ; guardState.up = false } }
+    // Puts the sword in hand. Swapping items ends a sword block.
+    const swordInHand = async () => {
+      if (sword && (!bot.heldItem || bot.heldItem.name !== sword.name)) { await bot.equip(sword, 'hand'); guardState.up = false }
+    }
+    // On 1.7.10 a block the pilot raised goes back up after the fight, sword in hand. True when the
+    // pilot's order applies.
+    const pilotGuard = async () => {
+      if (!LEGACY_1710 || !guardState.pilot || bunker.building) return false
+      try { await swordInHand() } catch (e) {}
+      guardUp()
+      return true
+    }
     const t0 = Date.now()
     try {
-      while (this.on && bot.entities[t.e.id] && Date.now() - t0 < 10000) {
+      while (this.on && !bunker.building && bot.entities[t.e.id] && Date.now() - t0 < 10000) {
         // ADAPTIVE disengage (death #2 lesson): the tripwire scales to the last hit taken while
         // it's FRESH (20s) — after a 1.4 drowned it sits at the old 8; after an 8.6 vindicator it
         // becomes "any hit landed = disengage NOW", because two more of those is a corpse. Stale
@@ -1850,7 +2011,7 @@ reflexes.unshift({
         // one). Floor drops to 5 there; every other stance and class keeps the old 8.
         const disengageFloor = (stance === 'vanguard' && t.cls === 'hostile') ? 5 : 8
         if (bot.health < Math.max(disengageFloor, hitRef * 2.5)) {
-          this.fleeFrom(bot, t.e.position, `HP ${Math.round(bot.health * 10) / 10} — disengaging from ${label}, sprinting`, 'emergency')
+          this.fleeFrom(bot, t.e, `HP ${Math.round(bot.health * 10) / 10} — disengaging from ${label}, sprinting`, 'emergency')
           return
         }
         // OUTNUMBERED (07-18, death #4 autopsy + the helmsman's diagnosis: the close-in never
@@ -1883,7 +2044,7 @@ reflexes.unshift({
             // HP FLOOR (07-21, the mill's lesson: the hold rule pinned me at 9 hearts twice on
             // 07-20 — an ally makes a pack survivable, not a wound. Below 12 the hold yields.)
             if (!allyNear || bot.health < 12) {
-              this.fleeFrom(bot, t.e.position, allyNear
+              this.fleeFrom(bot, t.e, allyNear
                 ? `OUTNUMBERED ${pack} at ${Math.round(bot.health)} HP — below the hold floor, withdrawing`
                 : `OUTNUMBERED ${pack} — fighting withdrawal, not a duel`)
               return
@@ -1895,7 +2056,9 @@ reflexes.unshift({
           }
         }
         const d = t.e.position.distanceTo(bot.entity.position)
-        if (d > 3.2) {
+        // 1.7.10 takes a hit from 6 blocks with a clear eye-line and from 3 without.
+        const reach = LEGACY_1710 ? (losClear(bot.entity.position.offset(0, 1.62, 0), t.e.position.offset(0, 1.0, 0)) ? 4.0 : 3.0) : 3.2
+        if (d > reach) {
           // Standoff band (the helmsman's 07-16 complaint: the reflex used to stand here sword-in-
           // hand, staring at skeletons that plink from 10). Stance decides: bow it, chase it, or
           // hold shield-up as before.
@@ -1914,7 +2077,8 @@ reflexes.unshift({
           // death posture — it holds the body still inside the firing solution. If the bow
           // couldn't answer (out of band, no LOS, no arrows), break the eye-line instead.
           const conf9 = AGGRO_CONFIRMED.get(t.e.id)
-          if (conf9 && conf9.ranged) { this.takeCover(bot, t.e.position, label); return }
+          if (conf9 && conf9.ranged) { this.takeCover(bot, t.e, label); return }
+          if (LEGACY_1710) { try { await swordInHand() } catch (e) {} }
           guardUp()                                           // hold ground, face it, shield up
           await bot.lookAt(t.e.position.offset(0, 1.2, 0), true)
           await new Promise(r => setTimeout(r, 250))
@@ -1922,6 +2086,17 @@ reflexes.unshift({
         }
         if (s.chase) { try { bot.pathfinder.setGoal(null) } catch (e) {} }  // in reach — legs off, sword out
         try {
+          if (LEGACY_1710) {
+            // No equip wait and no guard beats: the block stays up, and a swing goes out once it is due.
+            await swordInHand()
+            guardUp()
+            await bot.lookAt(t.e.position.offset(0, 1.2, 0), true)
+            const due = lastAttackT + LEGACY_HIT_MS - Date.now()
+            if (due > 0) { await new Promise(r => setTimeout(r, due)); continue }
+            bot.attack(t.e)
+            lastAttackT = Date.now()
+            continue
+          }
           if (sword && (!bot.heldItem || bot.heldItem.name !== sword.name)) { await bot.equip(sword, 'hand'); await bot.waitForTicks(13) }
           guardDown()                                         // the swing window — shield drops...
           await bot.waitForTicks(2)
@@ -1931,14 +2106,14 @@ reflexes.unshift({
           await new Promise(r => setTimeout(r, 400))
           guardUp()                                           // ...and comes right back up
         } catch (e) {}
-        await new Promise(r => setTimeout(r, 250))            // 650ms total swing cadence w/ the guard beats
+        await new Promise(r => setTimeout(r, 250))            // about 850 ms per swing w/ the guard beats, 1.5 s after an equip
       }
-    } finally { guardDown() }                                 // never exit combat with a stuck-raised arm
+    } finally { if (!(await pilotGuard())) guardDown() }      // the pilot's block stays up, the reflex's comes down
     if (!bot.entities[t.e.id]) emitEvent('combat', `${label} is DOWN`)
     // POST-COMBAT REFUEL (07-21, the mill's slow-bleed autopsy: /eat fails silently while
     // combat owns the hand, so food ratchets down across engagements and regen quits at 17.
     // The moment the hand is free is the moment to eat — before the next wave claims it.)
-    if (bot.food <= 14) {
+    if (bot.food <= 14 && !bunker.building) {
       try {
         const foods = (mcData && mcData.foods) || {}
         const bite = bot.inventory.items().filter(i => foods[i.type] && i.name !== 'golden_apple')
@@ -1951,7 +2126,21 @@ reflexes.unshift({
           if (prevHeld) await bot.equip(prevHeld, 'hand')
         }
       } catch (e) {}                                          // a failed snack must never wedge the reflex
+      await pilotGuard()                                      // the food in hand ended the pilot's block
     }
+  }
+})
+// flee_to_player: a combat flee runs to a player within 24 blocks who stands farther from the
+// threat, not straight away from it. It shapes the flee and never fires by itself.
+reflexes.push({
+  name: 'flee_to_player', on: true, active: false,
+  check () { return false },
+  // The player to run to, or undefined.
+  ally (bot, here, threatPos) {
+    return Object.values(bot.entities).find(e =>
+      e && e.type === 'player' && e.username && e.username !== bot.username &&
+      e.position && e.position.distanceTo(here) <= 24 &&
+      e.position.distanceTo(threatPos) > here.distanceTo(threatPos))
   }
 })
 // LAVA WATCH (07-17, death #3 autopsy: flowing lava advanced into a path that was air at plan
@@ -1990,7 +2179,11 @@ reflexes.unshift({
     this._lastPos = posNow; this._lastD = h.d
     this._coolUntil = Date.now() + 4000
     try {
-      safeStop()                                           // whatever the plan was, it ends here
+      if (bunker.building) {
+        emitEvent('lava', `LAVA ${h.dir} ~${h.d}, not moving while the bunker is built`)
+        return
+      }
+      stopPath()                                           // whatever the plan was, it ends here
       const here = bot.entity.position
       if (h.d === 0) {
         // standing in/over it: nearest non-lava, non-solid neighbor cell, fast
@@ -2009,6 +2202,32 @@ reflexes.unshift({
     } catch (e) {}
   }
 })
+// bunker: below BUNKER_HP and within 15 s of a mob's hit, the body builds the bunker that holds
+// against the mobs near it. It flees when none does and when the build fails or stops short, unless
+// the pilot's stop or a death ended it. A provokable mob that hits has been provoked.
+reflexes.splice(reflexes.findIndex(r => r.name === 'combat'), 0, {
+  name: 'bunker', on: true, active: false, _spent: false,
+  check (bot) {
+    if (this._spent && bot.health >= BUNKER_REARM_HP) this._spent = false
+    const next = bunkerReflexDecide()
+    if (next && next.flee) {
+      reflexes.find(r => r.name === 'combat').fleeFrom(bot, next.flee, next.why, 'emergency')
+      return false
+    }
+    return !!(next && next.build)
+  },
+  async act (bot) {
+    this._spent = true
+    emitEvent('bunker', `HP ${Math.round(bot.health * 10) / 10} after a mob's hit, building a bunker`)
+    const built = await buildBunker('auto', BUNKER_HEIGHT)
+    emitEvent('bunker', bunkerSummary(built))
+    const cause = built.error || (BUNKER_HALTS.includes(built.stopped) ? null : built.stopped)
+    const near = cause && shelterInputs('auto').threats[0]
+    if (near) reflexes.find(r => r.name === 'combat').fleeFrom(bot, near.entity, `${cause}, fleeing from ${near.name}`, 'emergency')
+  }
+})
+bot.on('death', resetThreatState)
+bot.on('spawn', resetThreatState)
 // (the /threatdebug route lives with the other routes below — `app` doesn't exist yet up here,
 // learned via a TDZ crashloop the moment this block first loaded)
 
@@ -2070,14 +2289,19 @@ function neededPickTier(blockName) {
   if (/(iron|lapis|copper)_ore/.test(n)) return 1
   return 0
 }
-async function equipPickFor(blockName) {
+// The lowest carried pick that harvests blockName, else the best carried one, else null.
+function pickFor(blockName) {
   const picks = bot.inventory.items().filter(i => PICK_TIER[i.name] !== undefined)
     .sort((a, b) => PICK_TIER[a.name] - PICK_TIER[b.name])
-  if (!picks.length) return false
+  if (!picks.length) return null
   const need = neededPickTier(blockName)
-  const pick = picks.find(p => PICK_TIER[p.name] >= need) || picks[picks.length - 1]
+  return picks.find(p => PICK_TIER[p.name] >= need) || picks[picks.length - 1]
+}
+async function equipPickFor(blockName) {
+  const pick = pickFor(blockName)
+  if (!pick) return false
   if (!bot.heldItem || bot.heldItem.name !== pick.name) { try { await bot.equip(pick, 'hand') } catch (e) {} }
-  return PICK_TIER[pick.name] >= need
+  return PICK_TIER[pick.name] >= neededPickTier(blockName)
 }
 
 // ---- no-legal-move check: a canDig=false walker boxed in (e.g. self-trapped in its own dig) has
@@ -2104,6 +2328,7 @@ function hasLegalMove() {
 
 // ---- HTTP control layer ----
 const app = express()
+installSecurity(app, { token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text) } })
 // ?brief=1 on ANY endpoint strips null/undefined fields from the reply — LLM pilots pay
 // by the token and "reason":null earns nothing. Empty ARRAYS survive on purpose: law 3
 // makes [] a statement ("looked, found none") and silence a different one ("didn't look").
@@ -2127,6 +2352,8 @@ const ok = (res, data) => {
 const err = (res, e) => res.json({ ok: false, error: e.message || String(e) })
 
 let lastTickSnap = null   // /tick?delta=1 diffs against the previous tick (single-pilot assumption)
+// Names this bot.js process in every /tick reply.
+const BOOT_ID = require('crypto').randomBytes(8).toString('hex')
 // GET /tick?chat=&ev= : the ONE-CALL HEARTBEAT (bones_ham's ask, 07-21 — the pilot's
 // standing glance used to be a 3-4 call bundle, and mid-combat that round-trip tax cut
 // deeper than the vindicators). Body essentials + new chat since ?chat= + new events
@@ -2153,6 +2380,7 @@ app.get('/tick', (req, res) => {
     }
     threats.sort((a, b) => a.dist - b.dist)
     const full = {
+      boot: BOOT_ID,
       pos: round(e.position),
       hp: bot.health, food: bot.food, xp: bot.experience.level,
       held: bot.heldItem ? bot.heldItem.name : null,
@@ -2312,7 +2540,7 @@ function entityPerceptible(en, fill) {
 // ---- player locator (07-14, the helmsman's ask: "so we avoid 'where I am' and in case we ever get
 // lost from each-other"). Consented co-op sense: live position when the server tracks them,
 // last-seen breadcrumb (pos + age + heading) when out of range. Breadcrumbs update every 5s.
-const playerCrumbs = {}
+const playerCrumbs = Object.create(null)
 setInterval(() => {
   try {
     for (const [name, pl] of Object.entries(bot.players || {})) {
@@ -2373,6 +2601,9 @@ app.get('/useon', async (req, res) => {
 // friendly-fire validation ritual, still refused until damage attribution exists to verify with);
 // NEVER melees creepers (detect→flee is law — refuse loudly so the pilot never learns the habit).
 app.get('/strike', async (req, res) => {
+  // The ids of the entities that died while the swings ran.
+  const died = new Set()
+  const onDead = (en) => died.add(en.id)
   try {
     if (!ready) return err(res, new Error('not ready'))
     const ename = req.query.name
@@ -2393,9 +2624,10 @@ app.get('/strike', async (req, res) => {
     }
     claimLane('strike', 20000)                     // soft lane: the approach + swings are MINE (07-21)
     // ?max=N (07-21 latency session): bounded swing SEQUENCE in one round trip — re-acquire,
-    // approach, charged swing, dead-watch, repeat. Exits honestly: dead / target gone / max.
+    // approach, swing, dead-watch, repeat. Exits honestly: dead / target gone / max.
     const max = Math.min(5, Math.max(1, parseInt(req.query.max || '1')))
     let struckAt = null, dead = false, swings = 0
+    bot.on('entityDead', onDead)
     for (let i = 0; i < max && !dead; i++) {
       const p0 = bot.entity.position
       const tgt = i === 0 ? target : Object.values(bot.entities)
@@ -2407,26 +2639,35 @@ app.get('/strike', async (req, res) => {
       }
       const alreadyHeld = bot.heldItem && bot.heldItem.name === iname
       await bot.equip(it, 'hand')
-      // COOLDOWN (learned on the first chicken, 07-15): a slot change resets the 1.9 attack charge —
-      // swinging immediately after equip lands a token-damage hit. ~13 ticks recharges a sword fully.
-      if (!alreadyHeld) await bot.waitForTicks(13)
-      else if (i > 0) await bot.waitForTicks(11)   // between loop swings: full recharge, no token hits
-      await bot.lookAt(tgt.position.offset(0, 0.6, 0), true)
-      await bot.waitForTicks(2)                    // the tick race: aim packet lands NEXT tick
+      if (LEGACY_1710) {
+        // 1.7.10 has no attack charge, and a swing goes out LEGACY_HIT_MS after the last attack.
+        const due = lastAttackT + LEGACY_HIT_MS - Date.now()
+        if (due > 0) await new Promise(r => setTimeout(r, due))
+        await bot.lookAt(tgt.position.offset(0, 0.6, 0), true)
+      } else {
+        // 13 ticks after an equip cover a sword's full attack charge, and 11 more wait between swings.
+        if (!alreadyHeld) await bot.waitForTicks(13)
+        else if (i > 0) await bot.waitForTicks(11)
+        await bot.lookAt(tgt.position.offset(0, 0.6, 0), true)
+        await bot.waitForTicks(2)                    // the tick race: aim packet lands NEXT tick
+      }
       struckAt = tgt.position.clone()
       bot.attack(tgt)
+      lastAttackT = Date.now()
       swings++
-      // watch for the despawn instead of guessing a delay (the 700ms check called a real kill a miss)
+      // watch for the death or the despawn instead of guessing a delay (the 700ms check called a real kill a miss)
       for (let w = 0; w < 15 && !dead; w++) {
+        // On 1.7.10 the watch ends before the next swing is due.
+        if (LEGACY_1710 && i < max - 1 && Date.now() + 100 > lastAttackT + LEGACY_HIT_MS) break
         await new Promise(r => setTimeout(r, 100))
-        dead = !bot.entities[tgt.id] || (tgt.health !== undefined && tgt.health <= 0)
+        dead = died.has(tgt.id) || !bot.entities[tgt.id]
       }
     }
     if (dead && struckAt) {
       try { await bot.pathfinder.goto(new goals.GoalNear(struckAt.x, struckAt.y, struckAt.z, 1)) } catch (e) {}  // hoover the drops
     }
     ok(res, { struck: ename, with: iname, swings, at: struckAt ? round(struckAt) : null, killed: dead, note: dead ? 'walked to drops' : swings ? 'still standing — swing again deliberately' : 'target left reach' })
-  } catch (e) { err(res, e) } finally { releaseLane() }
+  } catch (e) { err(res, e) } finally { releaseLane(); bot.removeListener('entityDead', onDead) }
 })
 
 // ---- /shoot (07-15, built the day the helmsman handed me a bow): the ranged verb — draw, hold a full
@@ -2436,6 +2677,9 @@ app.get('/strike', async (req, res) => {
 // hold-over (no hawkeye ballistics yet — good inside ~20 blocks; tune the 0.018 live). No
 // approach walk: ranged means shoot from where I stand; needs LOS and <=25 blocks.
 app.get('/shoot', async (req, res) => {
+  // The ids of the entities that died while the shots ran.
+  const died = new Set()
+  const onDead = (en) => died.add(en.id)
   try {
     if (!ready) return err(res, new Error('not ready'))
     const ename = req.query.name
@@ -2448,6 +2692,7 @@ app.get('/shoot', async (req, res) => {
     const max = Math.min(8, Math.max(1, parseInt(req.query.max || '1')))
     const shots = []
     let outcome = 'max'
+    bot.on('entityDead', onDead)
     for (let i = 0; i < max; i++) {
       if (!bot.inventory.items().find(x => x.name === 'bow')) { outcome = 'no-bow'; break }
       if (!bot.inventory.items().some(x => x.name === 'arrow')) { outcome = 'no-arrows'; break }
@@ -2464,7 +2709,7 @@ app.get('/shoot', async (req, res) => {
       let dead = false
       for (let w = 0; w < 20 && !dead; w++) {
         await new Promise(r => setTimeout(r, 100))
-        dead = !bot.entities[target.id] || (target.health !== undefined && target.health <= 0)
+        dead = died.has(target.id) || !bot.entities[target.id]
       }
       shots.push({ dist: +dist.toFixed(1), killed: dead })
       if (dead) { outcome = 'dead'; break }
@@ -2480,7 +2725,7 @@ app.get('/shoot', async (req, res) => {
         : outcome === 'no-arrows' ? 'quiver empty'
         : 'still up — check where the arrow went (/gaze) and loose again'
     })
-  } catch (e) { err(res, e) }
+  } catch (e) { err(res, e) } finally { bot.removeListener('entityDead', onDead) }
 })
 app.get('/where', (req, res) => {
   try {
@@ -2528,6 +2773,12 @@ app.get('/entities', (req, res) => {
 function safeStop () {
   try { if (bot.pathfinder.goal || bot.pathfinder.isMoving()) bot.pathfinder.stop() } catch (e) {}
 }
+// Stops the pathfinder at once. A goal set right after it stands, while safeStop() alone latches a
+// stop that cancels the next goal.
+function stopPath () {
+  safeStop()
+  bot.pathfinder.setGoal(null)
+}
 
 function snapFloor (Vec3, wp) {
   const fx = Math.floor(wp.x), fz = Math.floor(wp.z), fy = Math.floor(wp.y)
@@ -2549,8 +2800,10 @@ async function stagedGoto (dest, range = 2, { stallMs = 4500, segLen = 18, maxSe
   // recover (doors-v2 lesson) — door-opening dances and post-boot chunk lag both read as stalls.
   const Vec3 = require('vec3').Vec3
   const moving = () => { try { return bot.pathfinder.isMoving() } catch (e) { return false } }
-  // one guarded goto attempt: resolves {done} | {stalled} | {timeout,reason} | {reason}
+  // one guarded goto attempt: resolves {done} | {stalled} | {timeout,reason} | {reason}, and rejects
+  // with BUNKER_WALK when a bunker build began before it or cut it short
   const guarded = async (gx, gy, gz, grange) => {
+    if (bunker.building) throw new Error(BUNKER_WALK)
     let stalled = false
     let last = bot.entity.position.clone(); let lastT = Date.now()
     const watch = setInterval(() => {
@@ -2560,6 +2813,7 @@ async function stagedGoto (dest, range = 2, { stallMs = 4500, segLen = 18, maxSe
     }, 400)
     try { await bot.pathfinder.goto(new goals.GoalNear(gx, gy, gz, grange)); return { done: true } }
     catch (e) {
+      if (bunker.building) throw new Error(BUNKER_WALK)
       if (stalled) return { stalled: true }
       // "too?" — upstream mineflayer-pathfinder throws the TYPO'd "Took to long to decide path";
       // matching only the correct spelling silently disabled auto-staging (caught live 07-11)
@@ -2629,6 +2883,7 @@ async function stagedGoto (dest, range = 2, { stallMs = 4500, segLen = 18, maxSe
 
 app.get('/goto', async (req, res) => {
   try {
+    if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const Vec3 = require('vec3').Vec3
     const x = parseFloat(req.query.x), y = parseFloat(req.query.y), z = parseFloat(req.query.z)
     if (![x, y, z].every(Number.isFinite)) return err(res, new Error('x, y, z required'))
@@ -2643,6 +2898,7 @@ app.get('/goto', async (req, res) => {
 app.get('/come', async (req, res) => {
   try {
     if (!ready) return err(res, new Error('not ready'))
+    if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const range = parseInt(req.query.range || '2')
     // PLAYERS first (07-14): "/come?name=<player>" used to fail — this verb only ever
     // knew blocks. Live entity if tracked, else the last-seen breadcrumb from /where.
@@ -2790,6 +3046,8 @@ app.get('/place', async (req, res) => {
 
 app.get('/equip', async (req, res) => {
   try {
+    // Via turns the click on the off-hand slot into a drop, and the item lands on the ground.
+    if (LEGACY_1710 && String(req.query.dest) === 'off-hand') return err(res, new Error('1.7.10 has no off-hand'))
     const it = bot.inventory.items().find(i => i.name === req.query.name)
     if (!it) return err(res, new Error(`no ${req.query.name}`))
     await bot.equip(it, req.query.dest || 'hand')
@@ -2839,73 +3097,11 @@ app.get('/lookat', async (req, res) => {
   } catch (e) { err(res, e) }
 })
 
-// /chat?msg= speaks; /chat with NO msg LISTENS (last 20 lines + cursor) — the symmetry the
-// second pilot reached for instinctively ("I can SEND chat but couldn't find how to READ
-// incoming messages", 07-20). /chatlog?since= remains the cursored form for the heartbeat.
-app.get('/chat', async (req, res) => {
-  if (req.query.msg === undefined && req.query.lines === undefined) {
-    return ok(res, {
-      cursor: chatSeq,
-      recent: chatLog.slice(-20),
-      hint: 'poll /chatlog?since=<cursor> for only-new messages; /chat?msg=... to speak; ?lines=a|b|c for a paced multi-line'
-    })
-  }
-  // ?lines=a|b|c (07-21 latency session): the body handles the anti-kick spacing (2.5s —
-  // law 8's rapid-pair kick is especially tempting and especially fatal mid-crisis).
-  // Every ceremony and battle-report used to be three pilot turns with hand-rolled sleeps.
-  if (req.query.lines !== undefined) {
-    const lines = String(req.query.lines).split('|').map(s => s.trim()).filter(Boolean).slice(0, 5)
-    if (!lines.length) return err(res, new Error('lines= given but empty'))
-    for (let i = 0; i < lines.length; i++) {
-      if (i > 0) await new Promise(r => setTimeout(r, 2500))
-      bot.chat(lines[i])
-    }
-    return ok(res, { said: lines.length, lines })
-  }
-  bot.chat(req.query.msg || ''); ok(res, { said: req.query.msg })
-})
 app.get('/chatlog', (req, res) => {
   const since = parseInt(req.query.since || '0')
   ok(res, { cursor: chatSeq, messages: chatLog.filter(m => m.id > since) })
 })
-// GET /stream — the SSE push feed (see ssePush above). Every chat line and every event,
-// as it happens, each with pos/HP/food context baked in. `curl -N -s .../stream`.
-app.get('/stream', (req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
-  res.write(': connected — every chat + event pushes here; keepalive every 15s\n\n')
-  sseClients.add(res)
-  req.on('close', () => sseClients.delete(res))
-})
-app.get('/stop', (req, res) => { try { stopFollow() } catch {} ; safeStop(); try { bot.clearControlStates() } catch {} ; releaseLane(); const jobsCancelled = jobs.stopAll(); ok(res, { stopped: true, jobsCancelled }) })
-
-// GET /batch?do=<step>|<step>... : a SHORT linear verb chain, one round trip (07-21 latency
-// session). Each step is a URI-component-ENCODED path+query ("/equip%3Fname%3Dbow"); steps
-// run in order via self-dispatch and SHORT-CIRCUIT on the first ok:false. CAPPED AT 5 —
-// deliberately, in code and not in discipline: this harness's soul is query→act→verify with
-// the model in the loop. A bounded batch compresses one plan-step; an unbounded one scripts
-// a player, and then nobody is playing. /batch and /stream refuse to nest.
-app.get('/batch', async (req, res) => {
-  try {
-    if (!ready) return err(res, new Error('not ready'))
-    const raw = String(req.query.do || '')
-    if (!raw) return err(res, new Error('do= required: pipe-separated, URI-encoded /verb?query steps'))
-    const steps = raw.split('|').map(s => decodeURIComponent(s.trim())).filter(Boolean)
-    if (steps.length > 5) return err(res, new Error(`${steps.length} steps — the cap is 5, by design (the pilot stays in the loop)`))
-    const results = []
-    for (const step of steps) {
-      if (!step.startsWith('/')) { results.push({ step, ok: false, error: 'steps start with /' }); break }
-      if (/^\/(batch|stream)\b/.test(step)) { results.push({ step, ok: false, error: 'refused: no nesting' }); break }
-      let r
-      try {
-        const resp = await fetch(`http://127.0.0.1:${CTRL_PORT}${step}`)
-        r = await resp.json()
-      } catch (e2) { r = { ok: false, error: 'dispatch failed: ' + e2.message } }
-      results.push({ step, ...r })
-      if (!r.ok) break                            // short-circuit: verify before act, always
-    }
-    ok(res, { steps: results.length, completed: results.filter(r => r.ok).length, results })
-  } catch (e) { err(res, e) }
-})
+app.get('/stop', (req, res) => { bunker.stop = 'stopped by the pilot'; try { stopFollow() } catch {} ; safeStop(); try { bot.clearControlStates() } catch {} ; releaseLane(); const jobsCancelled = jobs.stopAll(); ok(res, { stopped: true, jobsCancelled }) })
 
 // GET /brace?sec=N : the PILOT-HOLD (07-21 debrief — the bounded version of switching the
 // combat reflex off to cross a room). For N seconds (cap 30) the legs answer no discretionary
@@ -2957,6 +3153,7 @@ function stopFollow () {
 }
 app.get('/follow', (req, res) => {
   try {
+    if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const name = req.query.name
     const range = parseInt(req.query.range || '2')
     const target = (bot.players[name] && bot.players[name].entity)
@@ -3017,7 +3214,12 @@ app.get('/follow', (req, res) => {
   } catch (e) { err(res, e) }
 })
 app.get('/unfollow', (req, res) => {
-  try { stopFollow(); bot.pathfinder.setGoal(null); bot.clearControlStates(); ok(res, { unfollowed: true }) } catch (e) { err(res, e) }
+  try {
+    stopFollow()
+    // A bunker build owns the pathfinder and the control states.
+    if (!bunker.building) { bot.pathfinder.setGoal(null); bot.clearControlStates() }
+    ok(res, { unfollowed: true })
+  } catch (e) { err(res, e) }
 })
 
 // lay a rectangular perimeter (foundation outline). Walks each border cell, finds the
@@ -3186,6 +3388,7 @@ app.get('/walls', async (req, res) => {
 // dig a specific block by coordinate (no-op if already air)
 app.get('/digat', async (req, res) => {
   try {
+    if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const Vec3 = require('vec3').Vec3
     const p = new Vec3(Math.floor(parseFloat(req.query.x)), Math.floor(parseFloat(req.query.y)), Math.floor(parseFloat(req.query.z)))
     const b = bot.blockAt(p)
@@ -3283,7 +3486,7 @@ app.get('/fish', (req, res) => {
     const { id } = jobs.start(`fish x${count}`, async (job) => {
       const rod = bot.inventory.items().find(i => i.name === 'fishing_rod')
       await bot.equip(rod, 'hand')
-      await bot.waitForTicks(13)                        // slot-change cooldown (the /strike lesson)
+      if (!LEGACY_1710) await bot.waitForTicks(13)      // slot-change cooldown (the /strike lesson), which 1.7.10 lacks
       const caught = []
       for (let i = 0; i < count; i++) {
         if (job.cancelled) break
@@ -3495,6 +3698,19 @@ app.get('/events', (req, res) => {
 app.get('/guard', (req, res) => {
   try {
     if (!ready) return err(res, new Error('not ready'))
+    // 1.7.10 blocks with the sword in the main hand. The combat reflex shares guardState: it raises the
+    // block again after a fight while the pilot's order stands, and on=0 lowers its block too.
+    if (LEGACY_1710) {
+      if (req.query.on === '0') {
+        bot.deactivateItem()
+        Object.assign(guardState, { up: false, pilot: false })
+        return ok(res, { guarding: false })
+      }
+      if (!bot.heldItem || !/_sword$/.test(bot.heldItem.name)) return err(res, new Error('no sword in hand, equip one first'))
+      bot.activateItem()
+      Object.assign(guardState, { up: true, slot: bot.quickBarSlot, pilot: true })
+      return ok(res, { guarding: true })
+    }
     const s = bot.inventory.slots[45]
     if (!s || s.name !== 'shield') return err(res, new Error('no shield in offhand — /equip name=shield dest=off-hand first'))
     const on = req.query.on !== '0'
@@ -3656,6 +3872,7 @@ app.get('/waypoints', (req, res) => {
 // GET /goto_wp?name=&range= -> look up a waypoint, pathfind to it (GoalNear)
 app.get('/goto_wp', async (req, res) => {
   try {
+    if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const name = req.query.name
     if (!name) return err(res, new Error('name required'))
     const wp = waypoints.get(name)
@@ -3876,7 +4093,7 @@ app.get('/scene', (req, res) => {
   } catch (e) { err(res, e) }
 })
 
-// GET /snapshot — first-person PNG. Headless Chrome screenshots the live :3001 prismarine-viewer,
+// GET /snapshot — first-person PNG. Headless Chrome screenshots the live VIEW_PORT prismarine-viewer,
 // which follows my first-person view. We keep ONE browser PAGE WARM and meshed: the first shot pays
 // the launch+mesh cost (~seconds), every shot after is ~1s (just a short settle + screenshot) — so
 // looking is cheap enough to actually use. ?w=&h= size, ?wait= extra settle ms, ?fresh=1 forces a
@@ -4070,7 +4287,7 @@ function gazeNarrate(sweep) {
 }
 
 // GET /gaze?at=x,y,z | dir=n|ne|e|se|s|sw|w|nw|up|down &dist=24 — the deliberate LOOK, in my native
-// medium. Aims the head (the :3001 viewer turns with it, so the helmsman sees where I look), sweeps a fan
+// medium. Aims the head (the VIEW_PORT viewer turns with it, so the helmsman sees where I look), sweeps a fan
 // of eye rays, and narrates what they strike: dominant surfaces, notables (ore/liquid/utility),
 // openings. Everything reported is SEEN-tier — a real ray hit it — and every swept cell feeds the
 // SEEN memory. This, not /snapshot, is the primary look verb; the PNG stays as the verifier.
@@ -4294,6 +4511,7 @@ app.get('/use', async (req, res) => {
 // feet clear the top rung, then keeps forward briefly to step off onto the floor.
 app.get('/climb', async (req, res) => {
   try {
+    if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const Vec3 = require('vec3').Vec3
     const base = bot.entity.position.floored()
     let lad = null
@@ -4319,22 +4537,50 @@ app.get('/climb', async (req, res) => {
     if (!(myCell.x === lx && myCell.z === lz)) {
       await nudgeInto(new Vec3(lx, myCell.y, lz), false)
     }
+    // A bunker build that began during the climb owns the control states from then on.
+    if (bunker.building) return err(res, new Error(BUNKER_WALK))
     await bot.lookAt(new Vec3(lx + 0.5 - AWAY[0] * 2, bot.entity.position.y + 0.6, lz + 0.5 - AWAY[1] * 2), true)
     bot.setControlState('forward', true)
     bot.setControlState('jump', true)    // physics only sees a ladder at the FEET cell — a hop
                                          // lifts the feet into it, and climbUsingJump takes over
     const t0 = Date.now()
     let crested = false
-    while (Date.now() - t0 < 15000) {
+    while (Date.now() - t0 < 15000 && !bunker.building) {
       await bot.waitForTicks(2)
       if (bot.entity.position.y >= topY + 0.9) { crested = true; break }
     }
+    if (bunker.building) return err(res, new Error(BUNKER_WALK))
     bot.setControlState('jump', false)
     await bot.waitForTicks(8)            // momentum carries the step-off past the hatch lip
-    bot.setControlState('forward', false)
+    if (!bunker.building) bot.setControlState('forward', false)
     ok(res, { climbed: crested, y: Math.round(bot.entity.position.y * 10) / 10, ladderTop: topY, onGround: bot.entity.onGround })
   } catch (e) { try { bot.clearControlStates() } catch (_) {}; err(res, e) }
 })
+
+// Equips item and jump-places it on below, the block under the feet, in up to three tries. True once
+// the body stands a block higher. own marks the bunker build's call, the only one a build lets through.
+async function jumpPlace (below, item, own = false) {
+  const yBefore = Math.floor(bot.entity.position.y)
+  refuseWhileBuilding(own)
+  await bot.equip(item, 'hand')
+  await bot.lookAt(below.position.offset(0.5, 1, 0.5), true)
+  const cell = below.position.offset(0, 1, 0)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    refuseWhileBuilding(own)
+    bot.setControlState('jump', true)
+    await new Promise(r => setTimeout(r, 180))                       // near jump apex
+    refuseWhileBuilding(own)
+    if (!entityInCell(cell, blockers())) {
+      try { await bot.placeBlock(below, new Vec3(0, 1, 0)) } catch (e) {}
+    }
+    // A build that began during the place owns the jump control.
+    refuseWhileBuilding(own)
+    bot.setControlState('jump', false)
+    await new Promise(r => setTimeout(r, 400))                       // settle
+    if (Math.floor(bot.entity.position.y) > yBefore) return true
+  }
+  return false
+}
 
 app.get('/pillar', async (req, res) => {
   try {
@@ -4343,27 +4589,389 @@ app.get('/pillar', async (req, res) => {
     let placed = 0
     const y0 = Math.floor(bot.entity.position.y)
     for (let i = 0; i < height; i++) {
+      if (bunker.building) return err(res, new Error(BUNKER_WALK))
       const yBefore = Math.floor(bot.entity.position.y)
       const below = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))
       if (!below || below.boundingBox !== 'block') return ok(res, { placed, rose: yBefore - y0, stopped: 'no solid footing to build on' })
       let it = null
       for (const n of names) { it = bot.inventory.items().find(m => m.name === n); if (it) break }
       if (!it) return ok(res, { placed, rose: yBefore - y0, stopped: 'out of pillar blocks (cobble/andesite/dirt)' })
-      await bot.equip(it, 'hand')
-      await bot.lookAt(below.position.offset(0.5, 1, 0.5), true)
-      let rose = false
-      for (let attempt = 0; attempt < 3 && !rose; attempt++) {
-        bot.setControlState('jump', true)
-        await new Promise(r => setTimeout(r, 180))                       // near jump apex
-        try { await bot.placeBlock(below, new Vec3(0, 1, 0)) } catch (e) {}
-        bot.setControlState('jump', false)
-        await new Promise(r => setTimeout(r, 400))                       // settle
-        if (Math.floor(bot.entity.position.y) > yBefore) { rose = true; placed++ }
-      }
-      if (!rose) return ok(res, { placed, rose: Math.floor(bot.entity.position.y) - y0, stopped: 'placement would not take (ceiling? cell blocked?)' })
+      if (!(await jumpPlace(below, it))) return ok(res, { placed, rose: Math.floor(bot.entity.position.y) - y0, stopped: 'placement would not take (ceiling? cell blocked?)' })
+      placed++
     }
     ok(res, { placed, rose: Math.floor(bot.entity.position.y) - y0, y: Math.floor(bot.entity.position.y) })
-  } catch (e) { try { bot.setControlState('jump', false) } catch (_) {} ; err(res, e) }
+  } catch (e) { try { if (!bunker.building) bot.setControlState('jump', false) } catch (_) {} ; err(res, e) }
+})
+
+// ---- BUNKER: the last-resort shelter, built from blocks in the pockets. "down" digs the three
+// cells under the feet in natural ground and caps the shaft over the head. "up" pillars and builds
+// a shell on top: a ledge ring under the body, two rings of wall beside it and a roof. The body
+// stays inside until the pilot digs out.
+const BUNKER_HEIGHT = 3
+// The health below which the bunker reflex fires, and the health at which it re-arms.
+const BUNKER_HP = 8
+const BUNKER_REARM_HP = 12
+// Natural ground, the only blocks "down" digs.
+const BUNKER_GROUND = /^(grass_block|dirt|coarse_dirt|podzol|mycelium|stone|granite|diorite|andesite|deepslate|tuff|sand|red_sand|gravel|sandstone|red_sandstone|netherrack|soul_sand|soul_soil|end_stone)$/
+// The longest dig per cell "down" accepts, with the pick it digs with.
+const BUNKER_DIG_MS = 1500
+// Filler, most expendable first. Planks of any wood come after these.
+const BUNKER_FILL = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'andesite', 'diorite', 'granite', 'stone', 'sandstone', 'end_stone', 'stone_bricks', 'bricks']
+const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+// The neighbours a placement may click, the one below first.
+const NEIGHBOURS = [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]
+const solidAt = (p) => { const b = bot.blockAt(p); return !!b && b.boundingBox === 'block' && !isSoftCover(b) }
+const xyz = (v) => ({ x: v.x, y: v.y, z: v.z })
+
+function fillers () {
+  const items = bot.inventory.items()
+  return [...BUNKER_FILL.flatMap(n => items.filter(i => i.name === n)), ...items.filter(i => i.name.endsWith('_planks'))]
+}
+
+// Puts a filler block into cell against a solid neighbour. 'placed', 'solid' when it already was, or null.
+async function placeFiller (cell) {
+  if (solidAt(cell)) return 'solid'
+  const item = fillers()[0]
+  const ref = item && NEIGHBOURS.map(([dx, dy, dz]) => cell.offset(dx, dy, dz)).find(solidAt)
+  if (!ref) return null
+  await clearSoftCover(cell)
+  if (!bot.heldItem || bot.heldItem.name !== item.name) await bot.equip(item, 'hand')
+  if (entityInCell(cell, blockers())) return null
+  try { await bot.placeBlock(bot.blockAt(ref), cell.minus(ref)) } catch (e) {}
+  return solidAt(cell) ? 'placed' : null
+}
+
+// Sneaks the body to the middle of its cell. Within 0.2 of it, the body fits a one-wide shaft and
+// clears the cells beside it.
+async function centerOnCell () {
+  const mid = bot.entity.position.floored().offset(0.5, 0, 0.5)
+  const off = () => Math.max(Math.abs(bot.entity.position.x - mid.x), Math.abs(bot.entity.position.z - mid.z))
+  if (off() > 0.2) {
+    try {
+      await bot.lookAt(new Vec3(mid.x, bot.entity.position.y + 1.62, mid.z), true)
+      bot.setControlState('sneak', true)
+      bot.setControlState('forward', true)
+      for (let i = 0; i < 30 && off() > 0.1; i++) await bot.waitForTicks(1)
+    } finally {
+      bot.setControlState('forward', false)
+      bot.setControlState('sneak', false)
+    }
+    await bot.waitForTicks(2)
+  }
+  return off() <= 0.2
+}
+
+// The ms the body takes to dig b with the pick it would equip.
+function digMs (b) {
+  const pick = pickFor(b.name)
+  return b.digTime(pick ? pick.type : null, false, false, false, [], bot.entity.effects)
+}
+
+// Why "down" cannot dig in where the body stands, or null.
+function digInProblem () {
+  if (!bot.entity.onGround) return 'not standing on the ground'
+  const o = bot.entity.position.floored()
+  // Water or lava beside the body runs down the shaft once it is open.
+  for (const dy of [0, 1]) {
+    for (const [dx, dz] of SIDES) {
+      const side = bot.blockAt(o.offset(dx, dy, dz))
+      if (!side || /water|lava/.test(side.name)) return `${side ? side.name : 'an unloaded block'} beside the body`
+    }
+  }
+  for (let dy = -1; dy >= -3; dy--) {
+    const b = bot.blockAt(o.offset(0, dy, 0))
+    if (!b || !BUNKER_GROUND.test(b.name)) return `${b ? b.name : 'unloaded ground'} ${-dy} below is not natural ground`
+    if (digMs(b) > BUNKER_DIG_MS) return `${b.name} ${-dy} below digs too slowly`
+    for (const [dx, dz] of SIDES) {
+      const side = bot.blockAt(o.offset(dx, dy, dz))
+      if (!side || /water|lava/.test(side.name)) return `${side ? side.name : 'unloaded ground'} beside the shaft`
+      if (dy < -1 && !solidAt(side.position)) return `an opening beside the shaft ${-dy} below`
+    }
+  }
+  if (!solidAt(o.offset(0, -4, 0))) return 'no solid floor 4 below'
+  if (!SIDES.some(([dx, dz]) => solidAt(o.offset(dx, -1, dz)))) return 'nothing beside the shaft to hold a cap'
+  if (!fillers().length) return 'no blocks for the cap'
+  return null
+}
+
+// True once the body has risen or sunk out of a mob's reach.
+function outOfReach () {
+  return bunker.reached >= (bunker.mode === 'up' ? SHELTER.SAFE_HEIGHT : SHELTER.SAFE_DEPTH)
+}
+
+// Why the build has to end now, or null. Out of reach, a hit no longer ends it.
+function buildStop () {
+  return bunker.stop === 'hit while building' && outOfReach() ? null : bunker.stop
+}
+
+// Digs the three cells under the feet, dropping into each, and caps the shaft over the head.
+async function digIn () {
+  const o = bot.entity.position.floored()
+  const cap = o.offset(0, -1, 0)
+  let dug = 0
+  for (let dy = -1; dy >= -3; dy--) {
+    if (buildStop()) return { at: bot.entity.position.floored(), dug, placed: 0, stopped: buildStop() }
+    const b = bot.blockAt(o.offset(0, dy, 0))
+    await equipPickFor(b.name)
+    await bot.dig(b)
+    dug++
+    const landed = () => bot.entity.onGround && Math.floor(bot.entity.position.y + 0.01) <= o.y + dy
+    for (let i = 0; i < 20 && !landed(); i++) await bot.waitForTicks(1)
+    if (!landed()) return { at: bot.entity.position.floored(), dug, placed: 0, stopped: 'the body did not drop into the shaft' }
+    bunker.reached = dug
+  }
+  const at = o.offset(0, -3, 0)
+  if (buildStop()) return { at, dug, placed: 0, stopped: buildStop() }
+  bunker.cell = at
+  const placed = (await placeFiller(cap)) === 'placed' ? 1 : 0
+  const shell = [cap, o.offset(0, -4, 0), ...SIDES.flatMap(([dx, dz]) => [o.offset(dx, -2, dz), o.offset(dx, -3, dz)])]
+  return { at, dug, placed, gaps: shell.filter(c => !solidAt(c)), exit: [cap].filter(solidAt) }
+}
+
+// Why "up" cannot pillar height blocks where the body stands, or null.
+function pillarProblem (height) {
+  const o = bot.entity.position.floored()
+  if (!solidAt(o.offset(0, -1, 0))) return 'no solid footing'
+  for (let dy = 2; dy <= height + 2; dy++) {
+    const b = bot.blockAt(o.offset(0, dy, 0))
+    if (!b || (b.boundingBox !== 'empty' && !isSoftCover(b))) return `no headroom ${dy} above the feet`
+  }
+  // A mob on a ledge beside the column, standing up to one block over the head of the body on top, is nearer it.
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      if (!dx && !dz) continue
+      for (let dy = 0; dy <= height + 1; dy++) {
+        if (solidAt(o.offset(dx, dy, dz)) && !solidAt(o.offset(dx, dy + 1, dz))) return 'a step beside the pillar'
+      }
+    }
+  }
+  const blocks = fillers().reduce((n, i) => n + i.count, 0)
+  if (blocks < height) return `${blocks} blocks carried, the pillar takes ${height}`
+  return null
+}
+
+// Pillars height blocks and builds the shell around the body on top.
+async function pillarShell (height) {
+  let placed = 0
+  for (let i = 0; i < height; i++) {
+    if (buildStop()) return { at: bot.entity.position.floored(), placed, stopped: buildStop() }
+    const below = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))
+    const item = fillers()[0]
+    if (!item || !below || !(await jumpPlace(below, item, true))) return { at: bot.entity.position.floored(), placed, stopped: `the pillar stopped after ${i} of ${height} blocks` }
+    placed++
+    bunker.reached = placed
+  }
+  const top = bot.entity.position.floored()
+  bunker.cell = top
+  await centerOnCell()
+  const onTop = () => bot.entity.position.floored().equals(top)
+  const put = async (cell) => {
+    if (buildStop() || !onTop()) return false
+    const r = await placeFiller(cell)
+    if (r === 'placed') placed++
+    return r !== null
+  }
+  const ring = (dy) => SIDES.map(([dx, dz]) => top.offset(dx, dy, dz))
+  for (const cell of [...ring(-1), ...ring(0), ...ring(1)]) await put(cell)
+  const roof = top.offset(0, 2, 0)
+  if (!(await put(roof))) {
+    const prop = ring(2).find(c => solidAt(c.offset(0, -1, 0)))
+    if (prop && await put(prop)) await put(roof)
+  }
+  const ledge = SIDES.find(([dx, dz]) => solidAt(top.offset(dx, -1, dz)))
+  return {
+    at: top,
+    placed,
+    gaps: [top.offset(0, -1, 0), ...ring(0), ...ring(1), roof].filter(c => !solidAt(c)),
+    exit: ledge ? [top.offset(ledge[0], 0, ledge[1]), top.offset(ledge[0], 1, ledge[1])].filter(solidAt) : [],
+    stopped: buildStop() || (onTop() ? undefined : 'the body left the pillar top')
+  }
+}
+
+// Why no bunker can start where the body stands, or null: water or lava in its feet or head cell,
+// which a shell would hold the body in.
+function liquidProblem () {
+  const p = bot.entity.position
+  for (const c of [p.floored(), p.offset(0, 1.6, 0).floored()]) {
+    const b = bot.blockAt(c)
+    if (b && (/^(water|lava|bubble_column|kelp|kelp_plant|seagrass|tall_seagrass)$/.test(b.name) || b.isWaterlogged)) return `the body stands in ${b.isWaterlogged ? 'waterlogged ' : ''}${b.name}`
+  }
+  return null
+}
+
+// The chooseShelter input for requested where the body stands. Threats come nearest first, each with
+// its entity.
+function shelterInputs (requested, height = BUNKER_HEIGHT) {
+  const here = bot.entity.position
+  const now = Date.now()
+  const combat = reflexes.find(r => r.name === 'combat')
+  const threats = []
+  for (const e of Object.values(bot.entities)) {
+    if (!e || e === bot.entity || !e.position) continue
+    const cls = mobClass(e)
+    // An expired confirmation leaves the map, which entityEngageable reads too.
+    const hit = AGGRO_CONFIRMED.get(e.id)
+    if (hit && now - hit.t > CONFIRMED_MS) AGGRO_CONFIRMED.delete(e.id)
+    const confirmed = AGGRO_CONFIRMED.has(e.id)
+    if (!(['hostile', 'creeper', 'heavy'].includes(cls) || (cls === 'provokable' && confirmed))) continue
+    const dist = e.position.distanceTo(here)
+    if (dist > (confirmed ? CONFIRMED_HORIZON : SHELTER.HORIZON) || !entityEngageable(e)) continue
+    // A mob that has not hit the body counts only where the body perceives it.
+    if (!confirmed && !entityPerceptible(e, combat.fairFill(bot))) continue
+    const data = mcData && mcData.entitiesByName[e.name]
+    threats.push({ name: e.name, baby: babyFlag(e.metadata, data && data.metadataKeys), dist, entity: e })
+  }
+  threats.sort((a, b) => a.dist - b.dist)
+  const liquid = liquidProblem()
+  const problems = { down: liquid || digInProblem(), up: liquid || pillarProblem(height) }
+  const shaft = []
+  for (let dy = 1; dy <= SHELTER.SAFE_DEPTH; dy++) shaft.push(bot.blockAt(here.floored().offset(0, -dy, 0)))
+  const buildMs = { down: problems.down === null ? downBuildMs(shaft.map(digMs)) : Infinity, up: upBuildMs() }
+  return { requested, threats, problems, buildMs }
+}
+
+// A mob's hit after the pick and before the body is out of reach stops the build.
+function onBuildHit (attrib) {
+  const cls = attrib && attrib.entity && !attrib.envHit ? mobClass(attrib.entity) : null
+  if (!bunker.stop && bunker.mode && ['hostile', 'creeper', 'heavy', 'provokable'].includes(cls) && !outOfReach()) bunker.stop = 'hit while building'
+}
+
+// The bunker reflex's next step: { build: true }, { flee, why } from the nearest threat, or null.
+function bunkerReflexDecide () {
+  const combat = reflexes.find(r => r.name === 'combat')
+  const reflex = reflexes.find(r => r.name === 'bunker')
+  const now = Date.now()
+  const playerFlee = combat._fleeCls === 'player' && now - combat._fleeT < 15000
+  if (bunkerHolds() || reflex._spent || playerFlee || bot.health >= BUNKER_HP) return null
+  if (now - lastHit.t >= 15000 || !['hostile', 'creeper', 'heavy', 'provokable'].includes(lastHit.cls)) return null
+  const input = shelterInputs('auto')
+  if (!input.threats.length) return null
+  const pick = chooseShelter(input)
+  if (pick.mode) return { build: true }
+  const near = input.threats[0]
+  return { flee: near.entity, why: `no bunker at HP ${Math.round(bot.health * 10) / 10} (${pick.refuse}), fleeing from ${near.name}` }
+}
+
+// Clears the threat state a death leaves behind.
+function resetThreatState () {
+  const combat = reflexes.find(r => r.name === 'combat')
+  AGGRO_CONFIRMED.clear()
+  combat._fleeT = 0
+  combat._fleeCls = null
+  combat._fleeUntil = 0
+  combat._coverUntil = 0
+  lastHit = { dmg: 0, t: 0 }
+  reflexes.find(r => r.name === 'bunker')._spent = false
+  bunker.cell = null
+}
+
+// The entities whose box keeps a block out of its cell.
+function blockers () {
+  const living = ['mob', 'hostile', 'animal', 'passive', 'ambient', 'living', 'player']
+  return Object.values(bot.entities).filter(e => e && e !== bot.entity && living.includes(e.type))
+}
+
+// Builds the bunker chooseShelter picks for mode once the combat reflex has let go. The result names
+// its cell, its gaps and the cells to dig to leave, or carries error.
+async function buildBunker (mode, height) {
+  if (bunker.building) return { error: 'a bunker is already being built' }
+  const liquid = liquidProblem()
+  if (liquid) return { error: `no bunker possible here (${liquid})` }
+  const earlier = bunker.cell
+  bunker.building = true
+  bunker.stop = null
+  bunker.mode = null
+  bunker.reached = 0
+  const onDeath = () => { bunker.stop = 'the body died' }
+  bot.once('death', onDeath)
+  // Until the build ends, any goal but null is refused, goto included.
+  const { setGoal, goto, setMovements } = bot.pathfinder
+  bot.pathfinder.setGoal = (goal, dynamic) => {
+    if (goal) throw new Error(BUNKER_WALK)
+    setGoal(goal, dynamic)
+  }
+  bot.pathfinder.goto = async () => { throw new Error(BUNKER_WALK) }
+  // setMovements clears the control states. Movements set during the build apply when it ends.
+  let movements = null
+  bot.pathfinder.setMovements = (m) => { movements = m }
+  let r = null
+  try {
+    safeStop()
+    // safeStop's stop lands at the next path node, clearing the goal lands it now.
+    bot.pathfinder.setGoal(null)
+    stopFollow()
+    jobs.stopAll()
+    bot.clearControlStates()
+    const combat = reflexes.find(r => r.name === 'combat')
+    // A flee or cover move stopped above holds no latch.
+    combat._fleeUntil = 0
+    combat._coverUntil = 0
+    for (let i = 0; i < 60 && combat.active; i++) await bot.waitForTicks(1)
+    // A down pick centres the body and picks again. Nothing waits between the last pick and the build.
+    let pick = null
+    for (const centre of [false, true]) {
+      const centred = !centre || await centerOnCell()
+      if (BUNKER_HALTS.includes(bunker.stop)) return { mode: bunker.mode, stopped: bunker.stop }
+      const input = shelterInputs(mode, height)
+      if (!centred) input.problems.down = 'cannot stand in the middle of the cell'
+      pick = chooseShelter(input)
+      if (pick.mode !== 'down') break
+    }
+    if (pick.refuse) return { error: `no bunker possible here (${pick.refuse})` }
+    bunker.mode = pick.mode
+    r = pick.mode === 'down' ? await digIn() : await pillarShell(height)
+    return {
+      mode: pick.mode,
+      at: xyz(r.at),
+      sealed: !r.stopped && r.gaps.length === 0,
+      dug: r.dug || 0,
+      placed: r.placed,
+      gaps: (r.gaps || []).map(xyz),
+      exit: (r.exit || []).map(xyz),
+      stopped: r.stopped
+    }
+  } catch (e) {
+    if (BUNKER_HALTS.includes(bunker.stop)) return { mode: bunker.mode, stopped: bunker.stop }
+    return { error: `the bunker failed: ${e.message}` }
+  } finally {
+    bot.pathfinder.setGoal = setGoal
+    bot.pathfinder.goto = goto
+    bot.pathfinder.setMovements = setMovements
+    bot.removeListener('death', onDeath)
+    bunker.building = false
+    bunker.stop = null
+    // A refusal, a throw or a stop leaves no cell of this build. An earlier bunker's cell stays.
+    if (bunker.cell !== earlier) {
+      if (!r || r.stopped) bunker.cell = null
+    }
+    try { bot.clearControlStates() } catch (e) {}
+    if (movements) setMovements(movements)
+  }
+}
+
+// One line on a buildBunker result, for the reply and the bunker events.
+function bunkerSummary (r) {
+  if (r.error) return r.error
+  if (!r.at) return `no bunker built, ${r.stopped}`
+  const cell = (c) => `(${c.x},${c.y},${c.z})`
+  const where = r.mode === 'up' ? `on a pillar at ${cell(r.at)}`
+    : `${r.dug === 3 ? 'dug in 3 below ground' : `dug ${r.dug} of 3 cells`} at ${cell(r.at)}`
+  if (r.stopped) return `${where}, ${r.stopped}`
+  const state = r.sealed ? 'sealed' : `${r.gaps.length} ${r.gaps.length === 1 ? 'gap' : 'gaps'} in the shell`
+  const dig = r.exit.length ? `dig ${r.exit.map(cell).join(' and ')}, then ` : ''
+  return `${where}, ${state}. To leave, ${dig}${r.mode === 'down' ? 'pillar up 3' : 'step out and drop to the ground'}.`
+}
+
+// GET /bunker?mode=auto|up|down&height=N: builds the shelter above and answers once it stands.
+app.get('/bunker', async (req, res) => {
+  try {
+    if (!ready) return err(res, new Error('not ready'))
+    const mode = req.query.mode === undefined ? 'auto' : req.query.mode
+    if (!BUNKER_MODES.includes(mode)) return err(res, new Error('mode must be auto, up or down'))
+    const r = await buildBunker(mode, req.query.height === undefined ? BUNKER_HEIGHT : parseInt(req.query.height))
+    if (r.error) return err(res, new Error(r.error))
+    ok(res, { ...r, summary: bunkerSummary(r) })
+  } catch (e) { err(res, e) }
 })
 
 // GET /listen?window=60 — what have I HEARD lately? Pull-only companion to the danger-tier hear
@@ -4373,7 +4981,7 @@ app.get('/listen', (req, res) => {
     const windowS = Math.min(300, Math.max(5, parseInt(req.query.window || '60')))
     const s = hearSummary(windowS * 1000)
     const payload = { heard: s || null, summary: s ? `heard (last ${windowS}s): ${s}` : `nothing heard in the last ${windowS}s`, buffered: HEARD.length }
-    if (req.query.verbose === '1') payload.raw = HEARD.slice(-25)   // forensic tail: exact sound names
+    if (req.query.verbose === '1') payload.recent = HEARD.slice(-25)
     ok(res, payload)
   } catch (e) { err(res, e) }
 })
@@ -4403,8 +5011,7 @@ app.get('/gesture', async (req, res) => {
   } catch (e) { err(res, e) }
 })
 
-// GET /boot — the one-call session opener: body, world, exits, tools, jobs, and the chat cursor
-// value to write into heartbeat_cursor.txt. Replaces the four-curl boot ritual.
+// GET /boot: the one-call session opener with body, world, exits, tools, jobs and the chat cursor.
 app.get('/boot', (req, res) => {
   try {
     if (!ready) return err(res, new Error('not ready'))
@@ -4426,7 +5033,7 @@ app.get('/boot', (req, res) => {
       ((bot.inventory.slots[45] && bot.inventory.slots[45].name) ? `Offhand: ${bot.inventory.slots[45].name}. ` : '') +
       skyPhrase(oh) + (around ? `Around: ${around}. ` : '') +
       (jl.length ? `RUNNING JOBS: ${jl.map(j => j.id + ':' + j.name).join(', ')}. ` : 'No jobs running. ') +
-      `Chat cursor: ${chatSeq} (write this to heartbeat_cursor.txt; HEAR chat via /chatlog?since=<cursor> or bare /chat).`
+      `Chat cursor: ${chatSeq}.`
     ok(res, {
       summary, pos: round(pos), health: bot.health, food: bot.food, xpLevel: bot.experience.level, held, armor,
       sky: oh, chatSeq, seenCells: SEEN.size,
@@ -4546,13 +5153,15 @@ app.get('/gather', (req, res) => {
 // polling until the bot is actually in the cell and grounded. The undug wall beyond stops overshoot.
 // climbing=true → ascending (mount +1); false → level/descending (walk or fall into the cell).
 async function nudgeInto (target, climbing, timeoutMs = 3000) {
+  // A bunker build owns the control states, also one that began mid-nudge.
+  if (bunker.building) return false
   const Vec3 = require('vec3').Vec3
   try {
     await bot.lookAt(new Vec3(target.x + 0.5, target.y + 0.5, target.z + 0.5), true)
     bot.setControlState('forward', true)
     if (climbing) bot.setControlState('jump', true)
     const t0 = Date.now()
-    while (Date.now() - t0 < timeoutMs) {
+    while (Date.now() - t0 < timeoutMs && !bunker.building) {
       await new Promise(r => setTimeout(r, 60))
       const p = bot.entity.position.floored()
       const yOk = climbing ? p.y >= target.y : p.y <= target.y
@@ -4561,7 +5170,7 @@ async function nudgeInto (target, climbing, timeoutMs = 3000) {
       // cell and sprints on (the 07-11 open-terrain overshoot to x-35). Settle+verify AFTER.
       if (p.x === target.x && p.z === target.z && yOk) break
     }
-  } finally { bot.setControlState('forward', false); bot.setControlState('jump', false) }
+  } finally { if (!bunker.building) { bot.setControlState('forward', false); bot.setControlState('jump', false) } }
   await new Promise(r => setTimeout(r, 250))   // let physics settle (land + shed momentum), then verify
   const p = bot.entity.position.floored()
   return (p.x === target.x && p.z === target.z && Math.abs(p.y - target.y) <= 1)
@@ -4576,6 +5185,7 @@ async function nudgeInto (target, climbing, timeoutMs = 3000) {
 // wall OPEN), then nudgeInto the door cell and the cell beyond — two dead-straight committed
 // steps, no pathfinder, no diagonal. Returns true if we ended up through; caller resumes route.
 async function doorwayCommit () {
+  if (bunker.building) return false
   const Vec3 = require('vec3').Vec3
   const me = bot.entity.position.floored()
   // nearest door/gate within ~3.5 — check the walk plane and one up (upper door half)
@@ -4597,6 +5207,7 @@ async function doorwayCommit () {
     try { await bot.pathfinder.goto(new goals.GoalBlock(nearC.x, nearC.y, nearC.z)) }
     catch (e) { const p = bot.entity.position.floored(); if (p.x !== nearC.x || p.z !== nearC.z) { console.log('[doorway] could not square up: ' + (e.message || '').slice(0, 50)); return false } }
   }
+  if (bunker.building) return false
   // 2. does the panel actually block the straight line? collision shapes decide; open-flag fallback
   const fresh = bot.blockAt(D)
   let blocked
@@ -4622,6 +5233,7 @@ async function doorwayCommit () {
 // intact — it only ever digs where it stands, one block at a time, seeing what a miner sees.
 app.get('/dig_tunnel', async (req, res) => {
   try {
+    if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const Vec3 = require('vec3').Vec3
     const DIRS = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0], north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] }
     let dx, dz
@@ -4641,7 +5253,8 @@ app.get('/dig_tunnel', async (req, res) => {
       const found = {}
       const note = (n, p) => { found[n] = (found[n] || 0) + 1; emitEvent('mine', `struck ${n} @ ${p.x},${p.y},${p.z}`) }
       const isHazard = (b) => b && (b.name.includes('lava') || b.name.includes('water'))
-      const equipPick = async (b) => { await equipPickFor(b && b.name) }   // tier-aware (07-12)
+      // tier-aware (07-12). A bunker build that began meanwhile ends the job before the dig that follows.
+      const equipPick = async (b) => { refuseWhileBuilding(); await equipPickFor(b && b.name); refuseWhileBuilding() }
 
       for (let step = 0; step < length && !stop; step++) {
         if (job.cancelled) { stop = 'cancelled'; break }
@@ -4694,6 +5307,7 @@ app.get('/dig_tunnel', async (req, res) => {
 // bury me); places a tread from andesite/cobble/dirt if the step is missing; torches the climb.
 app.get('/dig_stair', async (req, res) => {
   try {
+    if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const Vec3 = require('vec3').Vec3
     const DIRS = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0], north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] }
     let dx, dz
@@ -4709,7 +5323,8 @@ app.get('/dig_stair', async (req, res) => {
       let dug = 0, stop = null, climbed = 0
       const isHazard = (b) => b && (b.name.includes('lava') || b.name.includes('water'))
       const fally = (b) => b && (b.name === 'gravel' || b.name === 'sand' || b.name === 'red_sand')
-      const equipPick = async (b) => { await equipPickFor(b && b.name) }   // tier-aware (07-12)
+      // tier-aware (07-12). A bunker build that began meanwhile ends the job before the dig that follows.
+      const equipPick = async (b) => { refuseWhileBuilding(); await equipPickFor(b && b.name); refuseWhileBuilding() }
       // (per-step movement uses the shared module-scope nudgeInto — see above the /dig_tunnel route)
       for (let s = 0; s < steps && !stop; s++) {
         if (job.cancelled) { stop = 'cancelled'; break }
@@ -4871,6 +5486,7 @@ app.get('/safe_goto', async (req, res) => {
     // reporting failure (07-22: giving up here made every reflex assist kill the verb).
     let stopRetried = false
     for (;;) {
+      if (bunker.building) return err(res, new Error(BUNKER_WALK))
       try {
         await bot.pathfinder.goto(new goals.GoalNear(x, y, z, range))
         const pos = bot.entity.position
@@ -4898,6 +5514,7 @@ app.get('/safe_goto', async (req, res) => {
     let guard = 0
     const maxSegs = 12                            // hard bound on the loop
     while (guard++ < maxSegs) {
+      if (bunker.building) return err(res, new Error(BUNKER_WALK))
       const cur = bot.entity.position
       const remaining = cur.distanceTo(dest)
       if (remaining <= range + 1) break
@@ -5082,4 +5699,10 @@ app.get('/smelt', async (req, res) => {
   } catch (e) { err(res, e) }
 })
 
-app.listen(CTRL_PORT, BIND_HOST, () => console.log(`[bot] control API on http://${BIND_HOST}:${CTRL_PORT}`))
+app.listen(CTRL_PORT, '127.0.0.1', (e) => {
+  if (e) {
+    console.error(`[bot] control API cannot listen on 127.0.0.1:${CTRL_PORT}: ${e.message}`)
+    process.exit(1)
+  }
+  console.log(`[bot] control API on http://127.0.0.1:${CTRL_PORT}`)
+})

@@ -1,3 +1,6 @@
+.claude/
+/claude.md
+
 # dependencies (patches/ re-applies our fixes via postinstall; the 1.21.11 viewer
 # bundles are a GitHub Release asset — see install-viewer.sh)
 node_modules/

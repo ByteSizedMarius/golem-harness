@@ -1,0 +1,141 @@
+'use strict'
+
+// One tool per bot.js route the pilot may call. Each param is that route's query parameter of the same name.
+// structural names the top-level reply fields bot.js generates that keep up to 4000 characters.
+// timeoutMs is how long a route that answers once its action ended may take: its walks and mineflayer
+// waits added up, at most LONGEST.
+
+const required = (spec) => ({ ...spec, required: true })
+
+// One walk to a nearby target, about 250 blocks at walking speed.
+const WALK = 60000
+// mineflayer's default wait for a window or slot event.
+const EVENT = 20000
+// mineflayer's wait for the block update after a placement.
+const PLACE = 5000
+// mineflayer's wait for a food item to be eaten.
+const CONSUME = 2500
+// Routes whose walks have no bound in bot.js, or that walk once per item or per cell.
+const LONGEST = 600000
+
+const X = { type: 'num', min: -30000000, max: 30000000 }
+const Y = { type: 'num', min: -2048, max: 2048 }
+const XYZ = { x: required(X), y: required(Y), z: required(X) }
+const AT = { x: X, y: Y, z: X }
+const NAME = { type: 'str', maxLen: 64 }
+const PLAYER = { type: 'str', maxLen: 32 }
+const WAYPOINT = { type: 'str', maxLen: 64 }
+const POINT = { type: 'str', maxLen: 64, desc: 'x,y,z' }
+const COUNT = { type: 'int', min: 1, max: 576 }
+const SIZE = { type: 'int', min: 1, max: 64 }
+const RADIUS = { type: 'int', min: 1, max: 64 }
+const RANGE = { type: 'int', min: 1, max: 32 }
+const CURSOR = { type: 'int', min: 0, max: 1000000000 }
+const JOB_ID = { type: 'int', min: 1, max: 1000000000 }
+const FLAG = { type: 'bool' }
+const ON = { type: 'enum', values: ['1', '0'] }
+const FACE = { type: 'enum', values: ['N', 'S', 'E', 'W'] }
+const THEN = { type: 'enum', values: ['blockat'] }
+const TUNNEL_DIR = { type: 'enum', values: ['n', 's', 'e', 'w', 'north', 'south', 'east', 'west'] }
+// The reflexes bot.js runs, in the order it checks them.
+const REFLEXES = ['lava_watch', 'bunker', 'combat', 'unstuck', 'current_watch', 'narrator', 'trek', 'flee_to_player']
+
+const TOOLS = [
+  // Seeing
+  { name: 'boot', route: '/boot', description: 'Session opener: body, armor, held tool, sky, jobs, waypoint names, chat cursor.', params: {} },
+  { name: 'tick', route: '/tick', description: 'Heartbeat: body essentials, hostiles, jobs, and chat and events after the cursors chat and ev. Pass both cursors from the previous tick reply, or the chat cursor from boot at the start. Without cursors it repeats lines already delivered, up to the newest 50 of each. delta: true drops values unchanged since the previous tick, and wait_events ticks too, so a dropped value may be one you never saw.', params: { chat: CURSOR, ev: CURSOR, delta: FLAG }, lists: ['chat.messages', 'events.list', 'jobs'] },
+  { name: 'state', route: '/state', description: 'Position, facing, health, food, oxygen, water state, held item, looked-at block.', params: {} },
+  { name: 'inventory', route: '/inventory', description: 'Items with counts and slots, worn armor, empty slots.', params: {} },
+  { name: 'scene', route: '/scene', description: 'The default glance: facing, time, health, surroundings, ore, entities, threats, sounds.', params: { verbose: FLAG }, structural: ['summary'] },
+  { name: 'gaze', route: '/gaze', description: 'Look somewhere (at=x,y,z or dir) and narrate what eye rays hit.', params: { at: POINT, dir: { type: 'enum', values: ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw', 'up', 'down'] }, dist: { type: 'int', min: 4, max: 256 } } },
+  { name: 'section', route: '/section', description: 'Vertical cross-section in one direction with narration.', params: { dir: { type: 'enum', values: ['n', 's', 'e', 'w'] }, len: { type: 'int', min: 4, max: 32 }, up: { type: 'int', min: 2, max: 16 }, down: { type: 'int', min: 2, max: 24 } }, structural: ['grid'] },
+  { name: 'passages', route: '/passages', description: 'Exits from the current air pocket by direction.', params: { radius: { type: 'int', min: 8, max: 32 } } },
+  { name: 'map', route: '/map', description: 'Top-down minimap of explored terrain, row 0 is north.', params: { radius: { type: 'int', min: 1, max: 256 }, scale: { type: 'int', min: 1, max: 64 }, verbose: FLAG }, structural: ['grid'] },
+  { name: 'find', route: '/find', description: 'Nearest visible blocks matching a name; sense adds air-connected hits.', params: { name: required(NAME), count: { type: 'int', min: 1, max: 50 }, radius: RADIUS, sense: FLAG } },
+  { name: 'entities', route: '/entities', description: 'Perceptible entities nearby.', params: { radius: { type: 'int', min: 1, max: 128 } } },
+  { name: 'listen', route: '/listen', description: 'Sounds heard recently, aggregated.', params: { window: { type: 'int', min: 5, max: 300 }, verbose: FLAG } },
+  { name: 'blockat', route: '/blockat', description: 'Name, state and sign text of one block in sight.', params: XYZ },
+  { name: 'where', route: '/where', description: 'Live position or last-seen breadcrumb of a player.', params: { name: required(PLAYER) } },
+  { name: 'pulse', route: '/pulse', description: 'Change-gated narrator lines since a cursor.', params: { since: CURSOR }, lists: ['pulses'] },
+  { name: 'chatlog', route: '/chatlog', description: 'Chat lines since a cursor.', params: { since: CURSOR }, lists: ['messages'] },
+  { name: 'events', route: '/events', description: 'Interrupt events since a cursor.', params: { since: CURSOR }, lists: ['events'] },
+
+  // Moving
+  { name: 'goto', route: '/goto', description: 'Pathfind to a coordinate.', params: { ...XYZ, range: RANGE }, timeoutMs: LONGEST },
+  { name: 'safe_goto', route: '/safe_goto', description: 'Long trip: direct attempt, then segmented recovery.', params: { ...XYZ, range: RANGE, verbose: FLAG }, timeoutMs: LONGEST },
+  { name: 'come', route: '/come', description: 'Walk to a player (live or last seen) or the nearest visible block of a type.', params: { name: required(NAME), radius: RADIUS, range: RANGE }, timeoutMs: LONGEST },
+  { name: 'goto_wp', route: '/goto_wp', description: 'Walk to a saved waypoint.', params: { name: required(WAYPOINT), range: RANGE }, timeoutMs: LONGEST },
+  { name: 'follow', route: '/follow', description: 'Keep following a player.', params: { name: required(PLAYER), range: RANGE } },
+  { name: 'unfollow', route: '/unfollow', description: 'Stop following.', params: {} },
+  { name: 'stop', route: '/stop', description: 'Cancel the path, clear movement, stop all jobs.', params: {} },
+  { name: 'lookat', route: '/lookat', description: 'Aim the head at a point.', params: XYZ },
+  // A 3 s step into the ladder column, the 15 s climb loop and the step-off.
+  { name: 'climb', route: '/climb', description: 'Climb an adjacent ladder to its top.', params: {}, timeoutMs: 20000 },
+  // 16 levels, 3 jumps each of 580 ms plus the placement wait.
+  { name: 'pillar', route: '/pillar', description: 'Jump-and-place a pillar under yourself.', params: { height: { type: 'int', min: 1, max: 16 } }, timeoutMs: 16 * 3 * (580 + PLACE) },
+  { name: 'bridging', route: '/bridging', description: 'Arm (1) or disarm (0) scaffold bridging; no value reports the state.', params: { on: ON } },
+  { name: 'tidy', route: '/tidy', description: 'Mine back pathfinder scaffolding; dry only counts it.', params: { dry: FLAG }, timeoutMs: LONGEST },
+
+  // Working
+  { name: 'mine', route: '/mine', description: 'Find, break and collect the nearest visible matching blocks.', params: { name: required(NAME), count: COUNT, radius: RADIUS }, timeoutMs: LONGEST },
+  { name: 'collect', route: '/collect', description: 'Walk over loose item drops.', params: { radius: RADIUS }, timeoutMs: LONGEST },
+  { name: 'gather', route: '/gather', description: 'Job: mine a resource until the amount is collected.', params: { resource: required(NAME), amount: COUNT, radius: RADIUS } },
+  { name: 'dig_tunnel', route: '/dig_tunnel', description: 'Job: carve a 1x2 corridor; torch is the torch spacing, 0 for none.', params: { dir: TUNNEL_DIR, length: { type: 'int', min: 1, max: 64 }, torch: { type: 'int', min: 0, max: 64 } } },
+  { name: 'dig_stair', route: '/dig_stair', description: 'Job: carve a staircase, up 1 ascends, 0 or -1 descends; torch is the torch spacing.', params: { dir: TUNNEL_DIR, up: { type: 'enum', values: ['1', '0', '-1'] }, torch: { type: 'int', min: 0, max: 96 } } },
+  { name: 'digat', route: '/digat', description: 'Dig one block; then=blockat reports the cell afterwards.', params: { ...XYZ, then: THEN }, timeoutMs: LONGEST },
+  { name: 'craft', route: '/craft', description: 'Craft items, using a nearby or carried crafting table.', params: { item: required(NAME), count: COUNT }, timeoutMs: LONGEST },
+  // bot.js waits up to 12 s per item, up to 64, plus 15 s.
+  { name: 'smelt', route: '/smelt', description: 'Smelt at the nearest furnace and collect the result.', params: { item: required(NAME), fuel: NAME, count: COUNT }, timeoutMs: LONGEST },
+  // The table window opens, the offers get 6 s and a commit 1 s, and the lapis goes back.
+  { name: 'enchant', route: '/enchant', description: 'Without slot, list the enchanting table offers; slot 0-2 commits one.', params: { item: required(NAME), slot: { type: 'int', min: 0, max: 2 } }, timeoutMs: WALK + EVENT + 7000 + EVENT },
+  // The anvil window opens, and the rename waits for the experience update.
+  { name: 'rename', route: '/rename', description: 'Rename an item at the nearest anvil.', params: { item: required(NAME), name: required({ type: 'str', maxLen: 35 }) }, timeoutMs: WALK + 2 * EVENT },
+  { name: 'place', route: '/place', description: 'Place a block on an open spot beside you.', params: { name: required(NAME) }, timeoutMs: EVENT + PLACE },
+  { name: 'placeitem', route: '/placeitem', description: 'Place a block at a coordinate; face sets the stair direction.', params: { ...XYZ, name: required(NAME), face: FACE, then: THEN }, timeoutMs: WALK + PLACE },
+  { name: 'sign', route: '/sign', description: 'Place a sign and write it, | splits lines.', params: { ...XYZ, text: { type: 'str', maxLen: 90 }, face: FACE, item: NAME }, timeoutMs: WALK + PLACE },
+  { name: 'equip', route: '/equip', description: 'Equip an item.', params: { name: required(NAME), dest: { type: 'enum', values: ['hand', 'off-hand', 'head', 'torso', 'legs', 'feet'] } }, timeoutMs: EVENT },
+  // The equips before and after eating, and the 2.1 s hold of a golden apple at full food.
+  { name: 'eat', route: '/eat', description: 'Eat the named food, or the most filling one.', params: { food: NAME }, timeoutMs: 2 * EVENT + CONSUME + 2100 },
+  { name: 'activate', route: '/activate', description: 'Right-click a block in sight: beds, levers, buttons.', params: XYZ, timeoutMs: LONGEST },
+  { name: 'use', route: '/use', description: 'Right-click a block with an optional item: till, sow, fill or pour a bucket.', params: { ...XYZ, item: NAME }, timeoutMs: LONGEST },
+  { name: 'useon', route: '/useon', description: 'Use an item on a nearby creature.', params: { name: required(NAME), item: required(NAME) }, timeoutMs: LONGEST },
+  { name: 'toss', route: '/toss', description: 'Drop items, toward a player with to.', params: { name: required(NAME), count: COUNT, to: PLAYER }, timeoutMs: EVENT },
+  { name: 'fish', route: '/fish', description: 'Job: cast the fishing rod count times, optionally at seen water.', params: { count: { type: 'int', min: 1, max: 32 }, ...AT } },
+  { name: 'chest', route: '/chest', description: 'List the chest at x,y,z or the nearest one.', params: AT, timeoutMs: WALK + EVENT },
+  { name: 'withdraw', route: '/withdraw', description: 'Take items from a chest.', params: { name: required(NAME), count: COUNT, ...AT }, timeoutMs: WALK + EVENT },
+  { name: 'deposit', route: '/deposit', description: 'Put items into a chest.', params: { name: required(NAME), count: COUNT, ...AT }, timeoutMs: WALK + EVENT },
+
+  // Building
+  { name: 'build', route: '/build', description: 'Job: build a cabin.', params: { template: { type: 'enum', values: ['cabin'] }, x: required(X), z: required(X), w: SIZE, d: SIZE, h: SIZE, base: Y, name: NAME, base_name: NAME } },
+  { name: 'outline', route: '/outline', description: 'Lay a rectangular foundation outline.', params: { x: required(X), z: required(X), w: SIZE, d: SIZE, name: NAME, y: Y }, timeoutMs: LONGEST },
+  { name: 'walls', route: '/walls', description: 'Raise perimeter walls with a doorway.', params: { x: required(X), z: required(X), w: SIZE, d: SIZE, h: SIZE, base: Y, name: NAME, base_name: NAME, door: { type: 'enum', values: ['west', 'east', 'north', 'south'] } }, timeoutMs: LONGEST },
+  { name: 'roof', route: '/roof', description: 'Fill a solid slab at height y.', params: { x: required(X), y: required(Y), z: required(X), w: SIZE, d: SIZE, name: NAME }, timeoutMs: LONGEST },
+
+  // Fighting
+  // Five swings of about 2.3 s each, with room for short approaches.
+  { name: 'strike', route: '/strike', description: 'Melee swings at a creature, never players or creepers.', params: { name: required(NAME), item: NAME, max: { type: 'int', min: 1, max: 5 } }, timeoutMs: 20000 },
+  // 8 shots, each a 1.55 s draw and a 2 s watch for the kill, and the bow's equip.
+  { name: 'shoot', route: '/shoot', description: 'Bow shots at a creature, never players.', params: { name: required(NAME), max: { type: 'int', min: 1, max: 8 } }, timeoutMs: 8 * (1550 + 2000) + EVENT },
+  { name: 'guard', route: '/guard', description: 'Raise (1) or lower (0) the off-hand shield, or on 1.7.10 a block with the sword in hand.', params: { on: ON } },
+  { name: 'brace', route: '/brace', description: 'Hold the legs against reflexes for sec seconds.', params: { sec: { type: 'int', min: 1, max: 30 } } },
+  { name: 'stance', route: '/stance', description: 'Get or set the combat posture.', params: { set: { type: 'enum', values: ['guard', 'skirmish', 'vanguard', 'sentinel'] } } },
+  { name: 'reflexes', route: '/reflexes', description: 'List the reflexes, or switch the named one on (1) or off (0).', params: { name: { type: 'enum', values: REFLEXES }, on: ON } },
+  // The 3 s combat wait, two centrings of 1.6 s, 3 digs of 1.5 s with a 1 s drop each, 6 pillar levels of
+  // 3 jump-and-place tries, 16 placements, and an equip before each dig, level and placement.
+  { name: 'bunker', route: '/bunker', description: 'Last-resort shelter from blocks in the pockets: down digs 3 into natural ground and caps the shaft, up pillars height blocks (default 3) and builds a shell on top. Down holds only against spiders and up only against zombies, auto picks the one that holds (down when no mob is near), and it refuses when another mob is near or one is too close to finish first. A hit from a mob before the body is out of reach stops the build. The reply names the cells to dig to leave.', params: { mode: { type: 'enum', values: ['auto', 'up', 'down'] }, height: { type: 'int', min: 2, max: 6 } }, timeoutMs: Math.min(LONGEST, 3000 + 2 * 1600 + 3 * (1500 + 1000) + 6 * 3 * (580 + PLACE) + 16 * PLACE + (3 + 6 + 16) * EVENT) },
+
+  // Social
+  { name: 'chat', route: '/chat', description: 'Say one message in chat. Long messages are split. Commands: only /me, /tell, /msg, /w.', params: { msg: required({ type: 'str', maxLen: 400 }) } },
+  { name: 'chat_lines', route: '/chat', description: 'Say up to 5 messages, separated by |, paced by the bot.', params: { lines: required({ type: 'str', maxLen: 2004 }) } },
+  { name: 'gesture', route: '/gesture', description: 'Nod, shake, wave, or point at=x,y,z.', params: { name: required({ type: 'enum', values: ['nod', 'shake', 'wave', 'point'] }), at: POINT } },
+
+  // Memory and jobs
+  { name: 'waypoint', route: '/waypoint', description: 'Store, stamp, annotate, link or remove (rm) a named place.', params: { name: required(WAYPOINT), ...AT, note: { type: 'str', maxLen: 200 }, kind: { type: 'enum', values: ['place', 'resource'] }, linkto: WAYPOINT, rm: FLAG } },
+  { name: 'waypoints', route: '/waypoints', description: 'Every stored waypoint and walked edge.', params: { verbose: FLAG }, structural: ['graph'] },
+  { name: 'journal', route: '/journal', description: 'The last n journal lines.', params: { n: { type: 'int', min: 1, max: 50 } } },
+  { name: 'jobs', route: '/jobs', description: 'List jobs.', params: {}, lists: ['jobs'] },
+  { name: 'job', route: '/job', description: 'Status and result of one job.', params: { id: required(JOB_ID), verbose: FLAG } },
+  { name: 'job_stop', route: '/job_stop', description: 'Cancel one job.', params: { id: required(JOB_ID) } }
+]
+
+module.exports = { TOOLS }
