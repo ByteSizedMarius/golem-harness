@@ -7,20 +7,16 @@
 # NB on skins: offline-mode LAN servers derive the skin from the offline UUID (default
 # Steve/Alex family) — the CLIENT cannot push a custom skin. Naming after a premium account
 # only shows that account's skin on servers running a skin plugin (e.g. SkinsRestorer).
-# First launch TRUNCATES bot.log (fresh session); watchdog relaunches APPEND, so a log-tailing
-# Monitor survives. On a crash-relaunch the server chat seq RESETS — the "[event] reborn" line
-# below wakes the Monitor so the driver knows to reset heartbeat_cursor.txt and /boot again.
+# First launch truncates bot.log, watchdog relaunches append to it.
 PORT=${1:?usage: bash start.sh <LAN port> [name]}
 export PATH="/c/Program Files/nodejs:$PATH"
 cd "$(dirname "$0")"
-# honor .env here too (bot.js loads it, but env set by this script would override the file —
-# so fold the file in FIRST; precedence: arg > exported env > .env > Claude)
+# bot.js reads only the process environment. This script folds a .env file into it.
+# Name precedence: arg > exported env > .env > Claude.
 PRE_MC_USER=$MC_USER
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
 NAME=${2:-${PRE_MC_USER:-${MC_USER:-Claude}}}
-taskkill //F //IM node.exe 2>/dev/null
 rm -f stop.flag
-echo 0 > heartbeat_cursor.txt
 echo "[start] bot '$NAME' on port $PORT (watchdog armed; 'touch stop.flag' to end)"
 first=1
 while [ ! -f stop.flag ]; do
@@ -31,7 +27,7 @@ while [ ! -f stop.flag ]; do
     MC_HOST=localhost MC_PORT=$PORT MC_VERSION=auto MC_USER=$NAME node bot.js >> bot.log 2>&1
   fi
   [ -f stop.flag ] && break
-  echo "[event] reborn — bot process died, watchdog relaunching in 3s (reset heartbeat cursor + /boot)" >> bot.log
+  echo "[event] reborn: bot process died, watchdog relaunching in 3s" >> bot.log
   sleep 3
 done
 echo "[start] watchdog ended"
