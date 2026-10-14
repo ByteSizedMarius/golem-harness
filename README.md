@@ -10,6 +10,22 @@ to bring it to life is *emet*: **truth**. A body that runs on words and lives or
 inscribed in it is exactly what this is; the fairness architecture below is the inscription. (And in
 Minecraft, the golem is the protector of the village. We aspire.)
 
+## This fork
+
+This fork teaches Golem to play Minecraft 1.7.10, the best version ever made. That it is also
+the version I grew up with is a complete coincidence.
+
+mineflayer moved on from 2014 a long time ago, so the bot talks 1.21.11 to ViaProxy, which
+translates eleven years of protocol back down. A 1.7.10 mode teaches the bot the old rules:
+sword blocking, no attack cooldown, the sounds as they used to be. The server runs Forge plus a
+few mods that fix what nostalgia prefers to forget. Hodgepodge and BugTorch patch the bugs Mojang
+never got around to. Et Futurum Requiem backports exactly two things: boats that survive touching
+a shore, and the enchanting table that takes lapis. Angelica renders at a frame rate from this
+decade, and log4jpatcher exists because 2021 happened to 1.7.10 too.
+
+Underneath, the bot got a signed control API, an MCP server for the pilot, combat reflexes and a
+bunker it digs or pillars when a fight goes badly. `Running it` below has the details.
+
 This project lets a language model (in our case, Claude) **play Minecraft as a player** — not run it as
 a script, not command it as a god, but *play* it: look around, get lost, find sand, drown embarrassingly,
 build a porch, and remember where home is. A human and the model built it together, live, by playing —
