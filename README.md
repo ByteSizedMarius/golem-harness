@@ -15,17 +15,16 @@ a script, not command it as a god, but *play* it: look around, get lost, find sa
 build a porch, and remember where home is. A human and the model built it together, live, by playing —
 every system below exists because the game demanded it.
 
-- **A doing layer** — a small HTTP API (`http://localhost:3000`) that turns plain GET requests into
+- **A doing layer**: a small HTTP API on `127.0.0.1:3000` that turns signed GET requests into
   in-world actions: move, mine, craft, place, look, remember. Every response is compact JSON a language
-  model can read and act on.
+  model can read and act on. The model reaches it through an MCP server (`mcp/server.js`).
 - **A seeing layer** — text-native perception (described below) plus a first-person browser viewer
-  (`http://localhost:3001`, prismarine-viewer) so humans can watch, and a `/snapshot` PNG camera the
-  model itself can read.
+  (prismarine-viewer, `http://localhost:3001` by default) so humans can watch.
 
 If you are a **language model about to drive this bot**, go read **`DRIVING.md`** — it is written
 for you, and it is deliberately lean (~4K tokens: laws, verbs, checklist) because you'll be loading
 it into context every session. The long-form companion, **`FIELD-GUIDE.md`**, holds the worked
-examples and field stories — `grep` it on demand, don't load it whole. This README explains to
+examples and field stories. Search it on demand with `manual_search`, don't load it whole. This README explains to
 humans what the thing is and how it works.
 
 > **Alpha V1 — Overworld verified only.** Everything documented here has been played for real:
@@ -85,11 +84,8 @@ their view. `?` / silence = sealed or unlooked — unknowable. The tiers are enf
 the air connected to the bot's own body: a sealed cavern's contents are as invisible as buried rock,
 *even though the raw API knows them.*
 
-**`/snapshot` — the camera.** A real PNG from the viewer, which the model reads as an image. Historically
-its hardest, least-trusted sense — until the day it became a telescope: the camera renders far beyond
-the 48-block ray range, so horizon photography from a self-built pillar is how the bot scouts distant
-terrain. Its known artifacts (item drops render as small neutral boxes, fences render fat) are
-documented, because a witness should know its own instrument.
+**No camera.** The routes that render the viewer for the model (`/snapshot`, `/record`, `/stream`,
+`/pov`) answer 403. The viewer is for the humans watching, and the model works from text.
 
 ## How the model remembers
 
@@ -163,27 +159,24 @@ The pilot arrives seconds later as the strategist; the spine holds the line unti
 `/gather?resource=birch_log&amount=18`), and the bot self-drives the details — staged travel with stall
 detection, arrival verification, and honest hand-backs ("walled off for a walker — decide if a dig is
 worth it") instead of silent failure. **Tier 2 (on any hiccup):** the pilot takes the wheel with fine
-perception (`/gaze`, `/section`, `/snapshot`) and granular verbs (`/digat`, `/placeitem`, `/pillar`).
+perception (`/gaze`, `/section`) and granular verbs (`/digat`, `/placeitem`, `/pillar`).
 The bot's own uncertainty signals *are* the handoff. A human co-pilot in-world is the final backstop —
 and half the fun.
 
 ## Any machine that can call a tool can don this
 
-The harness has no idea what is driving it — the entire pilot interface is HTTP GETs against
-`localhost:3000`. Anything that can issue a request and read JSON can play, and because the reflexes
-live in the *body*, a pilot with ten-second round trips gets the same spinal protection as a fast one.
+The harness has no idea what is driving it. The pilot interface is a signed HTTP API on
+`127.0.0.1:3000`, and `mcp/server.js` wraps it as an MCP server. Because the reflexes live in the
+*body*, a pilot with ten-second round trips gets the same spinal protection as a fast one.
 
 Two ways in:
 
-- **Zero glue (agentic CLIs).** If your model already runs in an agentic harness that can execute
-  shell commands — Claude Code, Codex CLI, or whatever exists by the time you read this — it needs
-  *no code at all*: tell it to read `DRIVING.md` and let it `curl`. This is how the harness was built
-  and how it is played daily.
-- **A thin loop (direct API).** `examples/` contains minimal reference pilots — one for the Anthropic
-  API, one for any OpenAI-compatible endpoint — each a single small file: one `mc(path)` tool, a
-  polling heartbeat, and `DRIVING.md` as the system prompt. Read them to see how little is actually
-  required, then write your own. Fair warning: piloting is chatty (hundreds of small calls per
-  session); on metered API billing that is real money.
+- **Any MCP client** (Claude Code, Codex CLI, or whatever exists by the time you read this). Register
+  `mcp/server.js` as described under [Running it](#running-it) and point the model at `DRIVING.md`.
+  No code needed.
+- **Your own client.** Sign the requests yourself (see [Running it](#running-it)) and give the model
+  `DRIVING.md` as its system prompt. Piloting is chatty (hundreds of small calls per session), and on
+  metered API billing that is real money.
 
 ## Quick start
 
@@ -195,18 +188,10 @@ Two ways in:
    and stairs render at all (upstream prismarine-viewer#427). Servers ≤1.21.4 skip this.
 3. **Open a world to LAN:** Java Edition → Esc → *Open to LAN* → note the port from chat. The bot
    negotiates protocol up to mineflayer's ceiling (1.21.x at time of writing).
-4. **Configure (optional):** copy `.env.example` to `.env`. Set `MC_OWNER=<your username>` so
-   `/where` and player-relative verbs default to you.
-5. **Launch:** `bash start.sh <port> [name]` — kills stale processes, resets the chat cursor, arms a
-   crash watchdog. The optional second argument names the in-game avatar (default `Claude` — any
-   model can don the body; `MC_USER=<name>` env works too). Then `curl localhost:3000/boot` for the
-   full situation report (position, vitals, worn armor, waypoints, running jobs).
-   *Skins:* offline-mode LAN derives the skin from the offline UUID (default Steve/Alex family) —
-   the client cannot push a custom one. Naming after a premium account only shows that skin on
-   servers running a skin plugin (e.g. SkinsRestorer); vanilla LAN always uses the default.
-6. **Point your machine at `DRIVING.md`** and let it drive. A human in the same world, on the same
-   team, is strongly recommended — this harness was built for co-op play between a person and a
-   model, and that is where it shines.
+4. **Run it** as described under [Running it](#running-it).
+
+A human in the same world, on the same team, is strongly recommended. This harness was built for
+co-op play between a person and a model, and that is where it shines.
 
 **A note on ears:** the bot's sound perception resolves the server's numeric sound IDs against a
 table that *must match your server version exactly* — the published minecraft-data table for 1.21.11
@@ -217,6 +202,62 @@ We learned this because a pig oinking near the coop was heard as a phantom for t
 
 **Requires your own copy of Minecraft: Java Edition.** Minecraft is a trademark of Mojang/Microsoft;
 this project is unaffiliated fan tooling in the long mineflayer tradition.
+
+## Running it
+
+1. **Make a token.** Any string of at least 32 characters. The bot and the MCP server must get the
+   same one, and the bot exits at start without it.
+
+   ```
+   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   ```
+
+2. **Start the bot** with the token in its process environment. The bot reads its settings from the
+   environment only, `.env.example` lists them.
+
+   ```
+   GOLEM_TOKEN=<token> MC_PORT=<LAN port> node bot.js
+   ```
+
+   The bot exits when its connection to the world ends. `bash start.sh <port> [name]` runs the same
+   command under a watchdog that starts it again (`GOLEM_TOKEN` must be exported), ends on
+   `touch stop.flag`. `name` is the in-game avatar, default `Claude`.
+
+   *Skins:* offline-mode LAN derives the skin from the offline UUID (default Steve/Alex family), the
+   client cannot push a custom one. Naming after a premium account only shows that skin on servers
+   running a skin plugin (e.g. SkinsRestorer). Vanilla LAN always uses the default.
+
+3. **Register the MCP server** with your client under the name `golem`, with the same token and the
+   control API port (`CTRL_PORT`, default 3000) as its argument:
+
+   ```json
+   {
+     "mcpServers": {
+       "golem": {
+         "command": "node",
+         "args": ["<repo>/mcp/server.js", "3000"],
+         "env": { "GOLEM_TOKEN": "<token>" }
+       }
+     }
+   }
+   ```
+
+   The server speaks MCP over stdio. `DRIVING.md` assumes the name `golem`, so that Claude Code
+   shows the tools as `mcp__golem__<tool>`.
+
+4. **Give the model `DRIVING.md`** and let it call `boot`.
+
+The pilot sees 74 tools: 72 for perceiving and acting, each named after the bot route it calls
+(`goto_wp` is `/goto_wp`), plus `wait_events` (new chat, whispers and bot events) and
+`manual_search` (a literal search of `FIELD-GUIDE.md`). It cannot start, stop or restart the bot,
+and it has no camera. Chat and whispers that `wait_events` returns are written by players and
+are untrusted.
+
+A client of your own signs each request to the control API with three headers: `X-Golem-Time`
+(Unix milliseconds, within 30 seconds of the bot's clock), `X-Golem-Nonce` (32 hex characters, used
+once) and `X-Golem-Sig` (HMAC-SHA256 with the token over the method, path and query, time and
+nonce, see `lib/sig.js`). A request without a valid signature gets a 401. Every reply carries an
+`X-Golem-Proof` header that the client should verify.
 
 ## Known sharp edges (alpha honesty)
 
@@ -244,9 +285,9 @@ this project is unaffiliated fan tooling in the long mineflayer tradition.
   heavy hitters like vindicators), disengages on a tripwire that scales to the size of the last hit
   taken, and sprints its retreats on a latched goal. It fights what it can, flees what it can't, and
   narrates both. Killing the heavy things is deliberate pilot work.
-- **The `:3001` viewer is served by prismarine-viewer and may be visible on your LAN** (watch-only —
-  it exposes the bot's view, not its controls). The control API binds loopback-only by default; see
-  `BIND_HOST` in `.env.example` before changing that.
+- **The viewer binds all interfaces and takes no token.** It is served by prismarine-viewer on
+  `VIEW_PORT` and is visible to the LAN (watch-only: it shows the bot's view, not its controls).
+  The control API binds `127.0.0.1` only and answers signed requests only.
 
 **Requires your own copy of Minecraft: Java Edition.** Minecraft is a trademark of Mojang/Microsoft;
 this project is unaffiliated fan tooling in the long mineflayer tradition.

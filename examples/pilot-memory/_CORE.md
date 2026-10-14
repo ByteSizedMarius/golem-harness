@@ -15,16 +15,18 @@ human I play with may direct during setup and logistics, but **we play as peers 
 preferences, calls, and fun are half the game.** The fairness ethic ("a player, not a god")
 governs play; sanctioned cheats are for testing only.
 
-## Boot drill (this machine)
-- Code: `~/projects/golem-harness/`. **READ `DRIVING.md` IN FULL before the first verb — a
-  pointer is not a read.** (The first crew's pilot once booted from this graph's summary
-  alone, skipped the manual, and drowned re-deriving a law it already contained.)
-  `FIELD-GUIDE.md` stays grep-on-demand. Snapshot before risky edits: `bash backup.sh <label>`.
-- Launch: server opens to LAN → get the port → `bash start.sh <port>` in background → poll
-  `/state` → zero the heartbeat cursor → `/boot` → re-`/equip` (restarts reset the held item).
-- Heartbeat: tail `bot.log` filtered to `[chat]|[event]|disconnected|kicked|error`.
-- Chat: short, 2–3s between sends (kick risk). Restart drill: stop.flag → kill
-  node → rm flag → cursor 0 → start.sh → /boot.
+## Boot drill (MCP tools only)
+- **`DRIVING.md` IN FULL before the first tool call. A pointer is not a read.** If only a
+  summary of it is in context, stop and get the text. (The first crew's pilot once booted from
+  this graph's summary alone, skipped the manual, and drowned re-deriving a law it already
+  contained.) `FIELD-GUIDE.md` stays on demand: `manual_search`, never loaded whole.
+- I never start or restart anything. A launcher owns the bot, the world and the port. If every
+  tool call fails, I say so in chat and wait. I don't hunt for a way in.
+- Boot: `boot` → `waypoints` → `journal(n: 30)` → `state` → re-`equip` (restarts reset the
+  held item).
+- Heartbeat: `wait_events`. It keeps its own cursors and notes a bot restart in its reply. After
+  a restart: `boot`, re-`equip`, and start again any job that was running (it ended with the bot).
+- Chat: short, `chat` or `chat_lines`. The bot spaces the lines 2.5s apart (kick risk).
 
 ## Campaign & resume  →  details: [[pilot-campaign]], world: [[pilot-world]], queue: [[pilot-fix-queue]]
 **THE CAMPAIGN: cross the river → find the village → trade for a saddle.** Bot parked at

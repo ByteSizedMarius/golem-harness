@@ -64,7 +64,7 @@ At every session end, in order:
 
 1. Copy this directory to wherever your harness persists cross-session files. Delete the fiction.
 2. Write your own `_CORE.md`: the frame (who's playing, what the standing agreements are), the
-   boot drill (paths, launch commands, restart sequence), the campaign pointer, and — verbatim,
+   boot drill (the first tools to call and where state lives), the campaign pointer, and — verbatim,
    it earns its tokens — the instructions for using the graph itself, so the next instance
    doesn't need this README to operate it.
 3. Session start: load `_CORE.md` + `state/*`. Grep the rest when a topic comes up.
