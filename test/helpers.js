@@ -105,7 +105,7 @@ function guardRequest ({ token, port, method = 'GET', url = '/state', time, nonc
 // Recording handlers stand in for bot.js's own routes.
 const DUMMY_ROUTES = [
   '/state', '/tick', '/chatlog', '/walls', '/outline', '/roof', '/build', '/find', '/mine', '/collect', '/craft',
-  '/smelt', '/withdraw', '/deposit', '/gather', '/toss', '/goto', '/come', '/follow', '/goto_wp', '/safe_goto',
+  '/smelt', '/withdraw', '/deposit', '/gather', '/toss', '/goto', '/come', '/follow', '/goto_wp',
   '/waypoint', '/waypoints', '/snapshot', '/record', '/stream', '/pov', '/sign', '/rename', '/bunker'
 ]
 
@@ -539,7 +539,7 @@ function bunkerReflexIn (env) {
   const at = src.search(/\bname\s*:\s*['"]bunker['"]/)
   const literal = at < 0 ? '' : balanced(src, src.lastIndexOf('{', at))
   assert.ok(literal, 'the bunker reflex not found in bot.js')
-  return vm.runInContext(`(${literal})`, loadBotFunctions(['bunkerSummary'], env))
+  return vm.runInContext(`(${literal})`, vm.createContext(env))
 }
 
 // ---- bunker fakes over sliced bot.js functions ----
@@ -547,13 +547,15 @@ function bunkerReflexIn (env) {
 const HERE = new Vec3(0.5, 64, 0.5)
 
 // Entities carry seen and cls, ages maps an id to the ms since its hit.
+// A confirmed id missing from entities stands for a mob no longer loaded.
 function shelterInputsAmong (entities, confirmed, ages = {}) {
   const FILL = { cells: new Set() }
   let fills = 0
   const env = {
     bot: { entity: { position: HERE }, entities, blockAt: (p) => ({ name: 'dirt', position: p }) },
     reflexes: [{ name: 'combat', fairFill (b) { fills++; assert.strictEqual(b, env.bot, 'fairFill got another bot'); return FILL } }],
-    AGGRO_CONFIRMED: new Map(confirmed.map((id) => [id, { name: entities[id].name, t: Date.now() - (ages[id] || 0) }])),
+    AGGRO_CONFIRMED: new Map(confirmed.map((id) => [id, { name: entities[id] ? entities[id].name : 'zombie', t: Date.now() - (ages[id] || 0) }])),
+    expireConfirmed: shelter.expireConfirmed,
     SHELTER: shelter.SHELTER,
     CONFIRMED_HORIZON: botConstant('CONFIRMED_HORIZON'),
     CONFIRMED_MS: botConstant('CONFIRMED_MS'),
@@ -571,7 +573,7 @@ function shelterInputsAmong (entities, confirmed, ages = {}) {
     upBuildMs: shelter.upBuildMs
   }
   const input = loadBotFunctions(['shelterInputs'], env).shelterInputs('auto')
-  return { input, names: Array.from(input.threats, (t) => t.name), fills }
+  return { input, names: Array.from(input.threats, (t) => t.name), fills, confirmed: env.AGGRO_CONFIRMED }
 }
 
 // pillarProblem(height) for a body at (0, 64, 0) on a 5x5 floor at y 63, plus the solid cells in extra.
@@ -611,6 +613,7 @@ function buildHarness ({ scenes = [{}], centred = true } = {}) {
     SHELTER: shelter.SHELTER,
     BUNKER_WALK: 'refused while a bunker is being built, the stop tool ends the build',
     BUNKER_HALTS: botConstant('BUNKER_HALTS'),
+    bunkerSummary: shelter.bunkerSummary,
     mobClass,
     bot: Object.assign(new EventEmitter(), {
       pathfinder: { setGoal () {}, goto: async () => {}, setMovements () {} },
@@ -648,7 +651,7 @@ function buildHarness ({ scenes = [{}], centred = true } = {}) {
       return { at: bunker.cell, placed: height + 13, gaps: [], exit: [] }
     }
   }
-  const ctx = loadBotFunctions(['buildBunker', 'onBuildHit', 'bunkerHolds', 'bunkerSummary'], env)
+  const ctx = loadBotFunctions(['buildBunker', 'onBuildHit', 'bunkerHolds'], env)
   return { ctx, env, log, combat, bunker }
 }
 
@@ -659,9 +662,8 @@ const halt = {
 }
 const HALT_REASONS = Object.keys(halt)
 
-// during[k] runs while the k-th cell (0-based) is dug.
-function digHarness (during = {}) {
-  const bunker = { building: true, stop: null, cell: null, mode: 'down', reached: 0 }
+// When during[k] returns false, the body does not drop into the k-th dug cell (0-based).
+function digHarness (during = {}, bunker = { building: true, stop: null, cell: null, mode: 'down', reached: 0 }) {
   const entity = { position: new Vec3(0.5, 64, 0.5), onGround: true }
   let digs = 0
   const env = {
@@ -674,7 +676,7 @@ function digHarness (during = {}) {
       blockAt: (p) => ({ name: 'dirt', position: p }),
       async dig (b) {
         const k = digs++
-        if (during[k]) during[k](ctx)
+        if (during[k] && during[k](ctx) === false) return
         entity.position = new Vec3(0.5, b.position.y, 0.5)
       },
       waitForTicks: async () => {}
@@ -687,9 +689,8 @@ function digHarness (during = {}) {
   return { ctx, bunker }
 }
 
-// during[k] runs while the k-th block (0-based) is placed.
-function pillarHarness (during = {}) {
-  const bunker = { building: true, stop: null, cell: null, mode: 'up', reached: 0 }
+// The k-th placing (0-based) fails when during[k] returns false.
+function pillarHarness (during = {}, bunker = { building: true, stop: null, cell: null, mode: 'up', reached: 0 }) {
   const entity = { position: new Vec3(0.5, 64, 0.5), onGround: true }
   let places = 0
   const env = {
@@ -701,7 +702,7 @@ function pillarHarness (during = {}) {
     fillers: () => [{ name: 'dirt', count: 64 }],
     async jumpPlace () {
       const k = places++
-      if (during[k]) during[k](ctx)
+      if (during[k] && during[k](ctx) === false) return false
       entity.position = entity.position.offset(0, 1, 0)
       return true
     },
@@ -738,6 +739,7 @@ async function actAfter (built) {
     reflexes: [{ name: 'combat', fleeFrom (b, entity, why, klass) { flees.push({ entity, why, klass }) } }],
     emitEvent () {},
     buildBunker: async () => built,
+    bunkerSummary: shelter.bunkerSummary,
     shelterInputs: () => ({ requested: 'auto', threats: [{ ...threat('zombie', 6), entity: near }] }),
     bunkerReflexDecide: () => null,
     BUNKER_HALTS: botConstant('BUNKER_HALTS'),
@@ -752,7 +754,7 @@ async function actAfter (built) {
   return flees
 }
 
-const stoppedBuild = (why) => ({ mode: 'up', at: { x: 0, y: 65, z: 0 }, sealed: false, dug: 0, placed: 1, gaps: [], exit: [], stopped: why })
+const stoppedBuild = (why) => ({ mode: 'up', at: { x: 0, y: 65, z: 0 }, sealed: false, dug: 0, placed: 1, height: 3, gaps: [], exit: [], stopped: why })
 
 module.exports = {
   ROOT, GUIDE, ALLOW, UNAUTHORIZED, UNAUTHORIZED_BODY, ILLEGAL, LONE_SURROGATE, HUNG, PORT, MCP_TOKEN,

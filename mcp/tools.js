@@ -62,7 +62,6 @@ const TOOLS = [
 
   // Moving
   { name: 'goto', route: '/goto', description: 'Pathfind to a coordinate.', params: { ...XYZ, range: RANGE }, timeoutMs: LONGEST },
-  { name: 'safe_goto', route: '/safe_goto', description: 'Long trip: direct attempt, then segmented recovery.', params: { ...XYZ, range: RANGE, verbose: FLAG }, timeoutMs: LONGEST },
   { name: 'come', route: '/come', description: 'Walk to a player (live or last seen) or the nearest visible block of a type.', params: { name: required(NAME), radius: RADIUS, range: RANGE }, timeoutMs: LONGEST },
   { name: 'goto_wp', route: '/goto_wp', description: 'Walk to a saved waypoint.', params: { name: required(WAYPOINT), range: RANGE }, timeoutMs: LONGEST },
   { name: 'follow', route: '/follow', description: 'Keep following a player.', params: { name: required(PLAYER), range: RANGE } },
@@ -113,7 +112,7 @@ const TOOLS = [
 
   // Fighting
   // Five swings of about 2.3 s each, with room for short approaches.
-  { name: 'strike', route: '/strike', description: 'Melee swings at a creature, never players or creepers.', params: { name: required(NAME), item: NAME, max: { type: 'int', min: 1, max: 5 } }, timeoutMs: 20000 },
+  { name: 'strike', route: '/strike', description: 'Melee swings at a creature with item, iron_sword by default, never players or creepers. Refused when that item is not in the inventory.', params: { name: required(NAME), item: NAME, max: { type: 'int', min: 1, max: 5 } }, timeoutMs: 20000 },
   // 8 shots, each a 1.55 s draw and a 2 s watch for the kill, and the bow's equip.
   { name: 'shoot', route: '/shoot', description: 'Bow shots at a creature, never players.', params: { name: required(NAME), max: { type: 'int', min: 1, max: 8 } }, timeoutMs: 8 * (1550 + 2000) + EVENT },
   { name: 'guard', route: '/guard', description: 'Raise (1) or lower (0) the off-hand shield, or on 1.7.10 a block with the sword in hand.', params: { on: ON } },

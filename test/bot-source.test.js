@@ -17,3 +17,10 @@ test('bot.js binds the control API to 127.0.0.1 with no env override', () => {
   for (const args of listens) assert.match(args, /^\s*[^,]+,\s*['"]127\.0\.0\.1['"]/, `app.listen(${args}`)
   assert.doesNotMatch(src, /BIND_HOST/)
 })
+
+test('bot.js reads its settings from the process environment with no .env loader', () => {
+  assert.match(src, /\bprocess\.env\.GOLEM_TOKEN\b/, 'control: bot.js reads the process environment')
+  assert.doesNotMatch(src, /['"`/]\.env\b/)
+  assert.doesNotMatch(src, /loadEnvFile/)
+  assert.doesNotMatch(src, /dotenv/)
+})

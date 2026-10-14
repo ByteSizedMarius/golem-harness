@@ -129,7 +129,7 @@ y, the pathfinder handles vertical navigation. For `find` results you get the re
 
 - chat lines and whispers, each with its sender and message,
 - bot events, each with its kind and message: hurt, health_critical, low_food, death, hostile (mob
-  within 16), nightfall, combat, bunker, plus a job's end (done, error or cancelled), and gather, build and safe_goto milestones.
+  within 16), nightfall, combat, bunker, plus a job's end (done, error or cancelled), and gather and build milestones.
 
 A call returns at most 50 items, the newest kept and the number dropped reported. It returns no sooner
 than 5 s after its previous return, unless its timeout runs out first. It keeps the chat and event cursors itself, and after a bot
@@ -179,7 +179,6 @@ For the chat mechanics, call `manual_search(query: "send queue")`.
   `dig_tunnel`). **It never digs on its own: a blocked route is YOUR call.**
 - `come(name: "<block>", radius, range)`: pathfind to the nearest block of a type.
 - `goto_wp(name, range)`: pathfind to a saved waypoint.
-- `safe_goto`: legacy segmented-march variant; plain `goto` now does all of this itself.
 
 > **Guardrail lesson — the pathfinder walks, it does not carve.** Default movement NEVER breaks blocks
 > (protects builds and terrain) and places none (zero litter). If a gap/chasm genuinely needs a bridge,

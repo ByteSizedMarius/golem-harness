@@ -138,7 +138,6 @@ specific.
 | Tool         | Params                              | Does |
 |--------------|-------------------------------------|------|
 | `goto`       | x y z range                         | Pathfind to a coordinate. |
-| `safe_goto`  | x y z range verbose                 | Legacy: direct attempt, then ~24-block segments after a planning timeout. `goto` also stages long trips, pre-checks reachability and detects stalls: use `goto`. |
 | `come`       | name radius range                   | Pathfind to a player (by name, live or last-seen) or the nearest block of a type. Bypasses the walkability precheck: the escape hatch when `goto` refuses a ladder shaft. |
 | `goto_wp`    | name range                          | Pathfind to a saved waypoint. |
 | `follow`     | name range                          | Continuously follow a player (supervised: wedge-detects + doorway drill). |

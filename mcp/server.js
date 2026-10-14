@@ -506,7 +506,7 @@ function main () {
   }
   const token = process.env.GOLEM_TOKEN || ''
   if (token.length < TOKEN_MIN) fail(`GOLEM_TOKEN is missing or shorter than ${TOKEN_MIN} characters`)
-  // The launcher counts the wait_events lines of the wake log against its wake budget and logs the tool calls.
+  // The wake log lets a supervising process count the wait_events returns and the tool calls.
   let onWake
   let onToolCall
   if (args.length === 2) {

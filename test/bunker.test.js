@@ -130,6 +130,63 @@ test('stop or death ends a bunker build as stopped and the body does not flee', 
   }
 })
 
+test('a stop or death after the build began reports how far it got', async () => {
+  for (const why of HALT_REASONS) {
+    const reach = (h) => { h.bunker.reached = 2; halt[why](h); throw new Error('Digging aborted') }
+    let h = buildHarness()
+    h.env.centerOnCell = async () => { halt[why](h); return true }
+    let summary = shelter.bunkerSummary(await h.ctx.buildBunker('auto', 3))
+    assert.match(summary, /^no bunker built\b/, `control: ${why} before the build, got ${summary}`)
+
+    h = buildHarness()
+    h.env.digIn = async () => reach(h)
+    summary = shelter.bunkerSummary(await h.ctx.buildBunker('auto', 3))
+    assert.match(summary, /\b2 of 3\b/, `${why} after 2 cells dug, got ${summary}`)
+    assert.ok(summary.includes(why), `${why} after 2 cells dug, got ${summary}`)
+
+    h = buildHarness({ scenes: [{ threats: [zombie(30)] }] })
+    h.env.pillarShell = async () => reach(h)
+    summary = shelter.bunkerSummary(await h.ctx.buildBunker('auto', 4))
+    assert.match(summary, /\b2 of 4\b/, `${why} after 2 of 4 pillar blocks, got ${summary}`)
+    assert.ok(summary.includes(why), `${why} after 2 of 4 pillar blocks, got ${summary}`)
+  }
+})
+
+test('a stop or death that makes a build step fail ends the build as stopped and the body does not flee', async () => {
+  const steps = [
+    { name: 'pillarShell', harness: pillarHarness, scenes: [{ threats: [zombie(30)] }], progress: /\b1 of 3\b/ },
+    { name: 'digIn', harness: digHarness, scenes: [{}], progress: /\b2 of 3\b/ }
+  ]
+  for (const { name, harness, scenes, progress } of steps) {
+    let h = buildHarness({ scenes })
+    h.env[name] = harness({ 1: () => false }, h.bunker).ctx[name]
+    let r = await h.ctx.buildBunker('auto', 3)
+    assert.ok(r.stopped && !HALT_REASONS.includes(r.stopped), `control: ${name} failed with no stop, got ${JSON.stringify(r)}`)
+    assert.strictEqual((await actAfter(r)).length, 1, `control: the reflex flees after ${name} failed`)
+    for (const why of HALT_REASONS) {
+      h = buildHarness({ scenes })
+      h.env[name] = harness({ 1: () => { halt[why](h); return false } }, h.bunker).ctx[name]
+      r = await h.ctx.buildBunker('auto', 3)
+      assert.strictEqual(r.stopped, why, `${why} failed ${name}, got ${JSON.stringify(r)}`)
+      assert.match(shelter.bunkerSummary(r), progress, `${why} failed ${name}: how far it got`)
+      assert.strictEqual((await actAfter(r)).length, 0, `the reflex fled after ${why} failed ${name}`)
+    }
+  }
+})
+
+test('a stop or death during the last, successful placing leaves a finished build and keeps its cell', async () => {
+  for (const why of HALT_REASONS) {
+    const h = buildHarness()
+    const dig = digHarness({}, h.bunker)
+    dig.ctx.placeFiller = async () => { halt[why](h); return 'placed' }
+    h.env.digIn = dig.ctx.digIn
+    const r = await h.ctx.buildBunker('auto', 3)
+    assert.strictEqual(r.stopped, undefined, `${why} after digIn finished, got ${JSON.stringify(r)}`)
+    assert.strictEqual(r.sealed, true, `${why} after digIn finished: sealed`)
+    assert.ok(h.bunker.cell, `${why} after digIn finished: the cell was cleared`)
+  }
+})
+
 test('a hit before the shelter is picked does not stop the build', async () => {
   const bunker = { building: true, stop: null, cell: null, mode: 'up', reached: 0 }
   const ctx = loadBotFunctions(['onBuildHit'], { bunker, SHELTER: shelter.SHELTER, mobClass })
@@ -246,6 +303,13 @@ test('a hit counts toward the bunker only while the aggro is fresh', () => {
   assert.ok(!names.includes('zombie'), `a mob past the horizon counts on a 10-minute-old hit, got ${names}`)
   assert.ok(!names.includes('stray'), `a mob sealed from view counts on a 10-minute-old hit, got ${names}`)
   assert.ok(!names.includes('cave_spider'), `a mob a floor below out of sight counts on a 10-minute-old hit, got ${names}`)
+})
+
+test('an expired hit is forgotten even when its mob is no longer loaded', () => {
+  const confirmedMs = botConstant('CONFIRMED_MS')
+  const { confirmed } = shelterInputsAmong({}, [1, 2], { 1: confirmedMs - 1000, 2: confirmedMs + 1000 })
+  assert.ok(confirmed.has(1), 'control: a fresh hit by a mob no longer loaded is kept')
+  assert.ok(!confirmed.has(2), 'a stale hit by a mob no longer loaded is kept')
 })
 
 // ---- bunkerReflexDecide ----

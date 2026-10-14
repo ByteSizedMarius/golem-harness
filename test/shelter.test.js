@@ -1,7 +1,7 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
-const { mobFamily, requiredLead, chooseShelter, entityInCell, babyFlag } = require('../lib/shelter')
+const { mobFamily, requiredLead, chooseShelter, entityInCell, babyFlag, expireConfirmed, bunkerSummary } = require('../lib/shelter')
 
 // up: two pillar blocks of 650 ms.
 const BUILD = { up: 1300, down: 2930 }
@@ -156,4 +156,17 @@ test('babyFlag is true with no key, false with a key and no value, else the valu
   assert.strictEqual(babyFlag(at(3, 0), keys), false, 'is_baby 0')
   assert.strictEqual(babyFlag(at(2, true), keys), false, 'a value at another index')
   assert.strictEqual(babyFlag(at(2, true), ['a', 'b', 'baby']), true, 'baby true')
+})
+
+test('expireConfirmed drops every hit older than the max age and keeps one exactly that old', () => {
+  const now = 100000
+  const hits = new Map([[1, { t: now - 1001 }], [2, { t: now - 1000 }], [3, { t: now - 5000 }], [4, { t: now - 60000 }], [5, { t: now }]])
+  expireConfirmed(hits, now, 1000)
+  assert.deepStrictEqual([...hits.keys()], [2, 5])
+})
+
+test('a stopped up build says how many of its pillar blocks it placed', () => {
+  const stopped = { mode: 'up', at: { x: 0, y: 65, z: 0 }, sealed: false, dug: 0, placed: 1, height: 3, gaps: [], exit: [], stopped: 'stopped by the pilot' }
+  assert.match(bunkerSummary(stopped), /\b1 of 3\b/, 'stopped after 1 pillar block')
+  assert.match(bunkerSummary({ ...stopped, at: { x: 0, y: 67, z: 0 }, placed: 9 }), /\b3 of 3\b/, 'stopped while the shell was built')
 })

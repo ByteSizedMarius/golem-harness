@@ -9,7 +9,7 @@ const fs = require('fs')
 const { Vec3 } = require('vec3')
 const { installSecurity, BUNKER_MODES } = require('./lib/install')
 const { classifySound } = require('./lib/sounds')
-const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs } = require('./lib/shelter')
+const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
 
 const HOST = process.env.MC_HOST || 'localhost'
 const PORT = parseInt(process.env.MC_PORT || '25565')
@@ -1889,11 +1889,11 @@ reflexes.unshift({
       const now = Date.now()
       const here = bot.entity.position
       let best = null
+      expireConfirmed(AGGRO_CONFIRMED, now, CONFIRMED_MS)
       for (const e of Object.values(bot.entities)) {
         if (!e || e === bot.entity || !e.position) continue
         const cls = mobClass(e)
         const confirmed = AGGRO_CONFIRMED.get(e.id)
-        if (confirmed && now - confirmed.t > CONFIRMED_MS) { AGGRO_CONFIRMED.delete(e.id); continue }
         const scoreable = cls === 'hostile' || cls === 'creeper' || cls === 'heavy' || !!confirmed ||
           (cls === 'player' && now < threatDebugUntil)
         if (!scoreable) continue
@@ -2888,7 +2888,7 @@ app.get('/goto', async (req, res) => {
     const x = parseFloat(req.query.x), y = parseFloat(req.query.y), z = parseFloat(req.query.z)
     if (![x, y, z].every(Number.isFinite)) return err(res, new Error('x, y, z required'))
     const range = parseInt(req.query.range || '1')
-    claimLane('goto', 60000)                       // soft lane: my legs, my walk (07-21)
+    claimLane('goto', 300000)                     // soft lane: my legs, my walk (07-21)
     const r = await stagedGoto(new Vec3(x, y, z), range)
     if (!r.arrived) { safeStop(); try { bot.clearControlStates() } catch (e) {} }  // leave a clean stop so the bot doesn't drift on a give-up
     ok(res, { arrived: r.arrived, method: r.method || null, reason: r.reason || null, hint: r.hint || null, pos: round(bot.entity.position) })
@@ -4757,7 +4757,7 @@ async function pillarShell (height) {
     if (buildStop()) return { at: bot.entity.position.floored(), placed, stopped: buildStop() }
     const below = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))
     const item = fillers()[0]
-    if (!item || !below || !(await jumpPlace(below, item, true))) return { at: bot.entity.position.floored(), placed, stopped: `the pillar stopped after ${i} of ${height} blocks` }
+    if (!item || !below || !(await jumpPlace(below, item, true))) return { at: bot.entity.position.floored(), placed, stopped: 'a pillar block did not place' }
     placed++
     bunker.reached = placed
   }
@@ -4806,12 +4806,11 @@ function shelterInputs (requested, height = BUNKER_HEIGHT) {
   const now = Date.now()
   const combat = reflexes.find(r => r.name === 'combat')
   const threats = []
+  // entityEngageable reads this map too.
+  expireConfirmed(AGGRO_CONFIRMED, now, CONFIRMED_MS)
   for (const e of Object.values(bot.entities)) {
     if (!e || e === bot.entity || !e.position) continue
     const cls = mobClass(e)
-    // An expired confirmation leaves the map, which entityEngageable reads too.
-    const hit = AGGRO_CONFIRMED.get(e.id)
-    if (hit && now - hit.t > CONFIRMED_MS) AGGRO_CONFIRMED.delete(e.id)
     const confirmed = AGGRO_CONFIRMED.has(e.id)
     if (!(['hostile', 'creeper', 'heavy'].includes(cls) || (cls === 'provokable' && confirmed))) continue
     const dist = e.position.distanceTo(here)
@@ -4884,6 +4883,7 @@ async function buildBunker (mode, height) {
   bunker.reached = 0
   const onDeath = () => { bunker.stop = 'the body died' }
   bot.once('death', onDeath)
+  const halted = () => ({ mode: bunker.mode, stopped: bunker.stop, reached: bunker.reached, ...(bunker.mode === 'up' && { height }) })
   // Until the build ends, any goal but null is refused, goto included.
   const { setGoal, goto, setMovements } = bot.pathfinder
   bot.pathfinder.setGoal = (goal, dynamic) => {
@@ -4911,7 +4911,7 @@ async function buildBunker (mode, height) {
     let pick = null
     for (const centre of [false, true]) {
       const centred = !centre || await centerOnCell()
-      if (BUNKER_HALTS.includes(bunker.stop)) return { mode: bunker.mode, stopped: bunker.stop }
+      if (BUNKER_HALTS.includes(bunker.stop)) return halted()
       const input = shelterInputs(mode, height)
       if (!centred) input.problems.down = 'cannot stand in the middle of the cell'
       pick = chooseShelter(input)
@@ -4920,18 +4920,20 @@ async function buildBunker (mode, height) {
     if (pick.refuse) return { error: `no bunker possible here (${pick.refuse})` }
     bunker.mode = pick.mode
     r = pick.mode === 'down' ? await digIn() : await pillarShell(height)
+    if (r.stopped && BUNKER_HALTS.includes(bunker.stop)) r.stopped = bunker.stop
     return {
       mode: pick.mode,
       at: xyz(r.at),
       sealed: !r.stopped && r.gaps.length === 0,
       dug: r.dug || 0,
       placed: r.placed,
+      ...(pick.mode === 'up' && { height }),
       gaps: (r.gaps || []).map(xyz),
       exit: (r.exit || []).map(xyz),
       stopped: r.stopped
     }
   } catch (e) {
-    if (BUNKER_HALTS.includes(bunker.stop)) return { mode: bunker.mode, stopped: bunker.stop }
+    if (BUNKER_HALTS.includes(bunker.stop)) return halted()
     return { error: `the bunker failed: ${e.message}` }
   } finally {
     bot.pathfinder.setGoal = setGoal
@@ -4947,19 +4949,6 @@ async function buildBunker (mode, height) {
     try { bot.clearControlStates() } catch (e) {}
     if (movements) setMovements(movements)
   }
-}
-
-// One line on a buildBunker result, for the reply and the bunker events.
-function bunkerSummary (r) {
-  if (r.error) return r.error
-  if (!r.at) return `no bunker built, ${r.stopped}`
-  const cell = (c) => `(${c.x},${c.y},${c.z})`
-  const where = r.mode === 'up' ? `on a pillar at ${cell(r.at)}`
-    : `${r.dug === 3 ? 'dug in 3 below ground' : `dug ${r.dug} of 3 cells`} at ${cell(r.at)}`
-  if (r.stopped) return `${where}, ${r.stopped}`
-  const state = r.sealed ? 'sealed' : `${r.gaps.length} ${r.gaps.length === 1 ? 'gap' : 'gaps'} in the shell`
-  const dig = r.exit.length ? `dig ${r.exit.map(cell).join(' and ')}, then ` : ''
-  return `${where}, ${state}. To leave, ${dig}${r.mode === 'down' ? 'pillar up 3' : 'step out and drop to the ground'}.`
 }
 
 // GET /bunker?mode=auto|up|down&height=N: builds the shelter above and answers once it stands.
@@ -5463,81 +5452,6 @@ app.get('/build', (req, res) => {
     })
     ok(res, { job: id })
   } catch (e) { err(res, e) }
-})
-
-// GET /safe_goto?x=&y=&z=&range= : goto with recovery. One direct GoalNear attempt; on a
-// timeout/'took too long' failure, retry by marching toward the target in ~24-block
-// segments (intermediate GoalNear waypoints). Synchronous but hard-bounded (not a job).
-// Returns final position and whether it fully arrived. ?verbose=1 for per-segment detail.
-app.get('/safe_goto', async (req, res) => {
-  try {
-    const Vec3 = require('vec3').Vec3
-    const x = parseFloat(req.query.x), y = parseFloat(req.query.y), z = parseFloat(req.query.z)
-    if (![x, y, z].every(Number.isFinite)) return err(res, new Error('x, y, z required'))
-    const range = parseInt(req.query.range || '2')
-    const dest = new Vec3(x, y, z)
-    const verbose = req.query.verbose === '1'
-    const segLen = 24
-    claimLane('safe_goto', 300000)                 // soft lane, long trek duration (07-21)
-    const isTimeout = (e) => /took too long|timeout|timed out/i.test(e.message || '')
-
-    // first: a direct attempt. "Path was stopped" = a reflex intervened mid-path (e.g.
-    // unstuck clearing a door) — the blocker is often gone by now, so retry ONCE before
-    // reporting failure (07-22: giving up here made every reflex assist kill the verb).
-    let stopRetried = false
-    for (;;) {
-      if (bunker.building) return err(res, new Error(BUNKER_WALK))
-      try {
-        await bot.pathfinder.goto(new goals.GoalNear(x, y, z, range))
-        const pos = bot.entity.position
-        const arrived = pos.distanceTo(dest) <= range + 1
-        return ok(res, verbose
-          ? { arrived, method: 'direct', pos: round(pos), dist: +pos.distanceTo(dest).toFixed(1) }
-          : { arrived, pos: round(pos) })
-      } catch (e) {
-        if (/path was stopped/i.test(e.message || '') && !stopRetried) {
-          stopRetried = true
-          await new Promise(r => setTimeout(r, 1500))
-          continue
-        }
-        if (!isTimeout(e)) {
-          // non-timeout failure (blocked/no path): report position, don't segment-loop
-          const pos = bot.entity.position
-          return ok(res, { arrived: false, method: 'direct', reason: e.message, pos: round(pos) })
-        }
-        break                                                   // timeout → segmented recovery
-      }
-    }
-
-    // recovery: segmented march toward the target, ~24 blocks at a time
-    const segLog = []
-    let guard = 0
-    const maxSegs = 12                            // hard bound on the loop
-    while (guard++ < maxSegs) {
-      if (bunker.building) return err(res, new Error(BUNKER_WALK))
-      const cur = bot.entity.position
-      const remaining = cur.distanceTo(dest)
-      if (remaining <= range + 1) break
-      const t = Math.min(1, segLen / remaining)   // waypoint ~segLen blocks toward dest
-      const wx = cur.x + (dest.x - cur.x) * t
-      const wy = cur.y + (dest.y - cur.y) * t
-      const wz = cur.z + (dest.z - cur.z) * t
-      try {
-        await bot.pathfinder.goto(new goals.GoalNear(wx, wy, wz, 2))
-        segLog.push({ to: round(new Vec3(wx, wy, wz)), ok: true })
-      } catch (e) {
-        segLog.push({ to: round(new Vec3(wx, wy, wz)), ok: false, reason: e.message })
-        // if a segment stalls and we didn't move, bail rather than spin
-        if (bot.entity.position.distanceTo(cur) < 1) break
-      }
-    }
-    const pos = bot.entity.position
-    const arrived = pos.distanceTo(dest) <= range + 1
-    emitEvent('safe_goto', `${arrived ? 'arrived' : 'partial'} @ ${vecStr(pos)}`, { dest: round(dest), arrived })
-    ok(res, verbose
-      ? { arrived, method: 'segmented', pos: round(pos), dist: +pos.distanceTo(dest).toFixed(1), segments: segLog }
-      : { arrived, pos: round(pos), segments: segLog.length })
-  } catch (e) { err(res, e) } finally { releaseLane() }
 })
 
 // GET /enchant?item=&slot= : walk to the nearest enchanting table and enchant. The pilot's
