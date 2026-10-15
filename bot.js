@@ -304,7 +304,7 @@ bot.once('spawn', () => {
     setInterval(() => {
       try {
         if (!bot.entity) return
-        for (const en of Object.values(bot.entities || {})) considerMob(en)
+        for (const en of liveEntities()) considerMob(en)
         // let a mob re-warn once it has left (>24) or despawned, so a fresh approach re-fires
         for (const id of Array.from(warnedMobs)) {
           const en = bot.entities && bot.entities[id]
@@ -530,8 +530,8 @@ reflexes.push({
       }
       let nearest = null
       try {
-        for (const e of Object.values(bot.entities)) {
-          if (!e || e === bot.entity || !e.position) continue
+        for (const e of liveEntities()) {
+          if (!e.position) continue
           const nm = String(e.name || e.mobType || '').toLowerCase()
           if (!HOSTILE_NAMES.has(nm)) continue
           const d = e.position.distanceTo(pos)
@@ -1601,7 +1601,7 @@ function mobClass (e) {
 // source is pinned on it.
 function nearestHostile () {
   const here = bot.entity.position
-  const near = Object.values(bot.entities).filter(e => e && e !== bot.entity && e.position &&
+  const near = liveEntities().filter(e => e.position &&
     ['hostile', 'creeper', 'heavy'].includes(mobClass(e)) && e.position.distanceTo(here) <= 4)
   if (!near.length) return undefined
   const fill = reflexes.find(r => r.name === 'combat').fairFill(bot)
@@ -1637,7 +1637,7 @@ let swingWait = null
 function playersNear (hostile) {
   const here = bot.entity.position
   const reach = hostile ? hostile.position.distanceTo(here) : 4
-  return Object.values(bot.entities).filter(e => e && e !== bot.entity && e.type === 'player' && e.position &&
+  return liveEntities().filter(e => e.type === 'player' && e.position &&
     e.position.distanceTo(here) <= reach)
 }
 // True when yaw, the facing of player e, points at the bot within SWING_FACING.
@@ -1812,8 +1812,8 @@ function entityEngageable (en) {
 }
 // Hostiles within radius that the body perceives or that hit it, and that can reach it.
 function nearHostiles (fill, radius) {
-  return Object.values(bot.entities).filter(e => {
-    if (!e || !e.position) return false
+  return liveEntities().filter(e => {
+    if (!e.position) return false
     const c = mobClass(e)
     if (c !== 'hostile' && c !== 'creeper' && c !== 'heavy') return false
     if (e.position.distanceTo(bot.entity.position) >= radius) return false
@@ -1922,8 +1922,8 @@ reflexes.unshift({
       const here = bot.entity.position
       let best = null
       expireConfirmed(AGGRO_CONFIRMED, now, CONFIRMED_MS)
-      for (const e of Object.values(bot.entities)) {
-        if (!e || e === bot.entity || !e.position) continue
+      for (const e of liveEntities()) {
+        if (!e.position) continue
         const cls = mobClass(e)
         const confirmed = AGGRO_CONFIRMED.get(e.id)
         const scoreable = cls === 'hostile' || cls === 'creeper' || cls === 'heavy' || !!confirmed ||
@@ -2062,8 +2062,8 @@ reflexes.unshift({
             // ALLY SUPPRESSION (the helmsman's design, 07-20, en route to the dungeon reaping):
             // a pack is only a rout if I'm ALONE in it. A partner within 10 turns the math — two
             // blades hold a hallway three zombies can't. Withdrawal stays armed for the solo case.
-            const allyNear = Object.values(bot.entities).some(e2 =>
-              e2 && e2.type === 'player' && e2.username && e2.username !== bot.username &&
+            const allyNear = liveEntities().some(e2 =>
+              e2.type === 'player' && e2.username && e2.username !== bot.username &&
               e2.position && e2.position.distanceTo(bot.entity.position) <= 10)
             // HP FLOOR (07-21, the mill's lesson: the hold rule pinned me at 9 hearts twice on
             // 07-20 — an ally makes a pack survivable, not a wound. Below 12 the hold yields.)
@@ -2165,8 +2165,8 @@ reflexes.push({
   check () { return false },
   // The player to run to, or undefined.
   ally (bot, here, threatPos) {
-    return Object.values(bot.entities).find(e =>
-      e && e.type === 'player' && e.username && e.username !== bot.username &&
+    return liveEntities().find(e =>
+      e.type === 'player' && e.username && e.username !== bot.username &&
       e.position && e.position.distanceTo(here) <= 24 &&
       e.position.distanceTo(threatPos) > here.distanceTo(threatPos))
   }
@@ -2399,8 +2399,8 @@ app.get('/tick', (req, res) => {
     const w = waterState(bot)
     const fill = airFlood({ radius: 28, cap: 15000 })
     const threats = []
-    for (const en of Object.values(bot.entities)) {
-      if (!en || en === bot.entity || !en.position) continue
+    for (const en of liveEntities()) {
+      if (!en.position) continue
       const nm = String(en.name || '').toLowerCase()
       if (!HOSTILE_NAMES.has(nm)) continue
       const d = en.position.distanceTo(e.position)
@@ -2561,6 +2561,13 @@ function nametagVisible (en) {
 // lost from each-other"). Consented co-op sense: live position when the server tracks them,
 // last-seen breadcrumb (pos + age + heading) when out of range. Breadcrumbs update every 5s.
 const playerCrumbs = Object.create(null)
+// The ids of the entities loaded at the last dimension change that the server has not updated since.
+const staleEntities = new Set()
+for (const ev of ['entitySpawn', 'entityMoved', 'entityUpdate', 'entityGone']) bot.on(ev, (e) => { if (e) staleEntities.delete(e.id) })
+// The entities besides the body that the server updated since the last dimension change.
+function liveEntities () {
+  return Object.values(bot.entities).filter(e => e && e !== bot.entity && !staleEntities.has(e.id))
+}
 // A crumb's nametag is true when the player was known only by the nametag.
 function recordCrumbs () {
   try {
@@ -2582,6 +2589,9 @@ function forgetCrumbsElsewhere () {
   if (bot.game.dimension === crumbDimension) return
   crumbDimension = bot.game.dimension
   for (const name of Object.keys(playerCrumbs)) delete playerCrumbs[name]
+  staleEntities.clear()
+  for (const e of Object.values(bot.entities)) if (e !== bot.entity) staleEntities.add(e.id)
+  resetThreatState()
 }
 bot.on('game', forgetCrumbsElsewhere)
 function crumbFix (c, me) {
@@ -2619,8 +2629,8 @@ app.get('/useon', async (req, res) => {
     const it = bot.inventory.items().find(i => i.name === iname)
     if (!it) return err(res, new Error(`no ${iname} in inventory`))
     const here = bot.entity.position
-    const target = Object.values(bot.entities)
-      .filter(en => en !== bot.entity && en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(here) <= 16)
+    const target = liveEntities()
+      .filter(en => en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(here) <= 16)
       .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0]
     if (!target) return err(res, new Error(`no ${ename} within 16`))
     if (target.position.distanceTo(here) > 3) {
@@ -2652,8 +2662,8 @@ app.get('/strike', async (req, res) => {
     const it = bot.inventory.items().find(i => i.name === iname)
     if (!it) return err(res, new Error(`no ${iname} in inventory — refusing to punch with bare hands/wrong tool`))
     const here = bot.entity.position
-    const target = Object.values(bot.entities)
-      .filter(en => en !== bot.entity && en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(here) <= 16)
+    const target = liveEntities()
+      .filter(en => en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(here) <= 16)
       .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0]
     if (!target) return err(res, new Error(`no ${ename} within 16`))
     if (target.type === 'player' || (bot.players && Object.values(bot.players).some(p => p.entity === target))) {
@@ -2670,8 +2680,8 @@ app.get('/strike', async (req, res) => {
     bot.on('entityDead', onDead)
     for (let i = 0; i < max && !dead; i++) {
       const p0 = bot.entity.position
-      const tgt = i === 0 ? target : Object.values(bot.entities)
-        .filter(en => en !== bot.entity && en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(p0) <= 16)
+      const tgt = i === 0 ? target : liveEntities()
+        .filter(en => en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(p0) <= 16)
         .sort((a, b) => a.position.distanceTo(p0) - b.position.distanceTo(p0))[0]
       if (!tgt) break
       if (tgt.position.distanceTo(p0) > 3) {
@@ -2737,8 +2747,8 @@ app.get('/shoot', async (req, res) => {
       if (!bot.inventory.items().find(x => x.name === 'bow')) { outcome = 'no-bow'; break }
       if (!bot.inventory.items().some(x => x.name === 'arrow')) { outcome = 'no-arrows'; break }
       const here = bot.entity.position
-      const target = Object.values(bot.entities)
-        .filter(en => en !== bot.entity && en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(here) <= 25)
+      const target = liveEntities()
+        .filter(en => en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(here) <= 25)
         .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0]
       if (!target) { outcome = shots.length ? 'no-target' : null; if (!shots.length) return err(res, new Error(`no ${ename} within 25`)); break }
       if (target.type === 'player' || (bot.players && Object.values(bot.players).some(p => p.entity === target))) {
@@ -2792,8 +2802,8 @@ app.get('/entities', (req, res) => {
     const radius = parseInt(req.query.radius || '24')
     const here = bot.entity.position
     const fill = req.query.all === '1' ? null : airFlood({ radius: Math.min(radius + 4, 34), cap: 15000 })
-    const list = Object.values(bot.entities)
-      .filter(en => en !== bot.entity && en.position && en.position.distanceTo(here) <= radius)
+    const list = liveEntities()
+      .filter(en => en.position && en.position.distanceTo(here) <= radius)
       .filter(en => !fill || entityPerceptible(en, fill))
       .map(en => ({
         type: en.type, name: en.name || en.username || en.displayName,
@@ -3065,7 +3075,7 @@ function itemCounts () {
 function nearestDrop (radius, skip) {
   const here = bot.entity.position
   const fill = airFlood({ radius: Math.min(radius + 4, 34), cap: 15000 })
-  return Object.values(bot.entities)
+  return liveEntities()
     .filter(e => e.name === 'item' && e.position && !skip.has(e.id) && e.position.distanceTo(here) <= radius && entityPerceptible(e, fill))
     .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0] || null
 }
@@ -4142,8 +4152,7 @@ app.get('/scene', (req, res) => {
     const HOSTILES = HOSTILE_NAMES
     try {
       const here = pos
-      for (const en of Object.values(bot.entities)) {
-        if (en === bot.entity) continue
+      for (const en of liveEntities()) {
         if (en.type !== 'mob' && en.type !== 'animal' && en.type !== 'hostile' &&
             en.type !== 'passive' && en.type !== 'player' && en.type !== 'living') continue
         const d = en.position.distanceTo(here)
@@ -4941,8 +4950,8 @@ function shelterInputs (requested, height = BUNKER_HEIGHT) {
   const threats = []
   // entityEngageable reads this map too.
   expireConfirmed(AGGRO_CONFIRMED, now, CONFIRMED_MS)
-  for (const e of Object.values(bot.entities)) {
-    if (!e || e === bot.entity || !e.position) continue
+  for (const e of liveEntities()) {
+    if (!e.position) continue
     const cls = mobClass(e)
     const confirmed = AGGRO_CONFIRMED.has(e.id)
     if (!(['hostile', 'creeper', 'heavy'].includes(cls) || (cls === 'provokable' && confirmed))) continue
@@ -4984,7 +4993,7 @@ function bunkerReflexDecide () {
   return { flee: near.entity, why: `no bunker at HP ${Math.round(bot.health * 10) / 10} (${pick.refuse}), fleeing from ${near.name}` }
 }
 
-// Clears the threat state a death leaves behind.
+// Clears the threat state a death or a dimension change leaves behind.
 function resetThreatState () {
   const combat = reflexes.find(r => r.name === 'combat')
   AGGRO_CONFIRMED.clear()
@@ -5000,7 +5009,7 @@ function resetThreatState () {
 // The entities whose box keeps a block out of its cell.
 function blockers () {
   const living = ['mob', 'hostile', 'animal', 'passive', 'ambient', 'living', 'player']
-  return Object.values(bot.entities).filter(e => e && e !== bot.entity && living.includes(e.type))
+  return liveEntities().filter(e => living.includes(e.type))
 }
 
 // Builds the bunker chooseShelter picks for mode once the combat reflex has let go. The result names

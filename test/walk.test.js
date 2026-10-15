@@ -778,7 +778,7 @@ test('the last-seen fields of a nametag crumb give only a bearing and a distance
 })
 
 test('crumbs are dropped when the bot enters another dimension', () => {
-  const env = { bot: { game: { dimension: 'overworld' } }, playerCrumbs: {}, crumbDimension: null }
+  const env = { bot: { game: { dimension: 'overworld' }, entities: {} }, playerCrumbs: {}, crumbDimension: null, staleEntities: new Set(), resetThreatState () {} }
   const { forgetCrumbsElsewhere } = loadBotFunctions(['forgetCrumbsElsewhere'], env)
   forgetCrumbsElsewhere()
   env.playerCrumbs.Steve = { pos: new Vec3(5, 64, 5), t: Date.now() }

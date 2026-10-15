@@ -569,11 +569,19 @@ const HERE = new Vec3(0.5, 64, 0.5)
 // Entities carry seen and cls, ages maps an id to the ms since its hit.
 // A confirmed id missing from entities stands for a mob no longer loaded.
 function shelterInputsAmong (entities, confirmed, ages = {}) {
+  const { env, fills } = shelterEnv(entities, confirmed, ages)
+  const input = loadBotFunctions(['shelterInputs'], env).shelterInputs('auto')
+  return { input, names: Array.from(input.threats, (t) => t.name), fills: fills(), confirmed: env.AGGRO_CONFIRMED }
+}
+
+// The env shelterInputs runs over, with fills() the number of fairFill calls so far.
+function shelterEnv (entities, confirmed, ages = {}) {
   const FILL = { cells: new Set() }
   let fills = 0
   const env = {
     bot: { entity: { position: HERE }, entities, blockAt: (p) => ({ name: 'dirt', position: p }) },
     reflexes: [{ name: 'combat', fairFill (b) { fills++; assert.strictEqual(b, env.bot, 'fairFill got another bot'); return FILL } }],
+    staleEntities: new Set(),
     AGGRO_CONFIRMED: new Map(confirmed.map((id) => [id, { name: entities[id] ? entities[id].name : 'zombie', t: Date.now() - (ages[id] || 0) }])),
     expireConfirmed: shelter.expireConfirmed,
     SHELTER: shelter.SHELTER,
@@ -592,8 +600,7 @@ function shelterInputsAmong (entities, confirmed, ages = {}) {
     downBuildMs: shelter.downBuildMs,
     upBuildMs: shelter.upBuildMs
   }
-  const input = loadBotFunctions(['shelterInputs'], env).shelterInputs('auto')
-  return { input, names: Array.from(input.threats, (t) => t.name), fills, confirmed: env.AGGRO_CONFIRMED }
+  return { env, fills: () => fills }
 }
 
 // pillarProblem(height) for a body at (0, 64, 0) on a 5x5 floor at y 63, plus the solid cells in extra.
@@ -787,6 +794,6 @@ module.exports = {
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
   botSource, functionSource, balanced, botConstant, loadBotFunctions, bunkerReflexIn, combatReflexIn,
-  HERE, shelterInputsAmong, pillarProblemWith, column,
+  HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild
 }

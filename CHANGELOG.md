@@ -15,6 +15,13 @@ nudge that ends during a drown rescue leaves the swim-up's jump held. The doorwa
 doors the bot has seen. `airPrecheck`'s flood asks whether a cell is known only for the walls of a
 fill that stayed closed, not for every cell it touches.
 
+After a dimension change, entities the server has not updated since
+are left out of every scan: `tick`'s threats, `entities`, `scene`, the hostile alarm, the narrator,
+the combat reflex's flee and target scans, and the drop pickup. The rest followed: the bunker's
+threats, the hit attribution, the ally checks, `useon`, `strike`, `shoot` and the placing blockers,
+and a dimension change clears the confirmed aggro and the last hit, so a new mob that gets an old id
+is not taken for the one that hit.
+
 Reflexes took the legs in silence: a job carried on fighting a flee, and a walk answered a bare
 `stopped`. Now a running job keeps the legs from flees, cover moves and chases until a mob stands
 in melee range. A reflex that does take them (melee, an emergency flee, lava, drowning, the
