@@ -3,7 +3,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const express = require('express')
-const { installSecurity } = require('../lib/install')
+const { installSecurity, chatMaxLen } = require('../lib/install')
 const { ROUTE_BOUNDS } = require('../lib/bounds')
 const {
   ALLOW, PORT, UNAUTHORIZED, stripLead, assertSafeChunks, startApp, stateControl, referenceApp, proofOver, otherKey
@@ -329,4 +329,25 @@ test('five lines are sent in order and reported as queued, six get 400', async (
   assert.strictEqual((await s.get('/chat?lines=' + enc('m1|m2|m3|m4|m5|m6'))).status, 400)
   await s.drained()
   assert.strictEqual(s.sends.length, 5)
+})
+
+test('at a line length of 256, a 256-unit msg is one line and a 257-unit msg splits', async (t) => {
+  const s = await startApp(t, { maxLen: 256 })
+  assert.strictEqual((await s.get('/chat?msg=' + 'a'.repeat(256))).status, 200)
+  await s.drained()
+  assert.deepStrictEqual(s.texts(), ['a'.repeat(256)])
+  const r = await s.get('/chat?msg=' + enc('b'.repeat(200) + ' ' + 'c'.repeat(56)))
+  assertQueuedCount(r, 2)
+  await s.drained()
+  assert.deepStrictEqual(s.texts().slice(1), ['b'.repeat(200), 'c'.repeat(56)])
+})
+
+test('chatMaxLen gives 100 when unset or empty and takes 100 to 256', () => {
+  assert.strictEqual(chatMaxLen(undefined), 100)
+  assert.strictEqual(chatMaxLen(''), 100)
+  assert.strictEqual(chatMaxLen('100'), 100)
+  assert.strictEqual(chatMaxLen('256'), 256)
+  for (const bad of ['99', '257', '1e2', ' 200', '200 ', '0x100', '-100', '256.0', '0256']) {
+    assert.throws(() => chatMaxLen(bad), TypeError, JSON.stringify(bad))
+  }
 })

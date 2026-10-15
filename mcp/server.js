@@ -292,7 +292,7 @@ function untilAborted (promise, signal) {
 }
 
 // onWake runs after every return of wait_events. onToolCall runs on every tools/call with the name from
-// the tool table, null for a name outside it.
+// the tool table, null for a name outside it, and the sorted names of the tool's params the call passed.
 function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, now = () => new Date() }) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new TypeError('port must be an integer 1024-65535')
   if (typeof token !== 'string' || token === '') throw new TypeError('token must be a non-empty string')
@@ -479,7 +479,8 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
   async function callTool (id, params) {
     const valid = params !== null && typeof params === 'object' && typeof params.name === 'string'
     const tool = valid ? byName.get(params.name) : undefined
-    onToolCall(tool ? tool.name : null)
+    const args = tool && params.arguments !== null && typeof params.arguments === 'object' ? params.arguments : {}
+    onToolCall(tool ? tool.name : null, tool ? Object.keys(tool.params).filter((k) => Object.hasOwn(args, k)).sort() : [])
     if (!valid) return rpcError(id, -32602, 'invalid params')
     if (!tool) return rpcError(id, -32602, 'unknown tool')
     let values
@@ -584,7 +585,7 @@ function main () {
       }
     }
     onWake = () => logLine('wait_events returned')
-    onToolCall = (name) => logLine(`tool call ${name === null ? '(unknown)' : name}`)
+    onToolCall = (name, used) => logLine(`tool call ${name === null ? '(unknown)' : name}${used.length ? ' ' + used.join(',') : ''}`)
   }
   const papercutsFile = process.env.GOLEM_PAPERCUTS || undefined
   serveStdio(createServer({ port, token, fetch: globalThis.fetch, onWake, onToolCall, papercutsFile }))

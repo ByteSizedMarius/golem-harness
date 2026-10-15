@@ -8,6 +8,13 @@ and leaves the stories here.
 
 ## 2026-10-15: live-play fixes
 
+Chat length. On the 1.7.10 testbed every line over 100 characters arrived cut to 100, while
+the owner's own client sends up to 256 there. The cut is ViaVersion's 1.11 to 1.10 step,
+and a ViaProxy plugin raises it to 256 for a 1.7.10 server. The chat line length is
+`GOLEM_CHAT_MAX` (100 to 256, 100 when unset), and the `chat` description names both
+lengths. The MCP wake log now names the params each tool call passed, never their values,
+so unused tools and params can be counted and trimmed later.
+
 The head jittered on every walk past a mob: the combat reflex's standoff stare forced a look at it
 every 250 ms while the pathfinder turned the head toward its next node every tick, and the yaw is
 also the walking direction. The stare now waits until the legs are idle (`lib/head.js`). Melee and

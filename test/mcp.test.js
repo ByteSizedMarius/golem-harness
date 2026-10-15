@@ -2,6 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')
+const os = require('node:os')
 const path = require('node:path')
 const { createServer, redact, PATH_TOKEN } = require('../mcp/server')
 const { TOOLS } = require('../mcp/tools')
@@ -9,7 +10,7 @@ const { ROUTE_BOUNDS } = require('../lib/bounds')
 const {
   HUNG, PORT, MCP_TOKEN, proofOver, timed, delay, rawReply, mcpServer, manualFixture, call, rpc, callReq, isToolError, isRpcError, assertOk,
   textOf, errorText, LOCAL_TOOLS, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
-  baseEnv, assertEntryServes, assertEntryRefuses
+  baseEnv, assertEntryServes, assertEntryRefuses, fakeBot, runEntry
 } = require('./helpers')
 
 const FORBIDDEN_ROUTES = ['/snapshot', '/record', '/pov', '/threatdebug', '/pathdebug', '/stream', '/batch']
@@ -571,4 +572,28 @@ test('the entry point serves initialize with GOLEM_TOKEN in env and exits non-ze
   await assertEntryServes(t, PORT)
   await assertEntryRefuses(t, [String(PORT)], baseEnv())
   await assertEntryRefuses(t, [String(PORT), MCP_TOKEN], baseEnv())
+})
+
+test('onToolCall gets the tool name and the sorted names of its params the call passed, never their values', async () => {
+  const seen = []
+  const srv = createServer({ port: PORT, token: MCP_TOKEN, fetch: fakeBot().fetch, onToolCall: (name, used) => seen.push([name, used]) })
+  await call(srv, 'chat', { msg: 'meet me at the old well' })
+  await call(srv, 'goto', { z: 5, x: 1, range: 2 })
+  await call(srv, 'scene', { nonsense: 'say this' })
+  await call(srv, 'no_such_tool', { msg: 'hi' })
+  await call(srv, 'chat', ['msg'])
+  assert.deepStrictEqual(seen, [['chat', ['msg']], ['goto', ['range', 'x', 'z']], ['scene', []], [null, []], ['chat', []]])
+})
+
+test('the wake log names each called tool and its passed params and holds no argument text', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golem-wake-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const log = path.join(dir, 'mcp-wakes.log')
+  const e = runEntry(t, [String(PORT), log], { ...baseEnv(), GOLEM_TOKEN: MCP_TOKEN })
+  const calls = [callReq('papercut', { text: 'secret papercut words' }), callReq('manual', { topic: 'chat', extra: 'hidden chat words' }), callReq('nope', {})]
+  for (const req of calls) e.child.stdin.write(JSON.stringify(req) + '\n')
+  for (const req of calls) assert.ok(await e.response(req.id, 8000), `no reply to ${req.params.name}`)
+  e.child.kill()
+  await e.exited
+  assert.strictEqual(fs.readFileSync(log, 'utf8'), 'tool call papercut text\ntool call manual topic\ntool call (unknown)\n')
 })

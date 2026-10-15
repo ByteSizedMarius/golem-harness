@@ -7,7 +7,7 @@ const armorManager = require('mineflayer-armor-manager')
 const express = require('express')
 const fs = require('fs')
 const { Vec3 } = require('vec3')
-const { installSecurity, BUNKER_MODES } = require('./lib/install')
+const { installSecurity, chatMaxLen, BUNKER_MODES } = require('./lib/install')
 const { classifySound } = require('./lib/sounds')
 const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
 const { UNLOADED, standCell, resolveTarget, crumbCentre, nametagGoal, arrivedAt, walkAttempt, routeDeadline } = require('./lib/walk')
@@ -2420,7 +2420,7 @@ function hasLegalMove() {
 
 // ---- HTTP control layer ----
 const app = express()
-installSecurity(app, { token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text) } })
+installSecurity(app, { token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text), maxLen: chatMaxLen(process.env.GOLEM_CHAT_MAX) } })
 // The pilot routes in flight, which follow waits out.
 const verbs = countVerbs(app)
 // ?brief=1 on ANY endpoint strips null/undefined fields from the reply — LLM pilots pay
