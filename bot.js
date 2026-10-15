@@ -2257,16 +2257,29 @@ function bunkerHolds () {
   bunker.cell = null
   return false
 }
+// The cell on top of the last pillar the pilot built.
+const perch = { cell: null }
+function perchHolds () {
+  if (!perch.cell) return false
+  if (bot.entity && bot.entity.position.floored().equals(perch.cell)) return true
+  perch.cell = null
+  return false
+}
+function hpMelee () {
+  return meleeThreat() && bot.health < disengageHp(reflexes.find(r => r.name === 'combat')._threat.cls)
+}
 const laneBlocks = (klass) => legsLaneBlocks({
   klass,
   bunker: bunkerHolds(),
+  perch: perchHolds(),
+  hpMelee: hpMelee(),
   laneHeld: Date.now() < pilotLane.until,
   hard: pilotLane.hard,
   jobRunning: jobs.running(),
   meleeThreat: meleeThreat()
 })
 const laneNarrate = (what) => {
-  if (bunkerHolds()) return
+  if (bunkerHolds() || perchHolds()) return
   if (Date.now() - pilotLane.narrated < 6000) return
   pilotLane.narrated = Date.now()
   if (Date.now() >= pilotLane.until && jobs.running()) emitEvent('combat', `${what} deferred, the running job keeps the legs`)
@@ -2283,6 +2296,17 @@ function meleeThreat () {
   if (!t || !t.e || !bot.entities[t.e.id] || !bot.entity) return false
   return t.e.position.distanceTo(bot.entity.position) <= meleeReach(t.e)
 }
+// ADAPTIVE disengage (death #2 lesson): the tripwire scales to the last hit taken while
+// it's FRESH (20s) — after a 1.4 drowned it sits at the old 8; after an 8.6 vindicator it
+// becomes "any hit landed = disengage NOW", because two more of those is a corpse. Stale
+// hits stop counting so one bad fight doesn't leave the spine cowardly for the whole day.
+// Vanguard trusts the blade against light mobs (07-21, death #8: disengage-at-8 vs
+// zombies meant sprint-thrash inside a ring instead of the two sword hits that kill
+// one). Floor drops to 5 there; every other stance and class keeps the old 8.
+function disengageHp (cls) {
+  const hitRef = Date.now() - lastHit.t < 20000 ? lastHit.dmg : 0
+  return Math.max(stance === 'vanguard' && cls === 'hostile' ? 5 : 8, hitRef * 2.5)
+}
 // ---- ENGAGEABLE vs WATCHED (07-21, the mansion debrief, the helmsman's diagnosis: creepers pacing
 // dark rooms OVERHEAD were air-connected and honestly perceptible, so the pack counter armed
 // withdrawals against enemies the fight didn't contain — "legs fleeing the ceiling while the
@@ -2297,7 +2321,46 @@ function entityEngageable (en) {
     return losClear(bot.entity.position.offset(0, 1.62, 0), en.position.offset(0, 1.0, 0))
   } catch (e) { return true }
 }
-const { fleeHeading } = require('./lib/flee')
+const { planFlee, routeWithin } = require('./lib/flee')
+// The cells as the body knows them, in the shape planFlee and routeWithin read.
+function fleeWorld () {
+  const kinds = new Map()
+  const hazards = new Map()
+  const memo = (map, x, y, z, read) => {
+    const k = ck(x, y, z)
+    if (!map.has(k)) map.set(k, read(new Vec3(x, y, z)))
+    return map.get(k)
+  }
+  return {
+    kind: (x, y, z) => memo(kinds, x, y, z, (p) => {
+      const b = bot.blockAt(p)
+      if (!b || !cellKnown(p)) return 'unknown'
+      if (/lava|fire/.test(b.name)) return 'hazard'
+      return b.boundingBox === 'block' ? 'solid' : 'open'
+    }),
+    hazard: (x, y, z) => memo(hazards, x, y, z, (p) => {
+      const b = bot.blockAt(p)
+      return !!b && /lava|fire/.test(b.name) && cellKnown(p)
+    })
+  }
+}
+// The deepest drop a creeper route takes.
+const CREEPER_DROP = 22
+// True when creeper e walks to within 2 of the body in maxSteps steps or fewer over known cells.
+function creeperRoute (e, maxSteps) {
+  return routeWithin(fleeWorld(), e.position.floored(), bot.entity.position.floored(), maxSteps, CREEPER_DROP)
+}
+function fleeLog (threat, ally, plan) {
+  const at = (c) => `(${c.x},${c.y},${c.z})`
+  const r = plan.rejected
+  const rejected = `rejected ${r.edge} beside a drop or an unknown cell, ${r.lava} within 2 of lava or fire, ${r.mob} too near a mob`
+  const from = `[flee] from ${threat.name || '?'} at ${at(threat.position.floored())}`
+  const refused = plan.allyRefused ? `, no safe route to ${ally.username}` : ''
+  if (!plan.goal) return `${from}: no safe cell${refused}, holding, ${rejected}`
+  const to = plan.ally ? ` to ${ally.username}` : ''
+  const score = plan.ally ? '' : ` score ${plan.score.toFixed(1)},`
+  return `${from}:${to} goal ${at(plan.goal)},${score} ${plan.steps} steps, ${plan.mobDist.toFixed(1)} from the nearest mob, solid floor, no drop over 3 on the way or beside it, no lava or fire within 2, ${plan.candidates} candidates${refused}, ${rejected}`
+}
 // Hostiles within radius that the body perceives or that hit it, and that can reach it.
 function nearHostiles (fill, radius) {
   return liveEntities().filter(e => {
@@ -2315,38 +2378,43 @@ reflexes.unshift({
   name: 'combat', on: true, active: false,
   _hist: new Map(), _lastNarrate: new Map(), _threat: null,
   // _fleeCls is the mobClass of the threat the last flee ran from.
-  _fill: null, _fillT: 0, _fillSeed: null, _fleeUntil: 0, _fleeT: 0, _fleeCls: null, _coverUntil: 0,
+  _fill: null, _fillT: 0, _fillSeed: null, _fleeUntil: 0, _fleeT: 0, _fleeCls: null, _coverUntil: 0, _holdUntil: 0,
   // FLEE LATCH (07-16, the first-death autopsy: twelve 'disengaging' events, zero escape — every
   // 300ms re-entry safeStop'd the previous flee goal and re-planned from scratch, so the body
   // SHUFFLED IN PLACE while a same-speed drowned ate it 1.4 at a time. A flee is set ONCE, held
   // 6s, and RUN at a sprint; re-entries bounce off the latch instead of resetting the goal.)
+  // Returns 'held' when no safe cell exists and the body holds its ground instead.
   fleeFrom (bot, threat, why, klass = 'discretionary') {
     const now = Date.now()
     // PILOT LANE (07-21): discretionary flees defer to a held lane; interrupts pass the
-    // soft lane only; emergencies (creeper fuse, HP-critical) always own the legs.
+    // soft lane only; emergencies (creeper fuse, HP-critical) pass any pilot lane.
     if (laneBlocks(klass)) { laneNarrate(why || 'flee'); return }
     if (now < this._fleeUntil) return                    // a flee is already running — let it run
+    if (now < this._holdUntil) return 'held'
     this._fleeUntil = now + 6000
-    this._fleeT = now
-    this._fleeCls = mobClass(threat)
     try {
-      const threatPos = threat.position
       const here = bot.entity.position
       const anchor = reflexes.find(r => r.name === 'flee_to_player')
-      const ally = anchor && anchor.on ? anchor.ally(bot, here, threatPos) : undefined
+      const ally = anchor && anchor.on ? anchor.ally(bot, here, threat.position) : undefined
+      const mobs = nearHostiles(this.fairFill(bot), 16).filter(e => e.id !== threat.id).map(e => e.position)
+      const plan = planFlee({ world: fleeWorld(), here, threat: threat.position, mobs, ally: ally ? ally.position : null })
+      console.log(fleeLog(threat, ally, plan))
+      if (!plan.goal) {
+        this._fleeUntil = 0
+        this._holdUntil = now + 1500
+        takeLegs('combat', 'hold position')
+        stopPath()
+        return 'held'
+      }
+      this._fleeT = now
+      this._fleeCls = mobClass(threat)
       takeLegs('combat', 'flee')
       stopPath()
-      if (ally) {
-        bot.pathfinder.setGoal(new goals.GoalNear(ally.position.x, ally.position.y, ally.position.z, 2))
-        emitEvent('flee_to_player', `fleeing to ${ally.username} ${compass(ally.position.x - here.x, ally.position.z - here.z)} ~${Math.round(ally.position.distanceTo(here))}`)
-      } else {
-        const others = nearHostiles(this.fairFill(bot), 16).filter(e => e.id !== threat.id).map(e => e.position)
-        const away = fleeHeading(here, threatPos, others)
-        bot.pathfinder.setGoal(new goals.GoalNear(here.x + away.x * 20, here.y, here.z + away.z * 20, 2))
-      }
+      bot.pathfinder.setGoal(new goals.GoalBlock(plan.goal.x, plan.goal.y, plan.goal.z))
+      if (plan.ally) emitEvent('flee_to_player', `fleeing to ${ally.username} ${compass(ally.position.x - here.x, ally.position.z - here.z)} ~${Math.round(ally.position.distanceTo(here))}`)
       bot.setControlState('sprint', true)
       setTimeout(() => { try { bot.setControlState('sprint', false) } catch (e) {} }, 6000)
-    } catch (e) {}
+    } catch (e) { console.log('[flee] failed: ' + e.message) }
     if (why) emitEvent('combat', why)                    // ONE event per flee episode, not twelve
   },
   // RANGED-CHIP RESPONSE (07-23, death #9's patch: a skeleton plinked me dead up my own stair
@@ -2410,6 +2478,14 @@ reflexes.unshift({
       const now = Date.now()
       const here = bot.entity.position
       let best = null
+      const watch = (e, cls, dist) => {
+        const wk = 'w' + e.id
+        if (cls !== 'player' && now - (this._lastNarrate.get(wk) || 0) > 20000) {
+          this._lastNarrate.set(wk, now)
+          const rel = e.position.y > here.y + 1 ? 'above' : (e.position.y < here.y - 1 ? 'below' : 'beyond')
+          emitEvent('threat', `watched: ${e.name || '?'} ${rel} ~${Math.round(dist)} — separated, not driving`, null, { quiet: true })
+        }
+      }
       expireConfirmed(AGGRO_CONFIRMED, now, CONFIRMED_MS)
       for (const e of liveEntities()) {
         if (!e.position) continue
@@ -2429,15 +2505,7 @@ reflexes.unshift({
         // shouldn't amnesia the pursuit evidence, the sample just doesn't accrue while unseen.
         if (!confirmed && !entityPerceptible(e, this.fairFill(bot))) continue
         // WATCHED tier (the mansion lesson): perceptible but a floor away — narrate rarely, never score
-        if (!entityEngageable(e)) {
-          const wk = 'w' + e.id
-          if (cls !== 'player' && now - (this._lastNarrate.get(wk) || 0) > 20000) {
-            this._lastNarrate.set(wk, now)
-            const rel = e.position.y > here.y + 1 ? 'above' : (e.position.y < here.y - 1 ? 'below' : 'beyond')
-            emitEvent('threat', `watched: ${e.name || '?'} ${rel} ~${Math.round(dist)} — separated, not driving`, null, { quiet: true })
-          }
-          continue
-        }
+        if (!entityEngageable(e)) { watch(e, cls, dist); continue }
         const h = this._hist.get(e.id) || { d: dist, t: now, closes: 0, logT: 0 }
         const dt = (now - h.t) / 1000
         if (dt >= 0.25) {
@@ -2457,6 +2525,15 @@ reflexes.unshift({
         // proximity still does: fleeing a lit fuse is survival, not engagement)
         const closerAggro = STANCES[stance].engage === 'confirmed' ? false : h.closes >= 3
         const aggro = !!confirmed || closerAggro || (cls === 'creeper' && dist < 8)
+        // A creeper from 8 out drives the legs only along a walk of at most the stance's fleeDist.
+        if (aggro && cls === 'creeper' && dist >= 8) {
+          const routeKey = `${stance} ${e.position.floored()} ${here.floored()}`
+          if (h.routeKey !== routeKey) {
+            h.routeKey = routeKey
+            h.route = creeperRoute(e, STANCES[stance].fleeDist)
+          }
+          if (!h.route) { watch(e, cls, dist); continue }
+        }
         if (aggro && (!best || dist < best.dist)) best = { e, cls, dist, confirmed: !!confirmed }
       }
       this._threat = best
@@ -2478,21 +2555,6 @@ reflexes.unshift({
     }
     if (t.cls === 'player') return                          // NEVER weapons on players — narrate only
     const s = STANCES[stance]
-    if (t.cls === 'creeper' || t.cls === 'heavy') {
-      // Never trade with these — but "never melee" stopped meaning "only run" when stances landed:
-      // beyond the stance's berth and inside the bow band, the answer is an arrow, not distance.
-      // Lane classes: a creeper in berth is an EMERGENCY (fuses don't negotiate); a heavy's kite
-      // is an INTERRUPT (passes the soft lane, defers to /brace's hard one).
-      const fk = t.cls === 'creeper' ? 'emergency' : 'interrupt'
-      if (t.dist <= s.fleeDist) { this.fleeFrom(bot, t.e, null, fk); return }
-      const [lo, hi] = s.bowBand
-      const bandLo = t.cls === 'heavy' ? Math.max(lo, 10) : lo   // heavies close FAST — bigger floor
-      if (t.dist >= bandLo && t.dist <= hi) {
-        try { if (await drawAndLoose(t.e)) return } catch (e) {}
-      }
-      this.fleeFrom(bot, t.e, null, fk)
-      return
-    }
     // melee hostile: SHIELD POSTURE while it closes (the shield is a posture, not a parry —
     // settled with the helmsman 07-15: nobody blocks the arrow, you walk shield-up while threatened;
     // posture decisions are slow decisions, so the 300ms reflex holds it, not the pilot),
@@ -2519,21 +2581,31 @@ reflexes.unshift({
       guardUp()
       return true
     }
+    if (t.cls === 'creeper' || t.cls === 'heavy') {
+      // Never trade with these — but "never melee" stopped meaning "only run" when stances landed:
+      // beyond the stance's berth and inside the bow band, the answer is an arrow, not distance.
+      // Lane classes: a creeper in berth is an EMERGENCY (fuses don't negotiate); a heavy's kite
+      // is an INTERRUPT (passes the soft lane, defers to /brace's hard one).
+      const fk = t.cls === 'creeper' ? 'emergency' : 'interrupt'
+      const flee = () => {
+        if (this.fleeFrom(bot, t.e, null, fk) === 'held') guardUp()
+        else if (!guardState.pilot) guardDown()
+      }
+      if (t.dist <= s.fleeDist) { flee(); return }
+      const [lo, hi] = s.bowBand
+      const bandLo = t.cls === 'heavy' ? Math.max(lo, 10) : lo   // heavies close FAST — bigger floor
+      if (t.dist >= bandLo && t.dist <= hi) {
+        try { if (await drawAndLoose(t.e)) return } catch (e) {}
+      }
+      flee()
+      return
+    }
     const t0 = Date.now()
     try {
       while (this.on && !bunker.building && bot.entities[t.e.id] && Date.now() - t0 < 10000) {
-        // ADAPTIVE disengage (death #2 lesson): the tripwire scales to the last hit taken while
-        // it's FRESH (20s) — after a 1.4 drowned it sits at the old 8; after an 8.6 vindicator it
-        // becomes "any hit landed = disengage NOW", because two more of those is a corpse. Stale
-        // hits stop counting so one bad fight doesn't leave the spine cowardly for the whole day.
-        const hitRef = Date.now() - lastHit.t < 20000 ? lastHit.dmg : 0
-        // Vanguard trusts the blade against light mobs (07-21, death #8: disengage-at-8 vs
-        // zombies meant sprint-thrash inside a ring instead of the two sword hits that kill
-        // one). Floor drops to 5 there; every other stance and class keeps the old 8.
-        const disengageFloor = (stance === 'vanguard' && t.cls === 'hostile') ? 5 : 8
-        if (bot.health < Math.max(disengageFloor, hitRef * 2.5)) {
-          this.fleeFrom(bot, t.e, `HP ${Math.round(bot.health * 10) / 10} — disengaging from ${label}, sprinting`, 'emergency')
-          return
+        // A flee with no safe cell holds the ground and fights on.
+        if (bot.health < disengageHp(t.cls)) {
+          if (this.fleeFrom(bot, t.e, `HP ${Math.round(bot.health * 10) / 10} — disengaging from ${label}, sprinting`, 'emergency') !== 'held') return
         }
         // OUTNUMBERED (07-18, death #4 autopsy + the helmsman's diagnosis: the close-in never
         // counted the room). 3+ perceptible hostiles inside 16 is not a duel — withdraw, don't
@@ -2557,10 +2629,10 @@ reflexes.unshift({
             // HP FLOOR (07-21, the mill's lesson: the hold rule pinned me at 9 hearts twice on
             // 07-20 — an ally makes a pack survivable, not a wound. Below 12 the hold yields.)
             if (!allyNear || bot.health < 12) {
-              this.fleeFrom(bot, t.e, allyNear
+              const held = this.fleeFrom(bot, t.e, allyNear
                 ? `OUTNUMBERED ${pack} at ${Math.round(bot.health)} HP — below the hold floor, withdrawing`
-                : `OUTNUMBERED ${pack} — fighting withdrawal, not a duel`)
-              return
+                : `OUTNUMBERED ${pack} — fighting withdrawal, not a duel`) === 'held'
+              if (!held) return
             }
             if (!this._lastHoldEmit || Date.now() - this._lastHoldEmit > 10000) {
               this._lastHoldEmit = Date.now()
@@ -5641,17 +5713,21 @@ app.get('/pillar', async (req, res) => {
     const height = Math.min(16, Math.max(1, parseInt(req.query.height || '3')))
     let placed = 0
     const y0 = Math.floor(bot.entity.position.y)
+    const done = (body) => {
+      if (placed) perch.cell = bot.entity.position.floored()
+      ok(res, body)
+    }
     for (let i = 0; i < height; i++) {
       if (bunker.building) return err(res, new Error(BUNKER_WALK))
       const yBefore = Math.floor(bot.entity.position.y)
       const below = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))
-      if (!below || below.boundingBox !== 'block') return ok(res, { placed, rose: yBefore - y0, stopped: 'no solid footing to build on' })
+      if (!below || below.boundingBox !== 'block') return done({ placed, rose: yBefore - y0, stopped: 'no solid footing to build on' })
       const it = fillers()[0]
-      if (!it) return ok(res, { placed, rose: yBefore - y0, stopped: 'out of filler blocks (dirt, stone kinds, sandstone, bricks or planks)' })
-      if (!(await jumpPlace(below, it))) return ok(res, { placed, rose: Math.floor(bot.entity.position.y) - y0, stopped: 'placement would not take (ceiling? cell blocked?)' })
+      if (!it) return done({ placed, rose: yBefore - y0, stopped: 'out of filler blocks (dirt, stone kinds, sandstone, bricks or planks)' })
+      if (!(await jumpPlace(below, it))) return done({ placed, rose: Math.floor(bot.entity.position.y) - y0, stopped: 'placement would not take (ceiling? cell blocked?)' })
       placed++
     }
-    ok(res, { placed, rose: Math.floor(bot.entity.position.y) - y0, y: Math.floor(bot.entity.position.y) })
+    done({ placed, rose: Math.floor(bot.entity.position.y) - y0, y: Math.floor(bot.entity.position.y) })
   } catch (e) { try { if (!bunker.building) bot.setControlState('jump', false) } catch (_) {} ; err(res, e) }
 })
 
@@ -5912,6 +5988,7 @@ function resetThreatState () {
   combat._fleeCls = null
   combat._fleeUntil = 0
   combat._coverUntil = 0
+  combat._holdUntil = 0
   lastHit = { dmg: 0, t: 0 }
   reflexes.find(r => r.name === 'bunker')._spent = false
   bunker.cell = null

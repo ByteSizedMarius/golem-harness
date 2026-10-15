@@ -6,7 +6,7 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const { QUIET_MS, LONG_QUIET_MS, legLedger, takenText, laneBlocks } = require('../lib/legs')
 const { routeDeadline } = require('../lib/walk')
-const { loadBotFunctions, combatReflexIn } = require('./helpers')
+const { loadBotFunctions, combatReflexIn, awaitRoute } = require('./helpers')
 
 const KLASSES = ['discretionary', 'interrupt', 'emergency']
 const lane = (over) => laneBlocks({ klass: 'discretionary', bunker: false, laneHeld: false, hard: false, jobRunning: false, meleeThreat: false, ...over })
@@ -58,6 +58,29 @@ test('a running job keeps the legs from all but emergencies until a threat is in
   assert.strictEqual(lane({ klass: 'emergency', jobRunning: true }), false, 'emergency during a job')
   assert.strictEqual(lane({ klass: 'discretionary', jobRunning: true, meleeThreat: true }), false, 'discretionary with a threat in melee range')
   assert.strictEqual(lane({ klass: 'interrupt', jobRunning: true, meleeThreat: true }), false, 'interrupt with a threat in melee range')
+})
+
+test('a pillar top holds the legs from every flee but an emergency at disengage health with a mob in melee reach', async () => {
+  const entity = { position: new Vec3(0.5, 64, 0.5) }
+  const env = {
+    bot: { entity, blockAt: (p) => ({ name: 'stone', boundingBox: 'block', position: p }) },
+    bunker: { building: false },
+    BUNKER_WALK: 'refused while a bunker is being built',
+    perch: { cell: null },
+    fillers: () => [{ name: 'dirt', count: 64 }],
+    jumpPlace: async () => {
+      entity.position = entity.position.offset(0, 1, 0)
+      return true
+    }
+  }
+  await awaitRoute('/pillar', { height: '3' }, env)
+  const { perchHolds } = loadBotFunctions(['perchHolds'], env)
+  const onTop = (over) => lane({ perch: perchHolds(), ...over })
+  for (const klass of KLASSES) assert.strictEqual(onTop({ klass }), true, `${klass} on the pillar top`)
+  assert.strictEqual(onTop({ klass: 'interrupt', hpMelee: true }), true, 'an interrupt at disengage health')
+  assert.strictEqual(onTop({ klass: 'emergency', hpMelee: true }), false, 'an emergency at disengage health')
+  entity.position = new Vec3(1.5, 67, 0.5)
+  assert.strictEqual(onTop({ klass: 'discretionary' }), false, 'once the body stepped off')
 })
 
 test('a stopped walk names the reflex that took the legs during it, nothing else does', () => {
@@ -132,6 +155,7 @@ async function meleeSwing ({ chase, goal }) {
     airFlood: () => ({}),
     nearHostiles: () => [],
     meleeReach: () => 3.2,
+    disengageHp: () => 8,
     yieldJob: (reflex, why) => takes.push(['job', reflex, why]),
     takeLegs: (reflex, why) => takes.push(['legs', reflex, why]),
     laneBlocks: () => false,

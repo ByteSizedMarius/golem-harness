@@ -82,6 +82,7 @@ async function stareCycles (moving) {
     losClear: () => true,
     nearHostiles: () => [],
     meleeReach: () => 3.2,
+    disengageHp: () => 8,
     yieldJob () {},
     drawAndLoose: async () => false,
     laneBlocks: () => false,

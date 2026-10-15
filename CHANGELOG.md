@@ -384,6 +384,22 @@ those are `oak_fence` and `oak_fence_gate`. The server overrides file takes an o
 object of server item names to 1.21 ones, and `craft` looks a name up there before the registry. A
 file whose `items` is not an object of non-empty names is refused at start.
 
+**Creeper flees that end on safe ground.** In one live session the combat reflex took the legs to
+flee a creeper about 19 of 21 times, and only one creeper ever blew. Any creeper closing within 24
+counted, one 8 blocks down in a ravine with no way up included, and without a bow it was fled even
+beyond the stance's flee distance. Each flee ran a straight 20 blocks away and ignored edges. Flees
+walked up to 46 blocks and ended 4 blocks from lava, on a pinnacle above 17 to 28 block drops, on
+ravine lips and over open air. One walked the bot off its own pillar at 3 HP, and a death that
+session was likely a flee over a ravine lip. A creeper 8 or more blocks off now counts only when it
+can walk to the bot within the stance's flee distance over cells the bot knows, and is `watched:`
+otherwise. A flee walks only seen cells with no step down over 3 and nothing within 2 of lava or
+fire, and picks the cell 8 to 16 blocks away that stands farthest from the mobs for the fewest steps,
+on solid floor with no drop over 3 or unknown cell beside it. flee_to_player runs to a player only
+when such a walk reaches a safe cell beside them. With no safe cell the bot stays put and raises its
+guard. The top of a `pillar` holds the legs like a bunker, unless a mob in melee reach has the bot
+under its disengage tripwire. Each flee logs one `[flee]` line to `bot.log` with the goal and the
+counts of rejected cells.
+
 ## 2026-10-15: one goto, and arrival means standing there
 
 A scenario suite that walks onto exact cells could not pass: `range=0` at a drop's own y
