@@ -16,7 +16,7 @@ Speak the tiers back. Navigate by structure and mine what is seen: a sensed hint
 
 ## Which sense
 
-- `scene` is the default glance. Call it constantly.
+- `scene` is the default glance. Call it constantly. Its `steps` grid shows how far each cell around you lies up or down, the check before a jump or a climb.
 - `gaze` is the deliberate look, where a person would turn their head. It feeds the seen set and draws `map`. When a far reading surprises you, check it with `find` before building a theory on it.
 - `section` is the cave tool. It shows the vertical structure `map` cannot.
 - `passages` answers which ways this space goes.

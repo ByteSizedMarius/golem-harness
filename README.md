@@ -88,8 +88,10 @@ probe, and then `spatial3D()`: eight compass directions scanned for walls and fl
 grammar that distinguishes a *step* ("floor ~3 down") from *the mouth of a chamber* ("ledge ~3 down then
 OPENS — floor ~18 down (water below)") — and honestly reports "floor out of sight" past its measuring
 range rather than guessing. Ore appears as located landmarks, entities grouped and counted (never
-streamed), hostiles called out, sky/canopy/underground sensed from a column scan. Lines appear only
-when non-empty: a calm meadow is two lines, a cave mouth over lava is eight.
+streamed), hostiles called out, sky/canopy/underground sensed from a column scan, doors and gates in
+sight listed open or closed. Lines appear only when non-empty: a calm meadow is two lines, a cave mouth
+over lava is eight. Beside the summary, `steps` is a 5×5 north-up grid of the step from the feet to each
+neighbouring cell (`+1`, `-2`, `#` wall, `v` drop, `~` liquid, `?` unseen).
 
 **`/gaze` — the ray-sweep retina.** The bot's head physically turns, then a 15×7 fan of rays (~100°×60°,
 a human-ish field of view) marches out from the eye, sampling every quarter-block until something opaque

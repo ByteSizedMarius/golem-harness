@@ -14,6 +14,8 @@ const { UNLOADED, standCell, resolveTarget, crumbCentre, arrivedAt, walkAttempt,
 const { headFree } = require('./lib/head')
 const { sprintJump, passedNodes, step: nodeStep } = require('./lib/sprint')
 const { summarizePlan, planRisk } = require('./lib/plan')
+const { isDoor, doorStep } = require('./lib/doors')
+const { stepView } = require('./lib/steps')
 
 const HOST = process.env.MC_HOST || 'localhost'
 const PORT = parseInt(process.env.MC_PORT || '25565')
@@ -145,6 +147,7 @@ bot.once('spawn', () => {
   // Iron doors stay walls — they want redstone, that's the game's rule, keep it.
   const addDoors = (m) => { mcData.blocksArray.forEach(b => { if (b.name.endsWith('_door') && !b.name.includes('iron')) m.openable.add(b.id) }); m.canOpenDoors = true }
   addDoors(moves)
+  moves.infiniteLiquidDropdownDistance = false   // a drop into water is held to maxDropDown too
   bot.pathfinder.setMovements(moves)
   bot.pathfinder.thinkTimeout = 10000
   considerateMoves = moves       // remember the default so /gather can restore it after forestry
@@ -157,6 +160,7 @@ bot.once('spawn', () => {
   forestryMoves = new Movements(bot)
   forestryMoves.canDig = true
   forestryMoves.maxDropDown = 2          // gentler drops off trunk tops → avoid fall damage
+  forestryMoves.infiniteLiquidDropdownDistance = false
   forestryMoves.allow1by1towers = false
   forestryMoves.allowParkour = true
   forestryMoves.scafoldingBlocks = []          // still zero litter — never places blocks to travel
@@ -1328,8 +1332,8 @@ bot.once('spawn', () => {
 // open doors/gates and never close them — pen integrity and safe retreat both die on that habit.
 // Every opener routes through bot.activateBlock (pathfinder index.js useOne + reflex + verbs), so ONE
 // wrap sees every door I open. Post-toggle it reads the real state (/blockat ethic: verify, don't
-// assume): opened → remembered in PENDING_DOORS; closed → forgotten. A 400ms loop closes each
-// remembered door once I'm clear of the doorway (>2.5) but still in reach (<4.5); the wrap's own
+// assume): opened → remembered in PENDING_DOORS; closed → forgotten. closeDoorsBehind shuts each
+// remembered door once I went through it and stand clear, per doorStep, and the wrap's own
 // post-read then self-cleans the list. The helmsman's doors are untouched — only MY opens are remembered.
 // If I overshoot reach before it shuts (sprint/fall), it says so ONCE — an honest handoff, no lie.
 const PENDING_DOORS = []
@@ -1355,26 +1359,25 @@ bot.once('spawn', () => {
     }
   } catch (e) { console.log('[bot] gate-manners wrap skipped: ' + e.message) }
 })
-setInterval(() => {
-  try {
-    if (!ready || !PENDING_DOORS.length) return
-    const me = bot.entity.position
-    for (let i = PENDING_DOORS.length - 1; i >= 0; i--) {
-      const d = PENDING_DOORS[i]
-      if (Date.now() - d.t < 1500) continue                       // let me actually walk through first
-      const dist = me.distanceTo(d.pos.offset(0.5, 0.5, 0.5))
-      const approaching = d.lastDist !== undefined && dist < d.lastDist - 0.05
-      d.lastDist = dist
-      if (dist <= 2.5 || approaching) continue                    // in the doorway OR walking toward it —
-                                                                  // never slam a door in my own face
-      const b = bot.blockAt(d.pos)
-      if (!isManneredDoor(b) || !(b.getProperties() || {}).open) { PENDING_DOORS.splice(i, 1); continue }
-      if (dist < 4.5) { bot.activateBlock(b).catch(() => {}) }    // wrapped call — its post-read cleans the list
-      else if (!d.warned) { d.warned = true; emitEvent('manners', 'door left OPEN at ' + d.key + ' — out of reach, pilot decide') }
-      else if (Date.now() - d.t > 60000) PENDING_DOORS.splice(i, 1)
-    }
-  } catch (e) {}
-}, 400)
+// Runs every physics tick, as a sprint crosses the reach band in about 0.3 s.
+function closeDoorsBehind () {
+  if (!PENDING_DOORS.length) return
+  const now = Date.now()
+  for (let i = PENDING_DOORS.length - 1; i >= 0; i--) {
+    const d = PENDING_DOORS[i]
+    const act = doorStep(d, bot.entity.position, now)
+    if (act === 'wait') continue
+    const b = bot.blockAt(d.pos)
+    if (!isManneredDoor(b) || !(b.getProperties() || {}).open) { PENDING_DOORS.splice(i, 1); continue }
+    if (act === 'close') {
+      // The server's block update outlasts the wrap's post-read.
+      if (now < (d.retryAt || 0)) continue
+      d.retryAt = now + 1000
+      bot.activateBlock(b).catch(() => {})                       // wrapped call — its post-read cleans the list
+    } else if (!d.warned) { d.warned = true; emitEvent('manners', 'door left OPEN at ' + d.key + ' — out of reach, pilot decide') }
+    else if (now - d.t > 60000) PENDING_DOORS.splice(i, 1)
+  }
+}
 let changeBuf = []
 let lastChangeEmit = 0
 bot.on('blockUpdate', (oldB, newB) => {
@@ -2896,10 +2899,11 @@ function beforePathfinder () {
   if (!ready || !bot.entity) return
   try { skipPassedNodes() } catch (e) { console.log('[sprint] ' + e.message) }
 }
-// After the pathfinder's listener, so it acts on the control states it just set.
+// After the pathfinder's listener, so these act on the control states it just set.
 function afterPathfinder () {
   if (!ready || !bot.entity) return
   try { sprintTick() } catch (e) { console.log('[sprint] ' + e.message) }
+  try { closeDoorsBehind() } catch (e) { console.log('[doors] ' + e.message) }
 }
 // The plugin loader adds the pathfinder's listener on inject_allowed, after bot.js has run.
 function hookTicks () {
@@ -2966,13 +2970,26 @@ function walkRoute () {
   const route = { goal: null, taken: false, mark }
   const onGoal = (g) => { if (g && g !== route.goal) route.taken = true }
   const deadline = routeDeadline({ onExpire: () => releaseGoal(route) })
+  let last = bot.entity.position.clone()
+  let walked = 0
+  const onMove = () => {
+    const p = bot.entity.position
+    const stride = Math.hypot(p.x - last.x, p.z - last.z)
+    // A server teleport is no walk.
+    if (stride < 4) walked += stride
+    last = p.clone()
+  }
   bot.on('goal_updated', onGoal)
+  bot.on('move', onMove)
   route.expired = deadline.expired
   route.left = deadline.left
   route.stopped = () => route.taken || legs.mark() !== mark
+  // The horizontal distance the body moved during the route.
+  route.walked = () => Math.round(walked * 10) / 10
   route.end = () => {
     deadline.cancel()
     bot.removeListener('goal_updated', onGoal)
+    bot.removeListener('move', onMove)
     releaseGoal(route)
   }
   return route
@@ -3118,6 +3135,25 @@ function gotoQuery (query) {
   return q
 }
 
+// The nearest door or gate the bot knows within 2 of its feet, or null.
+function doorBeside () {
+  const feet = bot.entity.position.floored()
+  let best = null
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (const dy of [0, 1]) {
+    const p = feet.offset(dx, dy, dz)
+    const b = bot.blockAt(p)
+    if (!b || !isDoor(b.name) || !cellKnown(p)) continue
+    const d = Math.hypot(dx, dz)
+    if (best && best.d <= d) continue
+    const props = b.getProperties() || {}
+    // A door is named by its lower half.
+    best = { d, name: b.name, x: p.x, y: props.half === 'upper' ? p.y - 1 : p.y, z: p.z, open: !!props.open }
+  }
+  if (!best) return null
+  const { d, ...door } = best
+  return door
+}
+
 app.get('/goto', async (req, res) => {
   let lane = null
   try {
@@ -3131,6 +3167,11 @@ app.get('/goto', async (req, res) => {
     let r
     try { r = await stagedGoto(q, route, { preview, accept: req.query.accept === '1' }) } finally { route.end() }
     if (preview) r.preview = true
+    else if (r.reason) {
+      r.walked = route.walked()
+      const door = doorBeside()
+      if (door) r.door = door
+    }
     if (r.arrived && q.waypoint !== undefined) {
       if (lastWaypoint && lastWaypoint !== q.waypoint) waypoints.link(lastWaypoint, q.waypoint)
       lastWaypoint = q.waypoint
@@ -4201,6 +4242,23 @@ app.get('/map', (req, res) => {
   } catch (e) { err(res, e) }
 })
 
+// The doors and gates in sight within 16, nearest first, each named once by its lower half.
+function doorsInSight () {
+  const here = bot.entity.position
+  const ids = Object.values(mcData.blocksByName).filter(b => isDoor(b.name)).map(b => b.id)
+  const seen = new Set()
+  const out = []
+  for (const { pos } of findVisible(ids, 16, 12)) {
+    const b = bot.blockAt(pos)
+    const props = b.getProperties() || {}
+    const y = props.half === 'upper' ? pos.y - 1 : pos.y
+    if (seen.has(ck(pos.x, y, pos.z))) continue
+    seen.add(ck(pos.x, y, pos.z))
+    out.push({ name: b.name, dir: compass(pos.x + 0.5 - here.x, pos.z + 0.5 - here.z), dist: Math.round(here.distanceTo(pos.offset(0.5, 0, 0.5))), open: !!props.open })
+  }
+  return out.slice(0, 6)
+}
+
 // GET /scene — compact situational summary for the driver.
 app.get('/scene', (req, res) => {
   try {
@@ -4296,6 +4354,8 @@ app.get('/scene', (req, res) => {
     const oh = overheadCover()                                // the vertical fix: sky / canopy / UNDERGROUND
     const ws = waterState(bot)                                // proprioception: in water / submerged / current
     const heard = hearSummary(45000)                          // ears: only shown when something was heard
+    const doors = doorsInSight()
+    const steps = stepView((p) => bot.blockAt(p), cellKnown, pos)
     let dim = ''                                              // light sense: only shown when it matters
     try {
       const bl = bot.world.getBlockLight ? bot.world.getBlockLight(pos.floored()) : null
@@ -4319,11 +4379,12 @@ app.get('/scene', (req, res) => {
       (around ? `Around: ${around}. ` : '') +
       (veins ? `Veins: ${veins}. ` : '') +
       (heard ? `Hear: ${heard}. ` : '') +
+      (doors.length ? `Doors: ${doors.map(d => `${d.name} ${d.dir} ${d.dist} ${d.open ? 'open' : 'closed'}`).join(', ')}. ` : '') +
       `Entities: ${entSummary}. ` +
       (threats.length ? `THREATS: ${threats.slice(0, 4).map(t => `${t.name} ${t.dir} ${t.dist}`).join(', ')}. ` : '') +
       (resPhrases.length ? `Resources: ${resPhrases.join(', ')}.` : `No notable resources in ${SCENE_RESOURCE_R}.`)
 
-    const payload = { summary, facing, biome, time, threats, spatial: around, veins, sky: oh, water: ws, hear: heard }
+    const payload = { summary, facing, biome, time, threats, spatial: around, veins, sky: oh, water: ws, hear: heard, doors, steps }
     if (verbose) { payload.entities = groups; payload.ahead = ahead; payload.resources = notable; payload.held = held; payload.spatial_old = spatialSummary(bot) }
     ok(res, payload)
   } catch (e) { err(res, e) }

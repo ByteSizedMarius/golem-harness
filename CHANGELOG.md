@@ -32,6 +32,14 @@ is null, since whether the pathfinder found a way through unseen terrain is itse
 failed search reads null too, as it may have searched unseen terrain, so `reaches` is only ever true
 or null.
 
+Movement papercuts from the 15:03 session: door manners now check every physics tick instead of
+every 400 ms, a beat in which a sprint crossed the whole reach band and left the door open, and shut a
+door once the body went through it and stands clear. Iron doors stay walls, `scene` lists the doors in
+sight, and a failed `goto` names the door beside it and how far it walked. Water drops are held to the 3-block
+limit of dry ones. `scene` carries `steps`, a 5×5 grid of the step heights around the feet, with
+unseen cells as `?` (`lib/steps.js`), also where no standing cell was found and the grid would
+otherwise have called an unseen cell a wall or a drop.
+
 The walking review's deferrals: a lane claim returns a token, and a route's release clears only its
 own claim, so a stale handler can no longer drop the claim a newer route took after `/stop`. The
 hurt freeze clears the goal too, which ends a path still being planned before its first step. A
