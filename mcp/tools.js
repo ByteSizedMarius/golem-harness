@@ -81,8 +81,10 @@ const TOOLS = [
   { name: 'dig_stair', route: '/dig_stair', description: 'Job: carve 24 steps through rock, up 1 ascends (default), 0 or -1 descends; torch is the spacing in steps, default 4, 0 for none. It fills a missing step from your filler blocks.', params: { dir: TUNNEL_DIR, up: { type: 'enum', values: ['1', '0', '-1'] }, torch: { type: 'int', min: 0, max: 96 } } },
   { name: 'digat', route: '/digat', description: 'Dig one block, a no-op on air. It upgrades the pick tier so drops survive, and grabs a pickaxe for planks and sand too. then=blockat reports the cell afterwards.', params: { ...XYZ, then: THEN }, timeoutMs: LONGEST },
   { name: 'craft', route: '/craft', description: 'Craft at a crafting table within 16, else in the 2x2 grid. It never places one: a 3x3 recipe with no table within 16 is refused. Counts are unreliable for some recipes: craft small batches and check inventory between them.', params: { item: required(NAME), count: COUNT }, timeoutMs: LONGEST },
-  // bot.js waits up to 12 s per item, up to 64, plus 15 s.
-  { name: 'smelt', route: '/smelt', description: 'Walk to the nearest placed furnace, load input and fuel from your pockets, wait out the burn, collect the output. Blocking. Reuses fuel already in the slot and clears leftover output into your pockets.', params: { item: required(NAME), fuel: NAME, count: COUNT }, timeoutMs: LONGEST },
+  // The window opens, then the output, input and fuel moves wait for their slot updates.
+  { name: 'smelt', route: '/smelt', description: 'Load input and fuel from your pockets into the nearest furnace and return at once.', params: { item: required(NAME), fuel: NAME, count: COUNT }, timeoutMs: WALK + 4 * EVENT },
+  // The window opens, and the take waits for its slot updates.
+  { name: 'furnace', route: '/furnace', description: 'The slots of the furnace at x,y,z or the nearest. take moves one into your pockets.', params: { at: POINT, take: { type: 'enum', values: ['output', 'input', 'fuel'] }, count: COUNT }, timeoutMs: WALK + 2 * EVENT },
   // The table window opens, the offers get 6 s and a commit 1 s, and the lapis goes back.
   { name: 'enchant', route: '/enchant', description: 'At the nearest enchanting table: without slot, list the 3 offers (levels, lapis, enchantment); slot 0-2 commits one, paying lapis from your pockets and your levels (xpLevel in state).', params: { item: required(NAME), slot: { type: 'int', min: 0, max: 2 } }, timeoutMs: WALK + EVENT + 7000 + EVENT },
   // The anvil window opens, and the rename waits for the experience update.

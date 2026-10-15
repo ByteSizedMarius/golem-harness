@@ -23,6 +23,7 @@ const { stepView } = require('./lib/steps')
 const { countVerbs } = require('./lib/verbs')
 const { createChatLog } = require('./lib/chat-log')
 const { readServerOverrides, renameBlocks, overrideRecipes, craftable } = require('./lib/server-overrides')
+const { smeltYield } = require('./lib/furnace')
 
 const HOST = process.env.MC_HOST || 'localhost'
 const PORT = parseInt(process.env.MC_PORT || '25565')
@@ -6175,8 +6176,31 @@ app.get('/rename', async (req, res) => {
   } catch (e) { err(res, e) }
 })
 
-// GET /smelt?item=&fuel=&count= : walk to the nearest furnace, load fuel + input, wait for
-// the smelt to finish (polls the output slot, bounded), collect the result. 1 coal smelts 8.
+function targetFurnace (q) {
+  if (q.at == null) return bot.findBlock({ matching: resolveBlockIds('furnace'), maxDistance: 8 })
+  const [x, y, z] = String(q.at).split(',').map(Number)
+  if (![x, y, z].every(Number.isFinite)) throw new Error('at takes x,y,z')
+  const b = bot.blockAt(new Vec3(Math.floor(x), Math.floor(y), Math.floor(z)))
+  if (!b || b.name !== 'furnace') throw new Error(`no furnace at ${q.at} (${b ? b.name : 'unloaded'})`)
+  return b
+}
+
+function furnaceSlots (furnace) {
+  const text = (i) => i ? `${i.count} ${i.name}` : null
+  return { input: text(furnace.inputItem()), fuel: text(furnace.fuelItem()), output: text(furnace.outputItem()) }
+}
+
+function pocketRoom (window, item) {
+  const partial = window.items().filter(i => i.type === item.type).reduce((s, i) => s + i.stackSize - i.count, 0)
+  return window.emptySlotCount() * item.stackSize + partial
+}
+
+async function takeSlot (furnace, item, n) {
+  await bot.transfer({ window: furnace, itemType: item.type, metadata: null, count: n,
+    sourceStart: item.slot, sourceEnd: item.slot + 1, destStart: furnace.inventoryStart, destEnd: furnace.inventoryEnd })
+}
+
+// GET /smelt?item=&fuel=&count= : loads the nearest furnace and returns without waiting for the burn.
 app.get('/smelt', async (req, res) => {
   try {
     if (!ready) return err(res, new Error('not ready'))
@@ -6188,49 +6212,76 @@ app.get('/smelt', async (req, res) => {
     if (!fb) return err(res, new Error('no furnace within 8'))
     await bot.pathfinder.goto(new goals.GoalNear(fb.position.x, fb.position.y, fb.position.z, 2))
     const furnace = await bot.openFurnace(fb)
-    // 07-20 diagnostic: "destination full" on a furnace the helmsman verified EMPTY (1.21.11 window
-    // desync suspect) — dump what the client thinks the furnace slots hold before touching them.
-    console.log(`[smelt] window type=${furnace.type} invStart=${furnace.inventoryStart} slots0-2=` +
-      JSON.stringify((furnace.slots || []).slice(0, 3).map(s => s && { name: s.name, count: s.count })))
     try {
-      const inItem = bot.inventory.items().find(i => i.name === inputName)
-      const fuelItem = bot.inventory.items().find(i => i.name === fuelName)
+      const step = (what) => console.log(`[smelt] ${what} ${JSON.stringify(furnaceSlots(furnace))}`)
+      step('opened')
+      const pocketCount = (name) => furnace.items().filter(i => i.name === name).reduce((s, i) => s + i.count, 0)
+      const inItem = furnace.items().find(i => i.name === inputName)
       if (!inItem) throw new Error(`no ${inputName} to smelt`)
-      const smeltCount = Math.min(want, inItem.count)
-      // 07-20: furnaces aren't always empty (the home bank held a charcoal hoard in the fuel slot
-      // and putFuel died with "destination full") — drain the output, evict a mismatched input,
-      // and reuse whatever fuel is already sitting in the slot instead of failing.
-      if (furnace.outputItem()) {
-        const t = await furnace.takeOutput()
-        if (t) emitEvent('smelt', `cleared leftover output: ${t.count} ${t.name}`)
-      }
       const curIn = furnace.inputItem()
-      if (curIn && curIn.name !== inputName) await furnace.takeInput()
-      if (!furnace.fuelItem()) {
-        if (!fuelItem) throw new Error(`no ${fuelName} for fuel`)
-        // items-per-fuel: coal-family burns 8, wood-family 1.5 — the old flat /8 starved
-        // plank-fueled burns (2 planks for 9 logs = 3 smelted, silent stall)
+      if (curIn && curIn.name !== inputName) throw new Error(`the furnace is busy with ${curIn.count} ${curIn.name}`)
+      const n = Math.min(want, pocketCount(inputName), inItem.stackSize - (curIn ? curIn.count : 0))
+      if (n < 1) throw new Error(`the furnace input is full with ${curIn.count} ${curIn.name}`)
+      const fuelIn = furnace.fuelItem()
+      if (!fuelIn && !pocketCount(fuelName)) throw new Error(`no ${fuelName} for fuel`)
+      let took, note
+      const out = furnace.outputItem()
+      if (out && out.name === smeltYield(inputName) && pocketRoom(furnace, out) >= out.count) {
+        await takeSlot(furnace, out, out.count)
+        took = `${out.count} ${out.name}`
+        step('took output')
+      } else if (out) {
+        note = `left ${out.count} ${out.name} in the output`
+      }
+      await furnace.putInput(inItem.type, null, n)
+      step('loaded input')
+      const total = (curIn ? curIn.count : 0) + n
+      // A fuel slot holding another item is used as it is.
+      if (!fuelIn || fuelIn.name === fuelName) {
+        // Items smelted per fuel item: 8 for coal and charcoal, 1.5 for wood.
         const per = /coal/.test(fuelName) ? 8 : /planks|log|_wood|bamboo|stick/.test(fuelName) ? 1.5 : 8
-        const fuelNeeded = Math.min(fuelItem.count, Math.max(1, Math.ceil(smeltCount / per)))
-        await furnace.putFuel(fuelItem.type, null, fuelNeeded)
+        const add = Math.min(pocketCount(fuelName), Math.ceil(total / per) - (fuelIn ? fuelIn.count : 0))
+        if (add > 0) {
+          await furnace.putFuel(furnace.items().find(i => i.name === fuelName).type, null, add)
+          step('loaded fuel')
+        }
       }
-      await furnace.putInput(inItem.type, null, smeltCount)
-      // wait for the output to accumulate (each item ~10s), bounded
-      const deadline = Date.now() + smeltCount * 12000 + 15000
-      let outCount = 0
-      while (Date.now() < deadline) {
-        await new Promise(r => setTimeout(r, 1500))
-        const o = furnace.outputItem()
-        outCount = o ? o.count : 0
-        if (outCount >= smeltCount) break
-        if (!furnace.inputItem() && outCount > 0) break   // input consumed, output ready
-      }
-      let taken = null
-      try { taken = await furnace.takeOutput() } catch (e) {}
+      // A furnace smelts one item every 10 s.
+      ok(res, { at: round(fb.position), loaded: n, ...furnaceSlots(furnace), took, note, doneInSec: total * 10 })
+    } finally {
       furnace.close()
-      emitEvent('smelt', `${inputName} -> ${taken ? taken.count + ' ' + taken.name : 'nothing yet'}`)
-      ok(res, { smelted: inputName, requested: smeltCount, got: taken ? { name: taken.name, count: taken.count } : null })
-    } catch (e) { try { furnace.close() } catch (x) {} ; err(res, e) }
+    }
+  } catch (e) { err(res, e) }
+})
+
+// GET /furnace?at=&take=&count= : lists a furnace's slots, or takes one slot into the pockets.
+app.get('/furnace', async (req, res) => {
+  try {
+    if (!ready) return err(res, new Error('not ready'))
+    const take = req.query.take
+    if (take != null && !['input', 'fuel', 'output'].includes(take)) return err(res, new Error('take is input, fuel or output'))
+    const fb = targetFurnace(req.query)
+    if (!fb) return err(res, new Error('no furnace within 8'))
+    await bot.pathfinder.goto(new goals.GoalNear(fb.position.x, fb.position.y, fb.position.z, 2))
+    const furnace = await bot.openFurnace(fb)
+    try {
+      if (take == null) {
+        // mineflayer reads a bar as 0 until a value arrives after its total.
+        await bot.waitForTicks(2)
+        const share = (v) => typeof v === 'number' ? Math.round(v * 100) / 100 : undefined
+        return ok(res, { at: round(fb.position), ...furnaceSlots(furnace), progress: share(furnace.progress), fuelLeft: share(furnace.fuel) })
+      }
+      const item = { input: furnace.inputItem(), fuel: furnace.fuelItem(), output: furnace.outputItem() }[take]
+      if (!item) throw new Error(`the ${take} slot is empty`)
+      // The output slot accepts no items back.
+      const n = take === 'output' ? item.count : Math.min(parseInt(req.query.count || item.count), item.count)
+      if (pocketRoom(furnace, item) < n) throw new Error(`no room in your pockets for ${n} ${item.name}`)
+      await takeSlot(furnace, item, n)
+      console.log(`[furnace] took ${n} ${item.name} ${JSON.stringify(furnaceSlots(furnace))}`)
+      ok(res, { at: round(fb.position), took: `${n} ${item.name}`, ...furnaceSlots(furnace) })
+    } finally {
+      furnace.close()
+    }
   } catch (e) { err(res, e) }
 })
 

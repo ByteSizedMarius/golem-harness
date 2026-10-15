@@ -213,6 +213,17 @@ of a `bot.js` route carries the count and the senders of the chat lines and whis
 2 lines from Halbes. Read them with tick or wait_events.` The text stays behind the read path. The
 bot's own lines and server lines never count. The chat log moved into `lib/chat-log.js`.
 
+`smelt` held the body and the furnace window for 12 s per item plus 15 s. A live load of 69 iron
+ore made a 14 minute call, the pilot sat idle for 6 of them, a fight moved the bot, and the call
+ended "nothing yet" with 64 ore still in the furnace. It also pulled any other input out of the
+furnace, the owner's 22 queued iron ore included. `smelt` now loads input and fuel, takes the
+finished output of the same input into the pockets (`lib/furnace.js` knows what each input makes),
+and returns at once with `doneInSec`, 10 s per item. A furnace busy with another input is refused
+by name, and an output of another item stays where it is. bot.log carries the slots after each
+step. With no way to look into a furnace, the pilot once smelted a log only to reach the output.
+The new `furnace` tool lists a furnace's input, fuel, output and burn progress, and `take` moves one
+slot into the pockets.
+
 ## 2026-10-15: one goto, and arrival means standing there
 
 A scenario suite that walks onto exact cells could not pass: `range=0` at a drop's own y

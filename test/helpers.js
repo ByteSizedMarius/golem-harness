@@ -138,7 +138,7 @@ function guardRequest ({ token, port, method = 'GET', url = '/state', time, nonc
 // Recording handlers stand in for bot.js's own routes.
 const DUMMY_ROUTES = [
   '/state', '/tick', '/chatlog', '/walls', '/outline', '/roof', '/build', '/find', '/mine', '/collect', '/craft',
-  '/smelt', '/withdraw', '/deposit', '/gather', '/toss', '/goto', '/follow',
+  '/smelt', '/furnace', '/withdraw', '/deposit', '/gather', '/toss', '/goto', '/follow',
   '/waypoint', '/waypoints', '/snapshot', '/record', '/stream', '/pov', '/sign', '/rename', '/bunker'
 ]
 
@@ -870,7 +870,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, functionSource, balanced, botConstant, loadBotFunctions, runRoute, awaitRoute, reflexIn, bunkerReflexIn, combatReflexIn,
+  botSource, functionSource, balanced, botConstant, loadBotFunctions, routeHandler, runRoute, awaitRoute, reflexIn, bunkerReflexIn, combatReflexIn,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild
 }
