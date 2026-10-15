@@ -319,6 +319,18 @@ fires only for a step up or a gap. A `[sprint]` line in bot.log names the decisi
 water, fighting, farmland or crops), and a changed decision at most every 5 s. The 1.7.10 client
 sprints with food above 6, so the hop now starts at food 7 instead of 8.
 
+**One body call at a time.** Claude Code sends tool calls in parallel when the model batches them,
+and the bot ran them all at once. Live, two torch placements fought over the path and the bot ended
+in a ravine, 4 `digat` calls stalled for 76 s, and 8 `deposit` calls sat 5 minutes in `[path] reset
+stuck`. One session logged 6 `goal was changed`, 8 `Path was stopped` and 2 MCP timeouts at 80 s.
+The MCP server now runs the tools that move or use the body one at a time in arrival order: the
+walks, digs, placements, crafting, containers, combat verbs, `eat`, `use`, `activate`, `equip`,
+`lookat`, `gesture` and the job starters. Perception, memory and settings tools run at once beside
+them. A call that waited gets a `Waited <n> s behind <tools>.` line, and one still waiting at the end
+of its own time budget answers an error without running. `stop` and `job_stop` never wait and
+cancel the calls still waiting, which answer `cancelled by stop before it ran`. The flag lives in
+`mcp/tools.js` and stays out of `tools/list`.
+
 **Queued requests and 1.7.10 item names.** Live, the owner asked the pilot to keep track of wheat,
 and it added a todo but never told him it was queued. A `todo` add with a `who` now answers
 `Tell <who> it is queued if you have not.` under the `Added` line. `craft("fence")` and
