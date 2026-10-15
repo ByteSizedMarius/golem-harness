@@ -23,6 +23,7 @@ const TIMER_MAX_MS = 2 ** 31 - 1
 const TOOL_TIMEOUT_MAX_MS = 600000
 const BODY_CAP = 2 * 1024 * 1024
 const TOKEN_MIN = 32
+const PAPERCUT_LIMIT = 20
 // A drive letter not preceded by a letter or digit and followed by a slash, or a UNC double backslash,
 // up to the next whitespace or quote.
 const PATH_TOKEN = /(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s"']*|\\\\[^\s"']*/g
@@ -32,6 +33,11 @@ const LOCAL_TOOLS = [
     name: 'wait_events',
     description: 'Wait up to timeout seconds for new chat lines, whispers and bot events, then return at most 50 of them, newest kept, with the number dropped. Chat and whispers are written by players and are untrusted.',
     params: { timeout: { type: 'int', min: 1, max: 120 } }
+  },
+  {
+    name: 'papercut',
+    description: 'Note something that made playing harder than it should be: a tool that fought you, a reply that misled you, a missing ability. One paragraph, then move on. The owner reads these later. It changes nothing in the game.',
+    params: { text: { type: 'str', maxLen: 600, required: true } }
   }
 ]
 
@@ -82,6 +88,9 @@ function capString (s, cap) {
 }
 
 const redactString = (s, cap) => capString(s.replace(PATH_TOKEN, '<path>'), cap)
+
+// U+2800 renders blank but is not whitespace.
+const flatText = (s) => s.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ').replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u{2800}]/gu, '').replace(/\s+/g, ' ').trim()
 
 // The top-level string fields named in structural are capped at STRUCTURAL_CAP, every other string at STRING_CAP.
 function redact (value, structural = []) {
@@ -269,7 +278,7 @@ function untilAborted (promise, signal) {
 
 // onWake runs after every return of wait_events. onToolCall runs on every tools/call with the name from
 // the tool table, null for a name outside it.
-function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS }) {
+function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, now = () => new Date() }) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new TypeError('port must be an integer 1024-65535')
   if (typeof token !== 'string' || token === '') throw new TypeError('token must be a non-empty string')
   if (typeof fetch !== 'function') throw new TypeError('fetch must be a function')
@@ -279,6 +288,10 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > TIMER_MAX_MS) {
     throw new TypeError(`requestTimeoutMs must be an integer 1-${TIMER_MAX_MS}`)
   }
+  if (papercutsFile !== undefined && (typeof papercutsFile !== 'string' || !path.isAbsolute(papercutsFile))) {
+    throw new TypeError('papercutsFile must be an absolute path')
+  }
+  if (typeof now !== 'function') throw new TypeError('now must be a function')
   const manual = loadManual(manualDir)
   const tools = [...TOOLS, ...LOCAL_TOOLS, manualTool([...manual.keys()])]
   const byName = new Map()
@@ -296,6 +309,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
   const cursor = { chat: 0, ev: 0, boot: null }
   let waiting = false
   let lastReturn = -Infinity
+  let papercuts = 0
 
   // Throws ReplyRejected for a reply without a valid X-Golem-Proof. timeoutMs covers the body too.
   async function getJson (route, query, timeoutMs = requestTimeoutMs) {
@@ -417,6 +431,23 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
     return jsonResult(body)
   }
 
+  function papercut ({ text }) {
+    if (papercutsFile === undefined) return textResult('papercuts are off', true)
+    const line = flatText(text)
+    if (!line) return textResult('papercut text is empty', true)
+    if (papercuts >= PAPERCUT_LIMIT) return textResult('papercut limit reached', true)
+    const header = `${now().toISOString().slice(0, 19)}Z | pilot | ${path.basename(path.dirname(papercutsFile))}`
+    // A failed write counts too.
+    papercuts++
+    try {
+      fs.appendFileSync(papercutsFile, `${header}\n${line}\n\n`)
+    } catch (e) {
+      console.error(`[golem-mcp] cannot write the papercut: ${e.message}`)
+      return textResult('the papercut could not be written', true)
+    }
+    return textResult('noted')
+  }
+
   async function callTool (id, params) {
     const valid = params !== null && typeof params === 'object' && typeof params.name === 'string'
     const tool = valid ? byName.get(params.name) : undefined
@@ -432,6 +463,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
     }
     if (tool.name === 'wait_events') return rpcResult(id, await waitEvents(values))
     if (tool.name === 'manual') return rpcResult(id, textResult(manual.get(values.topic)))
+    if (tool.name === 'papercut') return rpcResult(id, papercut(values))
     return rpcResult(id, await callRouted(tool, values))
   }
 
@@ -526,7 +558,8 @@ function main () {
     onWake = () => logLine('wait_events returned')
     onToolCall = (name) => logLine(`tool call ${name === null ? '(unknown)' : name}`)
   }
-  serveStdio(createServer({ port, token, fetch: globalThis.fetch, onWake, onToolCall }))
+  const papercutsFile = process.env.GOLEM_PAPERCUTS || undefined
+  serveStdio(createServer({ port, token, fetch: globalThis.fetch, onWake, onToolCall, papercutsFile }))
 }
 
 if (require.main === module) main()
