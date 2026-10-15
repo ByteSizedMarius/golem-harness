@@ -319,6 +319,19 @@ fires only for a step up or a gap. A `[sprint]` line in bot.log names the decisi
 water, fighting, farmland or crops), and a changed decision at most every 5 s. The 1.7.10 client
 sprints with food above 6, so the hop now starts at food 7 instead of 8.
 
+**Stalled walks.** Live, `walls`, `deposit`, the walk of `craft` to a table and other verbs sat for
+minutes in the pathfinder's `[path] reset stuck` loop while the pilot waited. mineflayer-pathfinder's
+goto ends only on no path, a planning timeout, a stop or a changed goal, and a stuck reset just
+replans. Every goto now runs under the stall watch of a collect: 4.5 s without a block of progress,
+planning excluded, or 60 s in all ends it. A stall rejects with `stalled at x,y,z`, plus the block
+the body presses against when the bot knows it, and writes one `[path] stalled` line to bot.log. A
+goto inside a collect or a gather approach keeps the one watch it already had. `walls`, `roof`,
+`outline` and `build` stop at such a walk and reply what they placed with `reason` and the stall
+text as `hint`. `craft` and the `strike` walk to the drops report it instead of going on, and every
+verb whose walk fails into an error reply now carries `reason` beside the error. The unstuck reflex
+counted each replan after a stuck reset as planner progress and waited 30 s. It now ignores those
+replans and acts on a stuck loop after about 10 s.
+
 **One body call at a time.** Claude Code sends tool calls in parallel when the model batches them,
 and the bot ran them all at once. Live, two torch placements fought over the path and the bot ended
 in a ravine, 4 `digat` calls stalled for 76 s, and 8 `deposit` calls sat 5 minutes in `[path] reset

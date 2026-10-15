@@ -6,6 +6,7 @@ const { plugin: collectBlock } = require('mineflayer-collectblock')
 const armorManager = require('mineflayer-armor-manager')
 const express = require('express')
 const fs = require('fs')
+const { AsyncLocalStorage } = require('async_hooks')
 const { Vec3 } = require('vec3')
 const { installSecurity, chatMaxLen, BUNKER_MODES } = require('./lib/install')
 const { classifySound } = require('./lib/sounds')
@@ -137,10 +138,12 @@ async function collectSafely (block) {
 // How long one collect or approach may stand without progress, and how long it may take at most.
 const COLLECT_STALL_MS = 4500
 const COLLECT_BUDGET_MS = 60000
+// True inside a watchedWork, whose gotos need no watch of their own.
+const watchScope = new AsyncLocalStorage()
 // Runs work under a stall watch and the budget of one collect, and stop ends it when either trips.
 // A dig counts as progress.
 function watchedWork (work, stop) {
-  return guardWork(work, {
+  return guardWork(() => watchScope.run(true, work), {
     position: () => bot.entity.position,
     onPathUpdate: (fn) => {
       bot.on('path_update', fn)
@@ -151,7 +154,29 @@ function watchedWork (work, stop) {
     stallMs: COLLECT_STALL_MS,
     thinkTimeout: bot.pathfinder.thinkTimeout,
     budgetMs: COLLECT_BUDGET_MS
+  }).catch((e) => {
+    if (e.reason !== 'stalled') throw e
+    const text = stallText()
+    console.log('[path] ' + text)
+    throw Object.assign(new Error(text), { reason: 'stalled' })
   })
+}
+function stallText () {
+  const p = bot.entity.position
+  const feet = p.floored()
+  const at = `stalled at ${feet.x},${feet.y},${feet.z}`
+  const ahead = (dy) => new Vec3(Math.floor(p.x - Math.sin(bot.entity.yaw)), feet.y + dy, Math.floor(p.z - Math.cos(bot.entity.yaw)))
+  for (const c of [ahead(0), ahead(1)]) {
+    const b = bot.blockAt(c)
+    if (b && b.boundingBox === 'block' && cellKnown(c)) return `${at} against ${b.name} at ${c.x},${c.y},${c.z}`
+  }
+  return at
+}
+function watchGoto (goto) {
+  return (goal) => watchScope.getStore() ? goto(goal) : watchedWork(() => goto(goal), stopPath)
+}
+function walkGaveUp (e) {
+  return e.reason ? { reason: e.reason, hint: e.message } : null
 }
 // Ends a collect the watch gave up on: its walk, its dig and its wait for a drop pickup.
 function abandonCollect () {
@@ -516,10 +541,23 @@ reflexes.push({
   _lastPos: null, _stallStart: 0,
   check (bot) {
     if (!this._hooked) {                                        // planner heartbeat hookup (07-22)
-      try { bot.on('path_update', () => { this._lastPathUpdate = Date.now() }); this._hooked = true } catch (e) {}
+      try {
+        // True from a stuck reset until the goal changes, another reset comes or a replan finds no path.
+        bot.on('path_reset', (reason) => { this._stuckLoop = reason === 'stuck' })
+        bot.on('goal_updated', () => {
+          this._stuckLoop = false
+        })
+        // A replan after a stuck reset is no heartbeat.
+        bot.on('path_update', (r) => {
+          if (r.path.length === 0) this._stuckLoop = false
+          if (!this._stuckLoop) this._lastPathUpdate = Date.now()
+        })
+        this._hooked = true
+      } catch (e) {}
     }
     let moving = false
-    try { moving = bot.pathfinder.isMoving() } catch (e) {}
+    // The path stays empty for a tick between a stuck reset and its replan.
+    try { moving = bot.pathfinder.isMoving() || (!!this._stuckLoop && !!bot.pathfinder.goal) } catch (e) {}
     if (!moving) { this._stallStart = 0; this._lastPos = null; return false }
     const p = bot.entity.position
     if (!this._lastPos) { this._lastPos = p.clone(); this._stallStart = 0; return false }
@@ -964,7 +1002,7 @@ async function macroPlaceAt(Vec3, x, y, z, names, walk = true) {
     refuseWhileBuilding()
     await bot.placeBlock(ref, face)
     return { done: true, placed: true }
-  } catch (e) { return { done: false, error: e.message } }
+  } catch (e) { return Object.assign({ done: false, error: e.message }, walkGaveUp(e)) }
 }
 
 // ---- fairness: only "see" a block a player here could — exposed to air AND in line of sight.
@@ -1435,6 +1473,7 @@ bot.once('spawn', () => {
   const combat = reflexes.find(r => r.name === 'combat')
   bot.look = smoothLook(bot, bot.look, () => combat.active)
   bot._genericPlace = pacePlacements(bot._genericPlace)
+  bot.pathfinder.goto = watchGoto(bot.pathfinder.goto)
 })
 
 // ---- GATE MANNERS (07-15, built the day the chickens fled): the pathfinder and the unstuck reflex
@@ -2512,7 +2551,7 @@ const ok = (res, data) => {
   const body = { ok: true, ...data }
   send(res, res.req && res.req.query && res.req.query.brief ? debrief(body) : body)
 }
-const err = (res, e) => send(res, { ok: false, error: e.message || String(e) })
+const err = (res, e) => send(res, { ok: false, error: e.message || String(e), ...(e.reason && { reason: e.reason }) })
 
 let lastTickSnap = null   // /tick?delta=1 diffs against the previous tick (single-pilot assumption)
 // Names this bot.js process in every /tick reply.
@@ -2895,10 +2934,12 @@ app.get('/strike', async (req, res) => {
         dead = died.has(tgt.id) || !bot.entities[tgt.id]
       }
     }
+    let stop = null
     if (dead && struckAt) {
-      try { await bot.pathfinder.goto(new goals.GoalNear(struckAt.x, struckAt.y, struckAt.z, 1)) } catch (e) {}  // hoover the drops
+      try { await bot.pathfinder.goto(new goals.GoalNear(struckAt.x, struckAt.y, struckAt.z, 1)) } catch (e) { stop = walkGaveUp(e) }  // hoover the drops
     }
-    ok(res, { struck: ename, with: iname, swings, at: struckAt ? round(struckAt) : null, killed: dead, note: dead ? 'walked to drops' : swings ? 'still standing — swing again deliberately' : 'target left reach' })
+    const note = dead ? (stop ? 'the walk to the drops gave up' : 'walked to drops') : swings ? 'still standing — swing again deliberately' : 'target left reach'
+    ok(res, { struck: ename, with: iname, swings, at: struckAt ? round(struckAt) : null, killed: dead, note, ...stop })
   } catch (e) { err(res, e) } finally { releaseLane(lane); bot.removeListener('entityDead', onDead) }
 })
 
@@ -3531,7 +3572,7 @@ async function craftItem (item, count) {
   const useTable = canUseTable && !!near
   if (useTable) {
     // walk within reach of an existing table (fixes today's "table 4 blocks away" failure)
-    try { await bot.pathfinder.goto(new goals.GoalNear(near.position.x, near.position.y, near.position.z, 3)) } catch (e) {}
+    try { await bot.pathfinder.goto(new goals.GoalNear(near.position.x, near.position.y, near.position.z, 3)) } catch (e) { if (e.reason) throw e }
   }
 
   // count means ITEMS, not recipes (the 12-log lesson): one recipe pass may yield several
@@ -3824,7 +3865,7 @@ app.get('/outline', async (req, res) => {
     for (let i = 0; i < w; i++) for (let j = 0; j < d; j++) {
       if (i === 0 || i === w - 1 || j === 0 || j === d - 1) cells.push([x0 + i, z0 + j])
     }
-    let placed = 0, skipped = 0, failed = 0
+    let placed = 0, skipped = 0, failed = 0, stop = null
     for (const [x, z] of cells) {
       const it = bot.inventory.items().find(k => k.name === name)
       if (!it) { failed++; continue }
@@ -3844,9 +3885,12 @@ app.get('/outline', async (req, res) => {
         await bot.lookAt(target.offset(0.5, 0.5, 0.5), true)
         await bot.placeBlock(ground, new Vec3(0, 1, 0))
         placed++
-      } catch (e) { failed++ }
+      } catch (e) {
+        failed++
+        if ((stop = walkGaveUp(e))) break
+      }
     }
-    ok(res, { placed, skipped, failed, footprint: `${w}x${d}`, corner: { x: x0, z: z0 }, material: name })
+    ok(res, { placed, skipped, failed, footprint: `${w}x${d}`, corner: { x: x0, z: z0 }, material: name, ...stop })
   } catch (e) { err(res, e) }
 })
 
@@ -3993,9 +4037,9 @@ app.get('/walls', async (req, res) => {
     else if (doorSide === 'north') doorCell = [x0 + Math.floor(w / 2), z0]
     else doorCell = [x0 + Math.floor(w / 2), z0 + d - 1]
     const isDoor = (x, z) => x === doorCell[0] && z === doorCell[1]
-    let placed = 0, skipped = 0, failed = 0
+    let placed = 0, skipped = 0, failed = 0, stop = null
     for (const [x, z] of perim) {
-      try { await bot.pathfinder.goto(new goals.GoalNear(x, base, z, 2)) } catch (e) {}
+      try { await bot.pathfinder.goto(new goals.GoalNear(x, base, z, 2)) } catch (e) { if ((stop = walkGaveUp(e))) break }
       for (let k = 0; k < h; k++) {
         if (isDoor(x, z) && k < 2) continue          // leave a 2-high doorway
         const y = base + k
@@ -4017,7 +4061,7 @@ app.get('/walls', async (req, res) => {
         } catch (e) { failed++ }
       }
     }
-    ok(res, { placed, skipped, failed, size: `${w}x${d}`, height: h, door: doorSide })
+    ok(res, { placed, skipped, failed, size: `${w}x${d}`, height: h, door: doorSide, ...stop })
   } catch (e) { err(res, e) }
 })
 
@@ -4307,7 +4351,7 @@ app.get('/roof', async (req, res) => {
       cells.push([x0 + i, z0 + j, Math.min(i, j, w - 1 - i, d - 1 - j)])
     }
     cells.sort((a, b) => a[2] - b[2])   // outer rings first
-    let placed = 0, skipped = 0, failed = 0
+    let placed = 0, skipped = 0, failed = 0, stop = null
     for (const [x, z] of cells) {
       const target = new Vec3(x, y, z)
       const tb = bot.blockAt(target)
@@ -4328,7 +4372,7 @@ app.get('/roof', async (req, res) => {
         // walk UNDER the cell, not TO it — a roof cell is sky; GoalNear'ing it made the pathfinder
         // hunt for a way up and burn a 10s timeout per cell (the helmsman watched the bot stand still, 07-12)
         const eyeDist = bot.entity.position.offset(0, 1.62, 0).distanceTo(target.offset(0.5, 0.5, 0.5))
-        if (eyeDist > 4.2) { try { await bot.pathfinder.goto(new goals.GoalNear(x, y - 4, z, 1)) } catch (e) {} }
+        if (eyeDist > 4.2) { try { await bot.pathfinder.goto(new goals.GoalNear(x, y - 4, z, 1)) } catch (e) { if ((stop = walkGaveUp(e))) break } }
         await clearSoftCover(target)
         await bot.equip(it, 'hand')
         await bot.lookAt(target.offset(0.5, 0.5, 0.5), true)
@@ -4336,7 +4380,7 @@ app.get('/roof', async (req, res) => {
         placed++
       } catch (e) { failed++ }
     }
-    ok(res, { placed, skipped, failed, size: `${w}x${d}`, y })
+    ok(res, { placed, skipped, failed, size: `${w}x${d}`, y, ...stop })
   } catch (e) { err(res, e) }
 })
 
@@ -6109,6 +6153,7 @@ app.get('/build', (req, res) => {
         if (i === 0 || i === w - 1 || j === 0 || j === d - 1) perim.push([x0 + i, z0 + j])
       }
 
+      let stop = null
       // ---- foundation: base-material perimeter at y=base ----
       job.progress('phase: foundation')
       for (const [x, z] of perim) {
@@ -6118,29 +6163,31 @@ app.get('/build', (req, res) => {
         if (r.placed) stats.foundation++
         else if (r.skipped) stats.skipped++
         else stats.failed++
+        if (r.reason) { stop = r; break }
       }
       emitEvent('build', `foundation done (${stats.foundation})`, { x: x0, z: z0 })
 
       // ---- walls: perimeter columns base+1..base+h-1, leaving the doorway open ----
       job.progress('phase: walls')
       for (const [x, z] of perim) {
-        if (job.cancelled) break
+        if (job.cancelled || stop) break
         for (let k = 1; k < h; k++) {
           if (isDoor(x, z) && k < 2) { continue }  // 2-high doorway (rows k=0 base & k=1)
           const r = await macroPlaceAt(Vec3, x, base + k, z, [wallMat, baseMat])
           if (r.placed) stats.walls++
           else if (r.skipped) stats.skipped++
           else stats.failed++
+          if (r.reason) { stop = r; break }
         }
       }
 
       // ---- door: guarantee the 2-high doorway span (base..base+1) is clear ----
       job.progress('phase: door')
-      for (let k = 0; k < 2; k++) {
+      for (let k = 0; k < 2 && !stop; k++) {
         const dp = new Vec3(doorCell[0], base + k, doorCell[1])
         const db = bot.blockAt(dp)
         if (db && db.name !== 'air' && db.boundingBox === 'block') {
-          try { await bot.pathfinder.goto(new goals.GoalNear(dp.x, dp.y, dp.z, 3)); await bot.dig(db) } catch (e) {}
+          try { await bot.pathfinder.goto(new goals.GoalNear(dp.x, dp.y, dp.z, 3)); await bot.dig(db) } catch (e) { stop = walkGaveUp(e) }
         }
       }
 
@@ -6152,15 +6199,16 @@ app.get('/build', (req, res) => {
       }
       roofCells.sort((a, b) => a[2] - b[2])       // outer rings first
       for (const [x, z] of roofCells) {
-        if (job.cancelled) break
+        if (job.cancelled || stop) break
         const r = await macroPlaceAt(Vec3, x, base + h, z, [wallMat, baseMat])
         if (r.placed) stats.roof++
         else if (r.skipped) stats.skipped++
         else stats.failed++
+        if (r.reason) { stop = r; break }
       }
 
-      emitEvent('build', `cabin complete f=${stats.foundation} w=${stats.walls} r=${stats.roof}`, stats)
-      return { template, size: `${w}x${d}`, height: h, corner: { x: x0, z: z0 }, ...stats }
+      emitEvent('build', `cabin ${stop ? stop.reason : 'complete'} f=${stats.foundation} w=${stats.walls} r=${stats.roof}`, stats)
+      return { template, size: `${w}x${d}`, height: h, corner: { x: x0, z: z0 }, ...stats, ...(stop && { reason: stop.reason, hint: stop.hint }) }
     })
     ok(res, { job: id })
   } catch (e) { err(res, e) }

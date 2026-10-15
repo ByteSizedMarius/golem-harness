@@ -2,6 +2,7 @@
 // A collect that makes no progress or runs over its budget ends, and mine and tidy say why.
 const test = require('node:test')
 const assert = require('node:assert')
+const { AsyncLocalStorage } = require('node:async_hooks')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const gotoGoal = require('mineflayer-pathfinder/lib/goto')
@@ -37,7 +38,7 @@ function collector ({ blocks, reach, drifting = false }) {
   bot.heldItem = null
   bot.targetDigBlock = null
   bot.stopDigging = () => {}
-  const seen = { digs: 0, planned: 0, followed: 0, drops: [] }
+  const seen = { digs: 0, planned: 0, followed: 0, drops: [], watches: 0, logs: [] }
   bot.dig = async (b) => {
     seen.digs++
     seen.drops.push(new Entity(b.position.offset(0.5, 0.5, 0.5)))
@@ -85,7 +86,14 @@ function collector ({ blocks, reach, drifting = false }) {
     navPlaced: [],
     COLLECT_STALL_MS: botConstant('COLLECT_STALL_MS'),
     COLLECT_BUDGET_MS: botConstant('COLLECT_BUDGET_MS'),
-    guardWork: (work, o) => guardWork(work, { ...o, clock }),
+    guardWork: (work, o) => {
+      seen.watches++
+      return guardWork(work, { ...o, clock })
+    },
+    watchScope: new AsyncLocalStorage(),
+    Vec3,
+    cellKnown: () => true,
+    console: { log: (line) => seen.logs.push(line) },
     resolveBlockIds: () => [1],
     nearestVisible: () => blocks['1,64,0']
   }
@@ -107,6 +115,19 @@ test('mine returns with stalled when the path to the block never gets anywhere',
   c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
   assert.deepStrictEqual(await within(reply), { mined: 0, requested: 2, inventoryMatching: 0, reason: 'stalled' })
   assert.strictEqual(c.bot.pathfinder.goal, null, 'the walk is stopped')
+})
+
+test('a collect walks under one stall watch, the gotos of the collect plugin included', async (t) => {
+  const c = collector({ blocks: ORE, reach: () => false })
+  t.after(c.stop)
+  const { watchGoto } = loadBotFunctions(['watchGoto', 'stopPath'], c.env)
+  c.bot.pathfinder.goto = watchGoto((g) => gotoGoal(c.bot, g))
+  const reply = awaitRoute('/mine', { name: 'iron_ore' }, c.env)
+  assert.ok(await waitFor(() => c.seen.planned > 0, 2000), 'control: the walk to the block planned')
+  assert.strictEqual(c.seen.watches, 1)
+  c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
+  assert.deepStrictEqual(await within(reply), { mined: 0, requested: 1, inventoryMatching: 0, reason: 'stalled' })
+  assert.deepStrictEqual(c.seen.logs, ['[path] stalled at 0,64,0'])
 })
 
 test('mine returns with stalled when a drop is never picked up, and the next collect starts afresh', async (t) => {
