@@ -174,6 +174,21 @@ bot has seen all its walls. Light comes from the chunk data. mineflayer computes
 server sends it only with a chunk, so around a block change sight alone counts until fresh light
 arrives. `/fish` named the block of any loaded cell in its refusal before it checked sight.
 
+A live `mine iron_ore count 2 radius 8` never returned while the bot stood still. The collect plugin
+walks with a bare `pathfinder.goto` and then waits for each drop's pickup, with no watch on either.
+Every collect (`mine`, `tidy`, the digs of `gather`) and gather's walk to a target now run under a
+stall watch, 4.5 s without a block of progress with a dig counting as progress, and a 60 s budget
+per block. A stopped collect ends its walk, its dig and its wait for the drop, and `mine` and `tidy`
+name `stalled` or `budget` in `reason`. bot.log carries one line per pathfinder event (goal reached,
+path update, reset with its reason, stop), so the next hang shows where it stood.
+
+The senses the sight fix missed. `lava_watch` and `current_watch` scanned their shell through rock and
+backed away from lava sealed behind it. They now take only cells the body stands in or sees lit, and
+lava lights itself. `scene`, `boot` and the `map` note counted every solid block above the head and
+named the surface height. They now count the cover and name its top only once the sky shows (sky
+light 15 at the head, or the column known to the top), and otherwise give the first solid seen and
+call the rest unknown. The walked trail stamped a 7x7x4 box into the seen set every 2 s, through walls
+and in the dark. It now stamps the cells the body fills and the ones in lit sight from the head.
 `gaze` named surfaces its rays struck in total darkness. Those rays now read `too dark to see`, and
 the trek scan skips them too. A walk toward a player known only by the nametag aimed at their exact
 position. `goto` now heads for the centre of their 5-block cube with a reach that covers all of it,

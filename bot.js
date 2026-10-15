@@ -10,7 +10,7 @@ const { Vec3 } = require('vec3')
 const { installSecurity, chatMaxLen, BUNKER_MODES } = require('./lib/install')
 const { classifySound } = require('./lib/sounds')
 const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
-const { UNLOADED, standCell, resolveTarget, crumbCentre, nametagGoal, arrivedAt, walkAttempt, routeDeadline } = require('./lib/walk')
+const { UNLOADED, standCell, resolveTarget, crumbCentre, nametagGoal, arrivedAt, walkAttempt, routeDeadline, guardWork } = require('./lib/walk')
 const { playerNamed, playersAround, presenceUpdate, presenceText } = require('./lib/players')
 const { POINT_RANGE, deictic, lookedAt } = require('./lib/deixis')
 const { WAKE_KINDS, serverLines, rateLimit, foldQuiet, quietText } = require('./lib/server-msg')
@@ -120,11 +120,39 @@ async function collectSafely (block) {
   cage.canOpenDoors = true
   bot.collectBlock.movements = cage
   try {
-    return await bot.collectBlock.collect(block)
+    return await watchedWork(() => bot.collectBlock.collect(block), abandonCollect)
   } finally {
     bot.collectBlock.movements = null   // no stale cage lingering inside the plugin
     if (prev) bot.pathfinder.setMovements(prev)
   }
+}
+// How long one collect or approach may stand without progress, and how long it may take at most.
+const COLLECT_STALL_MS = 4500
+const COLLECT_BUDGET_MS = 60000
+// Runs work under a stall watch and the budget of one collect, and stop ends it when either trips.
+// A dig counts as progress.
+function watchedWork (work, stop) {
+  return guardWork(work, {
+    position: () => bot.entity.position,
+    onPathUpdate: (fn) => {
+      bot.on('path_update', fn)
+      return () => bot.removeListener('path_update', fn)
+    },
+    busy: () => !!bot.targetDigBlock,
+    stop,
+    stallMs: COLLECT_STALL_MS,
+    thinkTimeout: bot.pathfinder.thinkTimeout,
+    budgetMs: COLLECT_BUDGET_MS
+  })
+}
+// Ends a collect the watch gave up on: its walk, its dig and its wait for a drop pickup.
+function abandonCollect () {
+  stopPath()
+  if (bot.targetDigBlock) bot.stopDigging()
+  // A pickup wait that resumes later finds its list cleared and ends.
+  const Targets = bot.collectBlock.targets.constructor
+  bot.collectBlock.targets.clear()
+  bot.collectBlock.targets = new Targets(bot)
 }
 
 bot.once('spawn', () => {
@@ -537,8 +565,9 @@ reflexes.push({
       const p = bot.entity.position.floored()
       const V = require('vec3').Vec3
       for (let dx = -2; dx <= 2; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -2; dz <= 2; dz++) {
-        const b = bot.blockAt(new V(p.x + dx, p.y + dy, p.z + dz))
-        if (b && b.name.includes('water') && b.metadata !== 0) {   // flowing, not a still source
+        const c = new V(p.x + dx, p.y + dy, p.z + dz)
+        const b = bot.blockAt(c)
+        if (b && b.name.includes('water') && b.metadata !== 0 && perceived(c)) {   // flowing, not a still source
           const d = Math.abs(dx) + Math.abs(dz)
           if (d < dist) { dist = d; dir = compass(dx, dz) || 'here' }
           near = true
@@ -1024,6 +1053,12 @@ function nearestVisible(ids, maxDist) {
 function cellKnown (p) {
   return SEEN.has(ck(p.x, p.y, p.z)) || seesLit(p, 64)
 }
+// A cell the body fills, or one in lit sight now.
+function perceived (p) {
+  const o = bot.entity.position.floored()
+  if (p.x === o.x && p.z === o.z && (p.y === o.y || p.y === o.y + 1)) return true
+  return seesLit(p, 8)
+}
 
 // ==== VISION 2 (2026-07-11): the vertical sense, the air flood-fill, and the ray-sweep retina ====
 // Two tiers of knowing, everywhere: seen (SEEN, or lit sight now) / unknown (silence means "didn't
@@ -1031,16 +1066,19 @@ function cellKnown (p) {
 
 // ---- overhead cover: am I under open sky? The top-down /map renders whatever slice I'm embedded
 // in, so a stone shelf at y40 reads identical to a mountaintop — this column scan is the missing
-// vertical fix. Distinguishes true sky / tree canopy / underground, with an honest cover count.
+// vertical fix. Distinguishes true sky / tree canopy / underground from the column cells the bot knows.
+// The cover count and its top need the sky to show: sky light 15 at the head, or the column known to the top.
 function overheadCover() {
   try {
     const o = bot.entity.position.floored()
     const from = o.y + 2                       // first cell above the head
     const top = Math.min(from + 280, 320)      // 1.21 build ceiling
-    let cover = 0, firstUp = 0, topSolidY = null
+    let cover = 0, firstUp = 0, topSolidY = null, knownToTop = true
     const names = new Set()
     for (let y = from; y <= top; y++) {
-      const b = bot.blockAt(new Vec3(o.x, y, o.z))
+      const p = new Vec3(o.x, y, o.z)
+      if (!cellKnown(p)) { knownToTop = false; break }
+      const b = bot.blockAt(p)
       if (b && b.boundingBox === 'block') {
         cover++
         if (!firstUp) firstUp = y - o.y - 1    // blocks above the head to the first solid
@@ -1048,15 +1086,19 @@ function overheadCover() {
         names.add(b.name)
       }
     }
-    if (!cover) return { sky: true }
+    const head = bot.blockAt(o.offset(0, 1, 0))
+    const skyShows = knownToTop || (!!head && head.skyLight === 15 && !STALE_LIGHT.has(lightSection(o.x, o.y + 1, o.z)))
+    if (!cover) return skyShows ? { sky: true } : { sky: false, unseen: true }
     const canopy = [...names].every(n => n.includes('leaves') || n.endsWith('_log') || n.endsWith('_wood'))
-    return { sky: false, canopy, firstUp, cover, topY: topSolidY }
+    return skyShows ? { sky: false, canopy, firstUp, cover, topY: topSolidY } : { sky: false, canopy, firstUp }
   } catch (e) { return null }
 }
 function skyPhrase(oh) {
   if (!oh) return ''
   if (oh.sky) return 'Open sky above. '
+  if (oh.unseen) return 'Overhead unseen. '
   if (oh.canopy) return `Under tree canopy (leaves ${oh.firstUp} up). `
+  if (oh.topY == null) return `UNDERGROUND, rock overhead (first solid ${oh.firstUp} up, unknown past it). `
   return `UNDERGROUND — rock overhead (first solid ${oh.firstUp} up, ~${oh.cover} cover, top ~y${oh.topY}). `
 }
 
@@ -1488,11 +1530,16 @@ let lastAttrib = null            // set by the damage_event wire; read by the hu
 setInterval(() => {
   try {
     lastPosSafe = bot.entity.position.clone()
-    // walked trail feeds the SEEN memory — I have seen where I have stood (fills the fog-of-war map)
-    const o = lastPosSafe.floored()
-    for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -1; dy <= 2; dy++) markSeen(o.x + dx, o.y + dy, o.z + dz)
+    markTrail(lastPosSafe.floored())
   } catch (e) {}
 }, 2000)
+// The walked trail feeds SEEN with the perceived cells of the 7x7x4 box around feet cell o.
+function markTrail (o) {
+  for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -1; dy <= 2; dy++) {
+    const p = new Vec3(o.x + dx, o.y + dy, o.z + dz)
+    if (perceived(p)) markSeen(p.x, p.y, p.z)
+  }
+}
 bot.on('health', async () => {
   try {
     if (bot.health < lastHp - 0.5) {
@@ -2234,7 +2281,7 @@ reflexes.push({
 // LAVA WATCH (07-17, death #3 autopsy: flowing lava advanced into a path that was air at plan
 // time — the pathfinder's plan-time safety cannot see a moving hazard, and the flee latch sprints
 // a committed vector. Body-level veto, priority ABOVE combat: burns kill faster than brawls.
-// Any exposed lava in the near shell = kill goal + controls NOW, back away, tell the pilot.)
+// Perceived lava in the near shell = kill goal + controls NOW, back away, tell the pilot.)
 reflexes.unshift({
   name: 'lava_watch', on: true, active: false, _coolUntil: 0, _hit: null,
   check (bot) {
@@ -2243,8 +2290,9 @@ reflexes.unshift({
       const p = bot.entity.position.floored()
       const V = require('vec3').Vec3
       for (let dx = -2; dx <= 2; dx++) for (let dy = -1; dy <= 2; dy++) for (let dz = -2; dz <= 2; dz++) {
-        const b = bot.blockAt(new V(p.x + dx, p.y + dy, p.z + dz))
-        if (b && b.name === 'lava') {
+        const c = new V(p.x + dx, p.y + dy, p.z + dz)
+        const b = bot.blockAt(c)
+        if (b && b.name === 'lava' && perceived(c)) {
           this._hit = { dx, dz, d: Math.abs(dx) + Math.abs(dz), dir: compass(dx, dz) || 'UNDER ME' }
           return true
         }
@@ -3031,6 +3079,20 @@ function hookTicks () {
 }
 hookTicks()
 
+// The status of the last path_update.
+let lastPathStatus = null
+// One bot.log line per pathfinder event, and per planning for its partial updates.
+function logPathEvents () {
+  bot.on('goal_reached', () => console.log('[path] goal reached'))
+  bot.on('path_update', (r) => {
+    if (r.status !== 'partial' || lastPathStatus !== 'partial') console.log(`[path] update ${r.status}, ${r.path.length} nodes`)
+    lastPathStatus = r.status
+  })
+  bot.on('path_reset', (reason) => console.log(`[path] reset ${reason}`))
+  bot.on('path_stop', () => console.log('[path] stop'))
+}
+logPathEvents()
+
 // maxY is exclusive.
 function worldColumn () {
   return { minY: bot.game.minY, maxY: bot.game.minY + bot.game.height }
@@ -3309,15 +3371,23 @@ app.get('/mine', async (req, res) => {
     const ids = resolveBlockIds(name)
     if (!ids.length) return err(res, new Error(`unknown block: ${name}`))
     let mined = 0
+    // Why the collect stopped short: stalled or budget.
+    let reason = null
     for (let i = 0; i < count; i++) {
       const b = nearestVisible(ids, radius)
       if (!b) break
-      await collectSafely(b)
+      try {
+        await collectSafely(b)
+      } catch (e) {
+        if (!e.reason) throw e
+        reason = e.reason
+        break
+      }
       mined++
     }
     const have = bot.inventory.items().filter(it => it.name.includes(name) || name.includes(it.name))
       .reduce((s, it) => s + it.count, 0)
-    ok(res, { mined, requested: count, inventoryMatching: have })
+    ok(res, { mined, requested: count, inventoryMatching: have, reason })
   } catch (e) { err(res, e) }
 })
 
@@ -3548,13 +3618,23 @@ app.get('/tidy', async (req, res) => {
     const here = bot.entity.position
     todo.sort((a, b) => here.distanceTo(new Vec3(a.x, a.y, a.z)) - here.distanceTo(new Vec3(b.x, b.y, b.z)))
     let reclaimed = 0, alreadyGone = 0, failed = 0
-    for (const p of todo) {
+    // Why the reclaim stopped short: stalled or budget.
+    let reason = null
+    for (const [i, p] of todo.entries()) {
       const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
       if (!b || !scaffold.has(b.name)) { alreadyGone++; continue }  // already gone / not scaffold
       try { await collectSafely(b); reclaimed++ }
-      catch (e) { failed++; navPlaced.push(p) }                     // unreachable now — requeue
+      catch (e) {
+        failed++
+        navPlaced.push(p)                                           // unreachable now — requeue
+        if (e.reason) {
+          reason = e.reason
+          navPlaced.push(...todo.slice(i + 1))
+          break
+        }
+      }
     }
-    ok(res, { reclaimed, alreadyGone, failed, remaining: navPlaced.length })
+    ok(res, { reclaimed, alreadyGone, failed, remaining: navPlaced.length, reason })
   } catch (e) { err(res, e) }
 })
 app.get('/job_stop', (req, res) => { const stopped = jobs.stop(parseInt(req.query.id)); ok(res, { stopped }) })
@@ -5596,7 +5676,7 @@ app.get('/gather', (req, res) => {
           if (!b || !ids.includes(b.type)) { tried.add(key(p)); continue }
           try {
             // approach from a reachable spot, then collect (dig into a face, not a shaft)
-            await bot.pathfinder.goto(new goals.GoalNear(p.x, p.y, p.z, 2))
+            await watchedWork(() => bot.pathfinder.goto(new goals.GoalNear(p.x, p.y, p.z, 2)), stopPath)
           } catch (e) {
             // GUARDRAIL: unreachable candidate -> skip, try next nearest, don't flail
             tried.add(key(p))

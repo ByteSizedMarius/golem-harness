@@ -6,10 +6,10 @@ const { performance } = require('node:perf_hooks')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const walk = require('../lib/walk')
-const { loadBotFunctions, botConstant, startApp } = require('./helpers')
 const { playerNamed, playersAround } = require('../lib/players')
 const { summarizePlan, planRisk } = require('../lib/plan')
 const { legLedger } = require('../lib/legs')
+const { loadBotFunctions, botConstant, startApp, fakeClock } = require('./helpers')
 
 const { UNLOADED, UNKNOWN, standCell, targetKind, resolveTarget, crumbCentre, arrivedAt, watchProgress, walkAttempt, routeDeadline } = walk
 
@@ -31,37 +31,6 @@ function world (columns) {
 }
 
 const cellOf = (v) => v && { x: v.x, y: v.y, z: v.z }
-
-function fakeClock () {
-  let t = 0
-  let seq = 0
-  const timers = new Map()
-  const add = (fn, ms, every) => {
-    timers.set(++seq, { fn, at: t + ms, every: every ? ms : 0 })
-    return seq
-  }
-  return {
-    now: () => t,
-    setInterval: (fn, ms) => add(fn, ms, true),
-    setTimeout: (fn, ms) => add(fn, ms, false),
-    clearInterval: (id) => timers.delete(id),
-    clearTimeout: (id) => timers.delete(id),
-    advance (ms) {
-      const end = t + ms
-      for (;;) {
-        let next = null
-        for (const [id, x] of timers) if (x.at <= end && (!next || x.at < next[1].at)) next = [id, x]
-        if (!next) break
-        const [id, x] = next
-        t = x.at
-        if (x.every) x.at += x.every
-        else timers.delete(id)
-        x.fn()
-      }
-      t = end
-    }
-  }
-}
 
 test('standCell puts a drop resting on its floor block onto the cell above it', () => {
   const blockAt = world({ '0,0': ground(63) })

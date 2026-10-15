@@ -5,7 +5,7 @@ const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
-const { botConstant, loadBotFunctions, runRoute } = require('./helpers')
+const { botConstant, loadBotFunctions, runRoute, reflexIn } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3 }
@@ -130,6 +130,80 @@ test('passages calls a pocket closed only when the bot has seen its walls', () =
   for (let x = -1; x <= 4; x++) for (let y = 63; y <= 66; y++) for (let z = -1; z <= 1; z++) seen.SEEN.add(ck(x, y, z))
   assert.match(runRoute('/passages', { radius: '8' }, seen).summary, /^closed pocket/, 'control: every wall seen')
   assert.strictEqual(runRoute('/passages', { radius: '8' }, room()).summary, 'no exit in sight within 8 blocks')
+})
+
+// env with the blocks at the 'x,y,z' keys of cells in place of its own.
+function withCells (env, cells) {
+  const base = env.bot.blockAt
+  env.bot.blockAt = (p) => {
+    const c = cells[ck(p.x, p.y, p.z)]
+    return c ? { position: new Vec3(p.x, p.y, p.z), skyLight: 0, ...c } : base(p)
+  }
+  return env
+}
+
+const LAVA = { name: 'lava', boundingBox: 'empty', light: 15, metadata: 0 }
+const current = (light) => ({ name: 'water', boundingBox: 'empty', light, metadata: 3 })
+const AIR = { name: 'air', boundingBox: 'empty', light: LIT }
+// An air pocket at 1,64,-2 behind the room's north wall, beside the cell at 2,64,-2.
+const behindWall = (block) => ({ '1,64,-2': AIR, '2,64,-2': block })
+
+test('the lava watch fires on lava in sight, never on lava sealed in rock or behind a wall', () => {
+  const watch = (cells) => {
+    const env = { ...withCells(cave(LIT), cells), require }
+    const r = reflexIn('lava_watch', env)
+    return r.check(env.bot) ? [r._hit.dir, r._hit.d] : null
+  }
+  assert.deepStrictEqual(watch({ '2,64,0': LAVA }), ['E', 2], 'control: lava in the room')
+  assert.strictEqual(watch({ '2,64,-2': LAVA }), null, 'sealed in rock')
+  assert.strictEqual(watch(behindWall(LAVA)), null, 'behind the wall')
+})
+
+test('the current watch fires on a current in lit sight or around the body, never on one behind a wall or in the dark', () => {
+  const watch = (light, cells) => {
+    const env = { ...withCells(cave(light), cells), require }
+    const r = reflexIn('current_watch', env)
+    return r.check(env.bot) ? [r._dir, r._dist] : null
+  }
+  assert.deepStrictEqual(watch(LIT, { '2,64,0': current(LIT) }), ['E', 2], 'control: in lit sight')
+  assert.strictEqual(watch(LIT, behindWall(current(LIT))), null, 'behind the wall')
+  assert.strictEqual(watch(DARK, { '2,64,0': current(DARK) }), null, 'in the dark')
+  assert.deepStrictEqual(watch(DARK, { '0,64,0': current(DARK) }), ['-', 0], 'around the feet in the dark')
+})
+
+// Feet at 0,64,0 in a 2-high hole under stone at y 66..69, open above, at light level light.
+function shaft (light) {
+  return world({ open: (x, y, z) => (x === 0 && z === 0 && (y === 64 || y === 65)) || y >= 70, light: () => light })
+}
+
+test('overhead cover counts and tops the rock only once the sky shows, and gives no height past unseen rock', () => {
+  const cover = (env) => {
+    const { overheadCover, skyPhrase } = loadBotFunctions(['overheadCover', 'skyPhrase'], env)
+    const oh = overheadCover()
+    return [JSON.parse(JSON.stringify(oh)), skyPhrase(oh)]
+  }
+  const seenToSky = shaft(LIT)
+  for (let y = 66; y <= 320; y++) seenToSky.SEEN.add(ck(0, y, 0))
+  assert.deepStrictEqual(cover(seenToSky)[0], { sky: false, canopy: false, firstUp: 1, cover: 4, topY: 69 }, 'control: the column seen to the sky')
+  const [oh, phrase] = cover(shaft(LIT))
+  assert.deepStrictEqual(oh, { sky: false, canopy: false, firstUp: 1 })
+  assert.doesNotMatch(phrase, /cover|top|~y|69|70/)
+  assert.deepStrictEqual(cover(shaft(DARK)), [{ sky: false, unseen: true }, 'Overhead unseen. '])
+  const open = world({ open: (x, y, z) => x === 0 && z === 0 && y >= 64, light: () => LIT, skyLight: () => 15 })
+  assert.deepStrictEqual(cover(open)[0], { sky: true }, 'sky light 15 at the head')
+})
+
+test('the walked trail marks only what the body fills and sees lit, never a cell behind a wall', () => {
+  const trail = (light) => {
+    const env = withCells(cave(light), behindWall(AIR))
+    env.markSeen = (x, y, z) => env.SEEN.add(ck(x, y, z))
+    loadBotFunctions(['markTrail'], env).markTrail(new Vec3(0, 64, 0))
+    return env.SEEN
+  }
+  const lit = trail(LIT)
+  assert.ok(lit.has('3,64,0') && lit.has('2,63,0'), 'control: the room and its floor in sight')
+  assert.ok(!lit.has('2,64,-2') && !lit.has('1,64,-2'), 'the pocket behind the wall')
+  assert.deepStrictEqual([...trail(DARK)].sort(), ['0,64,0', '0,65,0'])
 })
 
 test('gaze names nothing it would see only in total darkness, and says it is too dark', () => {

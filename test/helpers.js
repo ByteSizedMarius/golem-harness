@@ -39,6 +39,38 @@ async function waitFor (cond, ms) {
   return cond()
 }
 
+// A clock whose timers run only in advance(ms), in time order.
+function fakeClock () {
+  let t = 0
+  let seq = 0
+  const timers = new Map()
+  const add = (fn, ms, every) => {
+    timers.set(++seq, { fn, at: t + ms, every: every ? ms : 0 })
+    return seq
+  }
+  return {
+    now: () => t,
+    setInterval: (fn, ms) => add(fn, ms, true),
+    setTimeout: (fn, ms) => add(fn, ms, false),
+    clearInterval: (id) => timers.delete(id),
+    clearTimeout: (id) => timers.delete(id),
+    advance (ms) {
+      const end = t + ms
+      for (;;) {
+        let next = null
+        for (const [id, x] of timers) if (x.at <= end && (!next || x.at < next[1].at)) next = [id, x]
+        if (!next) break
+        const [id, x] = next
+        t = x.at
+        if (x.every) x.at += x.every
+        else timers.delete(id)
+        x.fn()
+      }
+      t = end
+    }
+  }
+}
+
 async function timed (promise, ms) {
   let timer
   const t0 = Date.now()
@@ -571,6 +603,24 @@ function runRoute (route, query, env) {
   return replyOf(res)
 }
 
+// runRoute for a handler that replies after it awaits.
+async function awaitRoute (route, query, env) {
+  const { handle, res } = routeHandler(route, env)
+  await handle({ query }, res)
+  return replyOf(res)
+}
+
+// The bot.js reflex named name, evaluated over env with the bot.js functions it reaches.
+function reflexIn (name, env) {
+  const src = botSource()
+  const at = src.search(new RegExp(`\\bname\\s*:\\s*['"]${name}['"]`))
+  const literal = at < 0 ? '' : balanced(src, src.lastIndexOf('{', at))
+  assert.ok(literal, `the ${name} reflex not found in bot.js`)
+  const called = [...literal.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[1])
+  const names = [...new Set(called)].filter((n) => /^(?:async\s+)?function\b/.test(functionSource(n)))
+  return vm.runInContext(`(${literal})`, loadBotFunctions(names, env))
+}
+
 function bunkerReflexIn (env) {
   const src = botSource()
   const at = src.search(/\bname\s*:\s*['"]bunker['"]/)
@@ -813,14 +863,14 @@ const stoppedBuild = (why) => ({ mode: 'up', at: { x: 0, y: 65, z: 0 }, sealed: 
 
 module.exports = {
   ROOT, ALLOW, UNAUTHORIZED, UNAUTHORIZED_BODY, ILLEGAL, LONE_SURROGATE, HUNG, PORT, MCP_TOKEN,
-  hmac, sha256, newNonce, otherKey, delay, waitFor, timed, proofOver,
+  hmac, sha256, newNonce, otherKey, delay, waitFor, fakeClock, timed, proofOver,
   stripLead, serverCommand, strictCommand, assertNoForeignCommand, assertSafeChunks,
   guardRequest, DUMMY_ROUTES, rawRequest, startApp, stateControl, chatControl, referenceApp,
   rawReply, tickFrom, tickReply, tickOf, chatLine, eventLine, botProcess, missing,
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, functionSource, balanced, botConstant, loadBotFunctions, runRoute, bunkerReflexIn, combatReflexIn,
+  botSource, functionSource, balanced, botConstant, loadBotFunctions, runRoute, awaitRoute, reflexIn, bunkerReflexIn, combatReflexIn,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild
 }
