@@ -10,6 +10,7 @@ const { Vec3 } = require('vec3')
 const { installSecurity, BUNKER_MODES } = require('./lib/install')
 const { classifySound } = require('./lib/sounds')
 const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
+const { UNLOADED, standCell, resolveTarget, crumbCentre, arrivedAt, walkAttempt, routeDeadline } = require('./lib/walk')
 
 const HOST = process.env.MC_HOST || 'localhost'
 const PORT = parseInt(process.env.MC_PORT || '25565')
@@ -265,6 +266,7 @@ bot.once('spawn', () => {
         // and nothing else lets go. Abort the dig and swim — air first, apologies after.
         if (o2 <= 8) {
           try { bot.stopDigging() } catch (e) {}
+          legStops++
           try { bot.pathfinder.setGoal(null) } catch (e) {}
           try {
             bot.setControlState('jump', true)
@@ -603,7 +605,7 @@ const jobs = (() => {
 // ---- WAYPOINT GRAPH (2026-07-12): names that remember their NEIGHBORS. Nodes carry a kind
 // ('place' = durable landmark, 'resource' = PERISHABLE claim — extraction falsifies it, delete on
 // mine-out, doubt by default) and a one-line note. Edges record only REAL walked traversals
-// (auto-linked when a /goto_wp arrives from another waypoint). No routes are cached — the
+// (auto-linked when a /goto to a waypoint arrives from another waypoint). No routes are cached — the
 // pathfinder stays the "how", the graph is just the shape of the known world in ~a dozen lines.
 const waypoints = (() => {
   const FILE = './waypoints.json'
@@ -971,6 +973,10 @@ function nearestVisible(ids, maxDist) {
   const v = findVisible(ids, maxDist, 1)
   return v.length ? bot.blockAt(v[0].pos) : null
 }
+// A cell the bot saw earlier or sees now.
+function cellKnown (p) {
+  return SEEN.has(ck(p.x, p.y, p.z)) || canSeeBlock(p, 64)
+}
 // SENSE tier: blocks exposed to open AIR within range — the 360 ping. Unlike findVisible it does
 // NOT require a clear ray from the eye, so it catches ore a player would find by sweeping their
 // view and rounding this pocket's corners. Still fair: isExposed rejects ore sealed in solid rock.
@@ -1035,13 +1041,11 @@ function floodPassable(b) {
   if (!b) return false                                        // unloaded/unknown = wall, stay honest
   if (b.name.includes('lava')) return false
   if (b.name.includes('door') || b.name.includes('gate')) return true
-  // climbables (07-16): mc-data boxes ladders as solid, so the flood read every ladder shaft as
-  // WALLED and the goto precheck refused descents the planner itself walks fine (found live 07-15
-  // — /come had to smuggle the bot down its own attic ladder). A body passes a ladder cell.
+  // A body passes climbables, though mc-data boxes ladders as solid.
   if (b.name === 'ladder' || b.name === 'scaffolding' || b.name === 'vine' || b.name.includes('vines')) return true
   return blockTransparent(b)
 }
-function airFlood({ seed = null, radius = 24, cap = 15000, targets = null } = {}) {
+function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known = null } = {}) {
   const o = (seed || bot.entity.position).floored()
   let s = o
   if (!floodPassable(bot.blockAt(s))) s = o.offset(0, 1, 0)   // feet cell solid (slab etc.) -> try head
@@ -1049,7 +1053,7 @@ function airFlood({ seed = null, radius = 24, cap = 15000, targets = null } = {}
   const liquid = new Set()
   const queue = [[s.x, s.y, s.z]]
   cells.add(ck(s.x, s.y, s.z))
-  let capped = false, reached = null, qi = 0
+  let capped = false, reached = null, qi = 0, unknown = false
   while (qi < queue.length) {
     const [x, y, z] = queue[qi++]                               // index pointer, not shift() — O(1)
     if (targets && targets.has(ck(x, y, z))) { reached = new Vec3(x, y, z); break }
@@ -1058,7 +1062,9 @@ function airFlood({ seed = null, radius = 24, cap = 15000, targets = null } = {}
       if (Math.max(Math.abs(nx - o.x), Math.abs(ny - o.y), Math.abs(nz - o.z)) > radius) continue
       const k = ck(nx, ny, nz)
       if (cells.has(k)) continue
-      const b = bot.blockAt(new Vec3(nx, ny, nz))
+      const p = new Vec3(nx, ny, nz)
+      if (known && !unknown && !known(p)) unknown = true
+      const b = bot.blockAt(p)
       if (!floodPassable(b)) continue
       cells.add(k)
       if (b.name.includes('water')) liquid.add(k)
@@ -1067,7 +1073,7 @@ function airFlood({ seed = null, radius = 24, cap = 15000, targets = null } = {}
     }
     if (capped) break
   }
-  return { cells, liquid, capped, reached, seed: s }
+  return { cells, liquid, capped, reached, seed: s, unknown }
 }
 
 // ---- reachability pre-check for /goto: a walled goal used to cost the pathfinder its whole ~10s
@@ -1084,13 +1090,15 @@ function airPrecheck(dest, range = 1) {
     const targets = new Set()
     for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) for (let dz = -r; dz <= r; dz++) {
       const p = d0.offset(dx, dy, dz)
+      if (!cellKnown(p)) return { verdict: 'inconclusive', why: 'cells around the goal are unknown' }
       if (floodPassable(bot.blockAt(p))) targets.add(ck(p.x, p.y, p.z))
     }
     if (!targets.size) return { verdict: 'sealed', ms: Date.now() - t0 }
     const span = Math.ceil(bot.entity.position.distanceTo(d0)) + 24
-    const fill = airFlood({ radius: Math.min(span, 64), cap: 15000, targets })
+    const fill = airFlood({ radius: Math.min(span, 64), cap: 15000, targets, known: cellKnown })
     if (fill.reached) return { verdict: 'connected', cells: fill.cells.size, ms: Date.now() - t0 }
     if (fill.capped) return { verdict: 'inconclusive', cells: fill.cells.size, ms: Date.now() - t0 }
+    if (fill.unknown) return { verdict: 'inconclusive', why: 'the flood read unknown cells', cells: fill.cells.size, ms: Date.now() - t0 }
     return { verdict: 'walled', cells: fill.cells.size, ms: Date.now() - t0 }
   } catch (e) { return { verdict: 'inconclusive', why: e.message } }
 }
@@ -1486,6 +1494,7 @@ bot.on('health', async () => {
           emitEvent('hurt', `took ${dmg} damage while building the bunker${attrib ? `, ${attrib.desc}` : ''}, HP ${bot.health}/20`)
         }
       } else if (!attrib) {
+        legStops++
         try { jobs.stopAll() } catch (e) {}
         safeStop()
         try { bot.clearControlStates() } catch (e) {}
@@ -2183,6 +2192,7 @@ reflexes.unshift({
         emitEvent('lava', `LAVA ${h.dir} ~${h.d}, not moving while the bunker is built`)
         return
       }
+      legStops++
       stopPath()                                           // whatever the plan was, it ends here
       const here = bot.entity.position
       if (h.d === 0) {
@@ -2518,39 +2528,48 @@ function entityPerceptible(en, fill) {
   try {
     const p = en.position.floored()
     if (touchesFill(p, fill) || fill.cells.has(ck(p.x, p.y, p.z)) || fill.cells.has(ck(p.x, p.y + 1, p.z))) return true
-    // OPEN-SKY RULE (07-14, the pig blindness): the flood cap (15k cells) fills a cave but
-    // starves on open meadow — surface animals 20 blocks away were reading as "not there."
-    // If BOTH of us stand under open sky, no wall can be between us that matters: perceptible.
-    // Cave/indoor entities still ride the flood gate — the anti-wallhack floor is untouched.
-    const Vec3 = require('vec3').Vec3
-    const skyAbove = (v) => {
-      for (let y = v.y + 1; y <= Math.min(v.y + 48, 320); y++) {
-        const b = bot.blockAt(new Vec3(v.x, y, v.z))
-        if (b && b.boundingBox === 'block') return false
-        if (!b) break
-      }
-      return true
-    }
-    const me = bot.entity.position.floored()
-    if (skyAbove(me) && skyAbove(p)) return true
     // last resort: the eye-ray — sight across caverns/chasms the flood can't afford to fill
     return losClear(bot.entity.position.offset(0, 1.62, 0), en.position.offset(0, 1.0, 0))
-  } catch (e) { return true }
+  } catch (e) { return false }
+}
+// A player's nametag shows through walls within 64 blocks while they neither sneak nor are invisible (shared flag 0x20).
+function nametagVisible (en) {
+  const flags = (en.metadata && en.metadata[0]) || 0
+  return !en.crouching && !(flags & 0x20) && en.position.distanceTo(bot.entity.position) <= 64
 }
 // ---- player locator (07-14, the helmsman's ask: "so we avoid 'where I am' and in case we ever get
 // lost from each-other"). Consented co-op sense: live position when the server tracks them,
 // last-seen breadcrumb (pos + age + heading) when out of range. Breadcrumbs update every 5s.
 const playerCrumbs = Object.create(null)
-setInterval(() => {
+// A crumb's nametag is true when the player was known only by the nametag.
+function recordCrumbs () {
   try {
+    let fill = null
     for (const [name, pl] of Object.entries(bot.players || {})) {
-      if (pl && pl.entity && pl.entity.position && name !== bot.username) {
-        const prev = playerCrumbs[name]
-        playerCrumbs[name] = { pos: pl.entity.position.clone(), t: Date.now(), prev: prev ? { pos: prev.pos, t: prev.t } : null }
-      }
+      const en = pl && pl.entity
+      if (!en || !en.position || name === bot.username) continue
+      const seen = entityPerceptible(en, fill ??= airFlood({ radius: 34, cap: 15000 }))
+      if (!seen && !nametagVisible(en)) continue
+      const prev = playerCrumbs[name]
+      const pos = seen ? en.position.clone() : crumbCentre(en.position)
+      playerCrumbs[name] = { pos, t: Date.now(), nametag: !seen, prev: prev ? { pos: prev.pos, t: prev.t } : null }
     }
   } catch (e) {}
-}, 5000)
+}
+setInterval(recordCrumbs, 5000)
+let crumbDimension = null
+function forgetCrumbsElsewhere () {
+  if (bot.game.dimension === crumbDimension) return
+  crumbDimension = bot.game.dimension
+  for (const name of Object.keys(playerCrumbs)) delete playerCrumbs[name]
+}
+bot.on('game', forgetCrumbsElsewhere)
+function crumbFix (c, me) {
+  const agoSec = Math.round((Date.now() - c.t) / 1000)
+  const bearing = compass(c.pos.x - me.x, c.pos.z - me.z)
+  if (c.nametag) return { agoSec, dist: Math.round(c.pos.distanceTo(me) / 5) * 5, bearing }
+  return { lastSeen: { x: Math.round(c.pos.x), y: Math.round(c.pos.y), z: Math.round(c.pos.z) }, agoSec, dist: +c.pos.distanceTo(me).toFixed(0), bearing }
+}
 // /pathdebug?secs=30 — tap the pathfinder's event stream into bot.log for N seconds.
 // Built 07-14 night for the doors-v2 hunt: stalls with no error and no movement need the
 // planner's own words — path_update statuses and especially path_reset REASONS.
@@ -2743,7 +2762,7 @@ app.get('/where', (req, res) => {
     if (!c) return ok(res, { name, live: false, note: 'never seen this session' })
     let heading = null
     if (c.prev && c.pos.distanceTo(c.prev.pos) > 1) heading = compass(c.pos.x - c.prev.pos.x, c.pos.z - c.prev.pos.z)
-    ok(res, { name, live: false, lastSeen: fmt(c.pos), agoSec: Math.round((Date.now() - c.t) / 1000), dist: +c.pos.distanceTo(me).toFixed(0), bearing: bearing(c.pos), heading })
+    ok(res, { name, live: false, ...crumbFix(c, me), heading })
   } catch (e) { err(res, e) }
 })
 app.get('/entities', (req, res) => {
@@ -2764,9 +2783,6 @@ app.get('/entities', (req, res) => {
   } catch (e) { err(res, e) }
 })
 
-// snapFloor: nudge a straight-line waypoint onto a real standable cell so a staged hop doesn't
-// target a point buried in rock or floating in air (which just thrashes). Scan a few blocks up/down
-// from the interpolated y for the first solid floor, return the air cell right above it.
 // pathfinder.stop() while the pathfinder is IDLE latches a pending stop that silently aborts the
 // NEXT path ("Path was stopped before it could be completed" on a perfectly good goal — the
 // long-mysterious "stale latch"). Only ever stop a pathfinder that actually has a goal or motion.
@@ -2780,141 +2796,202 @@ function stopPath () {
   bot.pathfinder.setGoal(null)
 }
 
-function snapFloor (Vec3, wp) {
-  const fx = Math.floor(wp.x), fz = Math.floor(wp.z), fy = Math.floor(wp.y)
-  for (let dy = 2; dy >= -4; dy--) {
-    const b = bot.blockAt(new Vec3(fx, fy + dy, fz))
-    if (b && b.boundingBox === 'block') return new Vec3(fx, fy + dy + 1, fz)
-  }
-  return new Vec3(fx, fy, fz)
+// maxY is exclusive.
+function worldColumn () {
+  return { minY: bot.game.minY, maxY: bot.game.minY + bot.game.height }
 }
 
-// stagedGoto: the navigation workhorse. Wraps bot.pathfinder.goto with (1) a STALL DETECTOR — if the
-// pathfinder claims it's moving but the bot makes no real progress for ~stallMs, it's wedged (almost
-// always a canDig=false route that would need digging), so we STOP and hand back to the pilot with a
-// clear reason instead of bobbing forever; and (2) AUTO-STAGING — on a "took too long" planning
-// timeout, march toward the goal in ~segLen-block hops (each floor-snapped) so long routes don't die.
-// Returns {arrived, method, reason, hint}. NEVER digs — a blocked route is the pilot's call to make.
-async function stagedGoto (dest, range = 2, { stallMs = 4500, segLen = 18, maxSegs = 16 } = {}) {
-  // stallMs 3000→4500 (07-15): the 3s killer fired BEFORE upstream's 3.5s futility reset could
-  // recover (doors-v2 lesson) — door-opening dances and post-boot chunk lag both read as stalls.
-  const Vec3 = require('vec3').Vec3
-  const moving = () => { try { return bot.pathfinder.isMoving() } catch (e) { return false } }
-  // one guarded goto attempt: resolves {done} | {stalled} | {timeout,reason} | {reason}, and rejects
-  // with BUNKER_WALK when a bunker build began before it or cut it short
-  const guarded = async (gx, gy, gz, grange) => {
-    if (bunker.building) throw new Error(BUNKER_WALK)
-    let stalled = false
-    let last = bot.entity.position.clone(); let lastT = Date.now()
-    const watch = setInterval(() => {
-      const p = bot.entity.position
-      if (p.distanceTo(last) >= 1.0) { last = p.clone(); lastT = Date.now() }
-      else if (Date.now() - lastT > stallMs && moving()) { stalled = true; try { bot.pathfinder.stop() } catch (e) {} }
-    }, 400)
-    try { await bot.pathfinder.goto(new goals.GoalNear(gx, gy, gz, grange)); return { done: true } }
-    catch (e) {
-      if (bunker.building) throw new Error(BUNKER_WALK)
-      if (stalled) return { stalled: true }
-      // "too?" — upstream mineflayer-pathfinder throws the TYPO'd "Took to long to decide path";
-      // matching only the correct spelling silently disabled auto-staging (caught live 07-11)
-      return { timeout: /took too? long|timeout|timed out/i.test(e.message || ''), stopped: /stopped before/i.test(e.message || ''), reason: (e.message || '').slice(0, 60) }
-    } finally { clearInterval(watch) }
+// What resolveTarget reads, gated by what the bot perceives.
+function walkSources () {
+  let fill = null
+  return {
+    blockAt: (p) => bot.blockAt(p),
+    column: worldColumn(),
+    waypoint: (name) => waypoints.get(name),
+    player: (name) => (bot.players[name] && bot.players[name].entity) || null,
+    crumb: (name) => {
+      const c = playerCrumbs[name]
+      return c ? { pos: c.pos, nametag: c.nametag, agoSec: Math.round((Date.now() - c.t) / 1000) } : null
+    },
+    known: (en) => entityPerceptible(en, fill ??= airFlood({ radius: 34, cap: 15000 })),
+    nametag: nametagVisible,
+    visibleBlock: (name) => nearestVisible(resolveBlockIds(name), 64),
+    cellKnown
   }
+}
 
-  const near = () => bot.entity.position.distanceTo(dest) <= range + 1.5
-  const stallBail = () => ({ arrived: false, reason: `stalled — no progress for ${stallMs / 1000}s`, hint: 'goal is likely unreachable without digging; decide if it is worth a /dig_stair or /dig_tunnel, or pick a reachable point' })
+const WALK_HINTS = {
+  'no-path': 'the goal is walled off for a walker (canDig=false), reachable only by digging. Decide if a /dig_stair or /dig_tunnel is worth it, or pick an open point',
+  walled: 'reachable only by digging. Decide if a /dig_stair or /dig_tunnel is worth it, or pick an open point',
+  sealed: 'pick an open cell, or carve to it deliberately with /dig_stair or /dig_tunnel, your call',
+  stalled: 'goal is likely unreachable without digging. Decide if it is worth a /dig_stair or /dig_tunnel, or pick a reachable point',
+  'not-reached': 'call /goto again, or pick a reachable point',
+  stopped: 'check /jobs, wait a beat, try again',
+  bunker: BUNKER_WALK,
+  'boxed-in': 'dig out deliberately (/dig_stair toward open space), the pathfinder cannot help from here',
+  'no-floor': 'nothing to stand on in that column, pick another point',
+  budget: 'try again to continue, or shorten the goal'
+}
+// The reply reason for each way a walk attempt ends short of the goal.
+const WALK_FAILED = { done: 'not-reached', emptied: 'not-reached', stalled: 'stalled', 'no-path': 'no-path', timeout: 'no-path', stopped: 'stopped' }
 
-  // self-trapped? a canDig=false walker with NO legal first move gets a cryptic "Path was stopped"
-  // from the pathfinder — say the real thing (the helmsman had to be my eyes for this once; never again)
-  if (!hasLegalMove()) return { arrived: false, reason: 'no legal walker move exists from where I stand — boxed in (did I dig around my own feet?)', hint: 'dig out deliberately (/dig_stair toward open space); the pathfinder cannot help from here' }
+function walkReply (r, reason) {
+  const me = bot.entity.position
+  const reply = { arrived: !reason, kind: r.kind, target: r.target, pos: round(me), dist: null, reason: reason || null, hint: (reason && WALK_HINTS[reason]) || null }
+  if (r.agoSec !== undefined) reply.agoSec = r.agoSec
+  const aim = r.cell ? { x: r.cell.x + 0.5, z: r.cell.z + 0.5 } : r.toward
+  if (!aim) return reply
+  const dist = Math.hypot(aim.x - me.x, aim.z - me.z)
+  if (!r.nametag) return { ...reply, dist: +dist.toFixed(1) }
+  return { ...reply, dist: Math.round(dist / 5) * 5, bearing: compass(aim.x - me.x, aim.z - me.z) }
+}
 
-  // reachability PRE-CHECK: a walled goal used to burn the pathfinder's whole ~10s search before it
-  // said "no path" — the air flood-fill answers "does an air path even EXIST?" in ~ms. Conservative:
-  // only 'sealed'/'walled' bail here; 'connected'/'inconclusive' still go to the pathfinder, which
-  // owns real walkability (climbs, drops, gaps). Same hard handoff as ever: NO auto-dig.
-  const pre = airPrecheck(dest, range)
-  if (pre.verdict === 'sealed') return { arrived: false, reason: 'goal is sealed inside solid rock (no open cell within range of it)', hint: 'pick an open cell, or carve to it deliberately — /dig_stair or /dig_tunnel, your call' }
-  if (pre.verdict === 'walled') return { arrived: false, reason: `walled off — no air path connects here to the goal (checked ${pre.cells} cells in ${pre.ms}ms)`, hint: 'reachable only by digging; decide if a /dig_stair or /dig_tunnel is worth it, or pick an open point' }
-  const noPathHint = (reason) => /no path/i.test(reason || '') ? 'the goal is walled off for a walker (canDig=false) — reachable only by digging; decide if a /dig_stair or /dig_tunnel is worth it, or pick an open point' : undefined
+// Each bump ends every walk route begun before it.
+let legStops = 0
 
-  let r = await guarded(dest.x, dest.y, dest.z, range)                // direct attempt
-  // a 'done' that DIDN'T actually arrive = a stale goal_reached latch (seen right after /unfollow —
-  // the pilot-handoff path). Don't trust a bare 'done'; verify arrival and retry once cleanly.
-  if (r.done && !near()) { safeStop(); await new Promise(rz => setTimeout(rz, 150)); r = await guarded(dest.x, dest.y, dest.z, range) }
-  if (r.done && near()) return { arrived: true, method: 'direct' }
-  // the pathfinder often walks a good partial path before its plan dies — if that already carried
-  // us within range, that IS arrival; don't report a failure from beside the goal
-  if (near()) return { arrived: true, method: 'partial' }
-  if (r.stalled) {                                  // THE WEDGE DRILL, AUTOMATED (07-15, the helmsman's ask):
-    await new Promise(rz => setTimeout(rz, 700))    // manual "/stop then retry" cleared every wedge
-    // stalled NEXT TO a door/gate = the diagonal-through-the-jamb failure — do the helmsman's maneuver
-    // (square up, commit straight through) before asking the pathfinder to try again
-    let crossed = false
-    try { crossed = await doorwayCommit() } catch (e) { console.log('[doorway] commit failed: ' + e.message) }
-    r = await guarded(dest.x, dest.y, dest.z, range) // for 3 sessions — the body does the drill itself
-    if (r.done && near()) return { arrived: true, method: crossed ? 'doorway-commit' : 'retry-after-stall' }
-    if (near()) return { arrived: true, method: 'partial' }
-    if (r.stalled) return stallBail()               // stalled TWICE = genuinely blocked, say so
-  }                                                 // other retry outcomes fall through the ladder below
-  if (r.stopped) {                                  // stopped EXTERNALLY (a just-finished /collect,
-    await new Promise(rz => setTimeout(rz, 350))    // a plugin's internal stop) — one clean retry
-    r = await guarded(dest.x, dest.y, dest.z, range)
-    if (r.done && near()) return { arrived: true, method: 'retry-after-stop' }
-    if (r.stalled) return stallBail()
-    if (r.stopped) return { arrived: false, reason: 'something external keeps stopping the pathfinder (often a just-finished /collect or a running job)', hint: 'check /jobs, wait a beat, try again' }
+function walkRoute () {
+  const gen = legStops
+  const route = { goal: null, taken: false }
+  const onGoal = (g) => { if (g && g !== route.goal) route.taken = true }
+  const deadline = routeDeadline({ onExpire: () => releaseGoal(route) })
+  bot.on('goal_updated', onGoal)
+  route.expired = deadline.expired
+  route.left = deadline.left
+  route.stopped = () => route.taken || legStops !== gen
+  route.end = () => {
+    deadline.cancel()
+    bot.removeListener('goal_updated', onGoal)
+    releaseGoal(route)
   }
-  if (r.done && !near()) return { arrived: false, reason: 'pathfinder said done but the bot did not move (stale goal state)', hint: 'just call /goto again — the stale latch clears after one attempt' }
-  if (!r.timeout) return { arrived: false, reason: r.reason || 'no path', hint: noPathHint(r.reason) }   // hard blocked / bad goal
+  return route
+}
 
-  // planning timed out → segmented march toward the goal, ~segLen blocks per hop
-  for (let i = 0; i < maxSegs; i++) {
-    const cur = bot.entity.position
-    const remaining = cur.distanceTo(dest)
-    if (remaining <= range + 1) return { arrived: true, method: 'staged' }
-    const t = Math.min(1, segLen / remaining)
-    const wp = snapFloor(Vec3, new Vec3(cur.x + (dest.x - cur.x) * t, cur.y + (dest.y - cur.y) * t, cur.z + (dest.z - cur.z) * t))
-    const before = cur.clone()
-    const sr = await guarded(wp.x, wp.y, wp.z, 2)
-    if (sr.stalled) return { arrived: false, reason: `stalled mid-route (~${Math.round(remaining)} blocks out)`, hint: 'the way is blocked / needs digging — your call whether to carve it' }
-    if (bot.entity.position.distanceTo(before) < 1) return { arrived: false, reason: 'a staged hop made no progress — route blocked', hint: 'manual nav or a deliberate dig needed here' }
+// Clears the route's own goal, never one someone else set.
+function releaseGoal (route) {
+  if (route.goal && bot.pathfinder.goal === route.goal) stopPath()
+}
+
+// Why the route is over, or null.
+function routeEnd (route) {
+  if (bunker.building) return 'bunker'
+  if (route.expired()) return 'budget'
+  if (route.stopped()) return 'stopped'
+  return null
+}
+
+function pause (route, ms) {
+  return new Promise(resolve => setTimeout(resolve, Math.min(ms, route.left())))
+}
+
+async function walkOnce (goal, route, stallMs) {
+  if (routeEnd(route)) return routeEnd(route)
+  route.goal = goal
+  const how = await walkAttempt(bot, goal, { stallMs, thinkTimeout: bot.pathfinder.thinkTimeout })
+  if (how === 'changed') route.taken = true
+  if (routeEnd(route)) return routeEnd(route)
+  if (['stalled', 'timeout', 'no-path', 'emptied'].includes(how)) releaseGoal(route)
+  return how
+}
+
+// Returns null after a block of progress, else why it made none or why the route ended.
+async function hopToward (dest, route, { stallMs, segLen }) {
+  const from = bot.entity.position.clone()
+  const dx = dest.x - from.x
+  const dz = dest.z - from.z
+  const t = Math.min(1, segLen / Math.max(Math.hypot(dx, dz), 1e-6))
+  const hx = from.x + dx * t
+  const hz = from.z + dz * t
+  const hy = dest.y == null ? from.y : from.y + (dest.y - from.y) * t
+  const cell = standCell((p) => bot.blockAt(p), hx, hz, hy, worldColumn())
+  const goal = cell && cell !== UNLOADED ? new goals.GoalNear(cell.x, cell.y, cell.z, 2) : new goals.GoalNearXZ(hx, hz, 2)
+  const how = await walkOnce(goal, route, stallMs)
+  if (routeEnd(route)) return routeEnd(route)
+  if (how === 'stopped') return 'stopped'
+  if (bot.entity.position.distanceTo(from) >= 1) return null
+  return how === 'no-path' ? 'no-path' : 'stalled'
+}
+
+function flatTo (p) {
+  return Math.hypot(p.x - bot.entity.position.x, p.z - bot.entity.position.z)
+}
+
+async function drillDoorway (route) {
+  await pause(route, 700)
+  try { await doorwayCommit(route) } catch (e) { console.log('[doorway] commit failed: ' + e.message) }
+}
+
+// Hops toward a target it cannot resolve yet, then walks onto it, retrying a path stop, a stall and a planning timeout once each.
+async function stagedGoto (q, route, { stallMs = 4500, segLen = 18 } = {}) {
+  const opts = { stallMs, segLen }
+  if (q.block !== undefined && !resolveBlockIds(q.block).length) return walkReply({ kind: 'block', target: { block: q.block } }, 'unknown')
+  let r = resolveTarget(q, walkSources())
+  if (r.reason) return walkReply(r, r.reason)
+  if (!hasLegalMove()) return walkReply(r, 'boxed-in')
+  // A stalled hop gets the doorway drill again once the bot has moved a block since the last one.
+  let drilledAt = null
+  while (r.toward) {
+    if (flatTo(r.toward) <= 2) return walkReply(r, 'no-floor')
+    const stop = await hopToward(r.toward, route, opts)
+    if (stop === 'stalled' && !(drilledAt && bot.entity.position.distanceTo(drilledAt) < 1)) {
+      drilledAt = bot.entity.position.clone()
+      await drillDoorway(route)
+    } else if (stop) return walkReply(r, stop)
+    r = resolveTarget(q, walkSources())
+    if (r.reason) return walkReply(r, r.reason)
   }
-  return { arrived: false, reason: 'used the whole segment budget without arriving', hint: 'try again to continue, or shorten the goal' }
+  // A nametag target's cell is unseen.
+  if (!r.nametag) {
+    const pre = airPrecheck(r.cell, q.range ?? 0)
+    if (pre.verdict === 'sealed' || pre.verdict === 'walled') return walkReply(r, pre.verdict)
+  }
+  let retried = false
+  let drilled = false
+  let marched = false
+  for (;;) {
+    const how = await walkOnce(r.goal, route, stallMs)
+    if (routeEnd(route)) return walkReply(r, routeEnd(route))
+    if (arrivedAt(r.goal, bot.entity.position)) return walkReply(r, null)
+    if ((how === 'stopped' || how === 'done') && !retried) {
+      retried = true
+      await pause(route, 350)
+    } else if (how === 'stalled' && !drilled) {
+      drilled = true
+      await drillDoorway(route)
+    } else if (how === 'timeout' && !marched) {
+      marched = true
+      while (flatTo({ x: r.cell.x + 0.5, z: r.cell.z + 0.5 }) > 2) {
+        const stop = await hopToward(r.cell, route, opts)
+        if (stop) return walkReply(r, stop)
+      }
+    } else return walkReply(r, WALK_FAILED[how])
+  }
+}
+
+// Keeps only the target forms the pilot may name, never drop.
+function gotoQuery (query) {
+  const q = {}
+  for (const k of ['x', 'y', 'z']) if (query[k] !== undefined) q[k] = parseFloat(query[k])
+  for (const k of ['waypoint', 'player', 'block']) if (query[k] !== undefined) q[k] = query[k]
+  if (query.range !== undefined) q.range = parseInt(query.range)
+  return q
 }
 
 app.get('/goto', async (req, res) => {
   try {
-    if (bunker.building) return err(res, new Error(BUNKER_WALK))
-    const Vec3 = require('vec3').Vec3
-    const x = parseFloat(req.query.x), y = parseFloat(req.query.y), z = parseFloat(req.query.z)
-    if (![x, y, z].every(Number.isFinite)) return err(res, new Error('x, y, z required'))
-    const range = parseInt(req.query.range || '1')
-    claimLane('goto', 300000)                     // soft lane: my legs, my walk (07-21)
-    const r = await stagedGoto(new Vec3(x, y, z), range)
-    if (!r.arrived) { safeStop(); try { bot.clearControlStates() } catch (e) {} }  // leave a clean stop so the bot doesn't drift on a give-up
-    ok(res, { arrived: r.arrived, method: r.method || null, reason: r.reason || null, hint: r.hint || null, pos: round(bot.entity.position) })
-  } catch (e) { err(res, e) } finally { releaseLane() }
-})
-
-app.get('/come', async (req, res) => {
-  try {
     if (!ready) return err(res, new Error('not ready'))
     if (bunker.building) return err(res, new Error(BUNKER_WALK))
-    const range = parseInt(req.query.range || '2')
-    // PLAYERS first (07-14): "/come?name=<player>" used to fail — this verb only ever
-    // knew blocks. Live entity if tracked, else the last-seen breadcrumb from /where.
-    const who = req.query.name && bot.players && bot.players[req.query.name]
-    claimLane('come', 60000)                       // soft lane (07-21): the assault's "goal was
-    if (who || playerCrumbs[req.query.name]) {     // changed" x10 was the reflex stealing THIS verb
-      const target = (who && who.entity && who.entity.position) || (playerCrumbs[req.query.name] && playerCrumbs[req.query.name].pos)
-      if (!target) return err(res, new Error(`${req.query.name} is online but never seen — no position to walk to`))
-      await bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, range))
-      return ok(res, { reached: round(target), pos: round(bot.entity.position), player: req.query.name })
+    const q = gotoQuery(req.query)
+    if (['x', 'y', 'z'].some(k => k in q && !Number.isFinite(q[k]))) return err(res, new Error('x, y and z must be numbers'))
+    claimLane('goto', 300000)
+    const route = walkRoute()
+    let r
+    try { r = await stagedGoto(q, route) } finally { route.end() }
+    if (r.arrived && q.waypoint !== undefined) {
+      if (lastWaypoint && lastWaypoint !== q.waypoint) waypoints.link(lastWaypoint, q.waypoint)
+      lastWaypoint = q.waypoint
+      journal('goto', 'went to ' + q.waypoint)
     }
-    const ids = resolveBlockIds(req.query.name)
-    const b = nearestVisible(ids, parseInt(req.query.radius || '64'))
-    if (!b) return err(res, new Error(`no visible ${req.query.name} found`))
-    await bot.pathfinder.goto(new goals.GoalNear(b.position.x, b.position.y, b.position.z, range))
-    ok(res, { reached: round(b.position), pos: round(bot.entity.position) })
+    ok(res, r)
   } catch (e) { err(res, e) } finally { releaseLane() }
 })
 
@@ -2938,17 +3015,53 @@ app.get('/mine', async (req, res) => {
   } catch (e) { err(res, e) }
 })
 
+function itemCounts () {
+  const counts = {}
+  for (const it of bot.inventory.items()) counts[it.name] = (counts[it.name] || 0) + it.count
+  return counts
+}
+
+function nearestDrop (radius, skip) {
+  const here = bot.entity.position
+  const fill = airFlood({ radius: Math.min(radius + 4, 34), cap: 15000 })
+  return Object.values(bot.entities)
+    .filter(e => e.name === 'item' && e.position && !skip.has(e.id) && e.position.distanceTo(here) <= radius && entityPerceptible(e, fill))
+    .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0] || null
+}
+
+async function collectDrops (radius, route) {
+  const skip = new Set()
+  const missed = []
+  for (;;) {
+    if (routeEnd(route)) return { missed, reason: routeEnd(route) }
+    const drop = nearestDrop(radius, skip)
+    if (!drop) return { missed, reason: null }
+    const r = await stagedGoto({ drop }, route)
+    if (r.reason === 'stopped') return { missed, reason: 'stopped' }
+    // A pickup lands a few ticks after the arrival.
+    for (let i = 0; i < 10 && bot.entities[drop.id] && !routeEnd(route); i++) await bot.waitForTicks(2)
+    if (!bot.entities[drop.id] || routeEnd(route)) continue
+    skip.add(drop.id)
+    const item = drop.getDroppedItem && drop.getDroppedItem()
+    missed.push({ item: item ? item.name : 'item', pos: round(drop.position), reason: r.reason || 'not-picked-up' })
+  }
+}
+
 app.get('/collect', async (req, res) => {
   try {
+    if (!ready) return err(res, new Error('not ready'))
+    if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const radius = parseInt(req.query.radius || '16')
-    const here = bot.entity.position
-    const drops = Object.values(bot.entities).filter(e => e.name === 'item' && e.position.distanceTo(here) <= radius)
-    let got = 0
-    for (const d of drops) {
-      try { await bot.pathfinder.goto(new goals.GoalNear(d.position.x, d.position.y, d.position.z, 1)); got++ } catch {}
-    }
-    ok(res, { walkedTo: got })
-  } catch (e) { err(res, e) }
+    claimLane('collect', 300000)
+    const before = itemCounts()
+    const route = walkRoute()
+    let done
+    try { done = await collectDrops(radius, route) } finally { route.end() }
+    const now = itemCounts()
+    const picked = {}
+    for (const [name, n] of Object.entries(now)) if (n > (before[name] || 0)) picked[name] = n - (before[name] || 0)
+    ok(res, { picked, missed: done.missed, reason: done.reason })
+  } catch (e) { err(res, e) } finally { releaseLane() }
 })
 
 app.get('/craft', async (req, res) => {
@@ -3101,7 +3214,7 @@ app.get('/chatlog', (req, res) => {
   const since = parseInt(req.query.since || '0')
   ok(res, { cursor: chatSeq, messages: chatLog.filter(m => m.id > since) })
 })
-app.get('/stop', (req, res) => { bunker.stop = 'stopped by the pilot'; try { stopFollow() } catch {} ; safeStop(); try { bot.clearControlStates() } catch {} ; releaseLane(); const jobsCancelled = jobs.stopAll(); ok(res, { stopped: true, jobsCancelled }) })
+app.get('/stop', (req, res) => { bunker.stop = 'stopped by the pilot'; legStops++; try { stopFollow() } catch {} ; stopPath(); try { bot.clearControlStates() } catch {} ; releaseLane(); const jobsCancelled = jobs.stopAll(); ok(res, { stopped: true, jobsCancelled }) })
 
 // GET /brace?sec=N : the PILOT-HOLD (07-21 debrief — the bounded version of switching the
 // combat reflex off to cross a room). For N seconds (cap 30) the legs answer no discretionary
@@ -3867,29 +3980,6 @@ app.get('/waypoints', (req, res) => {
     if (req.query.verbose) return ok(res, { count: names.length, graph, waypoints: all })
     return ok(res, { count: names.length, graph, names })
   } catch (e) { err(res, e) }
-})
-
-// GET /goto_wp?name=&range= -> look up a waypoint, pathfind to it (GoalNear)
-app.get('/goto_wp', async (req, res) => {
-  try {
-    if (bunker.building) return err(res, new Error(BUNKER_WALK))
-    const name = req.query.name
-    if (!name) return err(res, new Error('name required'))
-    const wp = waypoints.get(name)
-    if (!wp) return err(res, new Error('unknown waypoint: ' + name))
-    const range = parseInt(req.query.range || '1')
-    const Vec3v = require('vec3').Vec3
-    claimLane('goto_wp', 120000)                   // soft lane: my legs, my walk (07-21)
-    const r = await stagedGoto(new Vec3v(wp.x, wp.y, wp.z), range)   // full staged-goto smarts (07-12)
-    if (!r.arrived) {
-      safeStop(); try { bot.clearControlStates() } catch (e) {}
-      return ok(res, { arrived: false, reason: r.reason || null, hint: r.hint || null, target: wp, pos: round(bot.entity.position) })
-    }
-    if (lastWaypoint && lastWaypoint !== name) waypoints.link(lastWaypoint, name)   // a real walked edge
-    lastWaypoint = name
-    journal('goto_wp', 'went to ' + name)
-    return ok(res, { arrived: name, method: r.method || null, target: wp, pos: round(bot.entity.position) })
-  } catch (e) { err(res, e) } finally { releaseLane() }
 })
 
 // GET /journal?n= -> return the last ~30 (or n) journal lines
@@ -5141,16 +5231,17 @@ app.get('/gather', (req, res) => {
 // advancing a fresh tunnel face. So we face the target and hold forward (+ jump when climbing),
 // polling until the bot is actually in the cell and grounded. The undug wall beyond stops overshoot.
 // climbing=true → ascending (mount +1); false → level/descending (walk or fall into the cell).
-async function nudgeInto (target, climbing, timeoutMs = 3000) {
+async function nudgeInto (target, climbing, timeoutMs = 3000, route = null) {
   // A bunker build owns the control states, also one that began mid-nudge.
-  if (bunker.building) return false
+  const cut = () => (route ? routeEnd(route) : bunker.building)
+  if (cut()) return false
   const Vec3 = require('vec3').Vec3
   try {
     await bot.lookAt(new Vec3(target.x + 0.5, target.y + 0.5, target.z + 0.5), true)
     bot.setControlState('forward', true)
     if (climbing) bot.setControlState('jump', true)
     const t0 = Date.now()
-    while (Date.now() - t0 < timeoutMs && !bunker.building) {
+    while (Date.now() - t0 < timeoutMs && !cut()) {
       await new Promise(r => setTimeout(r, 60))
       const p = bot.entity.position.floored()
       const yOk = climbing ? p.y >= target.y : p.y <= target.y
@@ -5160,6 +5251,7 @@ async function nudgeInto (target, climbing, timeoutMs = 3000) {
       if (p.x === target.x && p.z === target.z && yOk) break
     }
   } finally { if (!bunker.building) { bot.setControlState('forward', false); bot.setControlState('jump', false) } }
+  if (route && routeEnd(route)) return false
   await new Promise(r => setTimeout(r, 250))   // let physics settle (land + shed momentum), then verify
   const p = bot.entity.position.floored()
   return (p.x === target.x && p.z === target.z && Math.abs(p.y - target.y) <= 1)
@@ -5173,8 +5265,9 @@ async function nudgeInto (target, climbing, timeoutMs = 3000) {
 // collision SHAPE decides, not the open flag — a sideways-placed door is walkable CLOSED and a
 // wall OPEN), then nudgeInto the door cell and the cell beyond — two dead-straight committed
 // steps, no pathfinder, no diagonal. Returns true if we ended up through; caller resumes route.
-async function doorwayCommit () {
-  if (bunker.building) return false
+async function doorwayCommit (route = null) {
+  const cut = () => (route ? routeEnd(route) : bunker.building)
+  if (cut()) return false
   const Vec3 = require('vec3').Vec3
   const me = bot.entity.position.floored()
   // nearest door/gate within ~3.5 — check the walk plane and one up (upper door half)
@@ -5193,10 +5286,14 @@ async function doorwayCommit () {
   console.log(`[doorway] commit via ${found.name} at ${D} axis=${xT ? 'x' : 'z'} near=${nearC} far=${farC}`)
   // 1. square up on the near cell (a plain non-door walk; pathfinder is fine at this)
   if (!(me.x === nearC.x && me.z === nearC.z)) {
-    try { await bot.pathfinder.goto(new goals.GoalBlock(nearC.x, nearC.y, nearC.z)) }
-    catch (e) { const p = bot.entity.position.floored(); if (p.x !== nearC.x || p.z !== nearC.z) { console.log('[doorway] could not square up: ' + (e.message || '').slice(0, 50)); return false } }
+    const goal = new goals.GoalBlock(nearC.x, nearC.y, nearC.z)
+    const how = route ? await walkOnce(goal, route, 4500) : await walkAttempt(bot, goal, { stallMs: 4500, thinkTimeout: bot.pathfinder.thinkTimeout })
+    if (cut() || how === 'changed') return false
+    if (bot.pathfinder.goal === goal) stopPath()
+    const p = bot.entity.position.floored()
+    if (p.x !== nearC.x || p.z !== nearC.z) { console.log('[doorway] could not square up: ' + how); return false }
   }
-  if (bunker.building) return false
+  if (cut()) return false
   // 2. does the panel actually block the straight line? collision shapes decide; open-flag fallback
   const fresh = bot.blockAt(D)
   let blocked
@@ -5207,9 +5304,11 @@ async function doorwayCommit () {
   } catch (e) { blocked = !((fresh.getProperties() || {}).open) }
   console.log(`[doorway] panel blocked=${blocked} shapes=${JSON.stringify(fresh && fresh.shapes)}`)
   if (blocked) { try { await bot.activateBlock(fresh) } catch (e) {} ; await bot.waitForTicks(3) }
+  if (cut()) return false
   // 3. the committed straight walk: door cell, then the cell beyond — no turning mid-threshold
-  if (!await nudgeInto(D, false)) { console.log('[doorway] stuck entering the threshold') ; return false }
-  if (!await nudgeInto(farC, false)) { console.log('[doorway] crossed the door cell but not beyond') ; return false }
+  if (!await nudgeInto(D, false, 3000, route)) { console.log('[doorway] stuck entering the threshold') ; return false }
+  if (cut()) return false
+  if (!await nudgeInto(farC, false, 3000, route)) { console.log('[doorway] crossed the door cell but not beyond') ; return false }
   console.log('[doorway] through clean')
   return true
 }

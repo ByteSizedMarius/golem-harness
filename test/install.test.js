@@ -220,11 +220,11 @@ test('a waypoint note of 200 units passes, 201 units or a control character gets
   assert.strictEqual(s.routeHits('/waypoint').length, 1)
 })
 
-test('/goto_wp names outside the waypoint charset get 400', async (t) => {
+test('/goto waypoint names outside the waypoint charset get 400', async (t) => {
   const s = await startApp(t)
-  assert.strictEqual((await s.get('/goto_wp?name=ok_name')).status, 200)
-  assert.strictEqual((await s.get('/goto_wp?name=' + enc('../x'))).status, 400)
-  assert.strictEqual(s.routeHits('/goto_wp').length, 1)
+  assert.strictEqual((await s.get('/goto?waypoint=ok_name')).status, 200)
+  assert.strictEqual((await s.get('/goto?waypoint=' + enc('../x'))).status, 400)
+  assert.strictEqual(s.routeHits('/goto').length, 1)
 })
 
 // ---- /sign text and /rename name ----

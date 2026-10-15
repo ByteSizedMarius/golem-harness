@@ -6,6 +6,33 @@ the point, not just the diff. Dates are play-sessions, not releases. Full commit
 carry more detail (`git log`). The pilot's text (`DRIVING.md`, `manual/`) states the rules
 and leaves the stories here.
 
+## 2026-10-15: one goto, and arrival means standing there
+
+A scenario suite that walks onto exact cells could not pass: `range=0` at a drop's own y
+answered "No path to the goal!" (the floored y is the floor block), range 1 stopped a cell
+short of the pickup reach, `/collect` walked to nothing, a closed fence gate hung `/goto`
+19 times out of 19, and "arrived" allowed range + 1.5 blocks. The owner's question settled
+it: "why does the bot have to give a height anyways?"
+
+- `/goto` takes exactly one target: `x`,`z` with an optional `y`, `waypoint`, `player` or
+  `block`. Without `y` it stands on the column's surface, with `y` on the floor nearest it.
+  `range` 0 (the default) stands on the cell. `/come` and `/goto_wp` are gone.
+- Arrival is the pathfinder's own test after the walk, and the reply names one reason when
+  it is not: `no-path`, `walled`, `sealed`, `stalled`, `not-reached`, `stopped`, `bunker`,
+  `boxed-in`, `unseen`, `unknown`, `no-floor` or `budget`.
+- A walk ends when the feet make no block of progress for 4.5 s, whatever `isMoving()`
+  claims. Planning time counts against the think timeout, not the stall clock. The path
+  that empties beside a closed gate now ends as a stall and runs the doorway drill.
+- One route deadline of 280 s covers every attempt, retry and drill.
+- Terrain the bot has not seen gets walked and reported, never answered up front.
+- A player is walked to where the bot sees them, else toward their nametag (not sneaking,
+  within 64 blocks, the reply gives a bearing and a rough distance), else to where they
+  were last seen.
+- `/collect` walks onto each drop it perceives, nearest first, and reports what it picked
+  up and what it could not reach.
+- An entity under open sky is perceptible only with a clear eye ray, and an error in the
+  check now hides the entity instead of showing it.
+
 ## 2026-07-25 — the glass skin rises; the walls verb forgets to eat
 
 Autonomy session ("I'll leave it all in your hands"): 18 logs from a helmsman-led

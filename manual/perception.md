@@ -1,10 +1,10 @@
 # Perception
 
-You perceive the world only through what the tools say. The usual failure is acting blind: `mine(name: "stone")` with no stone nearby, or `goto` to a coordinate you made up. Look first, then move.
+You perceive the world only through what the tools say. The usual failure is acting blind: `mine(name: "stone")` with no stone nearby, or `goto` to a coordinate you made up. Look first, then move. A `goto` toward ground you have not seen walks there first and reports what it found.
 
 ## No x-ray
 
-A block shows only when a player standing where you stand could see it: exposed to air on at least one face and on an unobstructed ray from your eyes. `find`, `come`, `mine`, `gather` and the resource hints of `scene` all follow this. Ore buried in solid stone returns nothing until you expose it by mining toward it. Ore in a cave wall, a vein a cliff has sheared open, trees and surface blocks all show.
+A block shows only when a player standing where you stand could see it: exposed to air on at least one face and on an unobstructed ray from your eyes. `find`, `goto` to a block, `mine`, `gather` and the resource hints of `scene` all follow this. Ore buried in solid stone returns nothing until you expose it by mining toward it. Ore in a cave wall, a vein a cliff has sheared open, trees and surface blocks all show.
 
 ## Three tiers of knowing
 

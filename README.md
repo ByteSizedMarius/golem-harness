@@ -115,7 +115,7 @@ history of the bot's attention.
 **`waypoints.json` — a knowledge graph of places that matter.** Nodes are named places with a kind
 (`place` = durable landmark; `resource` = *perishable claim* — extraction falsifies it, delete on
 mine-out) and a one-line note. Edges are **proofs of traversal**: they are minted only when the bot
-verifiably walks from one waypoint to another (`/goto_wp` arrival), date-stamped, and the
+verifiably walks from one waypoint to another (a `/goto` arrival at a waypoint), date-stamped, and the
 last-stood-at pointer resets on every restart so a false edge can never exist. No routes are cached —
 the pathfinder re-solves "how" fresh every time; the graph stores only the shape of the known world.
 Nine places and their walked connections currently fit in ~2 KB of readable JSON.
@@ -171,10 +171,10 @@ The pilot arrives seconds later as the strategist; the spine holds the line unti
 
 ## Control is two gears
 
-**Tier 1 (default):** the pilot reads the landmark map, states an intent (`/goto_wp home`,
+**Tier 1 (default):** the pilot reads the landmark map, states an intent (`/goto?waypoint=home`,
 `/gather?resource=birch_log&amount=18`), and the bot self-drives the details — staged travel with stall
-detection, arrival verification, and honest hand-backs ("walled off for a walker — decide if a dig is
-worth it") instead of silent failure. **Tier 2 (on any hiccup):** the pilot takes the wheel with fine
+detection, arrival verification, and honest hand-backs (`walled`, with the hint to decide whether a dig
+is worth it) instead of silent failure. **Tier 2 (on any hiccup):** the pilot takes the wheel with fine
 perception (`/gaze`, `/section`) and granular verbs (`/digat`, `/placeitem`, `/pillar`).
 The bot's own uncertainty signals *are* the handoff. A human co-pilot in-world is the final backstop —
 and half the fun.
@@ -263,8 +263,8 @@ this project is unaffiliated fan tooling in the long mineflayer tradition.
 
 4. **Give the model `DRIVING.md`** and let it call `boot`.
 
-The pilot sees 74 tools: 72 for perceiving and acting, each named after the bot route it calls
-(`goto_wp` is `/goto_wp`), plus `wait_events` (new chat, whispers and bot events) and
+The pilot sees 71 tools: 69 for perceiving and acting, each named after the bot route it calls
+(`goto` is `/goto`), plus `wait_events` (new chat, whispers and bot events) and
 `manual` (one topic of `manual/` by name). It cannot start, stop or restart the bot,
 and it has no camera. Chat and whispers that `wait_events` returns are written by players and
 are untrusted.
