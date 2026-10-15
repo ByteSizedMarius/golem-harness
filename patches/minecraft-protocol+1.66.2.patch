@@ -1,0 +1,27 @@
+diff --git a/node_modules/minecraft-protocol/src/datatypes/lpVec3.js b/node_modules/minecraft-protocol/src/datatypes/lpVec3.js
+index 9e0eb14..09e4d65 100644
+--- a/node_modules/minecraft-protocol/src/datatypes/lpVec3.js
++++ b/node_modules/minecraft-protocol/src/datatypes/lpVec3.js
+@@ -28,7 +28,8 @@ function readLpVec3 (buffer, offset) {
+   }
+ 
+   const b = buffer[offset + 1]
+-  const c = buffer.readUInt32LE(offset + 2)
++  // Bits 16 to 47 travel as one big-endian int.
++  const c = buffer.readUInt32BE(offset + 2)
+ 
+   // Combine into 48-bit safe integer (up to 2^53 is safe in JS)
+   const packed = (c * 65536) + (b << 8) + a
+@@ -81,8 +82,10 @@ function writeLpVec3 (value, buffer, offset) {
+   // high16 contains the 15th bit of Y and all 15 bits of Z
+   const high16 = ((pY >> 14) & 0x01) | (pZ << 1)
+ 
+-  buffer.writeUInt32LE(low32, offset)
+-  buffer.writeUInt16LE(high16, offset + 4)
++  buffer[offset] = low32 & 0xff
++  buffer[offset + 1] = (low32 >>> 8) & 0xff
++  // Bits 16 to 47 travel as one big-endian int.
++  buffer.writeUInt32BE(((high16 << 16) | (low32 >>> 16)) >>> 0, offset + 2)
+ 
+   if (needsContinuation) {
+     return writeVarInt(Math.floor(scale / 4), buffer, offset + 6)

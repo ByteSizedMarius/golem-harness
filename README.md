@@ -202,7 +202,10 @@ Two ways in:
 
 1. **Install:** `npm install` (Node 22+ recommended). This auto-applies the bundled
    `patches/` — surgical fixes to mineflayer-pathfinder's door handling that the harness needs
-   (doors are harder than they look; see the comments in the patch).
+   (doors are harder than they look; see the comments in the patch), and two fixes that keep
+   knockback working on 1.21.9 and newer servers: `minecraft-protocol+1.66.2.patch` reads the
+   velocity vector in the server's byte order, and `mineflayer+4.37.1.patch` stops scaling it
+   down as if it were the old fixed-point format.
 2. **If your server is 1.21.5 or newer:** `bash install-viewer.sh` — installs rebuilt viewer bundles
    (vendored in `release-assets/`, ~5 MB) so the browser viewer renders modern block states correctly
    and stairs render at all (upstream prismarine-viewer#427). Servers ≤1.21.4 skip this.

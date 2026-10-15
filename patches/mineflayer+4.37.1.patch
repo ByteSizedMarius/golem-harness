@@ -1,0 +1,14 @@
+diff --git a/node_modules/mineflayer/lib/plugins/entities.js b/node_modules/mineflayer/lib/plugins/entities.js
+index 507a618..73d608f 100644
+--- a/node_modules/mineflayer/lib/plugins/entities.js
++++ b/node_modules/mineflayer/lib/plugins/entities.js
+@@ -282,7 +282,8 @@ function inject (bot) {
+     // entity velocity
+     const entity = fetchEntity(packet.entityId)
+     const notchVel = new Vec3(packet.velocity.x, packet.velocity.y, packet.velocity.z)
+-    entity.velocity.update(conv.fromNotchVelocity(notchVel))
++    // From 1.21.9 the velocity is an lpVec3, which minecraft-protocol decodes to blocks per tick.
++    entity.velocity.update(bot.registry.version['>=']('1.21.9') ? notchVel : conv.fromNotchVelocity(notchVel))
+   })
+ 
+   bot._client.on('entity_destroy', (packet) => {

@@ -25,6 +25,19 @@ test('the 1.7.10 achievement key and a wrapped component are server lines too', 
   assert.deepStrictEqual(line(chat(tr('death.attack.someMod', 'Steve', 'Golem'))), { kind: 'death', text: 'death.attack.someMod: Steve, Golem' })
 })
 
+test('a 1.7.10 achievement that ViaVersion sends with the format as its key is an achievement line', () => {
+  const name = { color: 'green', translate: 'Taking Inventory' }
+  const hover = { action: 'show_text', value: { text: '', extra: [name, { '': '\n' }, { italic: 1, translate: 'Achievement' }, { '': '\n' }, { translate: "Press 'E' to open your inventory" }] } }
+  const json = {
+    translate: '%s has just earned the achievement %s',
+    with: [
+      { text: 'Claude', click_event: { action: 'suggest_command', value: '/msg Claude ', command: '/msg Claude ' } },
+      { text: '[', color: 'green', hover_event: hover, extra: [{ ...name, hover_event: hover }, { '': ']' }] }
+    ]
+  }
+  assert.deepStrictEqual(line(chat(json)), { kind: 'achievement', text: 'Claude has just earned the achievement [Taking Inventory]' })
+})
+
 test('plain-text server lines are read by their wording', () => {
   const rows = [
     ['Steve was slain by Zombie', 'death'],

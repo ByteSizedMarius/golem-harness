@@ -15,6 +15,22 @@ and a ViaProxy plugin raises it to 256 for a 1.7.10 server. The chat line length
 lengths. The MCP wake log now names the params each tool call passed, never their values,
 so unused tools and params can be counted and trimmed later.
 
+**Knockback.** A zombie hit never moved the bot. Since 1.21.9 the server sends entity
+velocity as an `lpVec3`, 48 bits sent as two bytes and one big-endian int (vanilla and
+ViaVersion alike). minecraft-protocol 1.66.2 reads and writes that int little-endian, so every
+vector decoded scrambled: a zombie's push of (-0.4, 0.4, 0) as (0.6, -0.002, -0.239), a
+standing player's (0, -0.0784, 0) as (1, 0.994, 0.859). mineflayer 4.37.1 then divided the
+result by 8000 as if it were the old fixed-point shorts, which shrank the garbage to nothing.
+Dropping only the division threw the bot about on every hurt, starvation included.
+`patches/minecraft-protocol+1.66.2.patch` reads and writes the int big-endian, and
+`patches/mineflayer+4.37.1.patch` applies the decoded vector, blocks per tick, from 1.21.9 on,
+older versions keeping the division. A zombie hit now pushes the bot 1 to 2 blocks away from
+the zombie, and starvation leaves a standing bot where it stands.
+
+1.7.10 achievements arrive as achievement lines ("Claude has just earned the achievement
+[Taking Inventory]") instead of an unfilled template, since ViaVersion sends their key already
+replaced by its English format.
+
 The head jittered on every walk past a mob: the combat reflex's standoff stare forced a look at it
 every 250 ms while the pathfinder turned the head toward its next node every tick, and the yaw is
 also the walking direction. The stare now waits until the legs are idle (`lib/head.js`). Melee and
