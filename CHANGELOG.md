@@ -199,6 +199,13 @@ position. `goto` now heads for the centre of their 5-block cube with a reach tha
 and `follow` arms the entity goal only while it sees the player, else aims at the cube centre and
 re-aims when the cube changes.
 
+A player asked "what are u working on?" while the pilot ran some 30 `digat`, `collect` and `find`
+calls, and it never noticed: chat reached it only through `tick` and `wait_events`. Now every reply
+of a `bot.js` route carries the count and the senders of the chat lines and whispers no `tick` or
+`chatlog` has served yet, and the MCP server turns them into one closing line, such as `Unread chat:
+2 lines from Halbes. Read them with tick or wait_events.` The text stays behind the read path. The
+bot's own lines and server lines never count. The chat log moved into `lib/chat-log.js`.
+
 ## 2026-10-15: one goto, and arrival means standing there
 
 A scenario suite that walks onto exact cells could not pass: `range=0` at a drop's own y

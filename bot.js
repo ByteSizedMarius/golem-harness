@@ -21,6 +21,7 @@ const { summarizePlan, planRisk } = require('./lib/plan')
 const { isDoor, doorStep } = require('./lib/doors')
 const { stepView } = require('./lib/steps')
 const { countVerbs } = require('./lib/verbs')
+const { createChatLog } = require('./lib/chat-log')
 
 const HOST = process.env.MC_HOST || 'localhost'
 const PORT = parseInt(process.env.MC_PORT || '25565')
@@ -373,18 +374,18 @@ bot.on('end', (r) => {
 })
 
 // ---- chat capture (so the driver can hear the world, not just speak to it) ----
-let chatSeq = 0
-const chatLog = []
-// pointsAt is the block the speaker looked at as they spoke, or null.
-function pushChat(from, message, kind, pointsAt = null) {
-  chatLog.push({ id: ++chatSeq, t: Date.now(), from, msg: message, kind, ...(pointsAt && { pointsAt }) })
-  if (chatLog.length > 300) chatLog.splice(0, chatLog.length - 300)
+const chatLog = createChatLog({ self: USERNAME })
+function pushChat(from, message, kind) {
+  const line = chatLog.push(from, message, kind)
+  if (!line) return
+  const pointsAt = pointerOf(from, message)
+  if (pointsAt) line.pointsAt = pointsAt
   console.log(`[chat] <${from}> ${message}`)
 }
 // A pointer error leaves the line without one.
 const pointerOf = (from, message) => { try { return chatPointer(from, message) } catch (e) { return null } }
-bot.on('chat', (username, message) => { if (username !== USERNAME) pushChat(username, message, 'chat', pointerOf(username, message)) })
-bot.on('whisper', (username, message) => pushChat(username, message, 'whisper', pointerOf(username, message)))
+bot.on('chat', (username, message) => pushChat(username, message, 'chat'))
+bot.on('whisper', (username, message) => pushChat(username, message, 'whisper'))
 
 // Every system line no player wrote, as a server event. Deaths, joins, leaves and achievements wake the pilot,
 // at most 6 a minute, and every other line arrives quiet. A name in them is player-chosen text.
@@ -2489,11 +2490,13 @@ const debrief = (v) => {
   }
   return v
 }
+// Adds the unread chat count and senders to each JSON reply.
+const send = (res, body) => res.json(chatLog.withUnread(body))
 const ok = (res, data) => {
   const body = { ok: true, ...data }
-  res.json(res.req && res.req.query && res.req.query.brief ? debrief(body) : body)
+  send(res, res.req && res.req.query && res.req.query.brief ? debrief(body) : body)
 }
-const err = (res, e) => res.json({ ok: false, error: e.message || String(e) })
+const err = (res, e) => send(res, { ok: false, error: e.message || String(e) })
 
 let lastTickSnap = null   // /tick?delta=1 diffs against the previous tick (single-pilot assumption)
 // Names this bot.js process in every /tick reply.
@@ -2531,7 +2534,7 @@ app.get('/tick', (req, res) => {
       ...(w && (w.inWater || w.submerged || w.current || w.buried)
         ? { water: { inWater: w.inWater, submerged: w.submerged, current: w.current, buried: w.buried, oxygen: bot.oxygenLevel } } : {}),
       threats,
-      chat: { cursor: chatSeq, messages: chatLog.filter(m => m.id > chatSince) },
+      chat: { cursor: chatLog.cursor, messages: chatLog.read(chatSince) },
       events: { cursor: eventSeq, list: eventLog.filter(x => x.id > evSince) },
       jobs: jobs.list()
     }
@@ -3589,7 +3592,7 @@ app.get('/lookat', async (req, res) => {
 
 app.get('/chatlog', (req, res) => {
   const since = parseInt(req.query.since || '0')
-  ok(res, { cursor: chatSeq, messages: chatLog.filter(m => m.id > since) })
+  ok(res, { cursor: chatLog.cursor, messages: chatLog.read(since) })
 })
 app.get('/stop', (req, res) => { bunker.stop = 'stopped by the pilot'; legs.take(null); try { stopFollow() } catch {} ; stopPath(); try { bot.clearControlStates() } catch {} ; clearLane(); const jobsCancelled = jobs.stopAll(); ok(res, { stopped: true, jobsCancelled }) })
 
@@ -4133,7 +4136,7 @@ app.get('/placeitem', async (req, res) => {
         const Vec3 = require('vec3').Vec3
         const vx = Math.floor(parseFloat(req.query.x)), vy = Math.floor(parseFloat(req.query.y)), vz = Math.floor(parseFloat(req.query.z))
         const b = bot.blockAt(new Vec3(vx, vy, vz))
-        return res.json({ ok: false, error: e.message, verify: { name: b ? b.name : '?', at: { x: vx, y: vy, z: vz } } })
+        return send(res, { ok: false, error: e.message, verify: { name: b ? b.name : '?', at: { x: vx, y: vy, z: vz } } })
       } catch (e2) {}
     }
     err(res, e)
@@ -5605,10 +5608,10 @@ app.get('/boot', (req, res) => {
       ((bot.inventory.slots[45] && bot.inventory.slots[45].name) ? `Offhand: ${bot.inventory.slots[45].name}. ` : '') +
       skyPhrase(oh) + (around ? `Around: ${around}. ` : '') +
       (jl.length ? `RUNNING JOBS: ${jl.map(j => j.id + ':' + j.name).join(', ')}. ` : 'No jobs running. ') +
-      `Chat cursor: ${chatSeq}.`
+      `Chat cursor: ${chatLog.cursor}.`
     ok(res, {
       summary, pos: round(pos), health: bot.health, food: bot.food, xpLevel: bot.experience.level, held, armor,
-      sky: oh, chatSeq, seenCells: SEEN.size,
+      sky: oh, chatSeq: chatLog.cursor, seenCells: SEEN.size,
       waypoints: Object.keys(waypoints.list()), runningJobs: jl.map(j => ({ id: j.id, name: j.name })),
       reflexes: reflexes.map(r => ({ name: r.name, on: r.on }))
     })

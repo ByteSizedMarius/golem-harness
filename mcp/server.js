@@ -25,6 +25,8 @@ const TOOL_TIMEOUT_MAX_MS = 600000
 const BODY_CAP = 2 * 1024 * 1024
 const TOKEN_MIN = 32
 const PAPERCUT_LIMIT = 20
+const NAME_CAP = 32
+const NAMES_SHOWN = 5
 // A drive letter not preceded by a letter or digit and followed by a slash, or a UNC double backslash,
 // up to the next whitespace or quote.
 const PATH_TOKEN = /(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s"']*|\\\\[^\s"']*/g
@@ -224,13 +226,27 @@ function toQuery (tool, values) {
 }
 
 const textResult = (text, isError = false) => (isError ? { content: [{ type: 'text', text }], isError: true } : { content: [{ type: 'text', text }] })
-function jsonResult (value, isError = false) {
+// The tails count against the cap.
+function jsonResult (value, isError = false, tails = []) {
   const text = JSON.stringify(value)
-  if (text.length <= RESULT_CAP) return textResult(text, isError)
-  const note = `Trimmed: the reply was ${text.length} characters, over the ${RESULT_CAP}-character limit. Fields and list items after the cut are left out.`
-  const result = textResult(JSON.stringify(fitJson(value, RESULT_CAP - note.length).value), isError)
-  result.content.push({ type: 'text', text: note })
+  const cap = RESULT_CAP - tails.reduce((n, t) => n + t.length, 0)
+  let result
+  if (text.length <= cap) result = textResult(text, isError)
+  else {
+    const note = `Trimmed: the reply was ${text.length} characters, over the ${cap}-character limit. Fields and list items after the cut are left out.`
+    result = textResult(JSON.stringify(fitJson(value, cap - note.length).value), isError)
+    result.content.push({ type: 'text', text: note })
+  }
+  for (const t of tails) result.content.push({ type: 'text', text: t })
   return result
+}
+
+// The note on chat lines the pilot has not read: their count and senders, never their text.
+function unreadNote (u) {
+  if (u === null || typeof u !== 'object' || !Number.isInteger(u.lines) || u.lines < 1 || !Array.isArray(u.from)) return null
+  const names = u.from.filter((n) => typeof n === 'string').map((n) => redactString(flatText(n), NAME_CAP)).filter(Boolean)
+  const shown = names.slice(0, NAMES_SHOWN).join(', ') + (names.length > NAMES_SHOWN ? ` and ${names.length - NAMES_SHOWN} more` : '')
+  return `Unread chat: ${u.lines} line${u.lines === 1 ? '' : 's'}${shown ? ` from ${shown}` : ''}. Read ${u.lines === 1 ? 'it' : 'them'} with tick or wait_events.`
 }
 const rpcResult = (id, result) => ({ jsonrpc: '2.0', id, result })
 const rpcError = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } })
@@ -368,7 +384,14 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
     } catch (e) {
       return textResult(e && e.name === 'TimeoutError' ? cutMessage(timeoutMs) : botFailure(e), true)
     }
-    return jsonResult(redact(trimLists(reply.body, tool.lists), tool.structural), reply.status !== 200)
+    const body = reply.body
+    const tails = []
+    if (body !== null && typeof body === 'object' && Object.hasOwn(body, 'unreadChat')) {
+      const note = unreadNote(body.unreadChat)
+      if (note !== null) tails.push(note)
+      delete body.unreadChat
+    }
+    return jsonResult(redact(trimLists(body, tool.lists), tool.structural), reply.status !== 200, tails)
   }
 
   async function waitEvents ({ timeout = WAIT_DEFAULT_S }) {
