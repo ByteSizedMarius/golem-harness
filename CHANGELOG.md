@@ -364,6 +364,17 @@ floor still shows. A gaze ray that left the loaded world in the dark read as ope
 says too dark. `seen.json` now carries a version, and a file saved before this change is dropped at
 load, since it holds cells the old walked trail marked through walls and dark ray hits.
 
+**Sight gates on use, activate and passages.** `use` named the block at any loaded cell, so a call
+at a cell inside rock answered `diamond_ore`. It now refuses a block out of lit sight within 6, as
+`blockat` does. `activate` checked only the line of sight and named a block in total darkness within
+20. It now needs lit sight, and its reply carries the block's state only while the block stays in
+sight after the walk into reach. `passages` flooded through unseen cells, so a seen cell at the edge
+of the scan became an exit and gave away the unseen dark tunnel to it. The flood now passes only
+through cells the bot knows. A held bucket now always takes the item use, since one aimed at grass,
+a flower or a torch went through the block click and poured nothing. `mine` counted a block only
+when its collect finished, so a dig whose pickup stalled answered `mined 0`. It now counts a block
+once it is gone from the world.
+
 **One body call at a time.** Claude Code sends tool calls in parallel when the model batches them,
 and the bot ran them all at once. Live, two torch placements fought over the path and the bot ended
 in a ravine, 4 `digat` calls stalled for 76 s, and 8 `deposit` calls sat 5 minutes in `[path] reset

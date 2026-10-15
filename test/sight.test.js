@@ -7,7 +7,7 @@ const vm = require('node:vm')
 const { Vec3 } = require('vec3')
 const { sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
-const { botConstant, botSource, loadBotFunctions, runRoute, reflexIn } = require('./helpers')
+const { botConstant, botSource, loadBotFunctions, routeHandler, runRoute, reflexIn } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4 }
@@ -223,12 +223,70 @@ test('passages gives an exit in lit sight, never one around a corner or in the d
   assert.strictEqual(passages(corridor(DARK)).summary, 'no exit in sight within 8 blocks')
 })
 
+test('passages gives no exit at a seen cell that only an unseen dark stretch reaches', () => {
+  const env = corridor(DARK)
+  env.SEEN.add(ck(8, 64, 0)).add(ck(8, 65, 0))
+  const body = runRoute('/passages', { radius: '8' }, env)
+  assert.strictEqual(body.summary, 'no exit in sight within 8 blocks')
+  assert.deepStrictEqual(body.exits, {})
+})
+
 test('passages calls a pocket closed only when the bot has seen its walls', () => {
   const room = () => world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 3 && (y === 64 || y === 65), light: () => DARK })
   const seen = room()
   for (let x = -1; x <= 4; x++) for (let y = 63; y <= 66; y++) for (let z = -1; z <= 1; z++) seen.SEEN.add(ck(x, y, z))
   assert.match(runRoute('/passages', { radius: '8' }, seen).summary, /^closed pocket/, 'control: every wall seen')
   assert.strictEqual(runRoute('/passages', { radius: '8' }, room()).summary, 'no exit in sight within 8 blocks')
+})
+
+// The walk into reach moves the body to walkTo.
+function withHands (env, walkTo = null) {
+  const base = env.bot.blockAt
+  env.bot.blockAt = (p) => ({ ...base(p), getProperties: () => ({ lit: false }) })
+  Object.assign(env.bot, {
+    heldItem: null,
+    inventory: { items: () => [] },
+    pathfinder: { goto: async () => { if (walkTo) env.bot.entity.position = walkTo } },
+    lookAt: async () => {},
+    waitForTicks: async () => {},
+    activateBlock: async () => {},
+    activateItem () {},
+    deactivateItem () {}
+  })
+  return Object.assign(env, { require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals: { GoalNear: class {} } })
+}
+
+const UNSEEN = /not in my sight, blocked or unlit/
+
+test('use names a block in lit sight, never one in rock, around a corner or in the dark', async () => {
+  const use = async (env, at) => {
+    const { handle, res } = routeHandler('/use', withHands(env))
+    await handle({ query: at }, res)
+    return res
+  }
+  const coal = { x: '-1', y: '65', z: '0' }
+  assert.strictEqual((await use(cave(LIT), coal)).body.on, 'coal_ore', 'control: in sight')
+  const room = world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 3 && (y === 64 || y === 65), ores: { '1,62,0': 'diamond_ore' }, light: () => LIT })
+  const rock = await use(room, { x: '1', y: '62', z: '0' })
+  assert.match(rock.error.message, UNSEEN)
+  assert.strictEqual(rock.body, undefined)
+  const corner = await use(cave(LIT), { x: '7', y: '66', z: '0' })
+  assert.match(corner.error.message, UNSEEN)
+  assert.strictEqual(corner.body, undefined)
+  assert.match((await use(cave(DARK, FAR_END), coal)).error.message, UNSEEN)
+})
+
+test('activate presses a block in lit sight and gives its state only while it stays in sight', async () => {
+  const activate = async (env, at) => {
+    const { handle, res } = routeHandler('/activate', env)
+    await handle({ query: at }, res)
+    return { body: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error }
+  }
+  const coal = { x: '-1', y: '65', z: '0' }
+  assert.deepStrictEqual((await activate(withHands(cave(LIT)), coal)).body, { activated: 'coal_ore', at: { x: -1, y: 65, z: 0 }, properties: { lit: false } }, 'control: in sight')
+  assert.match((await activate(withHands(cave(DARK, FAR_END)), coal)).error.message, UNSEEN)
+  const away = await activate(withHands(cave(LIT, FAR_END), new Vec3(6.5, 64, 0.5)), coal)
+  assert.deepStrictEqual(away.body, { activated: 'coal_ore', at: { x: -1, y: 65, z: 0 } }, 'the walk went round the corner')
 })
 
 // env with the blocks at the 'x,y,z' keys of cells in place of its own.

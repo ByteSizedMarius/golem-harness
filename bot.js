@@ -1490,7 +1490,7 @@ function floodPassable(b) {
   return blockTransparent(b)
 }
 // keepWalls returns the cells that stopped the flood as walls, a Map by ck key.
-function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known = null, keepWalls = false } = {}) {
+function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known = null, knownOnly = false, keepWalls = false } = {}) {
   const o = (seed || bot.entity.position).floored()
   let s = o
   if (!floodPassable(bot.blockAt(s))) s = o.offset(0, 1, 0)   // feet cell solid (slab etc.) -> try head
@@ -1511,7 +1511,7 @@ function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known
       if (cells.has(k)) continue
       const p = new Vec3(nx, ny, nz)
       const b = bot.blockAt(p)
-      if (!floodPassable(b)) {
+      if (!floodPassable(b) || (knownOnly && !known(p))) {
         if (walls) walls.set(k, p)
         continue
       }
@@ -3871,9 +3871,11 @@ app.get('/mine', async (req, res) => {
       } catch (e) {
         if (!e.reason) throw e
         reason = e.reason
-        break
       }
-      mined++
+      // A collect can dig the block and then stall on the pickup.
+      const after = bot.blockAt(b.position)
+      if (after && after.name !== b.name) mined++
+      if (reason) break
     }
     const have = bot.inventory.items().filter(it => it.name.includes(name) || name.includes(it.name))
       .reduce((s, it) => s + it.count, 0)
@@ -4554,14 +4556,17 @@ app.get('/activate', async (req, res) => {
     const x = Math.floor(parseFloat(req.query.x)), y = Math.floor(parseFloat(req.query.y)), z = Math.floor(parseFloat(req.query.z))
     const b = bot.blockAt(new Vec3(x, y, z))
     if (!b) return err(res, new Error('unloaded chunk'))
-    if (!canSeeBlock({ x, y, z }, 20)) return err(res, new Error('not in my line of sight — walk closer or clear the view first'))
+    if (!seesLit({ x, y, z }, 20)) return err(res, new Error('not in my sight, blocked or unlit: walk closer, clear the view or light it'))
     if (bot.entity.position.distanceTo(new Vec3(x + 0.5, y + 0.5, z + 0.5)) > 3.5) {
       await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 2))
     }
     await bot.lookAt(new Vec3(x + 0.5, y + 0.5, z + 0.5), true)
     await bot.waitForTicks(2)
     await bot.activateBlock(b)
-    ok(res, { activated: b.name, at: { x, y, z }, properties: (bot.blockAt(new Vec3(x, y, z)) || b).getProperties() })
+    const out = { activated: b.name, at: { x, y, z } }
+    // The walk into reach can leave the block out of sight.
+    if (seesLit({ x, y, z }, 20)) out.properties = (bot.blockAt(new Vec3(x, y, z)) || b).getProperties()
+    ok(res, out)
   } catch (e) { err(res, e) }
 })
 
@@ -5555,7 +5560,7 @@ app.get('/passages', (req, res) => {
   try {
     const radius = Math.min(32, Math.max(8, parseInt(req.query.radius || '20')))
     const o = bot.entity.position.floored()
-    const fill = airFlood({ radius, cap: 15000, known: cellKnown })
+    const fill = airFlood({ radius, cap: 15000, known: cellKnown, knownOnly: true })
     const dirs = {}
     let contUp = false, contDown = false, leaves = false
     for (const k of fill.cells) {
@@ -5564,7 +5569,6 @@ app.get('/passages', (req, res) => {
       const side = Math.max(Math.abs(ddx), Math.abs(ddz)) >= radius
       if (!side && Math.abs(ddy) < radius) continue
       leaves = true
-      if (!cellKnown(new Vec3(x, y, z))) continue
       if (side) {
         const c = compass(ddx, ddz)
         const g = dirs[c] || (dirs[c] = { cells: 0, loY: Infinity, hiY: -Infinity })
@@ -5602,6 +5606,7 @@ app.get('/use', async (req, res) => {
     if (![p.x, p.y, p.z].every(Number.isFinite)) return err(res, new Error('x, y, z required'))
     const b = bot.blockAt(p)
     if (!b) return err(res, new Error('block not loaded'))
+    if (!seesLit(p, 6)) return err(res, new Error('not in my sight, blocked or unlit: walk closer, clear the view or light it'))
     if (req.query.item) {
       const it = bot.inventory.items().find(i => i.name === String(req.query.item))
       if (!it) return err(res, new Error('not carrying ' + req.query.item))
@@ -5613,7 +5618,9 @@ app.get('/use', async (req, res) => {
     // raw item-use (aim + right-click-the-item) for: liquids (fill), AIR targets (pour into a hole —
     // activateBlock on solids does NOT pour, learned live 07-12), or explicit ?raw=1
     // Crops, saplings and grass have no collision box but take the click themselves (bone meal).
-    const rawUse = b.name.includes('water') || b.name.includes('lava') || /^(cave_|void_)?air$/.test(b.name) || req.query.raw === '1'
+    // On 1.7.10 a bucket used through activateBlock on grass, a flower or a torch pours nothing.
+    const bucket = !!bot.heldItem && bot.heldItem.name.endsWith('bucket')
+    const rawUse = bucket || b.name.includes('water') || b.name.includes('lava') || /^(cave_|void_)?air$/.test(b.name) || req.query.raw === '1'
     if (rawUse) {
       bot.activateItem()
       await new Promise(r => setTimeout(r, 300))
