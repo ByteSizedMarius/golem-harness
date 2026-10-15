@@ -1307,8 +1307,7 @@ function touchesFill(p, fill) {
   }
   return false
 }
-// The cell an eye ray sees block p by: p itself when p is open, else the last open cell before it.
-// null when p is buried, beyond maxDist or behind an opaque block.
+// The open cell the eye sees block p by (p itself, else the one before it), null when p is unseen.
 function sightCell(p, maxDist) {
   if (!isExposed(p)) return null
   const eye = bot.entity.position.offset(0, 1.62, 0)
@@ -1318,6 +1317,7 @@ function sightCell(p, maxDist) {
   if (dist > maxDist) return null
   const at = new Vec3(p.x, p.y, p.z)
   let from = eye.floored()
+  let water = 0
   if (dist >= 1e-6) {
     const dir = delta.scaled(1 / dist)
     const steps = Math.ceil(dist * 4)               // sample ~every 0.25 blocks
@@ -1326,6 +1326,9 @@ function sightCell(p, maxDist) {
       if (c.equals(at)) break
       const b = bot.blockAt(c)
       if (b && b.boundingBox === 'block' && !blockTransparent(b)) return null   // occluded
+      if (b && b.name.includes('lava')) return null
+      // Four cells of water hide what lies behind them.
+      if (b && b.name.includes('water') && !c.equals(from) && ++water > 3) return null
       from = c
     }
   }
@@ -1334,36 +1337,77 @@ function sightCell(p, maxDist) {
 function canSeeBlock(p, maxDist) {
   return sightCell(p, maxDist) !== null
 }
-// Chunk sections whose held light may predate a block change near them. mineflayer computes no light,
-// and a server before 1.14 sends it only with chunk data.
+// Chunk sections whose held light may predate a light source placed near them.
 const STALE_LIGHT = new Set()
+// Estimated light of the cells opened since their column's light arrived, by column, then by cell.
+const OPENED_LIGHT = new Map()
 function lightSection(x, y, z) {
   return (x >> 4) + ',' + (y >> 4) + ',' + (z >> 4)
 }
-bot.on('blockUpdate', (oldB, newB) => {
-  if (!oldB || !newB || oldB.type === newB.type) return
+// The light the client holds for cell p, or the estimate for a cell opened since.
+function heldLight (p, b) {
+  const column = OPENED_LIGHT.get((p.x >> 4) + ',' + (p.z >> 4))
+  return (column && column.get(ck(p.x, p.y, p.z))) || b
+}
+function lightChanged (oldB, newB) {
+  if (!oldB || !newB || oldB.stateId === newB.stateId) return
   const p = newB.position
-  for (let dx = -16; dx <= 16; dx += 16) for (let dy = -16; dy <= 16; dy += 16) for (let dz = -16; dz <= 16; dz += 16) {
-    STALE_LIGHT.add(lightSection(p.x + dx, p.y + dy, p.z + dz))
+  // Light reaches emit - 1 cells from a source.
+  const r = (bot.registry.blocks[newB.type].emitLight || (newB.getProperties().lit === true ? 15 : 0)) - 1
+  if (r >= 0) {
+    for (let x = (p.x - r) >> 4; x <= (p.x + r) >> 4; x++) for (let y = (p.y - r) >> 4; y <= (p.y + r) >> 4; y++) for (let z = (p.z - r) >> 4; z <= (p.z + r) >> 4; z++) {
+      STALE_LIGHT.add(x + ',' + y + ',' + z)
+    }
   }
-})
+  if (blockTransparent(oldB) || !blockTransparent(newB)) return
+  let light = 0, skyLight = 0
+  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+    const q = new Vec3(p.x + dx, p.y + dy, p.z + dz)
+    const n = bot.blockAt(q)
+    if (!n) continue
+    const held = heldLight(q, n)
+    light = Math.max(light, held.light - 1)
+    skyLight = Math.max(skyLight, held.skyLight - 1)
+  }
+  const key = (p.x >> 4) + ',' + (p.z >> 4)
+  if (!OPENED_LIGHT.has(key)) OPENED_LIGHT.set(key, new Map())
+  OPENED_LIGHT.get(key).set(ck(p.x, p.y, p.z), { light, skyLight })
+}
+bot.on('blockUpdate', lightChanged)
 function freshLight(cx, cz) {
   for (const k of STALE_LIGHT) {
     const [x, , z] = k.split(',').map(Number)
     if (x === cx && z === cz) STALE_LIGHT.delete(k)
   }
+  OPENED_LIGHT.delete(cx + ',' + cz)
 }
 bot.on('chunkColumnLoad', (p) => freshLight(p.x >> 4, p.z >> 4))
 bot._client.on('update_light', (packet) => freshLight(packet.chunkX, packet.chunkZ))
-// Total darkness at open cell p by the light the client holds. Light that is missing or may be stale is not dark.
-function dark(p, b = bot.blockAt(p)) {
-  if (STALE_LIGHT.has(lightSection(p.x, p.y, p.z))) return false
-  return !!b && b.light === 0 && b.skyLight === 0
+// Sky light lost to the time of day, from 0 by day to 11 at midnight.
+function skyDarken () {
+  const t = bot.time.timeOfDay
+  if (t === null) return 0
+  const f = (t / 24000 + 0.75) % 1
+  const angle = f + ((1 - Math.cos(f * Math.PI)) / 2 - f) / 3
+  return Math.floor((1 - Math.min(1, Math.max(0, 0.5 + 2 * Math.cos(angle * Math.PI * 2)))) * 11)
 }
-// Block p in line of sight and not in total darkness.
+// How many blocks away a thing in open cell p shows by the light there, Infinity when that light is missing or may be stale.
+function lightRange (p, b = bot.blockAt(p)) {
+  if (!b || STALE_LIGHT.has(lightSection(p.x, p.y, p.z))) return Infinity
+  const held = heldLight(p, b)
+  const level = Math.max(held.light, held.skyLight - skyDarken())
+  return level >= 7 ? Infinity : [2, 4, 6, 8, 12, 16, 24][Math.max(0, level)]
+}
+// Distance from the eye to the nearest point of the column h cells tall from cell p.
+function eyeDist (p, h = 1) {
+  const e = bot.entity.position.offset(0, 1.62, 0)
+  const gap = (v, lo, size) => Math.max(lo - v, 0, v - lo - size)
+  return Math.hypot(gap(e.x, p.x, 1), gap(e.y, p.y, h), gap(e.z, p.z, 1))
+}
+// Block p in line of sight, within the reach of the light on its open face.
 function seesLit(p, maxDist) {
   const c = sightCell(p, maxDist)
-  return c !== null && !dark(c)
+  return c !== null && eyeDist(p) <= lightRange(c)
 }
 // findBlocks candidates (nearest-first) -> keep only what a player here could actually see
 function findVisible(ids, maxDist, count) {
@@ -1523,15 +1567,15 @@ const markSeen = (x, y, z) => { if (SEEN.size < SEEN_CAP) SEEN.add(ck(x, y, z)) 
 function lookVec(yaw, pitch) {
   return new Vec3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch))
 }
-// march one ray from the eye; returns first surface {pos,name,dist,liquid}, null (open past maxDist),
-// or DARK_RAY when the surface or the open end lies in total darkness
+// First surface {pos,name,dist,liquid} along dir, null for lit open air, DARK_RAY when it lies past its light.
 const DARK_RAY = { dark: true }
 function castRay(dir, maxDist) {
   const eye = bot.entity.position.offset(0, 1.62, 0)
   const steps = Math.ceil(maxDist * 4)
   let px = null, py = null, pz = null
-  // A struck surface is lit by the open cell the ray left.
-  let lit = !dark(eye.floored())
+  // A struck surface shows by the light of the open cell the ray left.
+  let range = lightRange(eye.floored())
+  let lit = true
   for (let s = 1; s <= steps; s++) {
     const t = (s / steps) * maxDist
     const q = eye.plus(dir.scaled(t))
@@ -1540,14 +1584,15 @@ function castRay(dir, maxDist) {
     px = bx; py = by; pz = bz
     const c = new Vec3(bx, by, bz)
     const b = bot.blockAt(c)
-    if (!b) return null                                       // ray left loaded world
+    if (!b) return lit ? null : DARK_RAY
     const liquid = b.name.includes('water') || b.name.includes('lava')
     if ((b.boundingBox === 'block' && !blockTransparent(b)) || liquid) {
-      if (!lit) return DARK_RAY
+      if (t > range) return DARK_RAY
       markSeen(bx, by, bz)
       return { pos: c, name: b.name, dist: +t.toFixed(1), liquid }
     }
-    lit = !dark(c, b)
+    range = lightRange(c, b)
+    lit = t <= range
     if (lit) markSeen(bx, by, bz)                             // traversed open air — seen empty
   }
   return lit ? null : DARK_RAY
@@ -2744,18 +2789,29 @@ setInterval(oreCallout, 4000)
 // ---- SEEN persistence: the fair fog-of-war memory survives restarts. Saved on a timer (and on
 // clean disconnect); loaded at spawn.
 const SEEN_FILE = './seen.json'
+// Version of the sight rules that marked the saved cells.
+const SEEN_VERSION = 2
+// Loads a seen.json text into SEEN, false for one saved under older sight rules.
+function loadSeen (text) {
+  const saved = JSON.parse(text)
+  if (saved.version !== SEEN_VERSION) return false
+  for (const k of saved.cells) { if (SEEN.size >= SEEN_CAP) break; SEEN.add(k) }
+  return true
+}
+function seenJson () {
+  return JSON.stringify({ version: SEEN_VERSION, cells: [...SEEN] })
+}
 bot.once('spawn', () => {
   try {
-    const arr = JSON.parse(fs.readFileSync(SEEN_FILE, 'utf8'))
-    for (const k of arr) { if (SEEN.size >= SEEN_CAP) break; SEEN.add(k) }
-    console.log('[bot] loaded SEEN memory: ' + SEEN.size + ' cells')
+    if (loadSeen(fs.readFileSync(SEEN_FILE, 'utf8'))) console.log('[bot] loaded SEEN memory: ' + SEEN.size + ' cells')
+    else console.log('[bot] dropped SEEN memory saved under older sight rules')
   } catch (e) {}
 })
 let seenDirty = 0
 setInterval(() => {
-  try { if (SEEN.size !== seenDirty) { fs.writeFileSync(SEEN_FILE, JSON.stringify([...SEEN])); seenDirty = SEEN.size } } catch (e) {}
+  try { if (SEEN.size !== seenDirty) { fs.writeFileSync(SEEN_FILE, seenJson()); seenDirty = SEEN.size } } catch (e) {}
 }, 120000)
-bot.on('end', () => { try { fs.writeFileSync(SEEN_FILE, JSON.stringify([...SEEN])) } catch (e) {} })
+bot.on('end', () => { try { fs.writeFileSync(SEEN_FILE, seenJson()) } catch (e) {} })
 
 // ---- tiered pick choice: use the LOWEST pick that can harvest the target (stop burning iron
 // durability on plain stone), upgrade automatically for ore that needs better (protects drops).
@@ -2995,6 +3051,7 @@ function entityPerceptible(en, fill) {
     // An invisible player shows neither body nor nametag.
     if (en.type === 'player' && isInvisible(en)) return false
     const p = en.position.floored()
+    if (eyeDist(p, 2) > lightRange(p)) return false
     if (touchesFill(p, fill) || fill.cells.has(ck(p.x, p.y, p.z)) || fill.cells.has(ck(p.x, p.y + 1, p.z))) return true
     // last resort: the eye-ray — sight across caverns/chasms the flood can't afford to fill
     return losClear(bot.entity.position.offset(0, 1.62, 0), en.position.offset(0, 1.0, 0))

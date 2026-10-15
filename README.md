@@ -61,8 +61,8 @@ epistemic constraints as a human player.** Not because it makes the bot stronger
 but because playing *fairly* is what makes it playing at all — and because the constraints turn out to
 produce more interesting minds. Concretely:
 
-- **No x-ray.** Ore and structures are only reported if they are exposed to air, in line of sight from
-  the bot's eyes and not in total darkness.
+- **No x-ray.** Ore and structures are only reported if they are exposed to air and in lit sight from
+  the bot's eyes, the darker the closer.
 - **No sensing through walls.** Mobs and players sealed behind rock are simply absent from perception.
 - **Considerate movement.** The pathfinder never breaks blocks to travel. Zero litter: scaffold blocks
   the bot places are tracked and reclaimed (`/tidy`). Doors and gates the bot opens are closed behind
@@ -98,8 +98,8 @@ a human-ish field of view) marches out from the eye, sampling every quarter-bloc
 stops each ray. Hits carry block identity, distance, and screen position; misses become "open space
 there." 105 pixels, where every pixel is a laser rangefinder that reports *material* instead of color.
 
-**Two tiers of knowing, everywhere.** Bare name = seen: a ray from the eyes reaches it and it is not
-in total darkness, now or when the bot looked earlier. `?` / silence = unseen. A cave around the
+**Two tiers of knowing, everywhere.** Bare name = seen: in lit sight from the eyes, the darker the
+closer, now or when the bot looked earlier. `?` / silence = unseen. A cave around the
 corner, a sealed cavern and a dark one stay unknown, *even though the raw API knows them.* Light comes
 from the chunk data the client holds. Where a block changed since that data arrived, sight alone
 counts.

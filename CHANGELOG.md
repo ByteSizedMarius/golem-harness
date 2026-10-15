@@ -346,6 +346,24 @@ rungs tried. Each rung writes one `[unstuck]` line to bot.log, and the event nam
 body. Only cells the body touches or the bot knows count in each decision. `follow` waits while
 the ladder runs.
 
+**Sight by light.** Sight knew only two states, lit and total darkness, so a block lit at level 1
+showed at any distance while one at level 0 stayed hidden at arm's length. How far the bot sees a
+block or a mob now depends on the light where it is, block light or sky light, whichever is
+brighter: 2 blocks at light 0, then 4, 6, 8, 12, 16 and 24, and any distance from light 7 up.
+Sky light falls with the time of day as vanilla computes it, to 4 at midnight, so open ground at
+midnight shows about 12 blocks out. `find`, `gaze`, `scene`, the ore callouts, the veins, the seen
+set and the entity senses all follow it, while a nametag still shows through walls.
+
+**Three sight leaks.** A 1.7.10 server sends light only with chunk data, so the bot took the light of
+every section around any changed block as unknown, and unknown counts as lit until the column
+reloads. One dig in a pitch-black cave made ore in total darkness show within about 25 blocks. Only a
+placed light source now marks the light around it unknown, within its reach, and a dug-out cell takes
+the light of its brightest neighbour, one level down. Sight went through lava and water, as their
+blocks have no collision box. Lava now blocks it, and water does after 3 blocks, about where a pond
+floor still shows. A gaze ray that left the loaded world in the dark read as open space and now
+says too dark. `seen.json` now carries a version, and a file saved before this change is dropped at
+load, since it holds cells the old walked trail marked through walls and dark ray hits.
+
 **One body call at a time.** Claude Code sends tool calls in parallel when the model batches them,
 and the bot ran them all at once. Live, two torch placements fought over the path and the bot ended
 in a ravine, 4 `digat` calls stalled for 76 s, and 8 `deposit` calls sat 5 minutes in `[path] reset

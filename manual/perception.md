@@ -4,19 +4,36 @@ You perceive the world only through what the tools say. The usual failure is act
 
 ## No x-ray
 
-A block shows only when a player standing where you stand could see it: exposed to air on at least one face, on an unobstructed ray from your eyes and not in total darkness. `find`, `goto` to a block, `mine`, `gather`, `section`, `passages`, the ore callouts and the resource hints of `scene` all follow this. Ore buried in solid stone returns nothing until you expose it by mining toward it. Ore in a cave wall, a vein a cliff has sheared open, trees and surface blocks all show. A dark cave shows nothing until you light it.
+A block shows only when a player standing where you stand could see it: exposed to air on at least one face, on an unobstructed ray from your eyes and within the reach of its light. `find`, `goto` to a block, `mine`, `gather`, `section`, `passages`, the ore callouts and the resource hints of `scene` all follow this. Ore buried in solid stone returns nothing until you expose it by mining toward it. Ore in a cave wall, a vein a cliff has sheared open, trees and surface blocks all show. Nothing shows through lava, or through more than 3 blocks of water.
+
+## Light
+
+How far you see a block or a mob depends on the light where it is, block light or sky light, whichever is brighter:
+
+| Light | You see it up to |
+|---|---|
+| 0 | 2 blocks |
+| 1 | 4 |
+| 2 | 6 |
+| 3 | 8 |
+| 4 | 12 |
+| 5 | 16 |
+| 6 | 24 |
+| 7 and up | any distance |
+
+Sky light falls with the time of day, to 4 at midnight, so open ground at midnight shows about 12 blocks out. A dark cave shows the 2 blocks around you until you light it. A torch you place shows its surroundings at once.
 
 ## Two tiers of knowing
 
 - Bare name: seen, a real eye ray hit it.
-- `?`: unseen. Nothing sees through solid rock or into total darkness.
+- `?`: unseen. Nothing sees through solid rock or past the reach of the light.
 
 Speak the tiers back. Navigate by structure and mine what is seen.
 
 ## Which sense
 
 - `scene` is the default glance. Call it constantly. Its `steps` grid shows how far each cell around you lies up or down, the check before a jump or a climb. Overhead it counts the cover and names its top only when the sky shows. Under rock it gives the first solid you see and leaves the rest unknown.
-- `gaze` is the deliberate look, where a person would turn their head. It feeds the seen set and draws `map`. In total darkness it says too dark instead of naming what is there. When a far reading surprises you, check it with `find` before building a theory on it.
+- `gaze` is the deliberate look, where a person would turn their head. It feeds the seen set and draws `map`. Past the reach of the light it says too dark instead of naming what is there. When a far reading surprises you, check it with `find` before building a theory on it.
 - `section` is the cave tool. It shows the vertical structure `map` cannot.
 - `passages` answers which ways this space goes.
 - `map`: a small radius (8 to 12) for a quick local read, larger to survey. `@` is you, `T` tree, log or leaves, `#` stone, `~` water or lava, `.` ground, `=` built blocks (planks, bricks, glass, furnace, chest), a space air or open, `·` unexplored. It scans the highest surface in each column, so it is a top-down heightmap, not a slice at your feet. Row 0 is north, left is west. Underground, it says so.

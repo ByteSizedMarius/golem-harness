@@ -5,7 +5,7 @@ const { Vec3 } = require('vec3')
 const { isDoor, doorStep, panelAcross, doorCrossing } = require('../lib/doors')
 const { loadBotFunctions } = require('./helpers')
 
-const AIR = { name: 'air', boundingBox: 'empty', shapes: [] }
+const AIR = { name: 'air', boundingBox: 'empty', shapes: [], light: 15, skyLight: 15 }
 const STONE = { name: 'stone', boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 1]] }
 const ck = (x, y, z) => x + ',' + y + ',' + z
 
@@ -81,13 +81,15 @@ function doorScene (wall = true) {
     bot: {
       entity: { position: new Vec3(0.5, 64, 0.5) },
       blockAt,
-      findBlocks: () => ['3,64,0', '3,65,0', '0,64,6', '0,65,6'].map((k) => new Vec3(...k.split(',').map(Number)))
+      findBlocks: () => ['3,64,0', '3,65,0', '0,64,6', '0,65,6'].map((k) => new Vec3(...k.split(',').map(Number))),
+      time: { timeOfDay: 6000 }
     },
     mcData: { blocksByName: { oak_door: { id: 1, name: 'oak_door' }, spruce_door: { id: 2, name: 'spruce_door' }, stone: { id: 3, name: 'stone' } } },
     isDoor,
     ck,
     Vec3,
-    STALE_LIGHT: new Set()
+    STALE_LIGHT: new Set(),
+    OPENED_LIGHT: new Map()
   }
 }
 

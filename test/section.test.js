@@ -59,14 +59,16 @@ function closedRoom (light) {
   return {
     bot: {
       entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 },
-      blockAt: (p) => (air(p) ? { name: 'air', boundingBox: 'empty', light, skyLight: 0 } : { name: 'stone', boundingBox: 'block', light: 0, skyLight: 0 })
+      blockAt: (p) => (air(p) ? { name: 'air', boundingBox: 'empty', light, skyLight: 0 } : { name: 'stone', boundingBox: 'block', light: 0, skyLight: 0 }),
+      time: { timeOfDay: 6000 }
     },
     ck: (x, y, z) => x + ',' + y + ',' + z,
     Vec3,
     sectionColumns,
     floorPhrase,
     SEEN: new Set(),
-    STALE_LIGHT: new Set()
+    STALE_LIGHT: new Set(),
+    OPENED_LIGHT: new Map()
   }
 }
 
@@ -75,7 +77,7 @@ test('the section of a lit closed room underground reads its floor and where it 
   assert.strictEqual(body.summary, 'Section E from (0,64,0): floor: level d0–2; headroom 2; sealed from d3.')
 })
 
-test('the section of the same room in total darkness knows only the cells the body fills', () => {
+test('the section of the same room in total darkness knows only the cells within two blocks', () => {
   const body = runRoute('/section', { dir: 'e' }, closedRoom(0))
-  assert.strictEqual(body.summary, 'Section E from (0,64,0): floor: floor unknown at d0; headroom 2; out of sight from d1.')
+  assert.strictEqual(body.summary, 'Section E from (0,64,0): floor: level d0–1, floor unknown at d2; headroom 2; out of sight from d3.')
 })

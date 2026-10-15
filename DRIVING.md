@@ -17,7 +17,7 @@ Every tool is `mcp__golem__<tool>`. This text writes the bare name, and a call w
 ## Laws
 
 1. Query, act, verify, every time. A plan more than a step or two ahead is a guess, so look again often.
-2. No x-ray. `find`, `scene` and `mine` report only blocks exposed to air, in line of sight and not in total darkness, so an empty ore result usually means buried or unlit, not absent. `?` means unseen. Silence means you did not look, never that it is clear.
+2. No x-ray. `find`, `scene` and `mine` report only blocks exposed to air and in lit sight, the darker the closer, so an empty ore result usually means buried or unlit, not absent. `?` means unseen. Silence means you did not look, never that it is clear.
 3. Carry names, not coordinates: `waypoint` anything worth returning to, and `goto(waypoint: "home")` walks back. Reason in coordinates: +x east, -x west, +z south, -z north, +y up.
 4. The pathfinder walks. It never digs and never places, so a blocked route is your call: `dig_stair`, `dig_tunnel` or another point. When `goto` says why it gave up, believe it.
 5. `find` before `mine`. Never dig the block under your own feet. Dig into faces, not floors.
