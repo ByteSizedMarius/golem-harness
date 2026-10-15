@@ -6,6 +6,7 @@ const path = require('node:path')
 const readline = require('node:readline')
 const { signRequest, verifyProof } = require('../lib/sig')
 const { quietText } = require('../lib/server-msg')
+const todos = require('../lib/todo')
 const { TOOLS } = require('./tools')
 
 const PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
@@ -41,6 +42,16 @@ const LOCAL_TOOLS = [
     name: 'papercut',
     description: 'Note what made playing harder than it should be: a tool that fought you, a workaround you needed, a misleading reply, a missing ability. When in doubt, note it: too many beat too few. One paragraph, then move on. The owner reads these later, and it changes nothing in the game.',
     params: { text: { type: 'str', maxLen: 600, required: true } }
+  },
+  {
+    name: 'todo',
+    description: 'Your todo list, kept across restarts and shown at boot: add what was asked (by who) or promised, then done or drop it by id.',
+    params: {
+      action: { type: 'enum', values: ['add', 'done', 'drop', 'list'], required: true },
+      text: { type: 'str', maxLen: 200 },
+      who: { type: 'str', maxLen: NAME_CAP },
+      id: { type: 'int', min: 1, max: 999999 }
+    }
   }
 ]
 
@@ -309,7 +320,7 @@ function untilAborted (promise, signal) {
 
 // onWake runs after every return of wait_events. onToolCall runs on every tools/call with the name from
 // the tool table, null for a name outside it, and the sorted names of the tool's params the call passed.
-function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, now = () => new Date() }) {
+function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, todoFile, now = () => new Date() }) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new TypeError('port must be an integer 1024-65535')
   if (typeof token !== 'string' || token === '') throw new TypeError('token must be a non-empty string')
   if (typeof fetch !== 'function') throw new TypeError('fetch must be a function')
@@ -321,6 +332,9 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
   }
   if (papercutsFile !== undefined && (typeof papercutsFile !== 'string' || !path.isAbsolute(papercutsFile))) {
     throw new TypeError('papercutsFile must be an absolute path')
+  }
+  if (todoFile !== undefined && (typeof todoFile !== 'string' || !path.isAbsolute(todoFile))) {
+    throw new TypeError('todoFile must be an absolute path')
   }
   if (typeof now !== 'function') throw new TypeError('now must be a function')
   const manual = loadManual(manualDir)
@@ -376,7 +390,8 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
     }
   }
 
-  async function callRouted (tool, values) {
+  // last, when not null, becomes the final tail.
+  async function callRouted (tool, values, last = null) {
     const timeoutMs = tool.timeoutMs ?? requestTimeoutMs
     let reply
     try {
@@ -391,6 +406,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
       if (note !== null) tails.push(note)
       delete body.unreadChat
     }
+    if (last !== null) tails.push(last)
     return jsonResult(redact(trimLists(body, tool.lists), tool.structural), reply.status !== 200, tails)
   }
 
@@ -499,6 +515,47 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
     return textResult('noted')
   }
 
+  function todoListing () {
+    try {
+      return todos.render(todos.load(todoFile).items, now().getTime())
+    } catch (e) {
+      console.error(`[golem-mcp] cannot read the todo list: ${e.message}`)
+      return null
+    }
+  }
+
+  function todo ({ action, text, who, id }) {
+    if (todoFile === undefined) return textResult('todos are off', true)
+    if (action !== 'add' && (text !== undefined || who !== undefined)) return textResult('text and who are only for add', true)
+    if ((action === 'add' || action === 'list') && id !== undefined) return textResult('id is only for done and drop', true)
+    if (action === 'add' && text === undefined) return textResult('add needs text', true)
+    if ((action === 'done' || action === 'drop') && id === undefined) return textResult(`${action} needs id`, true)
+    let head = null
+    let failed = false
+    try {
+      if (action === 'add') {
+        const line = flatText(text)
+        if (!line) return textResult('todo text is empty', true)
+        const asker = who === undefined ? '' : flatText(who)
+        head = `Added #${todos.add(todoFile, line, asker, now())}.`
+        if (asker) head += `\nTell ${asker} it is queued if you have not.`
+      } else if (action !== 'list') {
+        failed = !todos.remove(todoFile, id)
+        head = failed ? `No open todo has id ${id}.` : `${action === 'done' ? 'Done' : 'Dropped'} #${id}.`
+      }
+    } catch (e) {
+      if (!(e instanceof todos.TodoFull)) {
+        console.error(`[golem-mcp] cannot update the todo list: ${e.message}`)
+        return textResult('the todo list could not be read or written', true)
+      }
+      head = e.message
+      failed = true
+    }
+    const list = todoListing()
+    if (list === null) return textResult('the todo list could not be read', true)
+    return textResult(head === null ? list : `${head}\n${list}`, failed)
+  }
+
   async function callTool (id, params) {
     const valid = params !== null && typeof params === 'object' && typeof params.name === 'string'
     const tool = valid ? byName.get(params.name) : undefined
@@ -516,6 +573,11 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
     if (tool.name === 'wait_events') return rpcResult(id, await waitEvents(values))
     if (tool.name === 'manual') return rpcResult(id, textResult(manual.get(values.topic)))
     if (tool.name === 'papercut') return rpcResult(id, papercut(values))
+    if (tool.name === 'todo') return rpcResult(id, todo(values))
+    // A restarted pilot learns its open todos from boot.
+    if (tool.name === 'boot' && todoFile !== undefined) {
+      return rpcResult(id, await callRouted(tool, values, todoListing() ?? 'the todo list could not be read'))
+    }
     return rpcResult(id, await callRouted(tool, values))
   }
 
@@ -611,7 +673,8 @@ function main () {
     onToolCall = (name, used) => logLine(`tool call ${name === null ? '(unknown)' : name}${used.length ? ' ' + used.join(',') : ''}`)
   }
   const papercutsFile = process.env.GOLEM_PAPERCUTS || undefined
-  serveStdio(createServer({ port, token, fetch: globalThis.fetch, onWake, onToolCall, papercutsFile }))
+  const todoFile = process.env.GOLEM_TODO || undefined
+  serveStdio(createServer({ port, token, fetch: globalThis.fetch, onWake, onToolCall, papercutsFile, todoFile }))
 }
 
 if (require.main === module) main()

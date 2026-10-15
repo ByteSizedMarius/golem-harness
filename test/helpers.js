@@ -403,7 +403,7 @@ function errorText (r) {
   return r.result.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n')
 }
 
-const LOCAL_TOOLS = ['wait_events', 'papercut', 'manual']
+const LOCAL_TOOLS = ['wait_events', 'papercut', 'todo', 'manual']
 const routedTools = () => TOOLS.filter((t) => t.route != null && !LOCAL_TOOLS.includes(t.name))
 
 function validValue (spec) {

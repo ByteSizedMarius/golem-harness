@@ -15,6 +15,14 @@ and a ViaProxy plugin raises it to 256 for a 1.7.10 server. The chat line length
 lengths. The MCP wake log now names the params each tool call passed, never their values,
 so unused tools and params can be counted and trimmed later.
 
+Todo list. In one live session the owner made about 15 requests, and bread, seeds, wood for
+the owner and 64 ore left in a furnace were promised or noticed and then forgotten. Pending
+work lived only in the model's context. The MCP server now serves a `todo` tool (add, done,
+drop, list, at most 30 open items) that keeps the list in the JSON file `GOLEM_TODO` names,
+answers every call with the open list, and appends that list to the `boot` reply, so a
+restarted pilot sees what it still owes. Without the variable the tool answers that todos
+are off.
+
 **Server recipe overrides.** On the 1.7.10 testbed every crafted fence vanished a moment later. The
 bot crafted by the 1.21 recipe (4 planks and 2 sticks make 3) while the server knows only 6 sticks
 making 2, so the server refused the result and the resync wiped it. A door showed 3 and the server
@@ -223,6 +231,14 @@ by name, and an output of another item stays where it is. bot.log carries the sl
 step. With no way to look into a furnace, the pilot once smelted a log only to reach the output.
 The new `furnace` tool lists a furnace's input, fuel, output and burn progress, and `take` moves one
 slot into the pockets.
+
+**Queued requests and 1.7.10 item names.** Live, the owner asked the pilot to keep track of wheat,
+and it added a todo but never told him it was queued. A `todo` add with a `who` now answers
+`Tell <who> it is queued if you have not.` under the `Added` line. `craft("fence")` and
+`craft("fence_gate")` answered `unknown item`, since item names resolved only against 1.21, where
+those are `oak_fence` and `oak_fence_gate`. The server overrides file takes an optional `items`
+object of server item names to 1.21 ones, and `craft` looks a name up there before the registry. A
+file whose `items` is not an object of non-empty names is refused at start.
 
 ## 2026-10-15: one goto, and arrival means standing there
 
