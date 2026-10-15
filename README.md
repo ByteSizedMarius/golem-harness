@@ -66,7 +66,9 @@ produce more interesting minds. Concretely:
 - **No sensing through walls.** Mobs and players sealed behind rock are simply absent from perception.
 - **Considerate movement.** The pathfinder never breaks blocks to travel. Zero litter: scaffold blocks
   the bot places are tracked and reclaimed (`/tidy`). Doors and gates the bot opens are closed behind
-  it (gate manners — pen integrity and safe retreat both depend on it).
+  it (gate manners — pen integrity and safe retreat both depend on it). A `/goto` plans before it
+  walks and refuses a plan that ends more than 2 off the asked height or drops more than 3 at once,
+  unless told `accept=1`. `preview=1` answers the plan without a step.
 - **No teleporting, no auto-eat.** The pilot earns the way out.
 - **Silence means "didn't look," never "all clear."** The describer refuses to guess numbers it didn't
   measure; unknown space reads as unknown.

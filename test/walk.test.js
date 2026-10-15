@@ -7,6 +7,7 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const walk = require('../lib/walk')
 const { loadBotFunctions, botConstant, startApp } = require('./helpers')
+const { summarizePlan, planRisk } = require('../lib/plan')
 const { legLedger } = require('../lib/legs')
 
 const { UNLOADED, UNKNOWN, standCell, targetKind, resolveTarget, crumbCentre, arrivedAt, watchProgress, walkAttempt, routeDeadline } = walk
@@ -462,6 +463,10 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     airPrecheck: () => ({ verdict: 'connected' }),
     doorwayCommit: async () => false,
     stopPath () { bot.pathfinder.setGoal(null) },
+    // A plan straight onto the goal cell.
+    planPath: async (g) => ({ status: 'success', path: [new Vec3(g.x + 0.5, g.y, g.z + 0.5)] }),
+    summarizePlan,
+    planRisk,
     ...over
   })
   return { env, bot, ctx: loadBotFunctions(['walkRoute', 'stagedGoto', 'collectDrops'], env) }
@@ -821,4 +826,58 @@ test('a cancelled route deadline never fires', () => {
   clock.advance(600000)
   assert.strictEqual(stops, 0)
   assert.strictEqual(deadline.expired(), false)
+})
+
+// stagedGoto with its walk options, counting the goals the walk set.
+async function plannedGoto (q, walkOpts, opts = {}) {
+  const set = []
+  const answer = opts.answer || (() => {})
+  const { ctx } = walkBot({ ...opts, answer: (b, g, env) => { set.push(g); answer(b, g, env) } })
+  const route = ctx.walkRoute()
+  try {
+    return { r: JSON.parse(JSON.stringify(await ctx.stagedGoto(q, route, walkOpts))), walks: set.length }
+  } finally { route.end() }
+}
+
+test('a preview answers the plan and walks nothing', async () => {
+  const { r, walks } = await plannedGoto({ x: 5, z: 5 }, { preview: true })
+  assert.strictEqual(walks, 0)
+  assert.deepStrictEqual(r, {
+    arrived: false, kind: 'coordinate', target: { x: 5, y: 64, z: 5 }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: 7.1, reason: null, hint: null,
+    plan: { reaches: true, length: 7.1, rise: 0, drop: 0, end: { x: 5, y: 64, z: 5 }, unseen: false }
+  })
+  const unloaded = (bot) => { bot.blockAt = (p) => (p.x > 40 ? null : p.y <= 63 ? STONE : AIR) }
+  const far = await plannedGoto({ x: 300, y: 70, z: -40 }, { preview: true }, { setup: unloaded })
+  assert.deepStrictEqual([far.walks, far.r.reason, far.r.plan], [0, 'unresolved', null], 'an unloaded target has no plan yet')
+})
+
+test('a goto refuses a plan that ends far from the y asked or drops more than 3, without a step, and accept walks it', async () => {
+  const cliff = async (g) => ({ status: 'success', path: [new Vec3(1.5, 64, 0.5), new Vec3(2.5, 59, 0.5), new Vec3(g.x + 0.5, g.y, g.z + 0.5)] })
+  const refused = await plannedGoto({ x: 5, z: 5 }, {}, { over: { planPath: cliff }, answer: arrive })
+  assert.deepStrictEqual([refused.walks, refused.r.arrived, refused.r.reason, refused.r.risk, refused.r.plan.drop], [0, false, 'risky', 'it drops 5 blocks at once', 5])
+  const high = await plannedGoto({ x: 5, y: 70, z: 5 }, {}, { answer: arrive })
+  assert.deepStrictEqual([high.walks, high.r.reason, high.r.risk], [0, 'risky', 'it ends 6 below the y asked'], 'the floor of that column lies 6 under the y asked')
+  const near = await plannedGoto({ x: 5, y: 66, z: 5 }, {}, { answer: arrive })
+  assert.deepStrictEqual([near.walks, near.r.arrived], [1, true], 'control: 2 above the floor')
+  let planned = 0
+  const accepted = await plannedGoto({ x: 5, z: 5 }, { accept: true }, { over: { planPath: async (g) => { planned++; return cliff(g) } }, answer: arrive })
+  assert.deepStrictEqual([accepted.walks, accepted.r.arrived, planned], [1, true, 0])
+})
+
+test('a preview through terrain the bot has not seen reports only the part it knows', async () => {
+  // The plan steps east, then drops 5 into a cave the bot never saw from x 3 on.
+  const cave = async () => ({ status: 'success', path: [1, 2, 3, 4, 5].map((x) => new Vec3(x + 0.5, x < 3 ? 64 : 59, 0.5)) })
+  const { r, walks } = await plannedGoto({ x: 5, z: 0 }, { preview: true }, { over: { planPath: cave, cellKnown: (p) => p.x < 3 } })
+  assert.strictEqual(walks, 0)
+  assert.deepStrictEqual(r.target, { x: 5, z: 0 }, 'the target cell is unseen')
+  assert.deepStrictEqual(r.plan, { reaches: null, length: 2, rise: 0, drop: 0, end: { x: 2, y: 64, z: 0 }, unseen: true })
+  assert.ok(!JSON.stringify(r).includes('59'), 'the cave floor stays hidden')
+  const walked = await plannedGoto({ x: 5, z: 0 }, {}, { over: { planPath: cave, cellKnown: (p) => p.x < 3 }, answer: arrive })
+  assert.deepStrictEqual([walked.walks, walked.r.reason], [1, null], 'the hidden drop raises no refusal')
+})
+
+test('a preview of a failed search leaves reaches unknown, since the search may have run through unseen terrain', async () => {
+  const failed = async () => ({ status: 'noPath', path: [new Vec3(1.5, 64, 0.5), new Vec3(2.5, 64, 0.5)] })
+  const { r } = await plannedGoto({ x: 5, z: 0 }, { preview: true }, { over: { planPath: failed, cellKnown: (p) => p.x < 3 } })
+  assert.deepStrictEqual(r.plan, { reaches: null, length: 2, rise: 0, drop: 0, end: { x: 2, y: 64, z: 0 }, unseen: false })
 })

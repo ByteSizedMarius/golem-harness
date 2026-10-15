@@ -227,6 +227,16 @@ test('/goto waypoint names outside the waypoint charset get 400', async (t) => {
   assert.strictEqual(s.routeHits('/goto').length, 1)
 })
 
+test('/goto preview and accept take 1 or 0, anything else gets 400 and the route does not run', async (t) => {
+  const s = await startApp(t)
+  const valid = ['preview=1', 'preview=0', 'accept=1', 'accept=0', 'preview=1&accept=1']
+  for (const q of valid) assert.strictEqual((await s.get('/goto?x=1&z=1&' + q)).status, 200, `control: ${q}`)
+  for (const q of ['preview=true', 'preview=', 'accept=2', 'accept=1&accept=1', 'preview=__proto__']) {
+    assert.strictEqual((await s.get('/goto?x=1&z=1&' + q)).status, 400, q)
+  }
+  assert.strictEqual(s.routeHits('/goto').length, valid.length)
+})
+
 // ---- /sign text and /rename name ----
 
 const BAD_TEXTS = ['a\nb', 'a\u007fb', '§chello']

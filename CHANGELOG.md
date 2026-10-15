@@ -8,6 +8,15 @@ and leaves the stories here.
 
 ## 2026-10-15: live-play fixes
 
+`goto` plans before it walks, and refuses a plan that ends more than 2 blocks (or `range`) off the
+asked y or drops more than 3 at once, naming the risk and the numbers. `accept` walks it anyway, and
+`preview` answers the plan without a step: whether it reaches, its length, rise, biggest drop and end
+cell (`lib/plan.js`). The numbers stop where the plan enters terrain the bot has not seen, so a
+preview never maps a hidden cave, and a hidden drop never refuses a walk. Past that point `reaches`
+is null, since whether the pathfinder found a way through unseen terrain is itself a map of it. A
+failed search reads null too, as it may have searched unseen terrain, so `reaches` is only ever true
+or null.
+
 The walking review's deferrals: a lane claim returns a token, and a route's release clears only its
 own claim, so a stale handler can no longer drop the claim a newer route took after `/stop`. The
 hurt freeze clears the goal too, which ends a path still being planned before its first step. A

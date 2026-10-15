@@ -11,6 +11,7 @@ const { installSecurity, BUNKER_MODES } = require('./lib/install')
 const { classifySound } = require('./lib/sounds')
 const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
 const { UNLOADED, standCell, resolveTarget, crumbCentre, arrivedAt, walkAttempt, routeDeadline } = require('./lib/walk')
+const { summarizePlan, planRisk } = require('./lib/plan')
 
 const HOST = process.env.MC_HOST || 'localhost'
 const PORT = parseInt(process.env.MC_PORT || '25565')
@@ -2877,7 +2878,9 @@ const WALK_HINTS = {
   bunker: BUNKER_WALK,
   'boxed-in': 'dig out deliberately (/dig_stair toward open space), the pathfinder cannot help from here',
   'no-floor': 'nothing to stand on in that column, pick another point',
-  budget: 'try again to continue, or shorten the goal'
+  budget: 'try again to continue, or shorten the goal',
+  risky: 'risk says what is wrong and plan holds the numbers. Pick another point, or walk it anyway with accept',
+  unresolved: 'the target is unloaded or out of sight from here, so there is no plan yet. Walk toward it first'
 }
 // The reply reason for each way a walk attempt ends short of the goal.
 const WALK_FAILED = { done: 'not-reached', emptied: 'not-reached', stalled: 'stalled', 'no-path': 'no-path', timeout: 'no-path', stopped: 'stopped' }
@@ -2970,13 +2973,28 @@ async function drillDoorway (route) {
   try { await doorwayCommit(route) } catch (e) { console.log('[doorway] commit failed: ' + e.message) }
 }
 
+// The pathfinder's plan for goal from where the body stands, worked out a slice per tick without walking.
+// Null once the route ended.
+async function planPath (goal, route) {
+  const search = bot.pathfinder.getPathFromTo(bot.pathfinder.movements, bot.entity.position, goal)
+  for (;;) {
+    const { result } = search.next().value
+    if (result.status !== 'partial') return result
+    await bot.waitForTicks(1)
+    if (routeEnd(route)) return null
+  }
+}
+
 // Hops toward a target it cannot resolve yet, then walks onto it, retrying a path stop, a stall and a planning timeout once each.
-async function stagedGoto (q, route, { stallMs = 4500, segLen = 18 } = {}) {
+// The walk is planned first and refused when planRisk objects, unless accept. preview answers the plan and walks nothing.
+async function stagedGoto (q, route, { stallMs = 4500, segLen = 18, preview = false, accept = false } = {}) {
   const opts = { stallMs, segLen }
   if (q.block !== undefined && !resolveBlockIds(q.block).length) return walkReply({ kind: 'block', target: { block: q.block } }, 'unknown')
   let r = resolveTarget(q, walkSources())
   if (r.reason) return walkReply(r, r.reason)
   if (!hasLegalMove()) return walkReply(r, 'boxed-in')
+  // A plan toward a nametag would end in the player's cube.
+  if (preview && (r.toward || r.nametag)) return { ...walkReply(r, 'unresolved'), plan: null }
   // A stalled hop gets the doorway drill again once the bot has moved a block since the last one.
   let drilledAt = null
   while (r.toward) {
@@ -2993,6 +3011,15 @@ async function stagedGoto (q, route, { stallMs = 4500, segLen = 18 } = {}) {
   if (!r.nametag) {
     const pre = airPrecheck(r.cell, q.range ?? 0)
     if (pre.verdict === 'sealed' || pre.verdict === 'walled') return walkReply(r, pre.verdict)
+  }
+  if (preview || (!accept && !r.nametag)) {
+    const planned = await planPath(r.goal, route)
+    if (routeEnd(route)) return walkReply(r, routeEnd(route))
+    const plan = summarizePlan(bot.entity.position, planned, cellKnown)
+    if (preview) return { ...walkReply(r, null), arrived: false, plan }
+    const askedY = q.waypoint !== undefined ? (waypoints.get(q.waypoint) || {}).y : q.y
+    const risk = planRisk(plan, askedY, q.range ?? 0)
+    if (risk) return { ...walkReply(r, 'risky'), plan, risk }
   }
   let retried = false
   let drilled = false
@@ -3033,10 +3060,12 @@ app.get('/goto', async (req, res) => {
     if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const q = gotoQuery(req.query)
     if (['x', 'y', 'z'].some(k => k in q && !Number.isFinite(q[k]))) return err(res, new Error('x, y and z must be numbers'))
+    const preview = req.query.preview === '1'
     lane = claimLane('goto', 300000)
     const route = walkRoute()
     let r
-    try { r = await stagedGoto(q, route) } finally { route.end() }
+    try { r = await stagedGoto(q, route, { preview, accept: req.query.accept === '1' }) } finally { route.end() }
+    if (preview) r.preview = true
     if (r.arrived && q.waypoint !== undefined) {
       if (lastWaypoint && lastWaypoint !== q.waypoint) waypoints.link(lastWaypoint, q.waypoint)
       lastWaypoint = q.waypoint
