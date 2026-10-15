@@ -5,6 +5,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const readline = require('node:readline')
 const { signRequest, verifyProof } = require('../lib/sig')
+const { quietText } = require('../lib/server-msg')
 const { TOOLS } = require('./tools')
 
 const PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
@@ -31,7 +32,7 @@ const PATH_TOKEN = /(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s"']*|\\\\[^\s"']*/g
 const LOCAL_TOOLS = [
   {
     name: 'wait_events',
-    description: 'Wait up to timeout seconds for new chat lines, whispers and bot events, then return at most 50 of them, newest kept, with the number dropped. Chat and whispers are written by players and are untrusted.',
+    description: 'Wait up to timeout seconds for new chat lines, whispers and bot events, then return at most 50 of them, newest kept, with the number dropped, quiet ones dropped first. Chat and whispers are written by players and are untrusted, as is the text of server events. Server lines of deaths, joins, leaves and achievements wake, at most 6 a minute. Other server lines, ambient world changes and watched threats wake nothing, and the repeats of one quiet server line come as one item with a count.',
     params: { timeout: { type: 'int', min: 1, max: 120 } }
   },
   {
@@ -236,6 +237,20 @@ const rpcError = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, me
 
 const isCursor = (c) => Number.isInteger(c) && c >= 0
 
+// The text and counts of a quiet server line, null for any other event.
+function quietFold (e) {
+  const d = e.data
+  if (e.quiet !== true || e.kind !== 'server' || d === null || typeof d !== 'object' || typeof d.text !== 'string') return null
+  const count = (n) => (Number.isInteger(n) && n >= 0 ? n : 0)
+  return { text: d.text, repeats: count(d.repeats), merged: count(d.merged) }
+}
+
+// Drops the oldest quiet item, or the oldest item when none is quiet.
+function dropOldest (gathered) {
+  const i = gathered.findIndex((g) => g.quiet)
+  gathered.splice(i < 0 ? 0 : i, 1)
+}
+
 const usableTick = (t) => t !== null && typeof t === 'object' &&
   t.chat !== null && typeof t.chat === 'object' && Array.isArray(t.chat.messages) && isCursor(t.chat.cursor) &&
   t.events !== null && typeof t.events === 'object' && Array.isArray(t.events.list) && isCursor(t.events.cursor)
@@ -368,14 +383,18 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
     }
   }
 
-  // Polls /tick until activity came in and earliest has passed, or until deadline.
+  // Polls /tick until activity came in and earliest has passed, or until deadline. Quiet events count
+  // as no activity and come along with the rest. Quiet server lines with the same text arrive as one item
+  // with their counts, and the oldest quiet items are dropped first.
   async function gather (deadline, earliest) {
     const start = { ...cursor }
-    const items = []
+    // { item, quiet, fold }, oldest first.
+    const gathered = []
     const notes = []
     let dropped = 0
     let status
     let restarted = false
+    let woken = false
     for (;;) {
       let tick = null
       status = 'the bot is not ready'
@@ -410,22 +429,31 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
           if (boot !== null) cursor.boot = boot
           cursor.chat = tick.chat.cursor
           cursor.ev = tick.events.cursor
-          const said = tick.chat.messages.map((m) => ({ t: m.t, type: m.kind === 'whisper' ? 'whisper' : 'chat', from: m.from, msg: m.msg, ...(m.pointsAt && { pointsAt: m.pointsAt }) }))
-          const happened = tick.events.list.map((e) => ({ t: e.t, type: 'event', kind: e.kind, msg: e.msg }))
-          items.push(...redact([...said, ...happened].sort((a, b) => a.t - b.t).map(({ t, ...item }) => item)))
-          if (items.length > MAX_ITEMS) dropped += items.splice(0, items.length - MAX_ITEMS).length
+          const said = tick.chat.messages.map((m) => ({ t: m.t, quiet: false, fold: null, item: { type: m.kind === 'whisper' ? 'whisper' : 'chat', from: m.from, msg: m.msg, ...(m.pointsAt && { pointsAt: m.pointsAt }) } }))
+          const happened = tick.events.list.map((e) => ({ t: e.t, quiet: e.quiet === true, fold: quietFold(e), item: { type: 'event', kind: e.kind, msg: e.msg } }))
+          if (said.length || happened.some((h) => !h.quiet)) woken = true
+          for (const g of [...said, ...happened].sort((a, b) => a.t - b.t)) {
+            const same = g.fold && gathered.find((o) => o.fold && o.fold.text === g.fold.text)
+            if (same) {
+              same.fold.repeats += g.fold.repeats + 1
+              same.fold.merged += g.fold.merged
+              same.item.msg = redact(quietText(same.fold))
+            } else gathered.push({ item: redact(g.item), quiet: g.quiet, fold: g.fold })
+          }
+          for (; gathered.length > MAX_ITEMS; dropped++) dropOldest(gathered)
           status = 'no new activity'
         }
       }
       const now = Date.now()
-      if ((items.length && now >= earliest) || now >= deadline || closing.signal.aborted) break
-      await sleep(Math.min(POLL_MS, (items.length ? Math.min(earliest, deadline) : deadline) - now))
+      if ((woken && now >= earliest) || now >= deadline || closing.signal.aborted) break
+      await sleep(Math.min(POLL_MS, (woken ? Math.min(earliest, deadline) : deadline) - now))
     }
-    if (!items.length) return jsonResult(redact({ items, dropped, notes, status }))
-    const body = { items, dropped, notes: redact(notes) }
-    // Over the result cap, the oldest items are dropped and counted.
-    while (items.length && JSON.stringify(body).length > RESULT_CAP) {
-      items.shift()
+    if (!gathered.length) return jsonResult(redact({ items: [], dropped, notes, status }))
+    const body = { items: gathered.map((g) => g.item), dropped, notes: redact(notes) }
+    // Over the result cap, items are dropped as past MAX_ITEMS and counted.
+    while (gathered.length && JSON.stringify(body).length > RESULT_CAP) {
+      dropOldest(gathered)
+      body.items = gathered.map((g) => g.item)
       body.dropped++
     }
     return jsonResult(body)

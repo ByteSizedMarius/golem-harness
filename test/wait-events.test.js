@@ -4,7 +4,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const {
   PORT, mcpServer, call, isToolError, assertOk, textOf, assertSigned,
-  tickReply, tickOf, chatLine, eventLine, botProcess, missing
+  tickFrom, tickReply, tickOf, chatLine, eventLine, botProcess, missing
 } = require('./helpers')
 
 test('wait_events drops a /tick reply without a valid proof', { timeout: 20000 }, async () => {
@@ -74,6 +74,63 @@ test('wait_events caps and redacts every field of an item, not only the message'
   assert.ok(text.includes('E'.repeat(50)), 'control: the event reaches the result')
   for (const marker of ['fromleak1', 'evtsrv2', 'evtleak3']) assert.ok(!text.includes(marker), marker)
   for (const ch of ['F', 'K', 'E']) assert.ok(!text.includes(ch.repeat(301)), `${ch} run over 300 units`)
+})
+
+test('a quiet event wakes nothing and comes along at the timeout or with the next wake', { timeout: 30000 }, async () => {
+  const loud = mcpServer({ reply: tickReply([], [eventLine(1, 'ore-callout')]) })
+  const t0 = Date.now()
+  assert.ok(textOf(await call(loud.srv, 'wait_events', { timeout: 3 })).includes('ore-callout'), 'control')
+  assert.ok(Date.now() - t0 < 1500, `control: a waking event took ${Date.now() - t0} ms`)
+
+  const events = [{ ...eventLine(1, 'grass-grew'), quiet: true }]
+  const { srv } = mcpServer({ reply: tickReply([], events) })
+  const t1 = Date.now()
+  assert.ok(textOf(await call(srv, 'wait_events', { timeout: 2 })).includes('grass-grew'))
+  assert.ok(Date.now() - t1 >= 1900, `a quiet event woke wait_events after ${Date.now() - t1} ms`)
+
+  const messages = []
+  const quietThenChat = mcpServer({ reply: tickReply(messages, [{ ...eventLine(1, 'leaves-fell'), quiet: true }]) })
+  const later = setTimeout(() => messages.push(chatLine(1, 'hello-there')), 1000)
+  try {
+    const t2 = Date.now()
+    const text = textOf(await call(quietThenChat.srv, 'wait_events', { timeout: 20 }))
+    assert.ok(Date.now() - t2 < 5000, `held ${Date.now() - t2} ms after the chat line`)
+    assert.ok(text.includes('leaves-fell') && text.includes('hello-there'), text)
+  } finally {
+    clearTimeout(later)
+  }
+})
+
+// A quiet server line as bot.js logs it, with the repeats it already counted.
+const quietLine = (id, text, repeats = 0) => ({ id, t: id, kind: 'server', msg: repeats ? `${text} (seen ${repeats + 1} times)` : text, data: { kind: 'other', text, repeats, merged: 0 }, quiet: true })
+
+test('a quiet server line that repeats across polls arrives as one item with its count', { timeout: 20000 }, async () => {
+  const events = []
+  let ticks = 0
+  const reply = (url) => {
+    if (url.pathname !== '/tick') return { ok: true }
+    ticks++
+    events.push(quietLine(events.length + 1, 'Lag spike', ticks === 1 ? 2 : 0))
+    if (ticks === 2) events.push(quietLine(events.length + 1, 'World saved'))
+    return tickFrom({ chat: [], events }, url)
+  }
+  const { srv } = mcpServer({ reply })
+  const { items } = JSON.parse(textOf(await call(srv, 'wait_events', { timeout: 3 })))
+  assert.ok(ticks >= 3, `control: ${ticks} polls`)
+  assert.deepStrictEqual(items, [
+    { type: 'event', kind: 'server', msg: `Lag spike (seen ${ticks + 2} times)` },
+    { type: 'event', kind: 'server', msg: 'World saved' }
+  ])
+})
+
+test('quiet items are dropped before any chat line or waking event', { timeout: 20000 }, async () => {
+  const chat = [chatLine(1, 'keep-this-chat')]
+  const events = [{ ...eventLine(1, 'keep-this-event'), t: 2 }]
+  for (let i = 0; i < 60; i++) events.push({ ...quietLine(i + 2, `quiet ${i}`), t: 3 + i })
+  const { srv } = mcpServer({ reply: tickReply(chat, events) })
+  const body = JSON.parse(textOf(await call(srv, 'wait_events', { timeout: 1 })))
+  assert.deepStrictEqual(body.items.slice(0, 2).map((i) => i.msg), ['keep-this-chat', 'keep-this-event'])
+  assert.deepStrictEqual([body.items.length, body.dropped, body.items[2].msg], [50, 12, 'quiet 12'])
 })
 
 test('a chat line keeps the block its speaker pointed at', { timeout: 20000 }, async () => {

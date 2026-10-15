@@ -3,6 +3,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
+const { sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
 const { botConstant, loadBotFunctions, runRoute } = require('./helpers')
 
@@ -76,7 +77,7 @@ test('the veins of scene name ore in lit sight, never ore around a corner or in 
 test('the ore callout announces ore in lit sight, never ore around a corner or in the dark', () => {
   const callouts = (light) => {
     const events = []
-    const env = { ...cave(light), ORE_IDS: [1, 2], ORE_ANNOUNCED: new Map(), emitEvent: (kind, msg) => events.push(msg) }
+    const env = { ...cave(light), ORE_IDS: [1, 2], ORE_ANNOUNCED: new Map(), sameVein, emitEvent: (kind, msg) => events.push(msg) }
     loadBotFunctions(['oreCallout'], env).oreCallout()
     return events
   }

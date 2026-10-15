@@ -78,6 +78,20 @@ each one, and its reply reads from the 5-block cube.
 carries the block they looked at as it arrived, when the bot sees that block too. A crouching
 speaker's look starts from the crouched eye height.
 
+Server lines: every chat line no player wrote reaches `wait_events` as a `server` event. Deaths,
+joins, leaves and achievements, by their translate key or their plain wording, wake it, at most 6 a
+minute. Every other server line, and a waking one past the limit, arrives quiet with the next wake. A
+quiet line that repeats the one before counts on it instead of arriving again, and past 20 waiting
+lines the rest merge into the newest. Player chat, emotes, `/say` and whispers are never server
+lines. The text of a server line stays untrusted. The MCP server polls every second, so a line
+repeating every 1.1 s still came back as one item per poll: `wait_events` now merges quiet server
+lines of the same text into one item with the count over the whole call, and drops quiet items
+before any chat line or waking event past 50.
+
+Quieter wakes: 22 of 121 wakes in one session were noise. Grass, snow and leaves changing by
+themselves and `watched:` threats no longer wake `wait_events` and arrive with the next wake, and
+ore blocks of a vein already called out stay quiet.
+
 `/section` summarised "floor: down 13-16" over rows the capped air fill never reached, and the
 real ground lay 61 blocks down. A column now has a floor only where a solid block lies under its
 lowest sensed air, and that block counts only when the air fill stopped at it or the bot has seen

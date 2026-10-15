@@ -13,6 +13,8 @@ const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, 
 const { UNLOADED, standCell, resolveTarget, crumbCentre, nametagGoal, arrivedAt, walkAttempt, routeDeadline } = require('./lib/walk')
 const { playerNamed, playersAround, presenceUpdate, presenceText } = require('./lib/players')
 const { POINT_RANGE, deictic, lookedAt } = require('./lib/deixis')
+const { WAKE_KINDS, serverLines, rateLimit, foldQuiet, quietText } = require('./lib/server-msg')
+const { ambientChange, sameVein } = require('./lib/wake')
 const { headFree } = require('./lib/head')
 const { sprintJump, passedNodes, step: nodeStep } = require('./lib/sprint')
 const { summarizePlan, planRisk } = require('./lib/plan')
@@ -356,6 +358,31 @@ const pointerOf = (from, message) => { try { return chatPointer(from, message) }
 bot.on('chat', (username, message) => { if (username !== USERNAME) pushChat(username, message, 'chat', pointerOf(username, message)) })
 bot.on('whisper', (username, message) => pushChat(username, message, 'whisper', pointerOf(username, message)))
 
+// Every system line no player wrote, as a server event. Deaths, joins, leaves and achievements wake the pilot,
+// at most 6 a minute, and every other line arrives quiet. A name in them is player-chosen text.
+const serverWakes = rateLimit({ max: 6, windowMs: 60000 })
+// The quiet server events no reply carried yet, oldest first, as foldQuiet counts them, each with its event ev.
+const quietServer = []
+let serverLine = null
+function serverMessage (msg, position) {
+  try {
+    if (position !== 'system') return
+    serverLine ??= serverLines(bot.registry.language || {})
+    const line = serverLine(msg)
+    if (!line) return
+    if (WAKE_KINDS.includes(line.kind) && serverWakes.take(Date.now())) return emitEvent('server', line.text, { kind: line.kind })
+    while (quietServer.length && quietServer[0].ev.id <= eventsServed) quietServer.shift()
+    const folded = foldQuiet(quietServer, line.text)
+    if (folded) Object.assign(folded.ev, { msg: quietText(folded), data: { ...folded.ev.data, repeats: folded.repeats, merged: folded.merged } })
+    else {
+      // The MCP server merges the counts of the events that carry the same text.
+      const ev = emitEvent('server', line.text, { kind: line.kind, text: line.text, repeats: 0, merged: 0 }, { quiet: true })
+      if (ev) quietServer.push({ text: line.text, repeats: 0, merged: 0, ev })
+    }
+  } catch (e) {}
+}
+bot.on('message', serverMessage)
+
 // ---- helpers ----
 const vecStr = (v) => v ? `(${v.x.toFixed(1)}, ${v.y.toFixed(1)}, ${v.z.toFixed(1)})` : null
 const round = (v) => v ? { x: Math.round(v.x*10)/10, y: Math.round(v.y*10)/10, z: Math.round(v.z*10)/10 } : null
@@ -377,12 +404,18 @@ function resolveItem(name) {
 // ---- event stream (interrupts for the driver: damage, death, threats, night, hunger) ----
 let eventSeq = 0
 const eventLog = []
-function emitEvent(kind, msg, data) {
+// The newest event id a /tick or /events reply carried.
+let eventsServed = 0
+// A quiet event rides along with the next wake of wait_events and wakes nothing itself. Returns the event, null
+// when it could not be logged.
+function emitEvent(kind, msg, data, { quiet = false } = {}) {
   try {
     console.log('[event] ' + kind + ' ' + msg)   // stdout line so the log-tailing Monitor wakes the driver
-    eventLog.push({ id: ++eventSeq, t: Date.now(), kind, msg, data: data || null })
+    const ev = { id: ++eventSeq, t: Date.now(), kind, msg, data: data || null, ...(quiet && { quiet }) }
+    eventLog.push(ev)
     if (eventLog.length > 400) eventLog.splice(0, eventLog.length - 400)
-  } catch (e) {}
+    return ev
+  } catch (e) { return null }
 }
 
 // ---- AMBIENT PULSE (the change-gated awareness stream): a lean [pulse] log the driver reads AT ITS
@@ -1411,7 +1444,7 @@ bot.on('blockUpdate', (oldB, newB) => {
     if (changeBuf.length > 200) changeBuf.splice(0, changeBuf.length - 200)
   } catch (e) {}
 })
-setInterval(() => {
+function worldChangeEvent () {
   try {
     if (!changeBuf.length || Date.now() - lastChangeEmit < 6000) return
     const batch = changeBuf; changeBuf = []
@@ -1426,9 +1459,10 @@ setInterval(() => {
       .map(([k, g]) => `${k}${g.n > 1 ? ' x' + g.n : ''} ${Object.entries(g.dirs).sort((a, b) => b[1] - a[1])[0][0]} ~${g.nearest}`)
       .join('; ')
     lastChangeEmit = Date.now()
-    emitEvent('world', `changed near me: ${line}`)
+    emitEvent('world', `changed near me: ${line}`, null, { quiet: batch.every(c => ambientChange(c.from, c.to)) })
   } catch (e) {}
-}, 3000)
+}
+setInterval(worldChangeEvent, 3000)
 
 // ---- BODY ALARMS: damage freezes everything (the bot buys my slow reaction time); hunger warns
 // once per crossing; death stamps a waypoint and says what was lost where.
@@ -1969,7 +2003,7 @@ reflexes.unshift({
           if (cls !== 'player' && now - (this._lastNarrate.get(wk) || 0) > 20000) {
             this._lastNarrate.set(wk, now)
             const rel = e.position.y > here.y + 1 ? 'above' : (e.position.y < here.y - 1 ? 'below' : 'beyond')
-            emitEvent('threat', `watched: ${e.name || '?'} ${rel} ~${Math.round(dist)} — separated, not driving`)
+            emitEvent('threat', `watched: ${e.name || '?'} ${rel} ~${Math.round(dist)} — separated, not driving`, null, { quiet: true })
           }
           continue
         }
@@ -2289,7 +2323,7 @@ bot.on('spawn', resetThreatState)
 // A player's eyes are always on; the pilot's /find only fires when asked. Every 4s, sweep ore in
 // lit sight within 12 and announce anything new. Announced set is pruned by distance+age so it
 // can't OOM (the SEEN lesson).
-const ORE_ANNOUNCED = new Map()   // "x,y,z" -> ts
+const ORE_ANNOUNCED = new Map()   // "x,y,z" -> { t, name }
 let ORE_IDS = null
 function oreCallout () {
   try {
@@ -2297,16 +2331,19 @@ function oreCallout () {
     if (!ORE_IDS) ORE_IDS = Object.values(mcData.blocksByName)
       .filter(b => /_ore$/.test(b.name) || b.name === 'ancient_debris').map(b => b.id)
     const here = bot.entity.position
-    for (const [k, ts] of ORE_ANNOUNCED) {                     // prune: >10min old or >48 away
+    for (const [k, ore] of ORE_ANNOUNCED) {                    // prune: >10min old or >48 away
       const [x, y, z] = k.split(',').map(Number)
-      if (Date.now() - ts > 600000 || here.distanceTo(new Vec3(x, y, z)) > 48) ORE_ANNOUNCED.delete(k)
+      if (Date.now() - ore.t > 600000 || here.distanceTo(new Vec3(x, y, z)) > 48) ORE_ANNOUNCED.delete(k)
     }
     const fresh = {}
     for (const v of findVisible(ORE_IDS, 12, 12)) {
       const k = `${v.pos.x},${v.pos.y},${v.pos.z}`
       if (ORE_ANNOUNCED.has(k)) continue
-      ORE_ANNOUNCED.set(k, Date.now())
-      const b = bot.blockAt(v.pos); if (!b) continue
+      const b = bot.blockAt(v.pos)
+      // A block of a vein already announced is recorded without a callout.
+      const known = !!b && sameVein(ORE_ANNOUNCED, b.name, v.pos)
+      ORE_ANNOUNCED.set(k, { t: Date.now(), name: b ? b.name : null })
+      if (!b || known) continue
       const dir = compass(v.pos.x - Math.floor(here.x), v.pos.z - Math.floor(here.z)) || 'HERE'
       const g = fresh[b.name] = fresh[b.name] || { n: 0, dir, d: Math.round(v.dist), y: v.pos.y }
       g.n++
@@ -2448,6 +2485,7 @@ app.get('/tick', (req, res) => {
       events: { cursor: eventSeq, list: eventLog.filter(x => x.id > evSince) },
       jobs: jobs.list()
     }
+    eventsServed = eventSeq
     // ?delta=1 (07-21): report only what CHANGED since the last tick — fewer tokens in,
     // faster pilot decisions out. Threats/water/chat/events always report (safety and
     // cursors are never elided); pos elides under 1 block of drift; vitals elide when equal.
@@ -4112,6 +4150,7 @@ app.get('/roof', async (req, res) => {
 app.get('/events', (req, res) => {
   try {
     const since = parseInt(req.query.since || '0')
+    eventsServed = eventSeq
     ok(res, { cursor: eventSeq, events: eventLog.filter(e => e.id > since) })
   } catch (e) { err(res, e) }
 })
