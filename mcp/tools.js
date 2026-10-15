@@ -103,6 +103,8 @@ const TOOLS = [
   { name: 'chest', route: '/chest', description: 'List the chest at x,y,z or the nearest one within 12.', params: AT, timeoutMs: WALK + EVENT },
   { name: 'withdraw', route: '/withdraw', description: 'Take items from the chest at x,y,z or the nearest one. name matches as a substring.', params: { name: required(NAME), count: COUNT, ...AT }, timeoutMs: WALK + EVENT },
   { name: 'deposit', route: '/deposit', description: 'Put items into the chest at x,y,z or the nearest one. name matches as a substring, so mind what else it matches.', params: { name: required(NAME), count: COUNT, ...AT }, timeoutMs: WALK + EVENT },
+  // The walk, the window and one withdraw per item kind.
+  { name: 'grave', route: '/grave', description: 'List the gravestone at x,y,z or the nearest in sight. take: all or an item name.', params: { at: POINT, take: NAME }, timeoutMs: LONGEST },
 
   // Building
   { name: 'build', route: '/build', description: 'Job: a cabin with a cobblestone foundation, oak plank walls to height h, a 2-high doorway centred in the west wall and a roof laid outer ring first. Skips solid cells. Stock enough cobblestone and oak planks first, or cells fail.', params: { template: { type: 'enum', values: ['cabin'] }, x: required(X), z: required(X), w: SIZE, d: SIZE, h: SIZE, base: Y, name: NAME, base_name: NAME } },

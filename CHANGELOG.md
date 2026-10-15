@@ -30,6 +30,19 @@ made 1. `GOLEM_RECIPE_OVERRIDES` names a JSON file of the server's own recipes, 
 an item listed there by that recipe only: it checks the ingredients against it and counts `made` by
 its yield. Without the variable crafting is unchanged.
 
+**Gravestones.** On the 1.7.10 testbed a death puts the player's items into a modded
+gravestone, and the proxy showed it as a cobblestone wall, so the bot could neither tell a
+grave from a wall nor open one: `/chest` takes only chests, and mineflayer's `openContainer`
+refuses any other block name. The proxy now shows the grave as an end rod, which no 1.7.10
+world holds, and the overrides file renames blocks: `GOLEM_RECIPE_OVERRIDES` became
+`GOLEM_SERVER_OVERRIDES`, a file of recipes plus a `blocks` map, and
+`lib/server-recipes.js` became `lib/server-overrides.js`. A block mapped to `gravestone` is
+renamed in the registry at spawn, so scene, find, blockat and every event name it
+gravestone. The `grave` tool lists the gravestone at x,y,z or the nearest one in lit sight
+and with `take` (all or an item name) moves its items into the pockets through `openBlock`,
+reporting what reached them. On such a server the death event and the `lastdeath` note say
+the items wait in a gravestone there, and the new `death` manual topic gives the rules.
+
 **Knockback.** A zombie hit never moved the bot. Since 1.21.9 the server sends entity
 velocity as an `lpVec3`, 48 bits sent as two bytes and one big-endian int (vanilla and
 ViaVersion alike). minecraft-protocol 1.66.2 reads and writes that int little-endian, so every

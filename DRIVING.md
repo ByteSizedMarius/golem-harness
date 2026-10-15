@@ -38,4 +38,4 @@ Every tool is `mcp__golem__<tool>`. This text writes the bare name, and a call w
 
 Read a topic when its situation first comes up: chat before your first message, mining and jobs before digging, building before placing, water near water, combat and bunker at the first threat, memory before naming places, restart after a restart, legacy-1710 on 1.7.10, perception when an answer surprises you. `manual(topic: "water")` returns one topic.
 
-Topics for manual(topic): water, chat, mining, building, jobs, combat, bunker, memory, restart, perception, legacy-1710
+Topics for manual(topic): water, chat, mining, building, jobs, combat, bunker, memory, restart, death, perception, legacy-1710

@@ -23,7 +23,7 @@ const { isDoor, doorStep, panelAcross, doorCrossing } = require('./lib/doors')
 const { stepView } = require('./lib/steps')
 const { countVerbs } = require('./lib/verbs')
 const { createChatLog } = require('./lib/chat-log')
-const { readServerOverrides, renameBlocks, overrideRecipes, craftable } = require('./lib/server-overrides')
+const { GRAVESTONE, readServerOverrides, renameBlocks, overrideRecipes, craftable } = require('./lib/server-overrides')
 const { smeltYield } = require('./lib/furnace')
 
 const HOST = process.env.MC_HOST || 'localhost'
@@ -38,6 +38,8 @@ const LEGACY_1710 = process.env.GOLEM_MC_1710 === '1'
 const LEGACY_HIT_MS = 550
 const SERVER_OVERRIDES = readServerOverrides(process.env.GOLEM_SERVER_OVERRIDES)
 const SERVER_RECIPES = SERVER_OVERRIDES && SERVER_OVERRIDES.recipes
+// The server keeps a dead player's items in a gravestone.
+const GRAVES = !!SERVER_OVERRIDES && [...SERVER_OVERRIDES.blocks.values()].includes(GRAVESTONE)
 // The HMAC key that signs every control API request and response.
 const GOLEM_TOKEN = process.env.GOLEM_TOKEN || ''
 if (GOLEM_TOKEN.length < 32) {
@@ -1635,8 +1637,9 @@ bot.on('death', () => {
   try {
     const p = lastPosSafe || bot.entity.position
     const at = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }
-    try { waypoints.set('lastdeath', at) } catch (e) {}
-    emitEvent('death', `DIED near (${at.x},${at.y},${at.z}) — waypoint 'lastdeath' set; drops despawn in ~5 min`)
+    try { waypoints.set('lastdeath', at, GRAVES ? { note: 'your items are in a gravestone here' } : {}) } catch (e) {}
+    const items = GRAVES ? 'your items are in a gravestone there, take them with grave' : 'drops despawn in ~5 min'
+    emitEvent('death', `DIED near (${at.x},${at.y},${at.z}) — waypoint 'lastdeath' set; ${items}`)
   } catch (e) {}
 })
 
@@ -3915,6 +3918,55 @@ app.get('/deposit', async (req, res) => {
     const inChest = chest.containerItems().filter(i => i.name === name || i.name.includes(name)).reduce((s, i) => s + i.count, 0)
     chest.close()
     ok(res, { deposited, item: name, inChestNow: inChest })
+  } catch (e) { err(res, e) }
+})
+
+const GRAVE_SIGHT = 32
+// Refuses a cell out of lit sight before reading its block.
+function targetGrave (q) {
+  const grave = mcData && mcData.blocksByName[GRAVESTONE]
+  if (!grave) throw new Error('this server has no gravestones')
+  if (q.at == null) return nearestVisible([grave.id], GRAVE_SIGHT)
+  const [x, y, z] = String(q.at).split(',').map(Number)
+  if (![x, y, z].every(Number.isFinite)) throw new Error('at takes x,y,z')
+  const p = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z))
+  if (!seesLit(p, GRAVE_SIGHT)) throw new Error('not in my sight, blocked or unlit: walk closer, clear the view or light it')
+  const b = bot.blockAt(p)
+  if (!b || b.name !== GRAVESTONE) throw new Error(`no gravestone at ${q.at} (${b ? b.name : 'unloaded'})`)
+  return b
+}
+// took counts what reached the pockets.
+app.get('/grave', async (req, res) => {
+  try {
+    if (!ready) return err(res, new Error('not ready'))
+    const take = req.query.take
+    const gb = targetGrave(req.query)
+    if (!gb) return err(res, new Error(`no gravestone in sight within ${GRAVE_SIGHT}`))
+    await bot.pathfinder.goto(new goals.GoalNear(gb.position.x, gb.position.y, gb.position.z, 2))
+    const grave = await bot.openBlock(gb)
+    try {
+      const at = round(gb.position)
+      const items = () => grave.containerItems().map(i => ({ name: i.name, count: i.count }))
+      if (take == null) return ok(res, { at, items: items() })
+      const all = grave.containerItems()
+      const exact = all.filter(i => i.name === take)
+      const named = take === 'all' ? all : exact.length ? exact : all.filter(i => i.name.includes(take))
+      if (!named.length) throw new Error(`no ${take} in the gravestone`)
+      const took = []
+      let stopped
+      for (const type of new Set(named.map(i => i.type))) {
+        const n = named.filter(i => i.type === type).reduce((s, i) => s + i.count, 0)
+        const before = grave.count(type, null)
+        try { await grave.withdraw(type, null, n) } catch (e) { stopped = e.message }
+        const moved = grave.count(type, null) - before
+        if (moved > 0) took.push(`${moved} ${named.find(i => i.type === type).name}`)
+        if (stopped) break
+      }
+      if (!took.length) throw new Error(`took nothing${stopped ? `: ${stopped}` : ''}`)
+      ok(res, { at, took, stopped, items: items() })
+    } finally {
+      grave.close()
+    }
   } catch (e) { err(res, e) }
 })
 
