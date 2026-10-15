@@ -8,6 +8,13 @@ and leaves the stories here.
 
 ## 2026-10-15: live-play fixes
 
+Building manual. Live, the pilot opened the owner's hut walls and put chests into the wall
+line. A solid block sat right above them, so they could not be opened, and skeletons shot
+through the gaps beside them. `manual/building.md` now says a chest needs a free block above
+it, storage goes against the inside of a wall, an enclosure's wall top stands 2 blocks above
+the highest outside ground, and junk gets its own chest. The craft batch line no longer asks
+for an `inventory` check, since the craft reply reports the count.
+
 Chat length. On the 1.7.10 testbed every line over 100 characters arrived cut to 100, while
 the owner's own client sends up to 256 there. The cut is ViaVersion's 1.11 to 1.10 step,
 and a ViaProxy plugin raises it to 256 for a 1.7.10 server. The chat line length is
