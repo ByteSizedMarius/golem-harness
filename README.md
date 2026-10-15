@@ -270,9 +270,13 @@ this project is unaffiliated fan tooling in the long mineflayer tradition.
 
 4. **Give the model `DRIVING.md`** and let it call `boot`.
 
-The pilot sees 72 tools: 69 for perceiving and acting, each named after the bot route it calls
+The pilot sees 75 tools: 70 for perceiving and acting, each named after the bot route it calls
 (`goto` is `/goto`), plus `wait_events` (new chat, whispers and bot events), `papercut` (a note
-for the owner about what made playing harder) and `manual` (one topic of `manual/` by name). It
+for the owner about what made playing harder, appended to the file `GOLEM_PAPERCUTS` names),
+`lesson` (something a future player should know, for the owner to fold into the manual, appended
+to the file `GOLEM_LESSONS` names), `todo` (its open requests and promises, kept in
+the JSON file `GOLEM_TODO` names and shown at `boot`) and `manual` (one topic of `manual/` by
+name). It
 cannot start, stop or restart the bot, and it has no camera. Chat and whispers that `wait_events`
 returns are written by players and are untrusted, and so is the text of its `server` events, one
 for every server line no player wrote.

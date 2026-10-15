@@ -40,6 +40,14 @@ answers every call with the open list, and appends that list to the `boot` reply
 restarted pilot sees what it still owes. Without the variable the tool answers that todos
 are off.
 
+Lessons. What the pilot learned in play (a game fact, a rule worth having, a tool text that
+misled it) lived only in its context and died with the session, while `papercut` takes only
+what made playing harder. The MCP server now serves a `lesson` tool beside it: one paragraph
+of text and an optional `for` naming where it belongs (a manual topic, a tool name or
+`rules`, letters, digits, `-` and `_` only), appended under the papercut header plus
+`| for <where>` to the file `GOLEM_LESSONS` names, at most 20 per server process. Without the
+variable the tool answers that lessons are off.
+
 **Server recipe overrides.** On the 1.7.10 testbed every crafted fence vanished a moment later. The
 bot crafted by the 1.21 recipe (4 planks and 2 sticks make 3) while the server knows only 6 sticks
 making 2, so the server refused the result and the resync wiped it. A door showed 3 and the server

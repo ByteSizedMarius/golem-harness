@@ -32,8 +32,11 @@ const TIMER_MAX_MS = 2 ** 31 - 1
 const TOOL_TIMEOUT_MAX_MS = 600000
 const BODY_CAP = 2 * 1024 * 1024
 const TOKEN_MIN = 32
-const PAPERCUT_LIMIT = 20
+// Entries per note kind and server process.
+const NOTE_LIMIT = 20
 const NAME_CAP = 32
+// The lesson tool's for.
+const LESSON_PLACE = /^[A-Za-z0-9_-]+$/
 const NAMES_SHOWN = 5
 // A drive letter not preceded by a letter or digit and followed by a slash, or a UNC double backslash,
 // up to the next whitespace or quote.
@@ -49,6 +52,14 @@ const LOCAL_TOOLS = [
     name: 'papercut',
     description: 'Note what made playing harder than it should be: a tool that fought you, a workaround you needed, a misleading reply, a missing ability. When in doubt, note it: too many beat too few. One paragraph, then move on. The owner reads these later, and it changes nothing in the game.',
     params: { text: { type: 'str', maxLen: 600, required: true } }
+  },
+  {
+    name: 'lesson',
+    description: 'Write down what a future player should know: a game fact, a rule worth adding, a better tool text. When in doubt, note it: too many beat too few. The owner folds these into the manual. A tool that fought you is a papercut.',
+    params: {
+      text: { type: 'str', maxLen: 600, required: true },
+      for: { type: 'str', maxLen: NAME_CAP, desc: 'manual topic, tool name or rules' }
+    }
   },
   {
     name: 'todo',
@@ -348,7 +359,7 @@ function untilAborted (promise, signal) {
 
 // onWake runs after every return of wait_events. onToolCall runs on every tools/call with the name from
 // the tool table, null for a name outside it, and the sorted names of the tool's params the call passed.
-function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, todoFile, now = () => new Date() }) {
+function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, lessonsFile, todoFile, now = () => new Date() }) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new TypeError('port must be an integer 1024-65535')
   if (typeof token !== 'string' || token === '') throw new TypeError('token must be a non-empty string')
   if (typeof fetch !== 'function') throw new TypeError('fetch must be a function')
@@ -360,6 +371,9 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
   }
   if (papercutsFile !== undefined && (typeof papercutsFile !== 'string' || !path.isAbsolute(papercutsFile))) {
     throw new TypeError('papercutsFile must be an absolute path')
+  }
+  if (lessonsFile !== undefined && (typeof lessonsFile !== 'string' || !path.isAbsolute(lessonsFile))) {
+    throw new TypeError('lessonsFile must be an absolute path')
   }
   if (todoFile !== undefined && (typeof todoFile !== 'string' || !path.isAbsolute(todoFile))) {
     throw new TypeError('todoFile must be an absolute path')
@@ -385,7 +399,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
   const cursor = { chat: 0, ev: 0, boot: null }
   let waiting = false
   let lastReturn = -Infinity
-  let papercuts = 0
+  const noted = { papercut: 0, lesson: 0 }
 
   // Throws ReplyRejected for a reply without a valid X-Golem-Proof. timeoutMs covers the body too.
   async function getJson (route, query, timeoutMs = requestTimeoutMs) {
@@ -534,19 +548,21 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
     return jsonResult(body)
   }
 
-  function papercut ({ text }) {
-    if (papercutsFile === undefined) return textResult('papercuts are off', true)
+  // place is the lesson's for.
+  function note (kind, file, text, place) {
+    if (file === undefined) return textResult(`${kind}s are off`, true)
     const line = flatText(text)
-    if (!line) return textResult('papercut text is empty', true)
-    if (papercuts >= PAPERCUT_LIMIT) return textResult('papercut limit reached', true)
-    const header = `${now().toISOString().slice(0, 19)}Z | pilot | ${path.basename(path.dirname(papercutsFile))}`
+    if (!line) return textResult(`${kind} text is empty`, true)
+    if (place !== undefined && !LESSON_PLACE.test(place)) return textResult('for takes a manual topic, a tool name or rules', true)
+    if (noted[kind] >= NOTE_LIMIT) return textResult(`${kind} limit reached`, true)
+    const header = `${now().toISOString().slice(0, 19)}Z | pilot | ${path.basename(path.dirname(file))}${place === undefined ? '' : ` | for ${place}`}`
     // A failed write counts too.
-    papercuts++
+    noted[kind]++
     try {
-      fs.appendFileSync(papercutsFile, `${header}\n${line}\n\n`)
+      fs.appendFileSync(file, `${header}\n${line}\n\n`)
     } catch (e) {
-      console.error(`[golem-mcp] cannot write the papercut: ${e.message}`)
-      return textResult('the papercut could not be written', true)
+      console.error(`[golem-mcp] cannot write the ${kind}: ${e.message}`)
+      return textResult(`the ${kind} could not be written`, true)
     }
     return textResult('noted')
   }
@@ -608,7 +624,8 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
     }
     if (tool.name === 'wait_events') return rpcResult(id, await waitEvents(values))
     if (tool.name === 'manual') return rpcResult(id, textResult(manual.get(values.topic)))
-    if (tool.name === 'papercut') return rpcResult(id, papercut(values))
+    if (tool.name === 'papercut') return rpcResult(id, note('papercut', papercutsFile, values.text))
+    if (tool.name === 'lesson') return rpcResult(id, note('lesson', lessonsFile, values.text, values.for))
     if (tool.name === 'todo') return rpcResult(id, todo(values))
     // A restarted pilot learns its open todos from boot.
     if (tool.name === 'boot' && todoFile !== undefined) {
@@ -709,8 +726,9 @@ function main () {
     onToolCall = (name, used) => logLine(`tool call ${name === null ? '(unknown)' : name}${used.length ? ' ' + used.join(',') : ''}`)
   }
   const papercutsFile = process.env.GOLEM_PAPERCUTS || undefined
+  const lessonsFile = process.env.GOLEM_LESSONS || undefined
   const todoFile = process.env.GOLEM_TODO || undefined
-  serveStdio(createServer({ port, token, fetch: globalThis.fetch, onWake, onToolCall, papercutsFile, todoFile }))
+  serveStdio(createServer({ port, token, fetch: globalThis.fetch, onWake, onToolCall, papercutsFile, lessonsFile, todoFile }))
 }
 
 if (require.main === module) main()
