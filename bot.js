@@ -11,6 +11,8 @@ const { installSecurity, BUNKER_MODES } = require('./lib/install')
 const { classifySound } = require('./lib/sounds')
 const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
 const { UNLOADED, standCell, resolveTarget, crumbCentre, arrivedAt, walkAttempt, routeDeadline } = require('./lib/walk')
+const { headFree } = require('./lib/head')
+const { sprintJump, passedNodes, step: nodeStep } = require('./lib/sprint')
 const { summarizePlan, planRisk } = require('./lib/plan')
 
 const HOST = process.env.MC_HOST || 'localhost'
@@ -2106,7 +2108,7 @@ reflexes.unshift({
           if (conf9 && conf9.ranged) { this.takeCover(bot, t.e, label); return }
           if (LEGACY_1710) { try { await swordInHand() } catch (e) {} }
           guardUp()                                           // hold ground, face it, shield up
-          await bot.lookAt(t.e.position.offset(0, 1.2, 0), true)
+          if (headFree(bot)) await bot.lookAt(t.e.position.offset(0, 1.2, 0), true)
           await new Promise(r => setTimeout(r, 250))
           continue
         }
@@ -2843,6 +2845,69 @@ function swimUp (ms) {
   bot.setControlState('jump', true)
   setTimeout(() => { try { if (Date.now() >= swimUpUntil) bot.setControlState('jump', false) } catch (e) {} }, ms)
 }
+
+// The pathfinder's own path array, which it shifts as the feet reach each node.
+let livePath = []
+bot.on('path_update', (r) => { livePath = r.path })
+// True from a sprint jump's take-off until the body stands on the ground short of the next node.
+let hopping = false
+// The step of the straight run the last sprint jump took off along.
+let hopDir = null
+// True while sprintTick holds jump.
+let jumpHeld = false
+// Ticks off the path nodes a hop passed.
+function skipPassedNodes () {
+  if (!hopping || !bot.pathfinder.isMoving()) return
+  const passed = passedNodes(livePath, bot.entity.position, hopDir)
+  livePath.splice(0, passed)
+  if (!passed && bot.entity.onGround) hopping = false
+}
+// Lets go of a sprint jump the pathfinder no longer steers. Its resets on a block update, a chunk load and a
+// moved goal keep the control states it set.
+function releaseJump () {
+  if (!hopping && !jumpHeld) return
+  hopping = false
+  jumpHeld = false
+  for (const c of ['jump', 'sprint', 'forward']) bot.setControlState(c, false)
+}
+// Holds jump on top of the pathfinder's sprint along a straight, flat stretch.
+function sprintTick () {
+  if (!bot.pathfinder.isMoving()) return releaseJump()
+  const combat = reflexes.find(r => r.name === 'combat')
+  const jump = bot.getControlState('sprint') && sprintJump({
+    path: livePath,
+    pos: bot.entity.position,
+    onGround: bot.entity.onGround,
+    blockAt: (p) => bot.blockAt(p),
+    inWater: bot.entity.isInWater,
+    food: bot.food,
+    fighting: combat.active || Date.now() < combat._fleeUntil
+  })
+  jumpHeld = jump
+  if (jump) {
+    bot.setControlState('jump', true)
+    hopping = true
+    hopDir = nodeStep(livePath[0], livePath[1])
+  }
+}
+
+// Ahead of the pathfinder's listener, so it never steers back to a node a hop passed.
+function beforePathfinder () {
+  if (!ready || !bot.entity) return
+  try { skipPassedNodes() } catch (e) { console.log('[sprint] ' + e.message) }
+}
+// After the pathfinder's listener, so it acts on the control states it just set.
+function afterPathfinder () {
+  if (!ready || !bot.entity) return
+  try { sprintTick() } catch (e) { console.log('[sprint] ' + e.message) }
+}
+// The plugin loader adds the pathfinder's listener on inject_allowed, after bot.js has run.
+function hookTicks () {
+  bot.prependListener('physicsTick', beforePathfinder)
+  bot.once('inject_allowed', () => bot.on('physicsTick', afterPathfinder))
+  bot.on('path_reset', () => { try { releaseJump() } catch (e) { console.log('[sprint] ' + e.message) } })
+}
+hookTicks()
 
 // maxY is exclusive.
 function worldColumn () {

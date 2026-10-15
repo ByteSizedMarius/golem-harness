@@ -8,6 +8,21 @@ and leaves the stories here.
 
 ## 2026-10-15: live-play fixes
 
+The head jittered on every walk past a mob: the combat reflex's standoff stare forced a look at it
+every 250 ms while the pathfinder turned the head toward its next node every tick, and the yaw is
+also the walking direction. The stare now waits until the legs are idle (`lib/head.js`). Melee and
+bow aims are unchanged.
+
+On a straight, flat stretch the body now sprint jumps: four nodes ahead in line, room for the jump
+over each, dry, food at least 8 and no fight running. It lets go before a turn, a step or a drop
+(`lib/sprint.js`). The pathfinder counts a node reached only with the feet less than a block above
+it, so a hop passes nodes it never ticks off. The layer drops those from the live path instead of
+letting the pathfinder turn back for them, along the hop's own run only, never a node where the path
+turns. The first cut never jumped live: the plugin loader adds the pathfinder's tick listener only
+once `bot.js` has run, so the layer ticked before it and the pathfinder set jump back to false on
+every straight stretch. The layer now hooks in after it, and lets go of the jump when a path resets
+or the walk stops.
+
 `goto` plans before it walks, and refuses a plan that ends more than 2 blocks (or `range`) off the
 asked y or drops more than 3 at once, naming the risk and the numbers. `accept` walks it anyway, and
 `preview` answers the plan without a step: whether it reaches, its length, rise, biggest drop and end
