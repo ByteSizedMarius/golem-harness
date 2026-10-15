@@ -258,6 +258,16 @@ cell, and routed from inside the wall. It now starts from the free cell the body
 stop no longer centres the body into a wall or fence. Both fixes live in
 `patches/mineflayer-pathfinder+2.4.5.patch`.
 
+**Fields.** The owner watched the bot sprint jump across the fields and trample them, as a landing
+on farmland turns it to dirt. The sprint hop checked only the feet, head and jump cells along its
+run. It now holds no jump when farmland lies under the next four nodes or the cell past them, or a
+crop stands in one of those cells. The cell past the run is the farthest a hop lands, since one
+covers at most 3.7 blocks in prismarine-physics. The pathfinder's own sprint jump is kept, since it
+fires only for a step up or a gap. A `[sprint]` line in bot.log names the decision once per walk
+(`jump held`, or `no jump:` and the reason, such as food, not sprinting, the path's shape, headroom,
+water, fighting, farmland or crops), and a changed decision at most every 5 s. The 1.7.10 client
+sprints with food above 6, so the hop now starts at food 7 instead of 8.
+
 **Queued requests and 1.7.10 item names.** Live, the owner asked the pilot to keep track of wheat,
 and it added a todo but never told him it was queued. A `todo` add with a `who` now answers
 `Tell <who> it is queued if you have not.` under the `Added` line. `craft("fence")` and

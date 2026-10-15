@@ -16,7 +16,7 @@ const { POINT_RANGE, deictic, lookedAt } = require('./lib/deixis')
 const { WAKE_KINDS, serverLines, rateLimit, foldQuiet, quietText } = require('./lib/server-msg')
 const { ambientChange, sameVein } = require('./lib/wake')
 const { headFree } = require('./lib/head')
-const { sprintJump, passedNodes, step: nodeStep } = require('./lib/sprint')
+const { noJumpReason, passedNodes, step: nodeStep } = require('./lib/sprint')
 const { summarizePlan, planRisk } = require('./lib/plan')
 const { isDoor, doorStep, panelAcross, doorCrossing } = require('./lib/doors')
 const { stepView } = require('./lib/steps')
@@ -3049,11 +3049,13 @@ function releaseJump () {
   jumpHeld = false
   for (const c of ['jump', 'sprint', 'forward']) bot.setControlState(c, false)
 }
+// The last [sprint] line, the goal of its walk and its time.
+let sprintSaid = { line: null, goal: null, at: 0 }
 // Holds jump on top of the pathfinder's sprint along a straight, flat stretch.
 function sprintTick () {
   if (!bot.pathfinder.isMoving()) return releaseJump()
   const combat = reflexes.find(r => r.name === 'combat')
-  const jump = bot.getControlState('sprint') && sprintJump({
+  const why = !bot.getControlState('sprint') ? 'not sprinting' : noJumpReason({
     path: livePath,
     pos: bot.entity.position,
     onGround: bot.entity.onGround,
@@ -3062,8 +3064,16 @@ function sprintTick () {
     food: bot.food,
     fighting: combat.active || Date.now() < combat._fleeUntil
   })
-  jumpHeld = jump
-  if (jump) {
+  // A new goal logs at once, a changed decision at most every 5 s, and 'off the ground' never logs.
+  const line = why ? `no jump: ${why}` : 'jump held'
+  const goal = bot.pathfinder.goal
+  if (why !== 'off the ground' && (goal !== sprintSaid.goal || (line !== sprintSaid.line && Date.now() - sprintSaid.at >= 5000))) {
+    sprintSaid = { line, goal, at: Date.now() }
+    const p = bot.entity.position.floored()
+    console.log(`[sprint] ${line} at ${p.x} ${p.y} ${p.z}`)
+  }
+  jumpHeld = !why
+  if (jumpHeld) {
     bot.setControlState('jump', true)
     hopping = true
     hopDir = nodeStep(livePath[0], livePath[1])

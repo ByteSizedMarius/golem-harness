@@ -5,7 +5,7 @@ const { EventEmitter, once } = require('node:events')
 const { Vec3 } = require('vec3')
 const mineflayer = require('mineflayer')
 const { pathfinder } = require('mineflayer-pathfinder')
-const { sprintJump, passedNodes, step, RUN, MIN_FOOD } = require('../lib/sprint')
+const { noJumpReason, passedNodes, step, RUN, MIN_FOOD } = require('../lib/sprint')
 const { loadBotFunctions } = require('./helpers')
 
 const EAST = { dx: 1, dz: 0 }
@@ -13,6 +13,8 @@ const EAST = { dx: 1, dz: 0 }
 const AIR = { name: 'air', boundingBox: 'empty' }
 const STONE = { name: 'stone', boundingBox: 'block' }
 const WATER = { name: 'water', boundingBox: 'empty' }
+const FARMLAND = { name: 'farmland', boundingBox: 'block' }
+const WHEAT = { name: 'wheat', boundingBox: 'empty' }
 
 // Flat stone up to y 63, plus the cells in extra ('x,y,z' -> block).
 const world = (extra = {}) => (p) => extra[`${p.x},${p.y},${p.z}`] || (p.y <= 63 ? STONE : AIR)
@@ -22,7 +24,7 @@ const node = (x, y, z, work = {}) => ({ x: x + 0.5, y, z: z + 0.5, toBreak: work
 const east = (n) => Array.from({ length: n }, (_, i) => node(i + 1, 64, 0))
 
 function jumps (over = {}) {
-  return sprintJump({ path: east(6), pos: new Vec3(0.5, 64, 0.5), onGround: true, blockAt: world(), inWater: false, food: 20, fighting: false, ...over })
+  return noJumpReason({ path: east(6), pos: new Vec3(0.5, 64, 0.5), onGround: true, blockAt: world(), inWater: false, food: 20, fighting: false, ...over }) === null
 }
 
 test('the body sprint jumps along a straight, flat run with room overhead', () => {
@@ -47,6 +49,13 @@ test('it never jumps under a low ceiling or into water along the run', () => {
   assert.strictEqual(jumps({ blockAt: world({ '0,66,0': STONE }) }), false, 'a ceiling 3 above the body')
   assert.strictEqual(jumps({ blockAt: world({ '6,66,0': STONE }) }), true, 'control: a ceiling past the run')
   assert.strictEqual(jumps({ blockAt: world({ '2,64,0': WATER }) }), false, 'water on the run')
+})
+
+test('it never jumps over a field or where a hop lands on one', () => {
+  assert.strictEqual(jumps({ blockAt: world({ '2,63,0': FARMLAND }) }), false, 'farmland under the run')
+  assert.strictEqual(jumps({ blockAt: world({ '5,63,0': FARMLAND }) }), false, 'farmland one cell past the run')
+  assert.strictEqual(jumps({ blockAt: world({ '3,64,0': WHEAT }) }), false, 'a crop on the run')
+  assert.strictEqual(jumps({ blockAt: world({ '6,63,0': FARMLAND }) }), true, 'control: farmland out of a hop\'s reach')
 })
 
 test('it never jumps in water, hungry, in a fight, off the ground, or off the line', () => {
@@ -78,24 +87,26 @@ test('the corner node stays while the body is short of it, so the hop never cuts
 })
 
 // sprintTick of bot.js over a fake bot walking east along path.
-function sprintBot (path, { sprint = true, moving = true, pos = new Vec3(0.5, 64, 0.5), onGround = true } = {}) {
+function sprintBot (path, { sprint = true, moving = true, pos = new Vec3(0.5, 64, 0.5), onGround = true, cells = {} } = {}) {
   const controls = {}
+  const logs = []
+  const clock = { t: 1000000 }
   const bot = new EventEmitter()
   Object.assign(bot, {
     entity: { position: pos, onGround, isInWater: false },
     food: 20,
-    pathfinder: { isMoving: () => moving },
+    pathfinder: { isMoving: () => moving, goal: {} },
     getControlState: (k) => (k === 'sprint' ? sprint : !!controls[k]),
     setControlState: (k, v) => { controls[k] = v },
-    blockAt: world()
+    blockAt: world(cells)
   })
   const env = {
-    bot, ready: true, livePath: path, hopping: false, hopDir: null, jumpHeld: false,
-    reflexes: [{ name: 'combat', active: false, _fleeUntil: 0 }], sprintJump, passedNodes, nodeStep: step,
-    console: { log () {} }, closeDoorsBehind () {}
+    bot, ready: true, livePath: path, hopping: false, hopDir: null, jumpHeld: false, sprintSaid: { line: null, goal: null, at: 0 },
+    reflexes: [{ name: 'combat', active: false, _fleeUntil: 0 }], noJumpReason, passedNodes, nodeStep: step,
+    console: { log: (s) => logs.push(s) }, Date: { now: () => clock.t }, closeDoorsBehind () {}
   }
   const ctx = loadBotFunctions(['sprintTick', 'skipPassedNodes', 'hookTicks', 'beforePathfinder', 'afterPathfinder'], env)
-  return { env, controls, ctx, setMoving: (m) => { moving = m } }
+  return { env, controls, ctx, logs, clock, setMoving: (m) => { moving = m } }
 }
 
 test('sprintTick holds jump only while the pathfinder sprints along the path', () => {
@@ -104,6 +115,35 @@ test('sprintTick holds jump only while the pathfinder sprints along the path', (
     ctx.sprintTick()
     assert.strictEqual(controls.jump, jump, label)
   }
+})
+
+test('sprintTick declines the jump over a field and logs why', () => {
+  const { ctx, controls, logs } = sprintBot(east(6), { cells: { '2,63,0': FARMLAND } })
+  ctx.sprintTick()
+  assert.deepStrictEqual([controls.jump, logs], [undefined, ['[sprint] no jump: farmland at 0 64 0']])
+})
+
+test('the [sprint] line comes once per walk, then for a changed decision at most every 5 s, never mid-hop', () => {
+  const h = sprintBot(east(6))
+  h.ctx.sprintTick()
+  h.ctx.sprintTick()
+  assert.deepStrictEqual(h.logs, ['[sprint] jump held at 0 64 0'], 'one line for an unchanged decision')
+  h.env.bot.food = MIN_FOOD - 1
+  h.ctx.sprintTick()
+  assert.strictEqual(h.logs.length, 1, 'a change within 5 s waits')
+  h.clock.t += 5000
+  h.ctx.sprintTick()
+  assert.deepStrictEqual(h.logs.slice(1), ['[sprint] no jump: food at 0 64 0'], 'the change 5 s on')
+  h.env.bot.pathfinder.goal = {}
+  h.env.bot.entity.onGround = false
+  h.ctx.sprintTick()
+  assert.strictEqual(h.logs.length, 2, 'a tick in the air decides nothing')
+  h.env.bot.entity.onGround = true
+  h.ctx.sprintTick()
+  assert.strictEqual(h.logs.length, 3, 'a new walk logs at once')
+  const walker = sprintBot(east(6), { sprint: false })
+  walker.ctx.sprintTick()
+  assert.deepStrictEqual(walker.logs, ['[sprint] no jump: not sprinting at 0 64 0'])
 })
 
 test('the nodes a hop passed leave the live path, the ones after its landing stay, and a walk without a hop keeps all', () => {
