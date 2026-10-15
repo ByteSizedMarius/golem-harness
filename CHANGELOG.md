@@ -15,6 +15,16 @@ it, storage goes against the inside of a wall, an enclosure's wall top stands 2 
 the highest outside ground, and junk gets its own chest. The craft batch line no longer asks
 for an `inventory` check, since the craft reply reports the count.
 
+Key rules on first use. The pilot walled the hut with chests while `manual/building.md`
+already held the chest rules: it never asked for that topic. A manual topic can now open with
+a `## Key rules` list of at most 3 lines, and the first call in an MCP server process of a
+tool mapped to that topic gets those lines and a `manual('<topic>')` pointer appended to its
+reply, once per topic. `chest`, `deposit`, `withdraw`, `walls`, `roof`, `build`, `outline`
+and a `placeitem` of a chest bring up building's storage and wall rules, `smelt` and
+`furnace` bring up jobs' smelting rules. The tool list stays as it was, and the lines count
+against the reply size cap. Farming has no topic yet, so `use` with a hoe or seeds brings up
+nothing.
+
 Chat length. On the 1.7.10 testbed every line over 100 characters arrived cut to 100, while
 the owner's own client sends up to 256 there. The cut is ViaVersion's 1.11 to 1.10 step,
 and a ViaProxy plugin raises it to 256 for a 1.7.10 server. The chat line length is

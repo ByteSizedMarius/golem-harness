@@ -17,6 +17,13 @@ const MAX_ITEMS = 50
 const MANUAL_CAP = 4000
 const MANUAL_DIR = path.join(__dirname, '..', 'manual')
 const TOPIC_FILE = /^[a-z0-9-]{1,32}\.md$/
+const KEY_RULES_MAX = 3
+// A topic's key rules go out once, with the first reply of its tools that passes when.
+const PRIMED_BY = new Map([
+  ...['chest', 'deposit', 'withdraw', 'walls', 'roof', 'build', 'outline'].map((name) => [name, { topic: 'building' }]),
+  ['placeitem', { topic: 'building', when: ({ name }) => name.toLowerCase().includes('chest') }],
+  ...['smelt', 'furnace'].map((name) => [name, { topic: 'jobs' }])
+])
 const WAIT_DEFAULT_S = 60
 const WAIT_GAP_MS = 5000
 const POLL_MS = 1000
@@ -90,6 +97,27 @@ function loadManual (dir) {
   }
   if (!texts.size) throw new TypeError('manualDir holds no topic file')
   return texts
+}
+
+// The list under a "## Key rules" heading right below the title.
+function keyRules (topic, text) {
+  const lines = text.split(/\r?\n/)
+  if (!lines[0].startsWith('# ') || lines[1] !== '' || lines[2] !== '## Key rules' || lines[3] !== '') return null
+  const end = lines.findIndex((line, i) => i > 3 && !line.startsWith('- '))
+  const rules = lines.slice(4, end < 0 ? lines.length : end)
+  if (rules.length < 1 || rules.length > KEY_RULES_MAX) throw new TypeError(`manual topic ${topic} has key rules of ${rules.length} lines, not 1 to ${KEY_RULES_MAX}`)
+  return rules.join('\n')
+}
+
+function loadPrimers (manual) {
+  const primers = new Map()
+  for (const topic of new Set([...PRIMED_BY.values()].map((p) => p.topic))) {
+    if (!manual.has(topic)) continue
+    const rules = keyRules(topic, manual.get(topic))
+    if (rules === null) throw new TypeError(`manual topic ${topic} has no key rules below its title`)
+    primers.set(topic, `${rules}\nMore: manual('${topic}')`)
+  }
+  return primers
 }
 
 class ArgError extends Error {}
@@ -338,6 +366,9 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
   }
   if (typeof now !== 'function') throw new TypeError('now must be a function')
   const manual = loadManual(manualDir)
+  const primers = loadPrimers(manual)
+  // Topics whose key rules a reply already carried.
+  const primed = new Set()
   const tools = [...TOOLS, ...LOCAL_TOOLS, manualTool([...manual.keys()])]
   const byName = new Map()
   for (const tool of tools) {
@@ -405,6 +436,11 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
       const note = unreadNote(body.unreadChat)
       if (note !== null) tails.push(note)
       delete body.unreadChat
+    }
+    const primer = PRIMED_BY.get(tool.name)
+    if (primer && primers.has(primer.topic) && !primed.has(primer.topic) && (!primer.when || primer.when(values))) {
+      primed.add(primer.topic)
+      tails.push(primers.get(primer.topic))
     }
     if (last !== null) tails.push(last)
     return jsonResult(redact(trimLists(body, tool.lists), tool.structural), reply.status !== 200, tails)
