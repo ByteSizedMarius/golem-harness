@@ -760,38 +760,26 @@ function spatial3D(bot) {
   } catch (e) { return null }
 }
 
-// ---- VEIN landmarks: exposed ore around the bot as located points-that-matter (a miner's
-// map). A 360 SENSE ping (radius 25): every ore exposed to open AIR — no direct-LOS gate, so
-// it catches what a real player finds by sweeping their view and peeking around this pocket's
-// corners (a single forward raycast played WORSE than a human, the gap the helmsman caught). Still fair:
-// isExposed rejects ore entombed in solid rock — no sensing THROUGH stone. Each type's nearest
-// hit is tagged: bare = in direct sight (confident), "(sensed)" = around a corner, air-exposed
-// but no clear ray right now. Two tiers, honestly distinct. Reports nearest per ore TYPE with
-// compass direction, up/down, distance — facts, for me to judge.
+// ---- VEIN landmarks: the nearest ore in lit sight per TYPE, with compass direction, up/down and
+// distance.
 const VEIN_SENSE_R = 25
-function veinScan(bot, sharedFill) {
+function veinScan(bot) {
   try {
     const o = bot.entity.position.floored()
-    const feetY = o.y
     const oreIds = []
     if (mcData && mcData.blocksArray) for (const b of mcData.blocksArray) if (b.name.endsWith('_ore')) oreIds.push(b.id)
     if (!oreIds.length) return null
-    const cands = bot.findBlocks({ matching: oreIds, maxDistance: VEIN_SENSE_R, count: 512 })
-    const fill = sharedFill || airFlood({ radius: VEIN_SENSE_R + 2, cap: 12000 })   // MY connected air (07-12 fix)
     const byType = {}
-    for (const p of cands) {
-      if (!touchesFill(p, fill)) continue                        // must face MY air — a sealed cavern's
-                                                                 // exposed ore is as unknowable as buried rock
+    for (const p of bot.findBlocks({ matching: oreIds, maxDistance: VEIN_SENSE_R, count: 512 })) {
       const b = bot.blockAt(p); if (!b) continue
-      const dx = p.x - o.x, dy = p.y - feetY, dz = p.z - o.z
+      const dx = p.x - o.x, dy = p.y - o.y, dz = p.z - o.z
       const dist = Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz))
       const t = b.name.replace('deepslate_', '').replace('_ore', '')
-      if (!byType[t] || dist < byType[t].dist) byType[t] = { p, dir: compass(dx, dz), dy, dist }
+      if (byType[t] && byType[t].dist <= dist) continue
+      if (seesLit(p, VEIN_SENSE_R)) byType[t] = { dir: compass(dx, dz), dy, dist }
     }
-    // resolve the confident-vs-sensed tag only on each type's nearest (a handful) — canSeeBlock
-    // ray-marches, too costly to run on all 512 candidates.
     const phr = Object.entries(byType).sort((a, b) => a[1].dist - b[1].dist)
-      .map(([t, v]) => `${t} ${v.dir}${v.dy >= 3 ? ' up' : v.dy <= -3 ? ' down' : ''} ~${v.dist}${canSeeBlock(v.p, VEIN_SENSE_R) ? '' : ' (sensed)'}`)
+      .map(([t, v]) => `${t} ${v.dir}${v.dy >= 3 ? ' up' : v.dy <= -3 ? ' down' : ''} ~${v.dist}`)
     return phr.length ? phr.join(', ') : null
   } catch (e) { return null }
 }
@@ -916,35 +904,70 @@ function isExposed(p) {
   }
   return false
 }
-// does this block face MY connected air (the flood volume), not just ANY air? The helmsman's 07-12
-// correction: exposure alone still x-rays into SEALED caves — I once sensed iron through 15 blocks
-// of rock because it happened to face a cavern I had no connection to, then carved straight to its
-// coordinates. "Sensed" must mean: standing open in the space a player HERE could reach by walking
-// and peeking. In-sight ore passes automatically (an eye-ray only travels through my own air).
+// True when a neighbour of p lies in the flood's air.
 function touchesFill(p, fill) {
   for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
     if (fill.cells.has(ck(p.x + dx, p.y + dy, p.z + dz))) return true
   }
   return false
 }
-// line of sight via a cheap ray-march from the bot's eye to the block centre
-function canSeeBlock(p, maxDist) {
-  if (!isExposed(p)) return false                 // entombed in solid rock -> unseeable
+// The cell an eye ray sees block p by: p itself when p is open, else the last open cell before it.
+// null when p is buried, beyond maxDist or behind an opaque block.
+function sightCell(p, maxDist) {
+  if (!isExposed(p)) return null
   const eye = bot.entity.position.offset(0, 1.62, 0)
   const target = new Vec3(p.x + 0.5, p.y + 0.5, p.z + 0.5)
   const delta = target.minus(eye)
   const dist = delta.norm()
-  if (dist > maxDist || dist < 1e-6) return dist <= maxDist
-  const dir = delta.scaled(1 / dist)
-  const steps = Math.ceil(dist * 4)               // sample ~every 0.25 blocks
-  for (let s = 1; s < steps; s++) {
-    const q = eye.plus(dir.scaled((s / steps) * dist))
-    const bx = Math.floor(q.x), by = Math.floor(q.y), bz = Math.floor(q.z)
-    if (bx === p.x && by === p.y && bz === p.z) return true       // reached the target cell
-    const b = bot.blockAt(new Vec3(bx, by, bz))
-    if (b && b.boundingBox === 'block' && !blockTransparent(b)) return false   // occluded
+  if (dist > maxDist) return null
+  const at = new Vec3(p.x, p.y, p.z)
+  let from = eye.floored()
+  if (dist >= 1e-6) {
+    const dir = delta.scaled(1 / dist)
+    const steps = Math.ceil(dist * 4)               // sample ~every 0.25 blocks
+    for (let s = 1; s < steps; s++) {
+      const c = eye.plus(dir.scaled((s / steps) * dist)).floored()
+      if (c.equals(at)) break
+      const b = bot.blockAt(c)
+      if (b && b.boundingBox === 'block' && !blockTransparent(b)) return null   // occluded
+      from = c
+    }
   }
-  return true
+  return blockTransparent(bot.blockAt(at)) ? at : from
+}
+function canSeeBlock(p, maxDist) {
+  return sightCell(p, maxDist) !== null
+}
+// Chunk sections whose held light may predate a block change near them. mineflayer computes no light,
+// and a server before 1.14 sends it only with chunk data.
+const STALE_LIGHT = new Set()
+function lightSection(x, y, z) {
+  return (x >> 4) + ',' + (y >> 4) + ',' + (z >> 4)
+}
+bot.on('blockUpdate', (oldB, newB) => {
+  if (!oldB || !newB || oldB.type === newB.type) return
+  const p = newB.position
+  for (let dx = -16; dx <= 16; dx += 16) for (let dy = -16; dy <= 16; dy += 16) for (let dz = -16; dz <= 16; dz += 16) {
+    STALE_LIGHT.add(lightSection(p.x + dx, p.y + dy, p.z + dz))
+  }
+})
+function freshLight(cx, cz) {
+  for (const k of STALE_LIGHT) {
+    const [x, , z] = k.split(',').map(Number)
+    if (x === cx && z === cz) STALE_LIGHT.delete(k)
+  }
+}
+bot.on('chunkColumnLoad', (p) => freshLight(p.x >> 4, p.z >> 4))
+bot._client.on('update_light', (packet) => freshLight(packet.chunkX, packet.chunkZ))
+// Total darkness at open cell p by the light the client holds. Light that is missing or may be stale is not dark.
+function dark(p, b = bot.blockAt(p)) {
+  if (STALE_LIGHT.has(lightSection(p.x, p.y, p.z))) return false
+  return !!b && b.light === 0 && b.skyLight === 0
+}
+// Block p in line of sight and not in total darkness.
+function seesLit(p, maxDist) {
+  const c = sightCell(p, maxDist)
+  return c !== null && !dark(c)
 }
 // findBlocks candidates (nearest-first) -> keep only what a player here could actually see
 function findVisible(ids, maxDist, count) {
@@ -952,7 +975,7 @@ function findVisible(ids, maxDist, count) {
   const cands = bot.findBlocks({ matching: ids, maxDistance: maxDist, count: 256 })
   const out = []
   for (const p of cands) {
-    if (canSeeBlock(p, maxDist)) { out.push({ pos: p, dist: here.distanceTo(p) }); if (out.length >= count) break }
+    if (seesLit(p, maxDist)) { out.push({ pos: p, dist: here.distanceTo(p) }); if (out.length >= count) break }
   }
   return out
 }
@@ -960,32 +983,14 @@ function nearestVisible(ids, maxDist) {
   const v = findVisible(ids, maxDist, 1)
   return v.length ? bot.blockAt(v[0].pos) : null
 }
-// A cell the bot saw earlier or sees now.
+// A cell the bot saw lit earlier or sees lit now.
 function cellKnown (p) {
-  return SEEN.has(ck(p.x, p.y, p.z)) || canSeeBlock(p, 64)
-}
-// SENSE tier: blocks exposed to open AIR within range — the 360 ping. Unlike findVisible it does
-// NOT require a clear ray from the eye, so it catches ore a player would find by sweeping their
-// view and rounding this pocket's corners. Still fair: isExposed rejects ore sealed in solid rock.
-// Each hit carries inSight = does a direct ray reach it now (the confident subset), so a caller
-// can keep the two tiers honestly distinct. Nearest-first (findBlocks order).
-function findExposed(ids, maxDist, count) {
-  const here = bot.entity.position
-  const cands = bot.findBlocks({ matching: ids, maxDistance: maxDist, count: 512 })
-  const fill = airFlood({ radius: Math.min(maxDist + 2, 34), cap: 12000 })   // MY connected air (07-12 fix)
-  const out = []
-  for (const p of cands) {
-    if (!touchesFill(p, fill)) continue        // faces someone else's air = sealed from me = unknowable
-    out.push({ pos: p, dist: here.distanceTo(p), inSight: canSeeBlock(p, maxDist) })
-    if (out.length >= count) break
-  }
-  return out
+  return SEEN.has(ck(p.x, p.y, p.z)) || seesLit(p, 64)
 }
 
 // ==== VISION 2 (2026-07-11): the vertical sense, the air flood-fill, and the ray-sweep retina ====
-// Three tiers of knowing, everywhere: SEEN (a ray actually hit it) / (sensed) (air-connected to my
-// pocket — the helmsman's concession: a player would find it by moving and peeking) / unknown (sealed rock —
-// silence means "didn't look", never "clear").
+// Two tiers of knowing, everywhere: seen (SEEN, or lit sight now) / unknown (silence means "didn't
+// look", never "clear").
 
 // ---- overhead cover: am I under open sky? The top-down /map renders whatever slice I'm embedded
 // in, so a stone shelf at y40 reads identical to a mountaintop — this column scan is the missing
@@ -1019,8 +1024,7 @@ function skyPhrase(oh) {
 }
 
 // ---- air flood-fill: the volume of air my body is CONNECTED to (BFS from my feet, 6-way).
-// This is the "sensed" tier made volumetric. Fair by construction: the fill travels only through
-// open cells my pocket already connects to — it never crosses solid rock. Doors/gates count as
+// The fill travels only through open cells my pocket already connects to. Doors/gates count as
 // passable (the walker can open them); lava does not (nothing passes lava). Water passes (I swim).
 // Bounded by a Chebyshev radius around the seed and a hard cell cap, so cost stays ~milliseconds.
 const ck = (x, y, z) => x + ',' + y + ',' + z
@@ -1101,8 +1105,8 @@ function airPrecheck(dest, range = 1) {
 
 // ---- the ray-sweep retina + the SEEN set. canSeeBlock was a verifier (given a block, is it
 // visible?); this flips it into a SENSOR: cast a fan of rays from the eye and whatever they hit IS
-// the perception. Every cell a ray crosses or strikes goes into SEEN — the fair fog-of-war memory
-// (a player remembers what they've looked at; they never saw through rock).
+// the perception. Every cell a ray crosses or strikes out of total darkness goes into SEEN — the fair
+// fog-of-war memory (a player remembers what they've looked at; they never saw through rock).
 const SEEN = new Set()
 const SEEN_CAP = 400000
 const markSeen = (x, y, z) => { if (SEEN.size < SEEN_CAP) SEEN.add(ck(x, y, z)) }
@@ -1110,34 +1114,41 @@ const markSeen = (x, y, z) => { if (SEEN.size < SEEN_CAP) SEEN.add(ck(x, y, z)) 
 function lookVec(yaw, pitch) {
   return new Vec3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch))
 }
-// march one ray from the eye; returns first surface {pos,name,dist,liquid} or null (open past maxDist)
+// march one ray from the eye; returns first surface {pos,name,dist,liquid}, null (open past maxDist),
+// or DARK_RAY when the surface or the open end lies in total darkness
+const DARK_RAY = { dark: true }
 function castRay(dir, maxDist) {
   const eye = bot.entity.position.offset(0, 1.62, 0)
   const steps = Math.ceil(maxDist * 4)
   let px = null, py = null, pz = null
+  // A struck surface is lit by the open cell the ray left.
+  let lit = !dark(eye.floored())
   for (let s = 1; s <= steps; s++) {
     const t = (s / steps) * maxDist
     const q = eye.plus(dir.scaled(t))
     const bx = Math.floor(q.x), by = Math.floor(q.y), bz = Math.floor(q.z)
     if (bx === px && by === py && bz === pz) continue
     px = bx; py = by; pz = bz
-    const b = bot.blockAt(new Vec3(bx, by, bz))
+    const c = new Vec3(bx, by, bz)
+    const b = bot.blockAt(c)
     if (!b) return null                                       // ray left loaded world
     const liquid = b.name.includes('water') || b.name.includes('lava')
     if ((b.boundingBox === 'block' && !blockTransparent(b)) || liquid) {
+      if (!lit) return DARK_RAY
       markSeen(bx, by, bz)
-      return { pos: new Vec3(bx, by, bz), name: b.name, dist: +t.toFixed(1), liquid }
+      return { pos: c, name: b.name, dist: +t.toFixed(1), liquid }
     }
-    markSeen(bx, by, bz)                                      // traversed open air — seen empty
+    lit = !dark(c, b)
+    if (lit) markSeen(bx, by, bz)                             // traversed open air — seen empty
   }
-  return null
+  return lit ? null : DARK_RAY
 }
 // sweep a field of view around (yaw,pitch): hSteps x vSteps rays. Each hit carries u (-1 left ..
 // +1 right) and v (-1 low .. +1 high) so callers can talk about screen regions in words.
 function raySweep({ yaw = null, pitch = null, hFov = 1.75, vFov = 1.05, hSteps = 15, vSteps = 7, maxDist = 24 } = {}) {
   const cy = yaw == null ? bot.entity.yaw : yaw
   const cp = pitch == null ? bot.entity.pitch : pitch
-  const hits = [], misses = []
+  const hits = [], misses = [], unlit = []
   for (let i = 0; i < hSteps; i++) {
     const u = hSteps === 1 ? 0 : (i / (hSteps - 1)) * 2 - 1
     for (let j = 0; j < vSteps; j++) {
@@ -1146,11 +1157,12 @@ function raySweep({ yaw = null, pitch = null, hFov = 1.75, vFov = 1.05, hSteps =
       const ry = cy - u * (hFov / 2)
       const rp = Math.max(-1.55, Math.min(1.55, cp + v * (vFov / 2)))
       const hit = castRay(lookVec(ry, rp), maxDist)
-      if (hit) hits.push({ ...hit, u, v })
-      else misses.push({ u, v })
+      if (!hit) misses.push({ u, v })
+      else if (hit === DARK_RAY) unlit.push({ u, v })
+      else hits.push({ ...hit, u, v })
     }
   }
-  return { hits, misses, rays: hSteps * vSteps, yaw: cy, pitch: cp, maxDist }
+  return { hits, misses, unlit, rays: hSteps * vSteps, yaw: cy, pitch: cp, maxDist }
 }
 
 // ---- TREK SENSE (07-16, designed trail-side with the helmsman: "spot the environment as it
@@ -2270,12 +2282,12 @@ bot.on('spawn', resetThreatState)
 // learned via a TDZ crashloop the moment this block first loaded)
 
 // ---- ORE CALLOUT: passive prospector sense (07-17, "your ore senses need tuning" — the helmsman).
-// A player's eyes are always on; the pilot's /find only fires when asked. Every 4s, sweep
-// air-EXPOSED ore within 12 (findExposed — the fair 360 sense, no wall-vision) and announce
-// anything new. Announced set is pruned by distance+age so it can't OOM (the SEEN lesson).
+// A player's eyes are always on; the pilot's /find only fires when asked. Every 4s, sweep ore in
+// lit sight within 12 and announce anything new. Announced set is pruned by distance+age so it
+// can't OOM (the SEEN lesson).
 const ORE_ANNOUNCED = new Map()   // "x,y,z" -> ts
 let ORE_IDS = null
-setInterval(() => {
+function oreCallout () {
   try {
     if (!ready || !bot.entity || !mcData) return
     if (!ORE_IDS) ORE_IDS = Object.values(mcData.blocksByName)
@@ -2286,7 +2298,7 @@ setInterval(() => {
       if (Date.now() - ts > 600000 || here.distanceTo(new Vec3(x, y, z)) > 48) ORE_ANNOUNCED.delete(k)
     }
     const fresh = {}
-    for (const v of findExposed(ORE_IDS, 12, 12)) {
+    for (const v of findVisible(ORE_IDS, 12, 12)) {
       const k = `${v.pos.x},${v.pos.y},${v.pos.z}`
       if (ORE_ANNOUNCED.has(k)) continue
       ORE_ANNOUNCED.set(k, Date.now())
@@ -2298,7 +2310,8 @@ setInterval(() => {
     for (const [name, g] of Object.entries(fresh))
       emitEvent('ore', `${name}${g.n > 1 ? ' x' + g.n : ''} in view ${g.dir} ~${g.d} (y${g.y})`)
   } catch (e) {}
-}, 4000)
+}
+setInterval(oreCallout, 4000)
 
 // ---- SEEN persistence: the fair fog-of-war memory survives restarts. Saved on a timer (and on
 // clean disconnect); loaded at spawn.
@@ -2510,21 +2523,12 @@ app.get('/find', (req, res) => {
     const ids = resolveBlockIds(name)
     if (!ids.length) return err(res, new Error(`unknown block: ${name}`))
     const here = bot.entity.position
-    // FAIRNESS: only report blocks a player here could actually see (exposed + line of sight).
+    // FAIRNESS: only report blocks a player here could actually see (exposed, line of sight, lit).
     // ?xray=1 bypasses to the raw spatial index — that IS the cheat, kept for debugging only.
     if (req.query.xray === '1') {
       const positions = bot.findBlocks({ matching: ids, maxDistance: radius, count })
       const results = positions.map(p => ({ pos: { x: p.x, y: p.y, z: p.z }, name: bot.blockAt(p)?.name, dist: +here.distanceTo(p).toFixed(1) })).sort((a, b) => a.dist - b.dist)
       return ok(res, { count: results.length, blocks: results, xray: true })
-    }
-    // ?sense=1: the 360 SENSE ping — ore exposed to open air within range, NO direct-LOS gate
-    // (what a player finds by sweeping their view / rounding corners). Fair: still air-exposed
-    // only, no seeing through solid rock. Each hit tagged inSight so confident-vs-sensed stays clear.
-    if (req.query.sense === '1') {
-      const senseR = parseInt(req.query.radius || '25')
-      const exp = findExposed(ids, senseR, count).sort((a, b) => a.dist - b.dist)
-      const results = exp.map(v => ({ pos: { x: v.pos.x, y: v.pos.y, z: v.pos.z }, name: bot.blockAt(v.pos)?.name, dist: +v.dist.toFixed(1), inSight: v.inSight }))
-      return ok(res, { count: results.length, blocks: results, sensed: true })
     }
     const vis = findVisible(ids, radius, count)
     const results = vis.map(v => ({ pos: { x: v.pos.x, y: v.pos.y, z: v.pos.z }, name: bot.blockAt(v.pos)?.name, dist: +v.dist.toFixed(1) }))
@@ -3832,7 +3836,7 @@ app.get('/blockat', (req, res) => {
     const x = Math.floor(parseFloat(req.query.x)), y = Math.floor(parseFloat(req.query.y)), z = Math.floor(parseFloat(req.query.z))
     const b = bot.blockAt(new Vec3(x, y, z))
     if (!b) return err(res, new Error('unloaded chunk'))
-    if (!canSeeBlock({ x, y, z }, 20)) return err(res, new Error('not in my line of sight — walk closer or clear the view first'))
+    if (!seesLit({ x, y, z }, 20)) return err(res, new Error('not in my sight, blocked or unlit: walk closer, clear the view or light it'))
     const out = { name: b.name, at: { x, y, z }, properties: b.getProperties() }
     if (b.name.includes('sign')) {
       try {
@@ -3882,8 +3886,8 @@ app.get('/fish', (req, res) => {
     if ([req.query.x, req.query.y, req.query.z].every(v => v !== undefined)) {
       const x = Math.floor(parseFloat(req.query.x)), y = Math.floor(parseFloat(req.query.y)), z = Math.floor(parseFloat(req.query.z))
       const wb = bot.blockAt(new Vec3(x, y, z))
+      if (!seesLit({ x, y, z }, 30)) return err(res, new Error('that cell is not in my sight: walk to the bank first'))
       if (!wb || !wb.name.includes('water')) return err(res, new Error(`aim cell is ${wb ? wb.name : 'unloaded'} — point me at water`))
-      if (!canSeeBlock({ x, y, z }, 30)) return err(res, new Error('that water is not in my line of sight — walk to the bank first'))
       aim = new Vec3(x + 0.5, y + 0.9, z + 0.5)
     }
     const pockets = () => { const m = {}; for (const it of bot.inventory.items()) m[it.name] = (m[it.name] || 0) + it.count; return m }
@@ -4316,7 +4320,7 @@ app.get('/map', (req, res) => {
         // FOG OF WAR (07-12 fairness): only render terrain I have actually SEEN (ray-swept via
         // /gaze, or walked past — the trail marks a small disc). Everything else is '·' unexplored.
         // The old map was a heightmap of loaded chunks — knowledge without looking, same class of
-        // leak as the sensed-tier x-ray. Now looking around literally draws the map.
+        // leak as x-ray. Now looking around literally draws the map.
         const nearMe = Math.abs(cx * scale) <= 4 && Math.abs(cz * scale) <= 4
         if (!nearMe && g !== ' ') {
           let seen = false
@@ -4423,7 +4427,7 @@ app.get('/scene', (req, res) => {
       }
     } catch (e) {}
 
-    // one flood-fill shared by the fairness gates in this call (veins + entities)
+    // one flood-fill shared by the entity fairness gates in this call
     const sceneFill = airFlood({ radius: 32, cap: 15000 })
 
     // grouped entity summary + hostiles
@@ -4460,7 +4464,7 @@ app.get('/scene', (req, res) => {
     const held = bot.heldItem ? `${bot.heldItem.name} x${bot.heldItem.count}` : 'nothing'
     const resPhrases = Object.entries(notable).map(([k, v]) => `${k} ${v.dir} ~${Math.round(v.dist)}`)
     const around = spatial3D(bot)                             // 3D honest lay-of-the-land (facts, incl. vertical/voids)
-    const veins = veinScan(bot, sceneFill)                    // exposed ore landmarks (connected-air fair)
+    const veins = veinScan(bot)                               // ore landmarks in lit sight
     const oh = overheadCover()                                // the vertical fix: sky / canopy / UNDERGROUND
     const ws = waterState(bot)                                // proprioception: in water / submerged / current
     const heard = hearSummary(45000)                          // ears: only shown when something was heard
@@ -4684,11 +4688,17 @@ function gazeNarrate(sweep) {
   const phrases = []
   for (const e of entries.filter(e => !notable(e[0])).slice(0, 3)) phrases.push(phrase(e))
   for (const e of entries.filter(e => notable(e[0])).slice(0, 6)) phrases.push(phrase(e))
-  // openings: regions where no ray found a surface — open space, darkness, or sky
-  const buckets = {}
-  for (const m of sweep.misses) { const r = gazeRegion(m.u, m.v); buckets[r] = (buckets[r] || 0) + 1 }
-  const openings = Object.entries(buckets).sort((a, b) => b[1] - a[1]).filter(([, c]) => c >= 3).slice(0, 3).map(([r]) => r)
+  // The regions at least 3 of the rays end in, most first.
+  const regions = (rays) => {
+    const buckets = {}
+    for (const m of rays) { const r = gazeRegion(m.u, m.v); buckets[r] = (buckets[r] || 0) + 1 }
+    return Object.entries(buckets).sort((a, b) => b[1] - a[1]).filter(([, c]) => c >= 3).slice(0, 3).map(([r]) => r)
+  }
+  // openings: regions where no lit ray found a surface, open space or sky
+  const openings = regions(sweep.misses)
   if (openings.length) phrases.push(`nothing within ${sweep.maxDist} ${openings.join(', ')} — open space there`)
+  const unlit = regions(sweep.unlit)
+  if (unlit.length) phrases.push(`too dark to see ${unlit.join(', ')}`)
   const surfaces = entries.map(([name, g]) => ({ name, rays: g.count, nearest: +g.min.toFixed(1) }))
   return { phrases, surfaces, openings }
 }
@@ -4741,12 +4751,12 @@ app.get('/gaze', async (req, res) => {
   } catch (e) { err(res, e) }
 })
 
+const { sectionColumns, floorPhrase } = require('./lib/section')
+
 // GET /section?dir=n|s|e|w&len=16&up=8&down=12 — the VERTICAL cross-section, the missing half of
 // /map (a stone slice at depth used to read as "surface"; this is the view that shows the route
-// up/down). Renders the slice with the three-tier honesty: air my pocket CONNECTS to (the sensed
-// tier, the helmsman's concession) is space, the solid faces bounding it render by material, everything
-// sealed beyond is '?' fog. Not x-ray by construction — the flood-fill cannot cross solid rock, so
-// a cave behind an unbroken wall stays unknown. Narration first; the grid is the backup.
+// up/down). Renders only the cells the bot knows (cellKnown) and the two the body fills, and ore only
+// in lit sight now. Everything else is '?'. Narration first; the grid is the backup.
 app.get('/section', (req, res) => {
   try {
     const DIRS = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0] }
@@ -4759,10 +4769,18 @@ app.get('/section', (req, res) => {
     const upR = Math.min(16, Math.max(2, parseInt(req.query.up || '8')))
     const downR = Math.min(24, Math.max(2, parseInt(req.query.down || '12')))
     const o = bot.entity.position.floored()
-    const fill = airFlood({ radius: Math.max(len, upR, downR) + 6, cap: 20000 })
+    const knowledge = new Map()
+    const seen = (x, y, z) => {
+      if (x === o.x && z === o.z && (y === o.y || y === o.y + 1)) return true
+      const k = ck(x, y, z)
+      if (!knowledge.has(k)) knowledge.set(k, cellKnown(new Vec3(x, y, z)))
+      return knowledge.get(k)
+    }
+    const at = (x, y, z) => bot.blockAt(new Vec3(x, y, z))
+    const open = (x, y, z) => seen(x, y, z) && floodPassable(at(x, y, z))
+    const wet = (x, y, z) => at(x, y, z).name.includes('water')
 
     const secGlyph = (n) => n.endsWith('_ore') ? '*' : n.includes('water') ? '~' : n.includes('lava') ? '!' : (glyphFor(n) === ' ' ? '#' : glyphFor(n))
-    const ADJ = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
     const ores = []
     const rows = []
     for (let y = o.y + upR; y >= o.y - downR; y--) {
@@ -4770,15 +4788,16 @@ app.get('/section', (req, res) => {
       for (let d = -2; d <= len; d++) {
         const x = o.x + dx * d, z = o.z + dz * d
         if (d === 0 && (y === o.y || y === o.y + 1)) { row += '@'; continue }
-        const k = ck(x, y, z)
-        if (fill.cells.has(k)) { row += fill.liquid.has(k) ? '~' : ' '; continue }
-        const b = bot.blockAt(new Vec3(x, y, z))
-        const adj = ADJ.some(([ax, ay, az]) => fill.cells.has(ck(x + ax, y + ay, z + az)))
-        if (!b || !adj) { row += '?'; continue }                    // sealed or beyond the sensed budget
+        if (open(x, y, z)) { row += wet(x, y, z) ? '~' : ' '; continue }
+        const b = at(x, y, z)
+        if (!b || !seen(x, y, z)) { row += '?'; continue }
         if (b.name.includes('lava')) { row += '!'; continue }
         if (b.boundingBox === 'block') {
           const gl = secGlyph(b.name)
-          if (gl === '*') ores.push({ name: b.name.replace('deepslate_', '').replace('_ore', ''), d, dy: y - o.y, x, y, z })
+          if (gl === '*') {
+            if (!seesLit(new Vec3(x, y, z), 48)) { row += '?'; continue }
+            ores.push({ name: b.name.replace('deepslate_', '').replace('_ore', ''), d, dy: y - o.y, x, y, z })
+          }
           row += gl
         } else row += '?'
       }
@@ -4786,80 +4805,74 @@ app.get('/section', (req, res) => {
     }
 
     // per-column profile -> narration: floor trend, headroom, water, where it seals or continues
-    const cols = []
-    for (let d = 0; d <= len; d++) {
-      const x = o.x + dx * d, z = o.z + dz * d
-      let lo = null, hi = null, water = false
-      for (let y = o.y - downR; y <= o.y + upR; y++) {
-        if (fill.cells.has(ck(x, y, z))) { if (lo === null) lo = y; hi = y; if (fill.liquid.has(ck(x, y, z))) water = true }
-      }
-      cols.push({ d, lo, hi, water })
-    }
+    const cols = sectionColumns({
+      o, dx, dz, len, up: upR, down: downR, open, wet,
+      known: (p) => seen(p.x, p.y, p.z),
+      blockAt: (p) => bot.blockAt(p)
+    })
     const parts = []
-    let sealedAt = null
-    for (const c of cols) if (c.lo === null) { sealedAt = c.d; break }
-    const open = cols.filter(c => c.lo !== null && (sealedAt === null || c.d < sealedAt))
-    if (!open.length) parts.push(`sealed rock immediately ${dirName.toUpperCase()}`)
+    let endAt = null
+    for (const c of cols) if (c.lo === null) { endAt = c.d; break }
+    const reach = cols.filter(c => c.lo !== null && (endAt === null || c.d < endAt))
+    if (!reach.length) parts.push(`no open cell in sight ${dirName.toUpperCase()}`)
     else {
-      const segs = []
-      for (const c of open) {
-        const label = c.lo === o.y - downR ? 'below-frame' : String(c.lo - o.y)
-        if (segs.length && segs[segs.length - 1].label === label) segs[segs.length - 1].to = c.d
-        else segs.push({ label, from: c.d, to: c.d, r: c.lo - o.y })
-      }
-      parts.push('floor: ' + segs.map(s => {
-        const span = s.from === s.to ? `d${s.from}` : `d${s.from}–${s.to}`
-        if (s.label === 'below-frame') return `drops below the frame at ${span}`
-        return s.r === 0 ? `level ${span}` : `${s.r > 0 ? 'up' : 'down'} ${Math.abs(s.r)} at ${span}`
-      }).join(', '))
-      const rooms = open.map(c => c.hi - c.lo + 1)
+      parts.push(floorPhrase(reach, o.y))
+      const rooms = reach.map(c => c.hi - c.lo + 1)
       parts.push(`headroom ${Math.min(...rooms)}${Math.min(...rooms) === Math.max(...rooms) ? '' : '–' + Math.max(...rooms)}`)
-      const wet = open.filter(c => c.water)
-      if (wet.length) parts.push(`water at d${wet[0].d}${wet.length > 1 ? '–' + wet[wet.length - 1].d : ''}`)
-      // under a capped fill, an empty column is BUDGET not rock — those must sound different
-      if (sealedAt !== null) parts.push(fill.capped ? `unresolved from d${sealedAt} (fill capped — could be rock or unexplored budget)` : `sealed from d${sealedAt}`)
-      else if (cols[len].lo !== null) parts.push(`passage continues past d${len} (sensed)`)
-      if (open.some(c => c.hi === o.y + upR)) parts.push('open above the frame in places')
+      const water = reach.filter(c => c.water)
+      if (water.length) parts.push(`water at d${water[0].d}${water.length > 1 ? '–' + water[water.length - 1].d : ''}`)
+      if (endAt !== null) {
+        // Sealed only when the bot sees rock across the whole height of the last open column.
+        const last = reach[reach.length - 1]
+        const x = o.x + dx * endAt, z = o.z + dz * endAt
+        let wall = true
+        for (let y = last.lo; y <= last.hi && wall; y++) { const b = at(x, y, z); wall = seen(x, y, z) && !!b && b.boundingBox === 'block' }
+        parts.push(wall ? `sealed from d${endAt}` : `out of sight from d${endAt}`)
+      } else if (cols[len].lo !== null) parts.push(`passage continues past d${len}`)
+      if (reach.some(c => c.hi === o.y + upR)) parts.push('open above the frame in places')
     }
     const oreBest = {}
     for (const or of ores) if (!oreBest[or.name] || Math.abs(or.d) < Math.abs(oreBest[or.name].d)) oreBest[or.name] = or
     for (const or of Object.values(oreBest)) {
-      parts.push(`${or.name} at d${or.d}, ${or.dy >= 0 ? or.dy + ' up' : Math.abs(or.dy) + ' down'}${canSeeBlock(new Vec3(or.x, or.y, or.z), 40) ? '' : ' (sensed)'}`)
+      parts.push(`${or.name} at d${or.d}, ${or.dy >= 0 ? or.dy + ' up' : Math.abs(or.dy) + ' down'}`)
     }
-    if (fill.capped) parts.push('(large open volume — the sensed fill hit its cap; fog beyond is budget, not rock)')
 
     const summary = `Section ${dirName.toUpperCase()} from (${o.x},${o.y},${o.z}): ` + parts.join('; ') + '.'
     ok(res, {
       summary, dir: dirName, len, up: upR, down: downR,
-      legend: '@=you  space=air(connected/sensed)  ~=water !=lava *=ORE #=rock .=soil T=wood ==built ?=unknown(sealed or beyond)',
+      legend: '@=you  space=air  ~=water !=lava *=ORE #=rock .=soil T=wood ==built ?=unseen',
       orientation: `left column is 2 behind you, '@' column is you, rightward = ${dirName.toUpperCase()}; rows top->bottom = y${o.y + upR}->y${o.y - downR}`,
-      grid: rows.join('\n'), ores: Object.values(oreBest), capped: fill.capped
+      grid: rows.join('\n'), ores: Object.values(oreBest)
     })
   } catch (e) { err(res, e) }
 })
 
-// GET /passages?radius=20 — "which ways does this space GO?" The flood-fill frontier grouped by
-// direction: wherever connected air reaches the scan boundary, a passage leaves this chamber.
-// All (sensed)-tier by nature — connectivity, not eyesight.
+// GET /passages?radius=20 — "which ways does this space GO?" The air connected to the body that
+// reaches the scan boundary, grouped by direction. Only cells the bot knows (cellKnown) count.
 app.get('/passages', (req, res) => {
   try {
     const radius = Math.min(32, Math.max(8, parseInt(req.query.radius || '20')))
     const o = bot.entity.position.floored()
-    const fill = airFlood({ radius, cap: 15000 })
+    const fill = airFlood({ radius, cap: 15000, known: cellKnown })
     const dirs = {}
-    let contUp = false, contDown = false
+    let contUp = false, contDown = false, leaves = false
     for (const k of fill.cells) {
       const [x, y, z] = k.split(',').map(Number)
       const ddx = x - o.x, ddy = y - o.y, ddz = z - o.z
-      if (Math.max(Math.abs(ddx), Math.abs(ddz)) >= radius) {
+      const side = Math.max(Math.abs(ddx), Math.abs(ddz)) >= radius
+      if (!side && Math.abs(ddy) < radius) continue
+      leaves = true
+      if (!cellKnown(new Vec3(x, y, z))) continue
+      if (side) {
         const c = compass(ddx, ddz)
         const g = dirs[c] || (dirs[c] = { cells: 0, loY: Infinity, hiY: -Infinity })
         g.cells++; if (y < g.loY) g.loY = y; if (y > g.hiY) g.hiY = y
-        // keep one walk-to SAMPLE cell per exit (prefer one with a floor under it) so the pilot
+        // keep one walk-to SAMPLE cell per exit (prefer one with a seen floor under it) so the pilot
         // can probe an exit with /goto directly instead of guessing geometry
         if (!g.sampleFloor) {
-          const fb = bot.blockAt(new Vec3(x, y - 1, z))
-          const hasFloor = !!(fb && fb.boundingBox === 'block')
+          const under = new Vec3(x, y - 1, z)
+          const fb = bot.blockAt(under)
+          const hasFloor = !!(fb && fb.boundingBox === 'block') && cellKnown(under)
           if (!g.sample || hasFloor) { g.sample = { x, y, z }; g.sampleFloor = hasFloor }
         }
       }
@@ -4869,10 +4882,11 @@ app.get('/passages', (req, res) => {
     const parts = Object.entries(dirs).sort((a, b) => b[1].cells - a[1].cells)
       .map(([c, g]) => `${c} (around y${g.loY}${g.hiY !== g.loY ? '–' + g.hiY : ''}${g.sample ? `, walk-to ${g.sample.x},${g.sample.y},${g.sample.z}` : ''})`)
     let summary
-    if (fill.capped) summary = `large connected volume — air exceeds the ${radius}-block scan (outdoors or a big cavern); exits seen so far: ${parts.join(', ') || 'everywhere'}`
-    else if (!parts.length && !contUp && !contDown) summary = `closed pocket — no connected air leaves a ${radius}-block radius; digging is the only way on`
-    else summary = 'air continues ' + [...parts, contUp ? `UP past +${radius}` : null, contDown ? `DOWN past -${radius}` : null].filter(Boolean).join(', ') + ' (sensed — connectivity, not eyesight)'
-    ok(res, { summary, radius, exits: dirs, up: contUp, down: contDown, cells: fill.cells.size, capped: fill.capped })
+    if (parts.length || contUp || contDown) summary = 'air continues ' + [...parts, contUp ? `UP past +${radius}` : null, contDown ? `DOWN past -${radius}` : null].filter(Boolean).join(', ')
+    // Closed only when the bot sees every wall of a pocket that stays inside the radius.
+    else if (!leaves && !fill.capped && !fill.unknown) summary = `closed pocket — no connected air leaves a ${radius}-block radius; digging is the only way on`
+    else summary = `no exit in sight within ${radius} blocks`
+    ok(res, { summary, radius, exits: dirs, up: contUp, down: contDown })
   } catch (e) { err(res, e) }
 })
 
@@ -5491,7 +5505,7 @@ app.get('/gather', (req, res) => {
           // GUARDRAIL: never dig straight down. Refuse anything more than ~2 below feet
           // (a shaft); keep only targets at/above feet or reachable from the side.
           .filter(o => o.drop <= GATHER_MAX_DROP && o.drop >= -maxRise)
-          .filter(o => canSeeBlock(o.p, radius))     // FAIRNESS: only what a player here could see
+          .filter(o => seesLit(o.p, radius))         // FAIRNESS: only what a player here could see
           .sort((a, b) => a.dist - b.dist)
         if (!ranked.length) {
           job.progress(`no reachable ${resource} left (mined ${mined}/${amount})`)

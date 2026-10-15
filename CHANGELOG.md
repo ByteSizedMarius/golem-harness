@@ -74,6 +74,12 @@ view. A `stop` or `unfollow` during the drill ends it too, where the drill used 
 controls again afterwards. A `goto` toward a nametag walks in hops aimed where the nametag shows at
 each one, and its reply reads from the 5-block cube.
 
+`/section` summarised "floor: down 13-16" over rows the capped air fill never reached, and the
+real ground lay 61 blocks down. A column now has a floor only where a solid block lies under its
+lowest sensed air, and that block counts only when the air fill stopped at it or the bot has seen
+it. Anywhere else it reads `floor unknown at dN`. That fix threw "known is not a function" in any
+closed space, underground most of all, and `/section` reads the closed fill's walls again.
+
 Reflexes took the legs in silence: a job carried on fighting a flee, and a walk answered a bare
 `stopped`. Now a running job keeps the legs from flees, cover moves and chases until a mob stands
 in melee range. A reflex that does take them (melee, an emergency flee, lava, drowning, the
@@ -92,7 +98,21 @@ otherwise re-arm between the job's own paths and drag the body off. `/scene` nam
 like `/entities`, and a player named like a mob is never a threat there. A player under an invisibility
 potion counts as unseen, as the nametag rule already had it.
 
-A walk toward a player known only by the nametag aimed at their exact
+Ore through rock: in a live session `find` with `sense` returned the exact coordinates of iron 19
+blocks away behind rock, and `scene` said "Veins: iron SE down ~15 (sensed)". The sensed tier
+counted any block that faced air connected to the bot's pocket, caves it never saw included. The
+tier is gone. A block now reaches the pilot only in line of sight from the head and not in total
+darkness, or from the seen set, which a ray now stamps only where it is lit. That holds for `find`
+(its `sense` parameter is removed), the veins of `scene`, the ore callout, the ore, grid and
+narration of `/section`, the exits and walk-to cells of `/passages`, `/blockat`,
+`mine`, `gather` and `goto` to a block. A section column without seen air reads
+`out of sight from dN`, and `sealed` needs seen rock. `/passages` calls a pocket closed only when the
+bot has seen all its walls. Light comes from the chunk data. mineflayer computes none, and a 1.7.10
+server sends it only with a chunk, so around a block change sight alone counts until fresh light
+arrives. `/fish` named the block of any loaded cell in its refusal before it checked sight.
+
+`gaze` named surfaces its rays struck in total darkness. Those rays now read `too dark to see`, and
+the trek scan skips them too. A walk toward a player known only by the nametag aimed at their exact
 position. `goto` now heads for the centre of their 5-block cube with a reach that covers all of it,
 and `follow` arms the entity goal only while it sees the player, else aims at the cube centre and
 re-aims when the cube changes.

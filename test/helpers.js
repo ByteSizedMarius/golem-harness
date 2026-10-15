@@ -545,6 +545,32 @@ function loadBotFunctions (names, env) {
   return ctx
 }
 
+// The bot.js GET handler for route, run over env with the bot.js functions it reaches, and its res.
+function routeHandler (route, env) {
+  const src = botSource()
+  const at = src.indexOf(`app.get('${route}'`)
+  const arrow = src.indexOf('=>', at)
+  const handler = at < 0 ? '' : balanced(src, arrow)
+  assert.ok(handler, `the ${route} handler not found in bot.js`)
+  const called = [...handler.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[1])
+  const names = [...new Set(called)].filter((n) => /^(?:async\s+)?function\b/.test(functionSource(n)))
+  const ctx = loadBotFunctions(names, { ok: (res, body) => { res.body = body }, err: (res, e) => { res.error = e }, ...env })
+  const async = /\basync\b/.test(src.slice(at, arrow)) ? 'async ' : ''
+  return { handle: vm.runInContext(`(${async}(req, res) => ${handler})`, ctx), res: {} }
+}
+
+function replyOf (res) {
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  return JSON.parse(JSON.stringify(res.body))
+}
+
+// The reply of the bot.js GET handler for route on query, run over env with the bot.js functions it reaches.
+function runRoute (route, query, env) {
+  const { handle, res } = routeHandler(route, env)
+  handle({ query }, res)
+  return replyOf(res)
+}
+
 function bunkerReflexIn (env) {
   const src = botSource()
   const at = src.search(/\bname\s*:\s*['"]bunker['"]/)
@@ -794,7 +820,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, functionSource, balanced, botConstant, loadBotFunctions, bunkerReflexIn, combatReflexIn,
+  botSource, functionSource, balanced, botConstant, loadBotFunctions, runRoute, bunkerReflexIn, combatReflexIn,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild
 }

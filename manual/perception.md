@@ -4,20 +4,19 @@ You perceive the world only through what the tools say. The usual failure is act
 
 ## No x-ray
 
-A block shows only when a player standing where you stand could see it: exposed to air on at least one face and on an unobstructed ray from your eyes. `find`, `goto` to a block, `mine`, `gather` and the resource hints of `scene` all follow this. Ore buried in solid stone returns nothing until you expose it by mining toward it. Ore in a cave wall, a vein a cliff has sheared open, trees and surface blocks all show.
+A block shows only when a player standing where you stand could see it: exposed to air on at least one face, on an unobstructed ray from your eyes and not in total darkness. `find`, `goto` to a block, `mine`, `gather`, `section`, `passages`, the ore callouts and the resource hints of `scene` all follow this. Ore buried in solid stone returns nothing until you expose it by mining toward it. Ore in a cave wall, a vein a cliff has sheared open, trees and surface blocks all show. A dark cave shows nothing until you light it.
 
-## Three tiers of knowing
+## Two tiers of knowing
 
 - Bare name: seen, a real eye ray hit it.
-- `(sensed)`: exposed to air connected to your air pocket, but with no clear ray right now (around a corner, down a passage). The open space `section` and `passages` report is always this tier.
-- `?`: sealed beyond your connected air. Nothing sees through solid rock.
+- `?`: unseen. Nothing sees through solid rock or into total darkness.
 
-Speak the tiers back. Navigate by structure and mine what is seen: a sensed hint is not a target.
+Speak the tiers back. Navigate by structure and mine what is seen.
 
 ## Which sense
 
 - `scene` is the default glance. Call it constantly. Its `steps` grid shows how far each cell around you lies up or down, the check before a jump or a climb.
-- `gaze` is the deliberate look, where a person would turn their head. It feeds the seen set and draws `map`. When a far reading surprises you, check it with `find` before building a theory on it.
+- `gaze` is the deliberate look, where a person would turn their head. It feeds the seen set and draws `map`. In total darkness it says too dark instead of naming what is there. When a far reading surprises you, check it with `find` before building a theory on it.
 - `section` is the cave tool. It shows the vertical structure `map` cannot.
 - `passages` answers which ways this space goes.
 - `map`: a small radius (8 to 12) for a quick local read, larger to survey. `@` is you, `T` tree, log or leaves, `#` stone, `~` water or lava, `.` ground, `=` built blocks (planks, bricks, glass, furnace, chest), a space air or open, `·` unexplored. It scans the highest surface in each column, so it is a top-down heightmap, not a slice at your feet. Row 0 is north, left is west. Underground, it says so.

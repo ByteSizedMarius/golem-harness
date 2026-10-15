@@ -61,8 +61,8 @@ epistemic constraints as a human player.** Not because it makes the bot stronger
 but because playing *fairly* is what makes it playing at all — and because the constraints turn out to
 produce more interesting minds. Concretely:
 
-- **No x-ray.** Ore and structures are only reported if they are exposed to air the bot's own body can
-  reach, and every claim is tagged by evidence tier (see below).
+- **No x-ray.** Ore and structures are only reported if they are exposed to air, in line of sight from
+  the bot's eyes and not in total darkness.
 - **No sensing through walls.** Mobs and players sealed behind rock are simply absent from perception.
 - **Considerate movement.** The pathfinder never breaks blocks to travel. Zero litter: scaffold blocks
   the bot places are tracked and reclaimed (`/tidy`). Doors and gates the bot opens are closed behind
@@ -87,7 +87,7 @@ pushed by current? — proprioception before perception), orientation and vitals
 probe, and then `spatial3D()`: eight compass directions scanned for walls and floor profiles, with a
 grammar that distinguishes a *step* ("floor ~3 down") from *the mouth of a chamber* ("ledge ~3 down then
 OPENS — floor ~18 down (water below)") — and honestly reports "floor out of sight" past its measuring
-range rather than guessing. Ore appears as located landmarks, entities grouped and counted (never
+range rather than guessing. Ore in sight appears as located landmarks, entities grouped and counted (never
 streamed), hostiles called out, sky/canopy/underground sensed from a column scan, doors and gates in
 sight listed open or closed. Lines appear only when non-empty: a calm meadow is two lines, a cave mouth
 over lava is eight. Beside the summary, `steps` is a 5×5 north-up grid of the step from the feet to each
@@ -98,18 +98,18 @@ a human-ish field of view) marches out from the eye, sampling every quarter-bloc
 stops each ray. Hits carry block identity, distance, and screen position; misses become "open space
 there." 105 pixels, where every pixel is a laser rangefinder that reports *material* instead of color.
 
-**Three tiers of knowing, everywhere.** Bare name = a ray hits it right now (seen). `(sensed)` =
-air-connected to the bot's own air pocket but around a corner — what a player would find by sweeping
-their view. `?` / silence = sealed or unlooked — unknowable. The tiers are enforced by a flood-fill of
-the air connected to the bot's own body: a sealed cavern's contents are as invisible as buried rock,
-*even though the raw API knows them.*
+**Two tiers of knowing, everywhere.** Bare name = seen: a ray from the eyes reaches it and it is not
+in total darkness, now or when the bot looked earlier. `?` / silence = unseen. A cave around the
+corner, a sealed cavern and a dark one stay unknown, *even though the raw API knows them.* Light comes
+from the chunk data the client holds. Where a block changed since that data arrived, sight alone
+counts.
 
 **No camera.** The routes that render the viewer for the model (`/snapshot`, `/record`, `/stream`,
 `/pov`) answer 403. The viewer is for the humans watching, and the model works from text.
 
 ## How the model remembers
 
-**`seen.json` — attention, not content.** Every cell a gaze ray crosses is stamped into a persistent
+**`seen.json` — attention, not content.** Every lit cell a gaze ray crosses is stamped into a persistent
 SEEN set — but only the *fact of having looked*, never what was there. The top-down `/map` renders live
 world data *through* that mask: fog-of-war where looking literally draws the map. Storing no content
 means the memory can never go stale and the map can never assert a lie — if the world changed, the next

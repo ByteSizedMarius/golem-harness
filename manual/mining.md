@@ -1,7 +1,7 @@
 # Mining and pockets
 
 - `find` before `mine`. With nothing in range, `mine` returns `mined: 0` and you learn nothing. `find` shows whether the resource is there and where, then mine it or travel to it.
-- An empty ore result usually means buried, not absent. Expose it by digging toward it: open a cave, follow a wall of exposed stone.
+- An empty ore result usually means buried or unlit, not absent. Expose it by digging toward it: open a cave, follow a wall of exposed stone. Light a dark cave before you look.
 - Never dig the block under your own feet. It drops you into whatever is below: a cave, lava, a long fall. Dig into a face ahead of you or above. `gather` refuses targets more than about 2 below your feet, and with `digat` the rule is yours to keep.
 - A blocked route is your call: `dig_stair` or `dig_tunnel` on purpose, or another point.
 - Equip the right tool right before digs you care about. Tool choice is pick-biased: `digat` grabs a pickaxe for planks and sand.
