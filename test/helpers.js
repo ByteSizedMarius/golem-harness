@@ -648,6 +648,7 @@ function buildHarness ({ scenes = [{}], centred = true } = {}) {
       waitForTicks: async () => {}
     }),
     jobs: { stopAll () {} },
+    legs: legLedger(),
     safeStop () {},
     stopFollow () {},
     liquidProblem: () => null,

@@ -4,7 +4,7 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
-const { legLedger, takenText, laneBlocks } = require('../lib/legs')
+const { QUIET_MS, LONG_QUIET_MS, legLedger, takenText, laneBlocks } = require('../lib/legs')
 const { routeDeadline } = require('../lib/walk')
 const { loadBotFunctions, combatReflexIn } = require('./helpers')
 
@@ -21,6 +21,20 @@ test('the ledger names the last reflex that took the legs since a mark, and a st
   assert.strictEqual(legs.takenSince(legs.mark()), null, 'a take before the mark counts')
   legs.take(null)
   assert.strictEqual(legs.takenSince(m), null, 'the pilot stop still names the reflex before it')
+})
+
+test('the quiet after a reflex take lasts 3 s, 5 s after the hurt freeze or a lava take, and the pilot stop leaves none', () => {
+  const legs = legLedger()
+  assert.strictEqual(legs.quietUntil(), 0, 'control: nothing taken yet')
+  legs.take('unstuck', 'break a pathing wedge', 1000)
+  assert.strictEqual(legs.quietUntil(), 1000 + QUIET_MS)
+  legs.take('hurt', 'freeze after an unexplained hit', 2000)
+  assert.strictEqual(legs.quietUntil(), 2000 + LONG_QUIET_MS)
+  legs.take('lava_watch', 'back away from lava', 3000)
+  assert.strictEqual(legs.quietUntil(), 3000 + LONG_QUIET_MS)
+  legs.take(null)
+  assert.strictEqual(legs.quietUntil(), 0)
+  assert.deepStrictEqual([QUIET_MS, LONG_QUIET_MS], [3000, 5000])
 })
 
 test('takenText names the reflex and what it took the legs for', () => {

@@ -47,12 +47,32 @@ nudge that ends during a drown rescue leaves the swim-up's jump held. The doorwa
 doors the bot has seen. `airPrecheck`'s flood asks whether a cell is known only for the walls of a
 fill that stayed closed, not for every cell it touches.
 
-After a dimension change, entities the server has not updated since
+Players. Through the proxy, `bot.players` held no entity for a player the server tracked, so
+`where`, `follow`, goto's player target and the breadcrumbs never found the owner, while the
+flee toward a player (which scans the entities) did. Every lookup now finds the player's entity
+by username, `entities` names players by name instead of `player`, and `where` and `follow` pass
+the same gate as `goto`: in sight exact, by the nametag a bearing and a distance rounded to 5,
+else the breadcrumb. A `player` event says when someone comes into view, shows only by the
+nametag or goes out of sight, at most once per player per 30 s, entering within 60 blocks and
+leaving past 68. The owner's wording: "just as an FYI, not for Claude to act on", and the event
+says so. Presence forgets a player out of sight for 10 minutes and remembers at most 200, the
+longest unseen dropped first. After a dimension change, entities the server has not updated since
 are left out of every scan: `tick`'s threats, `entities`, `scene`, the hostile alarm, the narrator,
 the combat reflex's flee and target scans, and the drop pickup. The rest followed: the bunker's
 threats, the hit attribution, the ally checks, `useon`, `strike`, `shoot` and the placing blockers,
 and a dimension change clears the confirmed aggro and the last hit, so a new mob that gets an old id
-is not taken for the one that hit.
+is not taken for the one that hit. A player named `__proto__` or `constructor` is a
+`scene` group like any other, since the groups keyed by name no longer inherit from `Object`.
+
+Follow stays on until `unfollow` or `stop` ("it should stay on until i say so"). Reaching the
+player, a stall, a fight or a lost sight no longer ends it. It waits while a fight with its flee and
+cover moves, a bunker build, a job or any other tool call holds the legs, the call for at most 300 s,
+and while the body stands in a finished bunker. After a reflex took the legs, or a bunker build ended,
+it waits 3 s more, 5 s after the hurt freeze or a lava take. It re-arms once the goal is cleared,
+runs the doorway drill only while the pathfinder is moving, and says when the player is back in
+view. A `stop` or `unfollow` during the drill ends it too, where the drill used to set its goal and
+controls again afterwards. A `goto` toward a nametag walks in hops aimed where the nametag shows at
+each one, and its reply reads from the 5-block cube.
 
 Reflexes took the legs in silence: a job carried on fighting a flee, and a walk answered a bare
 `stopped`. Now a running job keeps the legs from flees, cover moves and chases until a mob stands
@@ -67,7 +87,15 @@ could point at a reflex that never stopped it. Now one ledger does both: every r
 legs (the hurt freeze, drowning, lava, a flee, a cover move, a chase, the vanguard's release in melee
 range, unstuck and the bunker) records itself there, and that record is what ends a walk route begun
 before it. `/stop` takes the legs for nobody and clears the lane. A melee fight ends a running job but
-leaves a pilot's walk its legs, as the lane says.
+leaves a pilot's walk its legs, as the lane says. `follow` also waits while a job runs, since it would
+otherwise re-arm between the job's own paths and drag the body off. `/scene` names players by username
+like `/entities`, and a player named like a mob is never a threat there. A player under an invisibility
+potion counts as unseen, as the nametag rule already had it.
+
+A walk toward a player known only by the nametag aimed at their exact
+position. `goto` now heads for the centre of their 5-block cube with a reach that covers all of it,
+and `follow` arms the entity goal only while it sees the player, else aims at the cube centre and
+re-aims when the cube changes.
 
 ## 2026-10-15: one goto, and arrival means standing there
 

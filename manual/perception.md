@@ -23,6 +23,7 @@ Speak the tiers back. Navigate by structure and mine what is seen: a sensed hint
 - `map`: a small radius (8 to 12) for a quick local read, larger to survey. `@` is you, `T` tree, log or leaves, `#` stone, `~` water or lava, `.` ground, `=` built blocks (planks, bricks, glass, furnace, chest), a space air or open, `·` unexplored. It scans the highest surface in each column, so it is a top-down heightmap, not a slice at your feet. Row 0 is north, left is west. Underground, it says so.
 - `listen` hears through walls. Danger sounds (lava, fuse, explosion) also arrive as hear events, throttled so a noisy area cannot flood you.
 - `entities(radius: 128)` is real sight across caverns and terrain. The server stops tracking mobs past about 128.
+- Players: in sight you know where they are, but an invisible player stays unseen. A player who neither sneaks nor is invisible shows a nametag through walls within 64 blocks, which gives a bearing and a distance rounded to 5. `where`, `goto(player: ...)` and `follow` use the same tiers, and a `player` event tells when someone comes into view or goes out of sight. Toward a nametag alone, `goto` and `follow` head for the centre of its 5-block cube until the player comes into sight.
 
 ## Scout tower
 

@@ -7,6 +7,7 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const walk = require('../lib/walk')
 const { loadBotFunctions, botConstant, startApp } = require('./helpers')
+const { playerNamed, playersAround } = require('../lib/players')
 const { summarizePlan, planRisk } = require('../lib/plan')
 const { legLedger } = require('../lib/legs')
 
@@ -201,15 +202,19 @@ test('a waypoint walks to the stand cell nearest its stored feet y, and an unkno
     { kind: 'waypoint', target: { waypoint: 'away' }, reason: 'unknown' })
 })
 
-test('a player walks to the live position in sight, near it by the nametag, else to the last-seen crumb', () => {
+test('a player walks to the live position in sight, to the centre of the nametag cube by the nametag, else to the last-seen crumb', () => {
   const steve = { position: { x: 5.3, y: 64, z: 5.7 } }
   const crumb = { pos: { x: 0.5, y: 64, z: 0.5 }, nametag: false, agoSec: 12 }
   const live = resolveTarget({ player: 'Steve' }, sources({ player: () => steve, crumb: () => crumb }))
   assert.deepStrictEqual(cellOf(live.cell), { x: 5, y: 64, z: 5 })
-  const tag = resolveTarget({ player: 'Steve', range: 1 }, sources({ player: () => steve, crumb: () => crumb, known: () => false, nametag: () => true }))
+  const byTag = (player) => resolveTarget({ player: 'Steve', range: 1 }, sources({ player: () => player, crumb: () => crumb, known: () => false, nametag: () => true }))
+  const tag = byTag(steve)
   assert.strictEqual(tag.nametag, true)
   assert.ok(tag.goal instanceof goals.GoalNear)
-  assert.strictEqual(tag.goal.rangeSq, 4, 'range 1 is raised to 2')
+  assert.deepStrictEqual([tag.goal.x, tag.goal.y, tag.goal.z], [7, 62, 7], 'the cube centre, not the player\'s cell 5,64,5')
+  assert.strictEqual(tag.goal.rangeSq, 16, 'range 1 is raised to reach every cell of the cube')
+  const sameCube = byTag({ position: { x: 9.8, y: 61.2, z: 8.9 } })
+  assert.deepStrictEqual([sameCube.goal.x, sameCube.goal.y, sameCube.goal.z, cellOf(sameCube.cell)], [7, 62, 7, cellOf(tag.cell)])
   assert.deepStrictEqual(tag.target, { player: 'Steve' })
   const hidden = resolveTarget({ player: 'Steve' }, sources({ player: () => steve, crumb: () => crumb, known: () => false }))
   assert.deepStrictEqual(cellOf(hidden.cell), { x: 0, y: 64, z: 0 })
@@ -433,6 +438,7 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
   const bot = fakeWalker((b, g) => answer(b, g, env))
   bot.game = { minY: -64, height: 384 }
   bot.players = {}
+  bot.entities = {}
   bot.blockAt = (p) => (p.y <= 63 ? STONE : AIR)
   setup(bot)
   Object.assign(env, {
@@ -453,6 +459,9 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     waypoints: { get: () => null },
     playerCrumbs: {},
+    playerNamed,
+    staleEntities: new Set(),
+    crumbCentre,
     entityPerceptible: () => true,
     nametagVisible: () => false,
     airFlood: () => ({}),
@@ -520,11 +529,14 @@ test('the /goto walk replies the reason it did not start', async () => {
     { arrived: false, kind: 'block', target: { block: 'chset' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: null, reason: 'unknown', hint: null })
 })
 
+// A player entity the server tracks, which bot.players does not list.
+const steveAt = (position) => (bot) => { bot.entities[7] = { id: 7, type: 'player', username: 'Steve', position } }
+
 test('a hidden player stays hidden in the /goto reply, and one known by the nametag gets only a bearing and a rough distance', async () => {
-  const setup = (bot) => { bot.players.Steve = { entity: { position: new Vec3(13.3, 64, -2.6) } } }
+  const setup = steveAt(new Vec3(13.3, 64, -2.6))
   assert.deepStrictEqual(await goto({ player: 'Steve' }, { setup, over: { entityPerceptible: () => false } }),
     { arrived: false, kind: 'player', target: { player: 'Steve' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: null, reason: 'unseen', hint: null })
-  const tagged = { arrived: false, kind: 'player', target: { player: 'Steve' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: 15, reason: 'no-path', hint: null, bearing: 'E' }
+  const tagged = { arrived: false, kind: 'player', target: { player: 'Steve' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: 10, reason: 'no-path', hint: null, bearing: 'E' }
   assert.deepStrictEqual(await goto({ player: 'Steve' }, { setup, over: { entityPerceptible: () => false, nametagVisible: () => true }, answer: update('noPath') }), tagged)
   const walled = { entityPerceptible: () => false, nametagVisible: () => true, airPrecheck: () => ({ verdict: 'walled' }) }
   assert.deepStrictEqual(await goto({ player: 'Steve' }, { setup, over: walled, answer: update('noPath') }), tagged, 'no precheck reads the hidden cell')
@@ -535,7 +547,41 @@ test('a player known last by the nametag stays a bearing and a rough distance, a
   const seen = await goto({ player: 'Steve' }, { over: { playerCrumbs: crumbs(false) }, answer: update('noPath') })
   assert.deepStrictEqual([seen.target, seen.dist, seen.agoSec], [{ x: 13, y: 64, z: -3 }, 13.3, 7], 'control: a crumb from sight')
   assert.deepStrictEqual(await goto({ player: 'Steve' }, { over: { playerCrumbs: crumbs(true) }, answer: update('noPath') }),
-    { arrived: false, kind: 'player', target: { player: 'Steve' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: 15, reason: 'no-path', hint: null, bearing: 'E', agoSec: 7 })
+    { arrived: false, kind: 'player', target: { player: 'Steve' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: 10, reason: 'no-path', hint: null, bearing: 'E', agoSec: 7 })
+})
+
+test('a walk toward a nametag aims each hop at the cube the nametag shows in now, and ends at its centre', async () => {
+  const tagOnly = { entityPerceptible: () => false, nametagVisible: () => true }
+  const goals_ = []
+  let player = null
+  const answer = (bot, g) => {
+    goals_.push({ x: g.x, z: g.z })
+    // The player walks south while the first hop runs.
+    if (goals_.length === 1) player.position = new Vec3(60.5, 64, 40.5)
+    arrive(bot, g)
+  }
+  const setup = (bot) => {
+    steveAt(new Vec3(60.5, 64, 0.5))(bot)
+    player = bot.entities[7]
+  }
+  const r = await goto({ player: 'Steve' }, { setup, answer, over: tagOnly })
+  assert.strictEqual(r.arrived, true)
+  assert.ok(goals_.length >= 3, `${goals_.length} goals`)
+  assert.ok(Math.abs(goals_[0].z) < 1, 'control: the first hop heads east')
+  assert.ok(goals_[1].z > 5, `the second hop turns toward the player, z ${goals_[1].z}`)
+  assert.deepStrictEqual(goals_[goals_.length - 1], { x: 62, z: 42 }, 'the cube centre, not the player at 60,40')
+  assert.deepStrictEqual(Object.keys(r).sort(), ['arrived', 'bearing', 'dist', 'hint', 'kind', 'pos', 'reason', 'target'])
+  assert.deepStrictEqual(r.target, { player: 'Steve' })
+})
+
+test('the reply about a player known now by the nametag tells no two spots in one 5-block cube apart', async () => {
+  const tagOnly = { entityPerceptible: () => false, nametagVisible: () => true }
+  const replyFor = async (spot) => {
+    const r = await goto({ player: 'Steve' }, { setup: steveAt(spot), over: tagOnly, answer: update('noPath') })
+    return [r.dist, r.bearing, r.target]
+  }
+  assert.notDeepStrictEqual(await replyFor(new Vec3(5.2, 64, 5.9)), await replyFor(new Vec3(12.2, 64, 12.9)), 'control: two cubes')
+  assert.deepStrictEqual(await replyFor(new Vec3(5.2, 64, 5.9)), await replyFor(new Vec3(9.8, 64, 5.1)))
 })
 
 test('a pilot stop ends the walk, and the retry that would arrive never starts', async () => {
@@ -643,7 +689,7 @@ test('an early /goto reply leaves a goal someone else set alone', async () => {
   const setup = (bot) => {
     walker = bot
     bot.pathfinder.goal = follow
-    bot.players.Steve = { entity: { position: new Vec3(13.3, 64, -2.6) } }
+    steveAt(new Vec3(13.3, 64, -2.6))(bot)
   }
   const r = await goto({ player: 'Steve' }, { setup, over: { entityPerceptible: () => false, stopPath () { stops++ } } })
   assert.deepStrictEqual([r.reason, stops, walker.pathfinder.goal], ['unseen', 0, follow])
@@ -721,10 +767,26 @@ test('a nametag shows only for a player who neither sneaks nor is invisible, wit
   assert.strictEqual(nametagVisible(player({ position: new Vec3(65, 64, 0) })), false, 'past 64')
 })
 
+test('an invisible player in plain sight is not seen', () => {
+  const fill = { cells: new Set(['3,64,0']) }
+  const env = { bot: { entity: { position: new Vec3(0.5, 64, 0.5) }, blockAt: () => null }, touchesFill: () => false, ck: (x, y, z) => x + ',' + y + ',' + z }
+  const { entityPerceptible } = loadBotFunctions(['entityPerceptible'], env)
+  const at = (over) => ({ type: 'player', username: 'Steve', position: new Vec3(3.5, 64, 0.5), metadata: [0], ...over })
+  assert.strictEqual(entityPerceptible(at(), fill), true, 'control: shared air')
+  assert.strictEqual(entityPerceptible(at({ metadata: [0x20] }), fill), false)
+})
+
+const steve = (position) => ({ id: 7, type: 'player', username: 'Steve', position })
+
+// recordCrumbs over bot.entities, with bot.players empty.
+const crumbEnv = (over) => ({ bot: { username: 'Claude', players: {}, entities: {} }, playerCrumbs: {}, playersAround, staleEntities: new Set(), airFlood: () => ({}), crumbCentre, ...over })
+
 test('a crumb records whether the player was in sight or known only by the nametag', () => {
   const env = {
-    bot: { username: 'Claude', players: { Steve: { entity: { position: new Vec3(5, 64, 5) } } } },
+    bot: { username: 'Claude', players: {}, entities: { 7: steve(new Vec3(5, 64, 5)) } },
     playerCrumbs: {},
+    playersAround,
+    staleEntities: new Set(),
     airFlood: () => ({}),
     entityPerceptible: () => true,
     nametagVisible: () => true,
@@ -739,10 +801,10 @@ test('a crumb records whether the player was in sight or known only by the namet
 })
 
 test('a nametag crumb tells no two spots in one 5-block cube apart, from wherever the bot asks', () => {
-  const env = { bot: { username: 'Claude', players: {} }, playerCrumbs: {}, airFlood: () => ({}), nametagVisible: () => true, crumbCentre }
+  const env = crumbEnv({ nametagVisible: () => true })
   const { recordCrumbs, crumbFix } = loadBotFunctions(['recordCrumbs', 'crumbFix'], env)
   const fixes = (spot, inSight) => {
-    env.bot.players.Steve = { entity: { position: spot } }
+    env.bot.entities[7] = steve(spot)
     env.entityPerceptible = () => inSight
     recordCrumbs()
     const c = env.playerCrumbs.Steve
@@ -792,6 +854,22 @@ test('crumbs are dropped when the bot enters another dimension', () => {
   env.bot.game.dimension = 'the_nether'
   forgetCrumbsElsewhere()
   assert.deepStrictEqual(Object.keys(env.playerCrumbs), [])
+})
+
+test('after a dimension change, a player entity the server has not updated since leaves no crumb', () => {
+  const env = crumbEnv({ bot: { username: 'Claude', players: {}, entities: { 7: steve(new Vec3(5, 64, 5)) }, game: { dimension: 'overworld' } }, crumbDimension: null, entityPerceptible: () => true, nametagVisible: () => true, resetThreatState () {} })
+  const { recordCrumbs, forgetCrumbsElsewhere } = loadBotFunctions(['recordCrumbs', 'forgetCrumbsElsewhere'], env)
+  env.crumbDimension = 'overworld'
+  recordCrumbs()
+  assert.ok(env.playerCrumbs.Steve, 'control: a player in the same dimension')
+  env.bot.game.dimension = 'the_nether'
+  forgetCrumbsElsewhere()
+  recordCrumbs()
+  assert.deepStrictEqual(Object.keys(env.playerCrumbs), [])
+  // An entity update from the server marks it current again.
+  env.staleEntities.delete(7)
+  recordCrumbs()
+  assert.ok(env.playerCrumbs.Steve)
 })
 
 test('/goto refuses a coordinate past the world border or outside the build height', async (t) => {
@@ -880,4 +958,17 @@ test('a preview of a failed search leaves reaches unknown, since the search may 
   const failed = async () => ({ status: 'noPath', path: [new Vec3(1.5, 64, 0.5), new Vec3(2.5, 64, 0.5)] })
   const { r } = await plannedGoto({ x: 5, z: 0 }, { preview: true }, { over: { planPath: failed, cellKnown: (p) => p.x < 3 } })
   assert.deepStrictEqual(r.plan, { reaches: null, length: 2, rise: 0, drop: 0, end: { x: 2, y: 64, z: 0 }, unseen: false })
+})
+
+test('a player known only by the nametag gets no plan, so neither a preview nor a refusal shows where they stand', async () => {
+  const setup = steveAt(new Vec3(13.3, 64, -2.6))
+  let planned = 0
+  const planPath = async (g) => { planned++; return { status: 'success', path: [new Vec3(g.x + 0.5, g.y, g.z + 0.5)] } }
+  const seen = await plannedGoto({ player: 'Steve' }, { preview: true }, { setup, over: { planPath } })
+  assert.deepStrictEqual([seen.r.plan.end, planned], [{ x: 13, y: 64, z: -3 }, 1], 'control: a player in sight')
+  const tagged = { entityPerceptible: () => false, nametagVisible: () => true, planPath }
+  const { r } = await plannedGoto({ player: 'Steve' }, { preview: true }, { setup, over: tagged })
+  assert.deepStrictEqual(r, { arrived: false, kind: 'player', target: { player: 'Steve' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: 10, reason: 'unresolved', hint: r.hint, bearing: 'E', plan: null })
+  const walked = await plannedGoto({ player: 'Steve' }, {}, { setup, over: tagged, answer: update('noPath') })
+  assert.deepStrictEqual([walked.r.reason, planned], ['no-path', 1], 'the walk toward a nametag plans nothing up front')
 })

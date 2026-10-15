@@ -10,12 +10,14 @@ const { Vec3 } = require('vec3')
 const { installSecurity, BUNKER_MODES } = require('./lib/install')
 const { classifySound } = require('./lib/sounds')
 const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
-const { UNLOADED, standCell, resolveTarget, crumbCentre, arrivedAt, walkAttempt, routeDeadline } = require('./lib/walk')
+const { UNLOADED, standCell, resolveTarget, crumbCentre, nametagGoal, arrivedAt, walkAttempt, routeDeadline } = require('./lib/walk')
+const { playerNamed, playersAround, presenceUpdate, presenceText } = require('./lib/players')
 const { headFree } = require('./lib/head')
 const { sprintJump, passedNodes, step: nodeStep } = require('./lib/sprint')
 const { summarizePlan, planRisk } = require('./lib/plan')
 const { isDoor, doorStep } = require('./lib/doors')
 const { stepView } = require('./lib/steps')
+const { countVerbs } = require('./lib/verbs')
 
 const HOST = process.env.MC_HOST || 'localhost'
 const PORT = parseInt(process.env.MC_PORT || '25565')
@@ -2365,6 +2367,8 @@ function hasLegalMove() {
 // ---- HTTP control layer ----
 const app = express()
 installSecurity(app, { token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text) } })
+// The pilot routes in flight, which follow waits out.
+const verbs = countVerbs(app)
 // ?brief=1 on ANY endpoint strips null/undefined fields from the reply — LLM pilots pay
 // by the token and "reason":null earns nothing. Empty ARRAYS survive on purpose: law 2
 // makes [] a statement ("looked, found none") and silence a different one ("didn't look").
@@ -2485,8 +2489,9 @@ app.get('/toss', async (req, res) => {
     const name = req.query.name
     if (!name) return err(res, new Error('name required'))
     const toward = req.query.to
-    if (toward && bot.players[toward] && bot.players[toward].entity) {
-      try { await bot.lookAt(bot.players[toward].entity.position.offset(0, 0.4, 0), true) } catch (e) {}
+    const towardEntity = toward && playerEntity(toward)
+    if (towardEntity && playerSighting(towardEntity, reflexes.find(r => r.name === 'combat').fairFill(bot))) {
+      try { await bot.lookAt(towardEntity.position.offset(0, 0.4, 0), true) } catch (e) {}
     }
     const item = bot.inventory.items().find(i => i.name === name || i.name.includes(name))
     if (!item) return err(res, new Error(`no ${name} in inventory`))
@@ -2552,16 +2557,21 @@ function losClear(from, to) {
 }
 function entityPerceptible(en, fill) {
   try {
+    // An invisible player shows neither body nor nametag.
+    if (en.type === 'player' && isInvisible(en)) return false
     const p = en.position.floored()
     if (touchesFill(p, fill) || fill.cells.has(ck(p.x, p.y, p.z)) || fill.cells.has(ck(p.x, p.y + 1, p.z))) return true
     // last resort: the eye-ray — sight across caverns/chasms the flood can't afford to fill
     return losClear(bot.entity.position.offset(0, 1.62, 0), en.position.offset(0, 1.0, 0))
   } catch (e) { return false }
 }
-// A player's nametag shows through walls within 64 blocks while they neither sneak nor are invisible (shared flag 0x20).
+// The shared entity flag 0x20 an invisibility potion sets.
+function isInvisible (en) {
+  return !!(((en.metadata && en.metadata[0]) || 0) & 0x20)
+}
+// A player's nametag shows through walls within 64 blocks while they neither sneak nor are invisible.
 function nametagVisible (en) {
-  const flags = (en.metadata && en.metadata[0]) || 0
-  return !en.crouching && !(flags & 0x20) && en.position.distanceTo(bot.entity.position) <= 64
+  return !en.crouching && !isInvisible(en) && en.position.distanceTo(bot.entity.position) <= 64
 }
 // ---- player locator (07-14, the helmsman's ask: "so we avoid 'where I am' and in case we ever get
 // lost from each-other"). Consented co-op sense: live position when the server tracks them,
@@ -2574,13 +2584,27 @@ for (const ev of ['entitySpawn', 'entityMoved', 'entityUpdate', 'entityGone']) b
 function liveEntities () {
   return Object.values(bot.entities).filter(e => e && e !== bot.entity && !staleEntities.has(e.id))
 }
+// The player named name by their entity. bot.players can lack the entity of a player the server tracks.
+function playerEntity (name) {
+  return playerNamed(bot.entities, name, (e) => staleEntities.has(e.id))
+}
+function trackedPlayers () {
+  return playersAround(bot.entities, bot.entity, (e) => staleEntities.has(e.id))
+}
+// How the bot perceives player en: seen with the exact distance, by the nametag from its 5-block cube, or null.
+function playerSighting (en, fill) {
+  const me = bot.entity.position
+  if (entityPerceptible(en, fill)) return { tier: 'seen', dist: Math.round(en.position.distanceTo(me)), bearing: compass(en.position.x - me.x, en.position.z - me.z) }
+  if (!nametagVisible(en)) return null
+  const c = crumbCentre(en.position)
+  return { tier: 'nametag', dist: Math.round(c.distanceTo(me) / 5) * 5, bearing: compass(c.x - me.x, c.z - me.z) }
+}
 // A crumb's nametag is true when the player was known only by the nametag.
 function recordCrumbs () {
   try {
     let fill = null
-    for (const [name, pl] of Object.entries(bot.players || {})) {
-      const en = pl && pl.entity
-      if (!en || !en.position || name === bot.username) continue
+    for (const en of trackedPlayers()) {
+      const name = en.username
       const seen = entityPerceptible(en, fill ??= airFlood({ radius: 34, cap: 15000 }))
       if (!seen && !nametagVisible(en)) continue
       const prev = playerCrumbs[name]
@@ -2600,6 +2624,31 @@ function forgetCrumbsElsewhere () {
   resetThreatState()
 }
 bot.on('game', forgetCrumbsElsewhere)
+// What the last presence event said about each player name.
+const presence = new Map()
+// True once the first player entity was logged against bot.players.
+let playersLogged = false
+// Emits a player event on each presence change, except for the followed player, whom follow reports.
+function presenceTick () {
+  try {
+    const around = trackedPlayers()
+    if (!playersLogged && around.length) {
+      playersLogged = true
+      const players = bot.players || {}
+      const withEntity = Object.keys(players).filter(n => players[n] && players[n].entity)
+      console.log(`[players] bot.players: ${Object.keys(players).join(', ') || 'none'} (with an entity: ${withEntity.join(', ') || 'none'}), player entities: ${around.map(e => e.username).join(', ')}`)
+    }
+    let fill = null
+    const sightings = []
+    for (const en of around) {
+      const s = playerSighting(en, fill ??= airFlood({ radius: 34, cap: 15000 }))
+      if (s) sightings.push({ name: en.username, ...s })
+    }
+    const quiet = new Set(followState ? [followState.name] : [])
+    for (const ev of presenceUpdate(presence, sightings, { now: Date.now(), quiet })) emitEvent('player', presenceText(ev), ev)
+  } catch (e) {}
+}
+setInterval(() => { if (ready && bot.entity) presenceTick() }, 2000)
 function crumbFix (c, me) {
   const agoSec = Math.round((Date.now() - c.t) / 1000)
   const bearing = compass(c.pos.x - me.x, c.pos.z - me.z)
@@ -2783,25 +2832,34 @@ app.get('/shoot', async (req, res) => {
     })
   } catch (e) { err(res, e) } finally { bot.removeListener('entityDead', onDead) }
 })
+// A player in sight gets the exact position, one known by the nametag a bearing and a rough distance, else the crumb.
+function whereIs (name) {
+  const me = bot.entity.position
+  const en = playerEntity(name)
+  const s = en && playerSighting(en, airFlood({ radius: 34, cap: 15000 }))
+  if (s && s.tier === 'seen') {
+    const p = en.position
+    return { name, live: true, pos: { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) }, dist: s.dist, bearing: s.bearing }
+  }
+  if (s) return { name, live: true, nametag: true, dist: s.dist, bearing: s.bearing }
+  const c = playerCrumbs[name]
+  if (!c) return { name, live: false, note: 'never seen this session' }
+  let heading = null
+  if (c.prev && c.pos.distanceTo(c.prev.pos) > 1) heading = compass(c.pos.x - c.prev.pos.x, c.pos.z - c.prev.pos.z)
+  return { name, live: false, ...crumbFix(c, me), heading }
+}
 app.get('/where', (req, res) => {
   try {
     if (!ready) return err(res, new Error('not ready'))
     const name = req.query.name || process.env.MC_OWNER
     if (!name) return err(res, new Error('need name= (or set MC_OWNER in the environment for a default)'))
-    const me = bot.entity.position
-    const live = bot.players && bot.players[name] && bot.players[name].entity && bot.players[name].entity.position
-    const fmt = (p) => ({ x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) })
-    const bearing = (p) => compass(p.x - me.x, p.z - me.z)
-    if (live) {
-      return ok(res, { name, live: true, pos: fmt(live), dist: +live.distanceTo(me).toFixed(0), bearing: bearing(live) })
-    }
-    const c = playerCrumbs[name]
-    if (!c) return ok(res, { name, live: false, note: 'never seen this session' })
-    let heading = null
-    if (c.prev && c.pos.distanceTo(c.prev.pos) > 1) heading = compass(c.pos.x - c.prev.pos.x, c.pos.z - c.prev.pos.z)
-    ok(res, { name, live: false, ...crumbFix(c, me), heading })
+    ok(res, whereIs(name))
   } catch (e) { err(res, e) }
 })
+// Players go by their username, every other entity by its type name.
+function entityLabel (en) {
+  return (en.type === 'player' && en.username) || en.name || en.username || en.displayName
+}
 app.get('/entities', (req, res) => {
   try {
     if (!ready) return err(res, new Error('not ready'))
@@ -2812,7 +2870,7 @@ app.get('/entities', (req, res) => {
       .filter(en => en.position && en.position.distanceTo(here) <= radius)
       .filter(en => !fill || entityPerceptible(en, fill))
       .map(en => ({
-        type: en.type, name: en.name || en.username || en.displayName,
+        type: en.type, name: entityLabel(en),
         pos: round(en.position), dist: +en.position.distanceTo(here).toFixed(1)
       }))
       .sort((a, b) => a.dist - b.dist).slice(0, 30)
@@ -2925,7 +2983,7 @@ function walkSources () {
     blockAt: (p) => bot.blockAt(p),
     column: worldColumn(),
     waypoint: (name) => waypoints.get(name),
-    player: (name) => (bot.players[name] && bot.players[name].entity) || null,
+    player: (name) => playerEntity(name),
     crumb: (name) => {
       const c = playerCrumbs[name]
       return c ? { pos: c.pos, nametag: c.nametag, agoSec: Math.round((Date.now() - c.t) / 1000) } : null
@@ -2958,7 +3016,8 @@ function walkReply (r, reason) {
   const me = bot.entity.position
   const reply = { arrived: !reason, kind: r.kind, target: r.target, pos: round(me), dist: null, reason: reason || null, hint: (reason && WALK_HINTS[reason]) || null }
   if (r.agoSec !== undefined) reply.agoSec = r.agoSec
-  const aim = r.cell ? { x: r.cell.x + 0.5, z: r.cell.z + 0.5 } : r.toward
+  // A nametag target is aimed at from the centre of its 5-block cube.
+  const aim = r.nametag ? crumbCentre(r.cell) : r.cell ? { x: r.cell.x + 0.5, z: r.cell.z + 0.5 } : r.toward
   if (!aim) return reply
   const dist = Math.hypot(aim.x - me.x, aim.z - me.z)
   if (!r.nametag) return { ...reply, dist: +dist.toFixed(1) }
@@ -3079,9 +3138,10 @@ async function stagedGoto (q, route, { stallMs = 4500, segLen = 18, preview = fa
   if (preview && (r.toward || r.nametag)) return { ...walkReply(r, 'unresolved'), plan: null }
   // A stalled hop gets the doorway drill again once the bot has moved a block since the last one.
   let drilledAt = null
-  while (r.toward) {
-    if (flatTo(r.toward) <= 2) return walkReply(r, 'no-floor')
-    const stop = await hopToward(r.toward, route, opts)
+  // A player known now by the nametag is walked toward in hops, each aimed at the cube the nametag shows in.
+  while (r.toward || (r.live && flatTo(r.cell) > segLen)) {
+    if (r.toward && flatTo(r.toward) <= 2) return walkReply(r, 'no-floor')
+    const stop = await hopToward(r.toward || r.cell, route, opts)
     if (stop === 'stalled' && !(drilledAt && bot.entity.position.distanceTo(drilledAt) < 1)) {
       drilledAt = bot.entity.position.clone()
       await drillDoorway(route)
@@ -3451,64 +3511,108 @@ function stopFollow () {
   try { clearInterval(followState.timer) } catch (e) {}
   followState = null
 }
+// The followed player's entity and its sighting tier while the bot sees it or its nametag, else null.
+function followTarget (st) {
+  const ent = playerEntity(st.name)
+  const s = ent && playerSighting(ent, reflexes.find(r => r.name === 'combat').fairFill(bot))
+  return s ? { ent, tier: s.tier } : null
+}
+// What the follow goal aims at: the entity in sight, else the cell of its nametag cube centre.
+function followAim (t) {
+  if (t.tier === 'seen') return t.ent
+  const c = crumbCentre(t.ent.position)
+  return ck(Math.floor(c.x), Math.floor(c.y), Math.floor(c.z))
+}
+function armFollow (st, t) {
+  st.aim = followAim(t)
+  st.goal = t.tier === 'seen' ? new goals.GoalFollow(t.ent, st.range) : nametagGoal(t.ent.position, st.range)
+  bot.pathfinder.setGoal(st.goal, true)
+}
+// True while something else owns the legs: a fight with its flee and cover, a bunker built or standing around
+// the body, a held lane, a job, a pilot route for 300 s after it began, or the quiet after a reflex took the
+// legs or a bunker build.
+function followHeld (now) {
+  const cr = reflexes.find(r => r.name === 'combat')
+  if (cr && (cr.active || now < cr._fleeUntil || now < cr._coverUntil)) return true
+  return bunkerHolds() || now < pilotLane.until || jobs.running() || verbs.running(now) > 0 || now < legs.quietUntil()
+}
+// The supervisor's 400 ms check. Only unfollow and stop end a follow: arriving, a stall, a fight or a
+// lost sight hold it, and it re-arms its goal once the legs are free. st is the follow it belongs to.
+async function followTick (st) {
+  if (followState !== st || st.drilling) return
+  const now = Date.now()
+  const rest = () => { st.lastPos = bot.entity.position.clone(); st.lastT = now }
+  // FOLLOW YIELDS TO COMBAT (07-21: the wedge drill held the legs still on a live creeper
+  // fuse, 9.4 through armor).
+  if (followHeld(now)) return rest()
+  const t = followTarget(st)
+  if (!t) {
+    // The goal would walk to where the bot cannot see the player.
+    if (st.goal && bot.pathfinder.goal === st.goal) stopPath()
+    if (!st.lostT) st.lostT = now
+    else if (!st.told && now - st.lostT > 12000) {
+      st.told = true
+      emitEvent('follow', `lost sight of ${st.name}, still following and going on once they show again`)
+    }
+    return rest()
+  }
+  if (st.lostT) {
+    if (st.told) emitEvent('follow', `${st.name} is back in view, following again`)
+    st.lostT = 0
+    st.told = false
+  }
+  const goal = bot.pathfinder.goal
+  // A cleared goal re-arms, and so does one whose aim changed: an entity the server replaced, a new nametag cube or tier.
+  if (!goal || (goal === st.goal && followAim(t) !== st.aim)) {
+    armFollow(st, t)
+    return rest()
+  }
+  // Another walk owns the legs until it clears its goal.
+  if (goal !== st.goal) return rest()
+  const p = bot.entity.position
+  // A body at rest is parked, not wedged: GoalFollow plans again only once the player moves past range.
+  const near = t.tier === 'seen' ? t.ent.position.distanceTo(p) <= st.range + 1.5 : goal.isEnd(p.floored())
+  if (!bot.pathfinder.isMoving() || p.distanceTo(st.lastPos) >= 1.0 || near) return rest()
+  if (now - st.lastT < 4500) return       // same patience as stagedGoto (doors-v2 lesson)
+  st.drilling = true                      // wedged while the target walks away — the drill
+  console.log('[follow] wedged — running the doorway drill')
+  try {
+    // HARD goal clear, not safeStop: GoalFollow is DYNAMIC — a stop leaves it set and the
+    // pathfinder resumes re-planning toward the target DURING the drill, fighting nudgeInto
+    // for the control states every tick (found live 07-16: same door, same drill — goto's
+    // drill crossed clean, follow's lost the threshold 3x. The legs need ONE owner.)
+    try { bot.pathfinder.setGoal(null) } catch (e) {}
+    try { bot.clearControlStates() } catch (e) {}
+    await new Promise(r => setTimeout(r, 700))
+    if (followState !== st || followHeld(Date.now())) return
+    // The drill ends with this follow, and when a reflex or another walk takes the legs.
+    const route = walkRoute()
+    const taken = route.stopped
+    route.stopped = () => taken() || followState !== st
+    let crossed = false
+    try { crossed = await doorwayCommit(route) } catch (e) { console.log('[follow] drill error: ' + e.message) } finally { route.end() }
+    if (followState !== st) return
+    const live = !followHeld(Date.now()) && followTarget(st)
+    if (live) armFollow(st, live)
+    st.lastPos = bot.entity.position.clone(); st.lastT = Date.now()
+    if (crossed) console.log('[follow] through clean — following resumed')
+    else if (Date.now() - st.warnT > 30000) {    // drill keeps retrying ~5s; the EVENT stays rare
+      st.warnT = Date.now()
+      emitEvent('follow', `wedged following ${st.name} and the doorway drill did not clear it — may need help`)
+    }
+  } finally { st.drilling = false }
+}
 app.get('/follow', (req, res) => {
   try {
     if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const name = req.query.name
     const range = parseInt(req.query.range || '2')
-    const target = (bot.players[name] && bot.players[name].entity)
+    const st = { name, range, goal: null, lastPos: bot.entity.position.clone(), lastT: Date.now(), drilling: false, lostT: 0, told: false, warnT: 0 }
+    const target = followTarget(st)
     if (!target) return err(res, new Error(`player '${name}' not in view (get closer or check name)`))
     stopFollow()
-    bot.pathfinder.setGoal(new goals.GoalFollow(target, range), true)
-    const st = { name, range, lastPos: bot.entity.position.clone(), lastT: Date.now(), drilling: false, lostT: 0, warnT: 0 }
-    st.timer = setInterval(async () => {
-      if (followState !== st || st.drilling) return
-      // FOLLOW YIELDS TO COMBAT (07-21: the wedge drill held the legs still on a live creeper
-      // fuse, 9.4 through armor). While the combat reflex is engaged, follow neither drills
-      // nor re-asserts its goal — one owner for the legs, and mid-fight it isn't follow.
-      const cr = reflexes.find(r => r.name === 'combat')
-      if (cr && cr.active) { st.lastPos = bot.entity.position.clone(); st.lastT = Date.now(); return }
-      try {
-        const ent = bot.players[st.name] && bot.players[st.name].entity
-        if (!ent) {                                    // target untracked (out of range / relogged)
-          if (!st.lostT) st.lostT = Date.now()
-          else if (st.lostT > 0 && Date.now() - st.lostT > 12000) {
-            st.lostT = -1                              // said it once; keep watching silently
-            emitEvent('follow', `lost sight of ${st.name} — holding until they're back in view`)
-          }
-          return
-        }
-        if (st.lostT) {                                // re-acquired: GoalFollow holds a dead entity ref, re-arm on the live one
-          st.lostT = 0
-          bot.pathfinder.setGoal(new goals.GoalFollow(ent, st.range), true)
-        }
-        const p = bot.entity.position
-        if (p.distanceTo(st.lastPos) >= 1.0) { st.lastPos = p.clone(); st.lastT = Date.now(); return }
-        if (ent.position.distanceTo(p) <= st.range + 1.5) { st.lastT = Date.now(); return }   // parked next to them = not a stall
-        if (Date.now() - st.lastT < 4500) return       // same patience as stagedGoto (doors-v2 lesson)
-        st.drilling = true                             // wedged while the target walks away — the drill
-        console.log('[follow] wedged — running the doorway drill')
-        try {
-          // HARD goal clear, not safeStop: GoalFollow is DYNAMIC — a stop leaves it set and the
-          // pathfinder resumes re-planning toward the target DURING the drill, fighting nudgeInto
-          // for the control states every tick (found live 07-16: same door, same drill — goto's
-          // drill crossed clean, follow's lost the threshold 3x. The legs need ONE owner.)
-          try { bot.pathfinder.setGoal(null) } catch (e) {}
-          try { bot.clearControlStates() } catch (e) {}
-          await new Promise(r => setTimeout(r, 700))
-          let crossed = false
-          try { crossed = await doorwayCommit() } catch (e) { console.log('[follow] drill error: ' + e.message) }
-          const live = followState === st && bot.players[st.name] && bot.players[st.name].entity
-          if (live) bot.pathfinder.setGoal(new goals.GoalFollow(live, st.range), true)
-          st.lastPos = bot.entity.position.clone(); st.lastT = Date.now()
-          if (crossed) console.log('[follow] through clean — following resumed')
-          else if (Date.now() - st.warnT > 30000) {    // drill keeps retrying ~5s; the EVENT stays rare
-            st.warnT = Date.now()
-            emitEvent('follow', `wedged following ${st.name} and the doorway drill did not clear it — may need help`)
-          }
-        } finally { st.drilling = false }
-      } catch (e) {}
-    }, 400)
+    armFollow(st, target)
+    st.timer = setInterval(() => { followTick(st).catch(e => console.log('[follow] check failed: ' + e.message)) }, 400)
     followState = st
     ok(res, { following: name, range, supervised: true })
   } catch (e) { err(res, e) }
@@ -4242,6 +4346,30 @@ app.get('/map', (req, res) => {
   } catch (e) { err(res, e) }
 })
 
+// The creatures perceptible within 48 grouped by label, and the hostile mobs among them, nearest first.
+function sceneEntities (here, fill) {
+  const threats = []
+  // Player names are keys here.
+  const groups = Object.create(null)
+  for (const en of liveEntities()) {
+    if (en.type !== 'mob' && en.type !== 'animal' && en.type !== 'hostile' &&
+        en.type !== 'passive' && en.type !== 'player' && en.type !== 'living') continue
+    const d = en.position.distanceTo(here)
+    if (d > 48) continue                                   // 32→48 (07-17): the eye-ray tier makes far sight real
+    if (!entityPerceptible(en, fill)) continue             // sealed behind rock = imperceptible (07-12)
+    const nm = entityLabel(en) || en.type || 'entity'
+    const dir = compass(en.position.x - here.x, en.position.z - here.z)
+    if (!groups[nm]) groups[nm] = { count: 0, dirs: {}, nearest: Infinity }
+    groups[nm].count++
+    groups[nm].dirs[dir] = (groups[nm].dirs[dir] || 0) + 1
+    if (d < groups[nm].nearest) groups[nm].nearest = d
+    // A player named like a mob is no threat.
+    if (en.type !== 'player' && HOSTILE_NAMES.has(String(nm).toLowerCase())) threats.push({ name: nm, dir, dist: +d.toFixed(1) })
+  }
+  threats.sort((a, b) => a.dist - b.dist)
+  return { threats, groups }
+}
+
 // The doors and gates in sight within 16, nearest first, each named once by its lower half.
 function doorsInSight () {
   const here = bot.entity.position
@@ -4299,27 +4427,9 @@ app.get('/scene', (req, res) => {
     const sceneFill = airFlood({ radius: 32, cap: 15000 })
 
     // grouped entity summary + hostiles
-    const threats = []
-    const groups = {}
-    const HOSTILES = HOSTILE_NAMES
-    try {
-      const here = pos
-      for (const en of liveEntities()) {
-        if (en.type !== 'mob' && en.type !== 'animal' && en.type !== 'hostile' &&
-            en.type !== 'passive' && en.type !== 'player' && en.type !== 'living') continue
-        const d = en.position.distanceTo(here)
-        if (d > 48) continue                                   // 32→48 (07-17): the eye-ray tier makes far sight real
-        if (!entityPerceptible(en, sceneFill)) continue        // sealed behind rock = imperceptible (07-12)
-        const nm = en.name || en.username || en.displayName || en.type || 'entity'
-        const dir = compass(en.position.x - here.x, en.position.z - here.z)
-        if (!groups[nm]) groups[nm] = { count: 0, dirs: {}, nearest: Infinity }
-        groups[nm].count++
-        groups[nm].dirs[dir] = (groups[nm].dirs[dir] || 0) + 1
-        if (d < groups[nm].nearest) groups[nm].nearest = d
-        if (HOSTILES.has(String(nm).toLowerCase())) threats.push({ name: nm, dir, dist: +d.toFixed(1) })
-      }
-    } catch (e) {}
-    threats.sort((a, b) => a.dist - b.dist)
+    let threats = []
+    let groups = {}
+    try { ({ threats, groups } = sceneEntities(pos, sceneFill)) } catch (e) {}
 
     const entPhrases = Object.entries(groups).map(([nm, g]) => {
       const domDir = Object.entries(g.dirs).sort((a, b) => b[1] - a[1])[0][0]
@@ -4555,7 +4665,7 @@ function gazeRegion(u, v) {
   return vert + (u < -0.33 ? 'left' : u > 0.33 ? 'right' : 'center')
 }
 function gazeNarrate(sweep) {
-  const groups = {}
+  const groups = Object.create(null)
   for (const h of sweep.hits) {
     const t = h.name.replace('deepslate_', '')
     const g = groups[t] || (groups[t] = { count: 0, min: Infinity, max: 0, sumU: 0, sumV: 0 })
@@ -5239,6 +5349,8 @@ async function buildBunker (mode, height) {
     bot.removeListener('death', onDeath)
     bunker.building = false
     bunker.stop = null
+    // Follow waits out the quiet after a build as after a reflex take.
+    legs.take('bunker', 'build a bunker')
     // A refusal, a throw or a stop leaves no cell of this build. An earlier bunker's cell stays.
     if (bunker.cell !== earlier) {
       if (!r || r.stopped) bunker.cell = null

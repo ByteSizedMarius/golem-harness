@@ -3,6 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const shelter = require('../lib/shelter')
+const { QUIET_MS } = require('../lib/legs')
 const {
   botConstant, loadBotFunctions, HERE, shelterInputsAmong, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild
@@ -39,6 +40,18 @@ test('a down build re-checks threats after centring and falls back to up or refu
   r = await h.ctx.buildBunker('auto', 3)
   assert.match(String(r.error), /spider 5 blocks away/, `a spider closed in during the centring, got ${JSON.stringify(r)}`)
   assert.ok(!h.log.includes('digIn') && !h.log.includes('pillarShell'), `built after the second pick refused: ${h.log}`)
+})
+
+test('a finished or failed build starts the quiet that follow waits out', async () => {
+  for (const fail of [false, true]) {
+    const h = buildHarness()
+    if (fail) h.env.centerOnCell = async () => { throw new Error('centring broke') }
+    assert.strictEqual(h.env.legs.quietUntil(), 0, 'control: nothing took the legs')
+    const before = Date.now()
+    const r = await h.ctx.buildBunker('auto', 3)
+    assert.strictEqual(fail ? /centring broke/.test(r.error) : r.mode === 'down', true, `control: ${JSON.stringify(r)}`)
+    assert.ok(h.env.legs.quietUntil() >= before + QUIET_MS, `failed ${fail}: quiet until ${h.env.legs.quietUntil()}`)
+  }
 })
 
 test('a refused or failed build keeps the bunker the body stands in, a cell the build set still goes', async () => {
