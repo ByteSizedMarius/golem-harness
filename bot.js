@@ -15,7 +15,8 @@ const { playerNamed, playersAround, presenceUpdate, presenceText } = require('./
 const { POINT_RANGE, deictic, lookedAt } = require('./lib/deixis')
 const { WAKE_KINDS, serverLines, rateLimit, foldQuiet, quietText } = require('./lib/server-msg')
 const { ambientChange, sameVein } = require('./lib/wake')
-const { headFree } = require('./lib/head')
+const { headFree, smoothLook } = require('./lib/head')
+const { pacePlacements } = require('./lib/pace')
 const { noJumpReason, passedNodes, step: nodeStep } = require('./lib/sprint')
 const { summarizePlan, planRisk } = require('./lib/plan')
 const { isDoor, doorStep, panelAcross, doorCrossing } = require('./lib/doors')
@@ -1427,6 +1428,11 @@ bot.once('spawn', () => {
     const origPlace = bot.placeBlock.bind(bot)
     bot.placeBlock = (ref, face) => { try { stampOwnEdit(ref.position.plus(face)) } catch (e) {} ; return origPlace(ref, face) }
   } catch (e) { console.log('[bot] own-edit wrap skipped:', e.message) }
+})
+bot.once('spawn', () => {
+  const combat = reflexes.find(r => r.name === 'combat')
+  bot.look = smoothLook(bot, bot.look, () => combat.active)
+  bot._genericPlace = pacePlacements(bot._genericPlace)
 })
 
 // ---- GATE MANNERS (07-15, built the day the chickens fled): the pathfinder and the unstuck reflex

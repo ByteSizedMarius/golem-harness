@@ -51,6 +51,19 @@ every 250 ms while the pathfinder turned the head toward its next node every tic
 also the walking direction. The stare now waits until the legs are idle (`lib/head.js`). Melee and
 bow aims are unchanged.
 
+Head and hands at a human pace. The owner, watching live: "claude builds very fast and its head
+jumps around." A forced look sent its final angle in one packet, so every aim snapped. It now sweeps
+at 300 degrees per second, one step per tick, and sends its last step before the place, dig or
+swing that waited for it. A turn under 15 degrees still goes out at once, a newer look ends a sweep
+under way, and while the combat reflex fights the sweep runs at 900 degrees per second, so a full
+about-face takes about 200 ms against the 550 ms swing cadence on 1.7.10. Unforced looks, the
+pathfinder's steering among them, keep mineflayer's own easing. Block placements go out one at a
+time, at least 200 ms plus up to 80 ms of jitter apart, through the one function every builder,
+the pathfinder's bridging included, places with (`lib/pace.js`). The Fields rule below also held
+the jump over a gap: the pathfinder's sprint jump fires where only a jump reaches the next node,
+and a parkour node with farmland past the gap was sprinted into without one. A parkour node now
+always keeps the jump.
+
 On a straight, flat stretch the body now sprint jumps: four nodes ahead in line, room for the jump
 over each, dry, food at least 8 and no fight running. It lets go before a turn, a step or a drop
 (`lib/sprint.js`). The pathfinder counts a node reached only with the feet less than a block above
