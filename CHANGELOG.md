@@ -332,6 +332,20 @@ verb whose walk fails into an error reply now carries `reason` beside the error.
 counted each replan after a stuck reset as planner progress and waited 30 s. It now ignores those
 replans and acts on a stuck loop after about 10 s.
 
+**Unstuck ladder.** Live, the unstuck reflex logged "broke a pathing wedge" while the bot stayed
+wedged. It had only stopped the path, and the text read as if it broke blocks ("breaking blocks isn't
+that bad but also it didn't work"). It now climbs a ladder, each rung once per stuck episode, and
+hands the walk back to the pathfinder after each rung, watching it for 5 s. Rung 1 replans from where
+the server has the body, first stepping into the nearest free cell when the body overlaps a block.
+Rung 2 steps back to the last cell the walk made progress in. Rung 3 opens a closed door, gate or
+trapdoor in front, or jumps onto a one-block step. Rung 4 breaks the block the body presses against,
+walks through and puts the same block back from the pockets. It breaks nothing it cannot put back
+and never bedrock, a container, a door, a bed or a block holding back liquid it knows of. Rung 5
+stops the walk, and its event names where the body stands, the block it presses against and the
+rungs tried. Each rung writes one `[unstuck]` line to bot.log, and the event names what freed the
+body. Only cells the body touches or the bot knows count in each decision. `follow` waits while
+the ladder runs.
+
 **One body call at a time.** Claude Code sends tool calls in parallel when the model batches them,
 and the bot ran them all at once. Live, two torch placements fought over the path and the bot ended
 in a ravine, 4 `digat` calls stalled for 76 s, and 8 `deposit` calls sat 5 minutes in `[path] reset
