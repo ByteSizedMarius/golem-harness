@@ -121,12 +121,29 @@ lowest sensed air, and that block counts only when the air fill stopped at it or
 it. Anywhere else it reads `floor unknown at dN`. That fix threw "known is not a function" in any
 closed space, underground most of all, and `/section` reads the closed fill's walls again.
 
+Drops wedged where no body fits came back from `/collect` as plain misses. A missed drop that no
+known standing cell reaches within pickup range now reads `enclosed` with its cell, and the reply
+hints at digging to it or placing a block into its cell to push it out. Unseen cells around a drop
+keep it a plain miss. Nothing changes the world on its own.
+
 Reflexes took the legs in silence: a job carried on fighting a flee, and a walk answered a bare
 `stopped`. Now a running job keeps the legs from flees, cover moves and chases until a mob stands
 in melee range. A reflex that does take them (melee, an emergency flee, lava, drowning, the
 unexplained-hit freeze, the bunker) ends the job and stops the job's walk with it, and its end
 event, `/job`, `/jobs` and a stopped `/goto` or `/collect` name the reflex in `takenBy`. A job
 cancelled this way stops counting as running at once, while it still winds down.
+
+Placing fixes from the same sessions:
+- `/craft` never places a crafting table. It crafts at one within 16 blocks, else in the 2x2 grid,
+  and refuses a 3x3 recipe with no table in range, asking for one to be placed. It used to place
+  one from the pockets and pick it back up, and a placement that failed came back as missing
+  materials.
+- `/place` never picks a cell the body overlaps, and `/pillar` places only once the body has risen
+  clear of the cell.
+- `dig_stair`, `dig_tunnel` and `/pillar` take any filler block the bunker uses. They used to
+  take only cobblestone, andesite or dirt and answer "nothing to place" with other blocks in
+  the pockets. A failed fill now says what failed.
+- `/digat` puts a carried tool that harvests the block back in hand, trying twice, or refuses.
 
 These landed side by side, and three of them reached for the legs at once. The walk routes counted
 stops in one place and the jobs named reflexes in another, so a route could end unnamed or a name
@@ -137,7 +154,8 @@ before it. `/stop` takes the legs for nobody and clears the lane. A melee fight 
 leaves a pilot's walk its legs, as the lane says. `follow` also waits while a job runs, since it would
 otherwise re-arm between the job's own paths and drag the body off. `/scene` names players by username
 like `/entities`, and a player named like a mob is never a threat there. A player under an invisibility
-potion counts as unseen, as the nametag rule already had it.
+potion counts as unseen, as the nametag rule already had it, and `/placeitem` refuses a cell the body
+overlaps.
 
 Ore through rock: in a live session `find` with `sense` returned the exact coordinates of iron 19
 blocks away behind rock, and `scene` said "Veins: iron SE down ~15 (sensed)". The sensed tier

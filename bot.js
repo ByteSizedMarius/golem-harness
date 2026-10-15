@@ -3325,6 +3325,8 @@ function itemCounts () {
   return counts
 }
 
+const { enclosedDrop } = require('./lib/drops')
+
 function nearestDrop (radius, skip) {
   const here = bot.entity.position
   const fill = airFlood({ radius: Math.min(radius + 4, 34), cap: 15000 })
@@ -3351,6 +3353,20 @@ async function collectDrops (radius, route) {
   }
 }
 
+// Marks each missed drop that no known cell a body fits in reaches as enclosed, with its cell.
+function enclosedMisses (missed) {
+  return missed.map(m => {
+    const cell = enclosedDrop(m.pos, { blockAt: (p) => bot.blockAt(p), known: cellKnown })
+    return cell ? { ...m, reason: 'enclosed', cell: xyz(cell) } : m
+  })
+}
+
+// The collect reply's hint for drops no body reaches.
+function enclosedHint (missed) {
+  const cells = missed.filter(m => m.reason === 'enclosed').map(m => `${m.cell.x},${m.cell.y},${m.cell.z}`)
+  return cells.length ? `enclosed at ${cells.join(' and ')}: dig to it, or place a block into its cell to push it out` : null
+}
+
 app.get('/collect', async (req, res) => {
   let lane = null
   try {
@@ -3365,71 +3381,67 @@ app.get('/collect', async (req, res) => {
     const now = itemCounts()
     const picked = {}
     for (const [name, n] of Object.entries(now)) if (n > (before[name] || 0)) picked[name] = n - (before[name] || 0)
-    ok(res, namedStop({ picked, missed: done.missed, reason: done.reason }, route.mark))
+    const missed = enclosedMisses(done.missed)
+    ok(res, namedStop({ picked, missed, reason: done.reason, hint: enclosedHint(missed) }, route.mark))
   } catch (e) { err(res, e) } finally { releaseLane(lane) }
 })
 
+// The cell beside the feet that a block placed on the ground below fills: air or soft cover over a
+// solid block, clear of the body, or null.
+function placeSpot () {
+  const base = bot.entity.position.floored()
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const spot = base.offset(dx, 0, dz)
+    const spotBlock = bot.blockAt(spot)
+    const belowBlock = bot.blockAt(spot.offset(0, -1, 0))
+    if (!spotBlock || !(spotBlock.name === 'air' || isSoftCover(spotBlock))) continue
+    if (!belowBlock || belowBlock.boundingBox !== 'block' || isSoftCover(belowBlock)) continue
+    if (entityInCell(spot, [bot.entity])) continue
+    return spot
+  }
+  return null
+}
+
+// Crafts count items of item at a crafting table within 16 blocks, or in the 2x2 grid when none stands
+// there and the recipe fits it. It never places a table.
+async function craftItem (item, count) {
+  // Does this recipe need a 3x3 table? (craftable WITH an assumed table but not without one)
+  const needsTable = !bot.recipesFor(item.id, null, 1, null).length && !!bot.recipesFor(item.id, null, 1, true).length
+  // Tableless 2x2 crafting desyncs on 1.21.x: the client simulates the craft (materials down,
+  // output up) but the server never performs it, and the next sync deletes the output. Route
+  // every craft through a real table when one is reachable; 2x2 only as last resort.
+  const canUseTable = !!bot.recipesFor(item.id, null, 1, true).length
+  const near = bot.findBlock({ matching: resolveBlockIds('crafting_table'), maxDistance: 16 })
+  if (needsTable && !near) throw new Error('no crafting table nearby, place one (place or placeitem) and craft again')
+  const useTable = canUseTable && !!near
+  if (useTable) {
+    // walk within reach of an existing table (fixes today's "table 4 blocks away" failure)
+    try { await bot.pathfinder.goto(new goals.GoalNear(near.position.x, near.position.y, near.position.z, 3)) } catch (e) {}
+  }
+
+  // count means ITEMS, not recipes (the 12-log lesson): one recipe pass may yield several
+  // items (planks 4, sticks 4, torches 4) — stop as soon as we've made enough.
+  let made = 0, lastErr = null
+  while (made < count) {
+    const t = useTable ? bot.findBlock({ matching: resolveBlockIds('crafting_table'), maxDistance: 4 }) : null
+    const recipes = bot.recipesFor(item.id, null, 1, t)
+    if (!recipes.length) { lastErr = `out of materials/recipe after ${made}${useTable ? ` (table nearby: ${!!t})` : ''}`; break }
+    const perCraft = (recipes[0].result && recipes[0].result.count) || 1
+    try { await bot.craft(recipes[0], 1, t || undefined); made += perCraft }
+    catch (e) { lastErr = e.message; break }
+  }
+
+  const nowHave = bot.inventory.items().filter(it => it.name === item.name).reduce((s, it) => s + it.count, 0)
+  if (made === 0) throw new Error(lastErr || 'craft failed')
+  return { crafted: item.name, requested: count, made, usedTable: useTable, nowHave, note: lastErr || undefined }
+}
+
 app.get('/craft', async (req, res) => {
   try {
-    const Vec3 = require('vec3').Vec3
     const item = resolveItem(req.query.item)
     if (!item) return err(res, new Error(`unknown item: ${req.query.item}`))
     const count = Math.max(1, parseInt(req.query.count || '1'))
-
-    // Does this recipe need a 3x3 table? (craftable WITH an assumed table but not without one)
-    const needsTable = !bot.recipesFor(item.id, null, 1, null).length && !!bot.recipesFor(item.id, null, 1, true).length
-    // Tableless 2x2 crafting desyncs on 1.21.x: the client simulates the craft (materials down,
-    // output up) but the server never performs it, and the next sync deletes the output. Route
-    // every craft through a real table when one is reachable or in the bag; 2x2 only as last resort.
-    const canUseTable = !!bot.recipesFor(item.id, null, 1, true).length
-    const tableAvailable = !!bot.findBlock({ matching: resolveBlockIds('crafting_table'), maxDistance: 16 }) ||
-                           !!bot.inventory.items().find(i => i.name === 'crafting_table')
-    const useTable = needsTable || (canUseTable && tableAvailable)
-    let placedTable = null
-    if (useTable) {
-      const near = bot.findBlock({ matching: resolveBlockIds('crafting_table'), maxDistance: 16 })
-      if (near) {
-        // walk within reach of an existing table (fixes today's "table 4 blocks away" failure)
-        try { await bot.pathfinder.goto(new goals.GoalNear(near.position.x, near.position.y, near.position.z, 3)) } catch (e) {}
-      } else {
-        // no table anywhere — place one from inventory (if we have it) and reclaim it afterward
-        const tableItem = bot.inventory.items().find(i => i.name === 'crafting_table')
-        if (tableItem) {
-          const base = bot.entity.position.floored()
-          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-            const sb = bot.blockAt(base.offset(dx, 0, dz)), bb = bot.blockAt(base.offset(dx, -1, dz))
-            if (sb && sb.name === 'air' && bb && bb.boundingBox === 'block') {
-              await bot.equip(tableItem, 'hand')
-              await bot.lookAt(base.offset(dx, 0, dz).offset(0.5, 0.5, 0.5), true)
-              await bot.placeBlock(bb, new Vec3(0, 1, 0))
-              placedTable = base.offset(dx, 0, dz)
-              break
-            }
-          }
-        }
-      }
-    }
-
-    // count means ITEMS, not recipes (the 12-log lesson): one recipe pass may yield several
-    // items (planks 4, sticks 4, torches 4) — stop as soon as we've made enough.
-    let made = 0, lastErr = null
-    while (made < count) {
-      const t = useTable ? bot.findBlock({ matching: resolveBlockIds('crafting_table'), maxDistance: 4 }) : null
-      const recipes = bot.recipesFor(item.id, null, 1, t)
-      if (!recipes.length) { lastErr = `out of materials/recipe after ${made}${useTable ? ` (table nearby: ${!!t})` : ''}`; break }
-      const perCraft = (recipes[0].result && recipes[0].result.count) || 1
-      try { await bot.craft(recipes[0], 1, t || undefined); made += perCraft }
-      catch (e) { lastErr = e.message; break }
-    }
-
-    let reclaimedTable = false
-    if (placedTable) {   // put our temporary table back in the bag — leave no litter
-      try { const tb = bot.blockAt(placedTable); if (tb && tb.name === 'crafting_table') { await collectSafely(tb); reclaimedTable = true } } catch (e) {}
-    }
-
-    const nowHave = bot.inventory.items().filter(it => it.name === item.name).reduce((s, it) => s + it.count, 0)
-    if (made === 0) return err(res, new Error(lastErr || 'craft failed'))
-    ok(res, { crafted: item.name, requested: count, made, usedTable: useTable, placedTable: !!placedTable, reclaimedTable, nowHave, note: lastErr || undefined })
+    ok(res, await craftItem(item, count))
   } catch (e) { err(res, e) }
 })
 
@@ -3440,25 +3452,13 @@ app.get('/place', async (req, res) => {
     const it = bot.inventory.items().find(i => i.name === name)
     if (!it) return err(res, new Error(`no ${name} in inventory`))
     await bot.equip(it, 'hand')
-    // find an adjacent ground spot: air at foot level with solid block beneath
-    const base = bot.entity.position.floored()
-    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]
-    let placed = null
-    for (const [dx, , dz] of dirs) {
-      const spot = base.offset(dx, 0, dz)
-      const below = base.offset(dx, -1, dz)
-      const spotBlock = bot.blockAt(spot)
-      const belowBlock = bot.blockAt(below)
-      if (spotBlock && (spotBlock.name === 'air' || isSoftCover(spotBlock)) && belowBlock && belowBlock.boundingBox === 'block' && !isSoftCover(belowBlock)) {
-        await clearSoftCover(spot)
-        await bot.lookAt(spot.offset(0.5, 0.5, 0.5), true)
-        await bot.placeBlock(belowBlock, new Vec3(0, 1, 0))
-        placed = below
-        break
-      }
-    }
-    if (!placed) return err(res, new Error('no valid adjacent ground spot (need air-over-solid beside me) — for an exact cell use /placeitem?name=&x=&y=&z= instead'))
-    ok(res, { placed: name, on: round(placed) })
+    const spot = placeSpot()
+    if (!spot) return err(res, new Error('no valid adjacent ground spot (need air-over-solid beside me, clear of my body) — for an exact cell use /placeitem?name=&x=&y=&z= instead'))
+    const below = spot.offset(0, -1, 0)
+    await clearSoftCover(spot)
+    await bot.lookAt(spot.offset(0.5, 0.5, 0.5), true)
+    await bot.placeBlock(bot.blockAt(below), new Vec3(0, 1, 0))
+    ok(res, { placed: name, on: round(below) })
   } catch (e) { err(res, e) }
 })
 
@@ -3847,6 +3847,18 @@ app.get('/walls', async (req, res) => {
   } catch (e) { err(res, e) }
 })
 
+// Puts a carried tool that harvests b in hand, trying twice. Null once one is held or none is
+// carried, else why the dig is refused.
+async function holdHarvester (b) {
+  const harvests = (item) => !!item && b.canHarvest(item.type)
+  if (!b.harvestTools || harvests(bot.heldItem)) return null
+  const tool = [pickFor(b.name), ...bot.inventory.items()].find(harvests)
+  if (!tool) return null
+  for (let i = 0; i < 2 && !harvests(bot.heldItem); i++) { try { await bot.equip(tool, 'hand') } catch (e) {} }
+  if (harvests(bot.heldItem)) return null
+  return `refusing to dig ${b.name}: the ${tool.name} did not go into my hand (holding ${bot.heldItem ? bot.heldItem.name : 'nothing'})`
+}
+
 // dig a specific block by coordinate (no-op if already air)
 app.get('/digat', async (req, res) => {
   try {
@@ -3869,6 +3881,8 @@ app.get('/digat', async (req, res) => {
     if (needTier > 0 && (heldTier === undefined || heldTier < needTier)) {
       return err(res, new Error(`refusing to dig ${b.name} holding ${bot.heldItem ? bot.heldItem.name : 'nothing'} — drop would be destroyed (need pick tier ${needTier})`))
     }
+    const unheld = await holdHarvester(b)
+    if (unheld) return err(res, new Error(unheld))
     await bot.dig(b)
     // ?then=blockat (bones_ham, 07-21): act+verify in one trip — what does the cell hold
     // now? (air = clean dig; anything else = sand/gravel fell in, water flowed, etc.)
@@ -3973,6 +3987,12 @@ app.get('/fish', (req, res) => {
   } catch (e) { err(res, e) }
 })
 
+// Walks within reach of cell, and refuses while the body overlaps it.
+async function reachToPlace (cell) {
+  await bot.pathfinder.goto(new goals.GoalNear(cell.x, cell.y, cell.z, 3))
+  if (entityInCell(cell, [bot.entity])) throw new Error(`refusing to place into ${cell.x},${cell.y},${cell.z}: my body overlaps that cell, step out of it first`)
+}
+
 app.get('/placeitem', async (req, res) => {
   try {
     const Vec3 = require('vec3').Vec3
@@ -3995,7 +4015,7 @@ app.get('/placeitem', async (req, res) => {
       }
       if (!ref) return err(res, new Error('nothing solid below or beside the target to place against'))
     }
-    await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 3))
+    await reachToPlace(new Vec3(x, y, z))
     await clearSoftCover(new Vec3(x, y, z))
     await bot.equip(it, 'hand')
     // face= (07-14): deliberate orientation for stairs & other facing blocks. The server derives
@@ -5045,8 +5065,10 @@ async function jumpPlace (below, item, own = false) {
     refuseWhileBuilding(own)
     bot.setControlState('jump', true)
     await new Promise(r => setTimeout(r, 180))                       // near jump apex
+    // A block never goes into a cell the body still overlaps.
+    for (let i = 0; i < 3 && entityInCell(cell, [bot.entity]); i++) await bot.waitForTicks(1)
     refuseWhileBuilding(own)
-    if (!entityInCell(cell, blockers())) {
+    if (!entityInCell(cell, [bot.entity, ...blockers()])) {
       try { await bot.placeBlock(below, new Vec3(0, 1, 0)) } catch (e) {}
     }
     // A build that began during the place owns the jump control.
@@ -5061,7 +5083,6 @@ async function jumpPlace (below, item, own = false) {
 app.get('/pillar', async (req, res) => {
   try {
     const height = Math.min(16, Math.max(1, parseInt(req.query.height || '3')))
-    const names = ['cobblestone', 'andesite', 'dirt']
     let placed = 0
     const y0 = Math.floor(bot.entity.position.y)
     for (let i = 0; i < height; i++) {
@@ -5069,9 +5090,8 @@ app.get('/pillar', async (req, res) => {
       const yBefore = Math.floor(bot.entity.position.y)
       const below = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))
       if (!below || below.boundingBox !== 'block') return ok(res, { placed, rose: yBefore - y0, stopped: 'no solid footing to build on' })
-      let it = null
-      for (const n of names) { it = bot.inventory.items().find(m => m.name === n); if (it) break }
-      if (!it) return ok(res, { placed, rose: yBefore - y0, stopped: 'out of pillar blocks (cobble/andesite/dirt)' })
+      const it = fillers()[0]
+      if (!it) return ok(res, { placed, rose: yBefore - y0, stopped: 'out of filler blocks (dirt, stone kinds, sandstone, bricks or planks)' })
       if (!(await jumpPlace(below, it))) return ok(res, { placed, rose: Math.floor(bot.entity.position.y) - y0, stopped: 'placement would not take (ceiling? cell blocked?)' })
       placed++
     }
@@ -5709,6 +5729,14 @@ async function doorwayCommit (route = null) {
   return true
 }
 
+// Fills cell with a carried filler block from where the body stands. Null once it is solid, else why not.
+async function fillFrom (cell) {
+  const r = await macroPlaceAt(Vec3, cell.x, cell.y, cell.z, fillers().map(i => i.name), false)
+  if (r.done) return null
+  if (r.noItem) return 'no filler blocks carried'
+  return r.error ? `the block did not place (${r.error})` : 'nothing solid beside it to place against'
+}
+
 // GET /dig_tunnel?dir=&length=&torch= : EXPLORE-TO-FIND mining. Drives a 1-wide x 2-high
 // corridor from where the bot stands — digs the wall directly AHEAD, steps in, repeats. This
 // is the HONEST way to mine into rock: it discovers ore by exposing it, and never routes to a
@@ -5762,8 +5790,8 @@ app.get('/dig_tunnel', async (req, res) => {
         const fb = bot.blockAt(aheadFloor)                    // keep a solid floor so we don't fall / breach a drop
         if (!fb || fb.boundingBox !== 'block') {
           if (isHazard(fb)) { stop = `${fb.name} below — stopping`; break }
-          const r = await macroPlaceAt(Vec3, aheadFloor.x, aheadFloor.y, aheadFloor.z, ['cobblestone', 'dirt', 'andesite'], false)
-          if (!r.done) { stop = 'gap in floor, nothing to fill it with'; break }
+          const why = await fillFrom(aheadFloor)
+          if (why) { stop = `gap in floor, ${why}`; break }
           await equipPick()
         }
         if (!(await nudgeInto(ahead, false))) { stop = 'cannot advance: nudge stalled'; break }
@@ -5841,8 +5869,8 @@ app.get('/dig_stair', async (req, res) => {
         const tb = bot.blockAt(tread)                                      // need a tread to stand on
         if (!tb || tb.boundingBox !== 'block') {
           if (isHazard(tb)) { stop = `${tb.name} at the step — stopping`; break }
-          const r = await macroPlaceAt(Vec3, tread.x, tread.y, tread.z, ['andesite', 'cobblestone', 'dirt'], false)
-          if (!r.done) { stop = 'no step to stand on, nothing to place'; break }
+          const why = await fillFrom(tread)
+          if (why) { stop = `no step to stand on, ${why}`; break }
           await equipPick()
         }
         if (!(await nudgeInto(feet, up > 0))) { stop = (up > 0 ? 'cannot climb' : 'cannot descend') + ': nudge stalled at ' + Math.floor(bot.entity.position.y); break }

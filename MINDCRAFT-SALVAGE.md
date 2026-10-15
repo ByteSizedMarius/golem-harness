@@ -21,7 +21,7 @@ calls a *feature*; and the considerate `canDig=false` nav). So: steal, don't mar
 - **`/eat?food=`** — MANUAL eating (we deliberately did NOT take auto-eat; food is the pilot's job).
   Equips named/most-filling food, consumes, restores prior held item.
 - **`/craft` table logistics** — searches 16 blocks and walks to a table (fixes the "table nearby:
-  false" bug from range), and if none exists, places one from inventory and **reclaims it after** (tidy-style).
+  false" bug from range). It never places a table: a 3x3 recipe with none within 16 is refused.
 - **Reflex scheduler + `unstuck` + `/reflexes`** — always-on node-process reflex loop (~300ms, zero
   model calls). `reflexes[]` list, `reflexFire()` with an `active` guard, `startReflexes()` in spawn.
   `unstuck` watches ONLY for pathfinder wedging (gated on `isMoving()`, so it never touches slow
