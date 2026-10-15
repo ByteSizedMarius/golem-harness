@@ -6,7 +6,7 @@ Every tool is `mcp__golem__<tool>`. This text writes the bare name, and a call w
 
 ## The loop
 
-- Session start: `boot`, `waypoints`, `journal(n: 30)`.
+- Session start: `boot`, `waypoints`, `journal(n: 30)`, then the `manual` topics for the work ahead.
 - `wait_events` is your wake-up channel. It returns new chat, whispers and bot events as they arrive, keeps its own cursors, and returns no sooner than 5 s after its previous return unless its timeout runs out first.
 - An event wakes you: read it, `scene`, then decide.
 - Slow drift rings nothing: food creeping down, night coming. When nothing rang for a while, glance with `scene`, and `jobs` while work runs. Tighter in a fight or on a trip, looser while idle.
@@ -36,6 +36,6 @@ Every tool is `mcp__golem__<tool>`. This text writes the bare name, and a call w
 
 ## Manual
 
-Planning something unfamiliar or stuck in a specific way: `manual(topic: "water")` returns that topic.
+Read a topic when its situation first comes up: chat before your first message, mining and jobs before digging, building before placing, water near water, combat and bunker at the first threat, memory before naming places, restart after a restart, legacy-1710 on 1.7.10, perception when an answer surprises you. `manual(topic: "water")` returns one topic.
 
 Topics for manual(topic): water, chat, mining, building, jobs, combat, bunker, memory, restart, perception, legacy-1710

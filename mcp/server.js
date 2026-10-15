@@ -37,7 +37,7 @@ const LOCAL_TOOLS = [
   },
   {
     name: 'papercut',
-    description: 'Note something that made playing harder than it should be: a tool that fought you, a reply that misled you, a missing ability. One paragraph, then move on. The owner reads these later. It changes nothing in the game.',
+    description: 'Note what made playing harder than it should be: a tool that fought you, a workaround you needed, a misleading reply, a missing ability. When in doubt, note it: too many beat too few. One paragraph, then move on. The owner reads these later, and it changes nothing in the game.',
     params: { text: { type: 'str', maxLen: 600, required: true } }
   }
 ]

@@ -5067,7 +5067,8 @@ app.get('/use', async (req, res) => {
     await bot.lookAt(p.offset(0.5, 0.5, 0.5), true)
     // raw item-use (aim + right-click-the-item) for: liquids (fill), AIR targets (pour into a hole —
     // activateBlock on solids does NOT pour, learned live 07-12), or explicit ?raw=1
-    const rawUse = b.name.includes('water') || b.name.includes('lava') || blockTransparent(b) || req.query.raw === '1'
+    // Crops, saplings and grass have no collision box but take the click themselves (bone meal).
+    const rawUse = b.name.includes('water') || b.name.includes('lava') || /^(cave_|void_)?air$/.test(b.name) || req.query.raw === '1'
     if (rawUse) {
       bot.activateItem()
       await new Promise(r => setTimeout(r, 300))

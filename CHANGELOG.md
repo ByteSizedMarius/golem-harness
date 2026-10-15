@@ -149,6 +149,9 @@ The combat flee ran straight away from one mob, sometimes into the next. It now 
 every hostile it perceives within 16, the nearer ones pushing harder. The bunker digs in against
 skeletons, strays and bogged, and an arrow no longer stops a dig-in.
 
+The pilot never opened the manual in three live sessions. `DRIVING.md` now names which topic to
+read when its situation first comes up.
+
 These landed side by side, and three of them reached for the legs at once. The walk routes counted
 stops in one place and the jobs named reflexes in another, so a route could end unnamed or a name
 could point at a reflex that never stopped it. Now one ledger does both: every reflex that takes the
@@ -159,7 +162,8 @@ leaves a pilot's walk its legs, as the lane says. `follow` also waits while a jo
 otherwise re-arm between the job's own paths and drag the body off. `/scene` names players by username
 like `/entities`, and a player named like a mob is never a threat there. A player under an invisibility
 potion counts as unseen, as the nametag rule already had it, and `/placeitem` refuses a cell the body
-overlaps.
+overlaps. The batch's text pushed the pilot's prompt and tool list past their cap, so the tool
+descriptions dropped what the replies, the laws in `DRIVING.md` or a manual topic already say.
 
 Ore through rock: in a live session `find` with `sense` returned the exact coordinates of iron 19
 blocks away behind rock, and `scene` said "Veins: iron SE down ~15 (sensed)". The sensed tier
