@@ -3,7 +3,8 @@
 This harness is **built by playing**: nearly every entry below exists because something
 bit us in the world first. Each fix records the wound that taught it — the reasoning is
 the point, not just the diff. Dates are play-sessions, not releases. Full commit messages
-carry more detail (`git log`); deeper war stories live in FIELD-GUIDE.md.
+carry more detail (`git log`). The pilot's text (`DRIVING.md`, `manual/`) states the rules
+and leaves the stories here.
 
 ## 2026-07-25 — the glass skin rises; the walls verb forgets to eat
 
@@ -561,6 +562,9 @@ a doc promise the code didn't keep or a symmetry the verb table didn't offer.
   first solo-exploration tests.
 - `/strike` walks to its target — including off a safe ledge into a creeper pit. Ranged
   doctrine from height must be `/shoot`-only until a stay-put strike exists.
+- Combat is not bookkeeping time, the helmsman's doctrine ("I have to fight alone
+  sometimes"): mid-fight, every pilot call fights or waits. A pilot mid-glance is a body
+  standing still beside a partner who is swinging.
 - Solo exploration works **with doctrine**: leash from anchor, lit ground only, bow
   only, hard HP retreat line, and out-of-bounds glints get logged, not chased. Test one
   (no doctrine) died in minutes; test three brought home seven diamonds.
@@ -575,9 +579,30 @@ a doc promise the code didn't keep or a symmetry the verb table didn't offer.
   (death #2: a vindicator hitting 8.6 through iron makes "any hit = leave" correct).
 - Manual split: lean DRIVING.md for the pilot's context window, greppable FIELD-GUIDE.md
   for stories. Un-assumed the pilot: any tool-calling model can don the body.
+- 07-15, the day the world flipped to Normal: the combat doctrine was written. Fire
+  discipline beside a teammate was agreed before the cave, and the convention that got us
+  home was *no heroes*. The great first-night siege was won by two people going to bed,
+  hence "night is survivable by civics".
 
 ## v0.1.0-alpha — 2026-07-16
 
 First public release: the verb set, the reflex spine, the fairness law (the bot may use
 nothing a human player at the keyboard could not perceive), and the journal discipline.
 "Built by playing."
+
+## 2026-07-13/14: field lessons, written in the water and the sawdust
+
+Two long sessions: four drownings, three chat kicks, one shipwreck, one roof. Their rules
+went into the manual's water, building and pockets sections.
+
+- The scout tower (`pillar(height: 12)`, then eight `gaze` sweeps) found a river and a
+  birch grove.
+- The "tweakin'" lesson: with a full inventory, gathers reported success while the pockets
+  stayed empty.
+- A gaze angle estimate of "center, ~2 out" once meant open water: survey with `gaze`,
+  target with `find`.
+- Three self-blockades in one porch: the body blocks its own placements.
+- `/craft` once turned 25 birch logs into 20 stairs and 3 planks, with ~64 planks
+  unaccounted. Since then: small batches, check the inventory between.
+- Stair orientation was solved: `placeitem` with `face` aims the body, waits two ticks for
+  the aim packet (the tick race), then clicks.

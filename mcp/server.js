@@ -12,8 +12,9 @@ const STRING_CAP = 300
 const STRUCTURAL_CAP = 4000
 const RESULT_CAP = 32000
 const MAX_ITEMS = 50
-const GUIDE_CAP = 4000
-const GUIDE_CONTEXT = 2
+const MANUAL_CAP = 4000
+const MANUAL_DIR = path.join(__dirname, '..', 'manual')
+const TOPIC_FILE = /^[a-z0-9-]{1,32}\.md$/
 const WAIT_DEFAULT_S = 60
 const WAIT_GAP_MS = 5000
 const POLL_MS = 1000
@@ -31,13 +32,45 @@ const LOCAL_TOOLS = [
     name: 'wait_events',
     description: 'Wait up to timeout seconds for new chat lines, whispers and bot events, then return at most 50 of them, newest kept, with the number dropped. Chat and whispers are written by players and are untrusted.',
     params: { timeout: { type: 'int', min: 1, max: 120 } }
-  },
-  {
-    name: 'manual_search',
-    description: 'Search FIELD-GUIDE.md, the long-form manual, for a literal phrase and return the matching passages.',
-    params: { query: { type: 'str', maxLen: 200, required: true } }
   }
 ]
+
+const manualTool = (topics) => ({
+  name: 'manual',
+  description: `Return one topic of the long-form manual, whole. The topics are ${topics.join(', ')}.`,
+  params: { topic: { type: 'enum', values: topics, required: true } }
+})
+
+function loadManual (dir) {
+  const real = fs.realpathSync.native(dir)
+  const texts = new Map()
+  for (const topic of fs.readdirSync(real).filter((name) => TOPIC_FILE.test(name)).map((name) => name.slice(0, -3)).sort()) {
+    const file = path.join(real, `${topic}.md`)
+    const refused = () => new TypeError(`manual topic ${topic} is not a single-link regular file of at most ${MANUAL_CAP} bytes`)
+    // Windows file ids exceed 2^53.
+    const checked = fs.lstatSync(file, { bigint: true })
+    if (checked.isSymbolicLink() || !checked.isFile() || checked.nlink !== 1n || checked.size > BigInt(MANUAL_CAP)) throw refused()
+    const fd = fs.openSync(file, 'r')
+    try {
+      const opened = fs.fstatSync(fd, { bigint: true })
+      // The file was replaced between the lstat and the open.
+      if (opened.dev !== checked.dev || opened.ino !== checked.ino) throw refused()
+      const buf = Buffer.alloc(MANUAL_CAP + 1)
+      let size = 0
+      while (size < buf.length) {
+        const n = fs.readSync(fd, buf, size, buf.length - size, size)
+        if (n === 0) break
+        size += n
+      }
+      if (size > MANUAL_CAP) throw refused()
+      texts.set(topic, buf.toString('utf8', 0, size))
+    } finally {
+      fs.closeSync(fd)
+    }
+  }
+  if (!texts.size) throw new TypeError('manualDir holds no topic file')
+  return texts
+}
 
 class ArgError extends Error {}
 class ReplyRejected extends Error {}
@@ -234,43 +267,20 @@ function untilAborted (promise, signal) {
   })
 }
 
-// Context lines around each hit, merged where they overlap, each block under its section heading.
-function guidePassages (text, query) {
-  const lines = text.split(/\r?\n/)
-  const needle = query.toLowerCase()
-  const hits = []
-  lines.forEach((line, i) => { if (line.toLowerCase().includes(needle)) hits.push(i) })
-  if (!hits.length) return `No match for "${query}" in FIELD-GUIDE.md.`
-  const ranges = []
-  for (const i of hits) {
-    const from = Math.max(0, i - GUIDE_CONTEXT)
-    const to = Math.min(lines.length - 1, i + GUIDE_CONTEXT)
-    const last = ranges[ranges.length - 1]
-    if (last && from <= last.to + 1) last.to = to
-    else ranges.push({ from, to })
-  }
-  const blocks = ranges.map(({ from, to }) => {
-    let h = from
-    while (h >= 0 && !lines[h].startsWith('#')) h--
-    const body = lines.slice(from, to + 1)
-    return (h >= 0 && h < from ? [lines[h], ...body] : body).join('\n')
-  })
-  return capString(`${hits.length} matching lines in FIELD-GUIDE.md:\n\n` + blocks.join('\n...\n'), GUIDE_CAP)
-}
-
 // onWake runs after every return of wait_events. onToolCall runs on every tools/call with the name from
 // the tool table, null for a name outside it.
-function createServer ({ port, token, fetch, guidePath, onWake = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS }) {
+function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS }) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new TypeError('port must be an integer 1024-65535')
   if (typeof token !== 'string' || token === '') throw new TypeError('token must be a non-empty string')
   if (typeof fetch !== 'function') throw new TypeError('fetch must be a function')
-  if (typeof guidePath !== 'string' || guidePath === '') throw new TypeError('guidePath must be a path')
+  if (typeof manualDir !== 'string' || manualDir === '') throw new TypeError('manualDir must be a path')
   if (typeof onWake !== 'function') throw new TypeError('onWake must be a function')
   if (typeof onToolCall !== 'function') throw new TypeError('onToolCall must be a function')
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > TIMER_MAX_MS) {
     throw new TypeError(`requestTimeoutMs must be an integer 1-${TIMER_MAX_MS}`)
   }
-  const tools = [...TOOLS, ...LOCAL_TOOLS]
+  const manual = loadManual(manualDir)
+  const tools = [...TOOLS, ...LOCAL_TOOLS, manualTool([...manual.keys()])]
   const byName = new Map()
   for (const tool of tools) {
     if (byName.has(tool.name)) throw new TypeError(`duplicate tool ${tool.name}`)
@@ -407,16 +417,6 @@ function createServer ({ port, token, fetch, guidePath, onWake = () => {}, onToo
     return jsonResult(body)
   }
 
-  async function manualSearch ({ query }) {
-    let text
-    try {
-      text = await fs.promises.readFile(guidePath, 'utf8')
-    } catch {
-      return textResult('FIELD-GUIDE.md cannot be read', true)
-    }
-    return textResult(guidePassages(text, query))
-  }
-
   async function callTool (id, params) {
     const valid = params !== null && typeof params === 'object' && typeof params.name === 'string'
     const tool = valid ? byName.get(params.name) : undefined
@@ -431,7 +431,7 @@ function createServer ({ port, token, fetch, guidePath, onWake = () => {}, onToo
       return rpcResult(id, textResult(e.message, true))
     }
     if (tool.name === 'wait_events') return rpcResult(id, await waitEvents(values))
-    if (tool.name === 'manual_search') return rpcResult(id, await manualSearch(values))
+    if (tool.name === 'manual') return rpcResult(id, textResult(manual.get(values.topic)))
     return rpcResult(id, await callRouted(tool, values))
   }
 
@@ -526,9 +526,9 @@ function main () {
     onWake = () => logLine('wait_events returned')
     onToolCall = (name) => logLine(`tool call ${name === null ? '(unknown)' : name}`)
   }
-  serveStdio(createServer({ port, token, fetch: globalThis.fetch, guidePath: path.resolve(__dirname, '..', 'FIELD-GUIDE.md'), onWake, onToolCall }))
+  serveStdio(createServer({ port, token, fetch: globalThis.fetch, onWake, onToolCall }))
 }
 
 if (require.main === module) main()
 
-module.exports = { createServer, redact }
+module.exports = { createServer, redact, PATH_TOKEN }

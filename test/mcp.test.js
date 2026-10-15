@@ -2,13 +2,12 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')
-const os = require('node:os')
 const path = require('node:path')
-const { createServer, redact } = require('../mcp/server')
+const { createServer, redact, PATH_TOKEN } = require('../mcp/server')
 const { TOOLS } = require('../mcp/tools')
 const { ROUTE_BOUNDS } = require('../lib/bounds')
 const {
-  GUIDE: FIELD_GUIDE, HUNG, PORT, MCP_TOKEN, proofOver, timed, delay, rawReply, mcpServer, call, rpc, callReq, isToolError, isRpcError, assertOk,
+  HUNG, PORT, MCP_TOKEN, proofOver, timed, delay, rawReply, mcpServer, manualFixture, call, rpc, callReq, isToolError, isRpcError, assertOk,
   textOf, errorText, LOCAL_TOOLS, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, assertEntryServes, assertEntryRefuses
 } = require('./helpers')
@@ -25,25 +24,20 @@ const radiusTool = () => {
 
 // ---- the tool table ----
 
-test('no tool takes a URL, path, route or raw query', () => {
+test('no tool takes a URL, path, route, raw query or step list', () => {
   assert.ok(TOOLS.length > 0)
-  const banned = ['url', 'uri', 'path', 'route', 'endpoint', 'raw', 'do', 'step', 'steps', 'qs', 'querystring']
+  const banned = ['url', 'uri', 'path', 'route', 'endpoint', 'raw', 'do', 'step', 'steps', 'query', 'qs', 'querystring']
   for (const t of TOOLS) {
-    for (const k of Object.keys(t.params)) {
-      assert.ok(!banned.includes(k.toLowerCase()), `${t.name}.${k}`)
-      if (t.name !== 'manual_search') assert.notStrictEqual(k.toLowerCase(), 'query', `${t.name}.${k}`)
-    }
+    for (const k of Object.keys(t.params)) assert.ok(!banned.includes(k.toLowerCase()), `${t.name}.${k}`)
   }
 })
 
-test('tools/list lists the table plus wait_events and manual_search, and no forbidden tool or route', async () => {
+test('tools/list lists exactly the table, then wait_events and manual, and no forbidden tool or route', async () => {
   const { srv } = mcpServer()
   const r = await rpc(srv, 'tools/list', {})
   assert.ok(r && r.result && Array.isArray(r.result.tools), 'tools/list result')
   const tools = r.result.tools
-  const names = tools.map((t) => t.name)
-  for (const t of TOOLS) assert.ok(names.includes(t.name), `${t.name} missing from tools/list`)
-  for (const n of LOCAL_TOOLS) assert.ok(names.includes(n), `${n} missing from tools/list`)
+  assert.deepStrictEqual(tools.map((t) => t.name), [...TOOLS.map((t) => t.name), ...LOCAL_TOOLS])
   for (const t of tools) {
     assert.doesNotMatch(t.name, FORBIDDEN_NAME)
     assert.ok(t.inputSchema && t.inputSchema.type === 'object', `${t.name} inputSchema`)
@@ -65,6 +59,24 @@ test('the bunker tool and the /bunker route share their bounds', () => {
   assert.ok(numeric.length > 0, 'bunker has a numeric param')
   assert.ok(ROUTE_BOUNDS['/bunker'], 'ROUTE_BOUNDS has /bunker')
   for (const [k, spec] of numeric) assert.deepStrictEqual(ROUTE_BOUNDS['/bunker'][k], [spec.min, spec.max], `/bunker ${k}`)
+})
+
+test('every manual file is at most 4000 bytes and DRIVING.md lists exactly the manual topics', () => {
+  const dir = path.join(__dirname, '..', 'manual')
+  const files = fs.readdirSync(dir)
+  assert.ok(files.length > 0, 'manual/ holds files')
+  for (const f of files) assert.ok(fs.statSync(path.join(dir, f)).size <= 4000, `${f} is over 4000 bytes`)
+  const line = /^Topics for manual\(topic\): (.+)$/m.exec(fs.readFileSync(path.join(__dirname, '..', 'DRIVING.md'), 'utf8'))
+  assert.ok(line, 'DRIVING.md has a topics line')
+  assert.deepStrictEqual(line[1].split(', ').sort(), files.map((f) => f.replace(/\.md$/, '')).sort())
+})
+
+// manual replies skip the path redaction.
+test('no manual file holds a drive or UNC path', () => {
+  const pathToken = new RegExp(PATH_TOKEN.source)
+  assert.match('see C:/Users/x', pathToken, 'control')
+  const dir = path.join(__dirname, '..', 'manual')
+  for (const f of fs.readdirSync(dir)) assert.doesNotMatch(fs.readFileSync(path.join(dir, f), 'utf8'), pathToken, f)
 })
 
 // ---- requests ----
@@ -477,76 +489,79 @@ test('a tool with timeoutMs is not cut at the request timeout', { timeout: 10000
   assert.ok(ms >= 3 * REQUEST_TIMEOUT - 20, `answered after ${ms} ms, before the reply was sent`)
 })
 
-// ---- manual_search ----
+// ---- manual ----
 
-function guideFixture (t, body) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'golem-guide-'))
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  const dir = path.join(root, 'a', 'b')
-  fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(path.join(root, 'x'), 'SECRET-MARKER-42 outside the guide\n')
-  const guidePath = path.join(dir, 'FIELD-GUIDE.md')
-  fs.writeFileSync(guidePath, body)
-  return guidePath
+const WATER = '# Water\n\nSurface before the bubbles run out, also in Tōkyō.\n'
+const SECRET = 'SECRET-MARKER-42'
+
+const manualTool = async (srv) => (await rpc(srv, 'tools/list', {})).result.tools.find((x) => x.name === 'manual')
+
+function assertNoPath (r, dir) {
+  const out = JSON.stringify(r)
+  assert.ok(!out.includes(path.basename(path.dirname(dir))), out.slice(0, 300))
 }
 
-const filler = (tag) => Array.from({ length: 30 }, (_, i) => `${tag} filler prose number ${i}`).join('\n')
-const GUIDE = [
-  '# Guide', filler('intro'),
-  '## Fruit', filler('fruit'), 'banana', filler('fruit2'),
-  '## Patterns', filler('pat'), 'the pattern .*(a+)+$ appears literally here', filler('pat2'),
-  '## Paths', filler('paths'), 'see ../../x for nothing', filler('paths2'),
-  '## Decoy', filler('decoy'), 'fooXXbar decoy', filler('decoy2'),
-  '## Literal', filler('lit'), 'foo.*bar literal', filler('lit2')
-].join('\n') + '\n'
-
-test('manual_search treats a regex query as literal text', async (t) => {
-  const { srv, calls } = mcpServer({ guidePath: guideFixture(t, GUIDE) })
-  const ctl = textOf(await call(srv, 'manual_search', { query: 'foo.*bar' }))
-  assert.ok(ctl.includes('foo.*bar literal'))
-  assert.ok(!ctl.includes('fooXXbar'))
-  const text = textOf(await call(srv, 'manual_search', { query: '.*(a+)+$' }))
-  assert.ok(text.includes('appears literally here'))
-  assert.ok(!text.includes('banana'))
-  assert.ok(text.length <= 4000)
+test('manual returns the whole topic file and sends no request', async (t) => {
+  const { srv, calls } = mcpServer({ manualDir: manualFixture(t, { 'water.md': WATER }) })
+  assert.strictEqual(textOf(await call(srv, 'manual', { topic: 'water' })), WATER)
   assert.strictEqual(calls.length, 0)
 })
 
-test('manual_search with ../../x reads only the guide', async (t) => {
-  const { srv, calls } = mcpServer({ guidePath: guideFixture(t, GUIDE) })
-  const text = textOf(await call(srv, 'manual_search', { query: '../../x' }))
-  assert.ok(text.includes('for nothing'))
-  assert.ok(!text.includes('SECRET-MARKER-42'))
-  assert.ok(text.length <= 4000)
+test('the manual topics are the lowercase .md file names of its dir, sorted, in the schema and the description', async (t) => {
+  const dir = manualFixture(t, { 'water.md': WATER, 'legacy-1710.md': 'l', 'Upper.md': 'u', 'notes.txt': 'n' })
+  const tool = await manualTool(mcpServer({ manualDir: dir }).srv)
+  assert.ok(tool, 'manual missing from tools/list')
+  assert.deepStrictEqual(tool.inputSchema.properties.topic.enum, ['legacy-1710', 'water'])
+  assert.deepStrictEqual(tool.inputSchema.required, ['topic'])
+  for (const topic of ['legacy-1710', 'water']) assert.ok(tool.description.includes(topic), topic)
+})
+
+test('manual refuses an unlisted topic, a case variant and a path, and reads nothing outside its dir', async (t) => {
+  const dir = manualFixture(t, { 'water.md': WATER })
+  fs.writeFileSync(path.join(path.dirname(dir), 'secret.md'), SECRET)
+  const { srv, calls } = mcpServer({ manualDir: dir })
+  assert.strictEqual(textOf(await call(srv, 'manual', { topic: 'water' })), WATER, 'control')
+  for (const topic of ['nope', 'WATER', '../secret']) {
+    const r = await call(srv, 'manual', { topic })
+    assert.ok(isToolError(r), topic)
+    assert.ok(!JSON.stringify(r).includes(SECRET), topic)
+    assertNoPath(r, dir)
+  }
   assert.strictEqual(calls.length, 0)
 })
 
-test('manual_search returns at most 4000 units', async (t) => {
-  const many = Array.from({ length: 500 }, (_, i) => `needle line ${i} `.padEnd(60, '.')).join('\n') + '\n'
-  const { srv } = mcpServer({ guidePath: guideFixture(t, many) })
-  const r = await call(srv, 'manual_search', { query: 'needle' })
-  assert.ok(textOf(r).includes('needle'))
-  const total = r.result.content.reduce((n, c) => n + (typeof c.text === 'string' ? c.text.length : 0), 0)
-  assert.ok(total <= 4000, `${total} units`)
+test('createServer refuses a manual dir with an oversize topic file and names the topic', (t) => {
+  const dir = manualFixture(t, { 'water.md': WATER })
+  assert.doesNotThrow(() => mcpServer({ manualDir: dir }), 'control')
+  fs.writeFileSync(path.join(dir, 'huge.md'), 'o'.repeat(1 << 20))
+  assert.throws(() => mcpServer({ manualDir: dir }), { name: 'TypeError', message: /\bhuge\b/ })
 })
 
-test('manual_search matches case-insensitively and returns each match with two lines of context under its section heading', async (t) => {
-  const { srv } = mcpServer({ guidePath: guideFixture(t, GUIDE) })
-  const lines = textOf(await call(srv, 'manual_search', { query: 'BANANA' })).split('\n')
-  assert.ok(lines.includes('banana'), `the match is missing: ${lines}`)
-  assert.ok(lines.includes('## Fruit'), 'the section heading is missing')
-  for (const near of ['fruit filler prose number 28', 'fruit filler prose number 29', 'fruit2 filler prose number 0', 'fruit2 filler prose number 1']) {
-    assert.ok(lines.includes(near), `context line missing: ${near}`)
-  }
-  for (const far of ['fruit filler prose number 27', 'fruit2 filler prose number 2']) {
-    assert.ok(!lines.includes(far), `a third context line: ${far}`)
-  }
+test('createServer refuses a manual dir with a hardlinked topic file and names the topic', (t) => {
+  const dir = manualFixture(t, { 'water.md': WATER })
+  assert.doesNotThrow(() => mcpServer({ manualDir: dir }), 'control')
+  const outside = path.join(path.dirname(dir), 'secret.md')
+  fs.writeFileSync(outside, SECRET)
+  fs.linkSync(outside, path.join(dir, 'linked.md'))
+  assert.throws(() => mcpServer({ manualDir: dir }), { name: 'TypeError', message: /\blinked\b/ })
+})
+
+test('manual serves each topic as it was at startup and no topic added later', async (t) => {
+  const dir = manualFixture(t, { 'water.md': WATER })
+  const { srv } = mcpServer({ manualDir: dir })
+  fs.writeFileSync(path.join(dir, 'water.md'), SECRET)
+  fs.writeFileSync(path.join(dir, 'late.md'), SECRET)
+  assert.strictEqual(textOf(await call(srv, 'manual', { topic: 'water' })), WATER)
+  assert.deepStrictEqual((await manualTool(srv)).inputSchema.properties.topic.enum, ['water'])
+  const r = await call(srv, 'manual', { topic: 'late' })
+  assert.ok(isToolError(r))
+  assert.ok(!JSON.stringify(r).includes(SECRET))
 })
 
 // ---- the port and the stdio entry point ----
 
 test('createServer refuses a port outside 1024-65535 or not an integer', () => {
-  const opts = (port) => ({ port, token: MCP_TOKEN, fetch: async () => {}, guidePath: FIELD_GUIDE })
+  const opts = (port) => ({ port, token: MCP_TOKEN, fetch: async () => {} })
   for (const port of [1024, 65535]) assert.doesNotThrow(() => createServer(opts(port)), `control: ${port}`)
   for (const port of [1023, 65536, PORT + 0.5, String(PORT)]) assert.throws(() => createServer(opts(port)), TypeError, String(port))
 })

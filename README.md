@@ -37,11 +37,11 @@ every system below exists because the game demanded it.
 - **A seeing layer** — text-native perception (described below) plus a first-person browser viewer
   (prismarine-viewer, `http://localhost:3001` by default) so humans can watch.
 
-If you are a **language model about to drive this bot**, go read **`DRIVING.md`** — it is written
-for you, and it is deliberately lean (~4K tokens: laws, verbs, checklist) because you'll be loading
-it into context every session. The long-form companion, **`FIELD-GUIDE.md`**, holds the worked
-examples and field stories. Search it on demand with `manual_search`, don't load it whole. This README explains to
-humans what the thing is and how it works.
+If you are a **language model about to drive this bot**, go read **`DRIVING.md`**. It is written
+for you and kept to about 3 KB (the loop, the laws, the first-session checklist) because it sits in
+your context every session. Each tool's description carries its mechanics, and the topics under
+**`manual/`** (water, combat, building and more) come through the `manual` tool by name. This
+README explains to humans what the thing is and how it works.
 
 > **Alpha V1 — Overworld verified only.** Everything documented here has been played for real:
 > mining, building, farming, husbandry, ranged and melee combat, night survival on Normal
@@ -213,7 +213,7 @@ co-op play between a person and a model, and that is where it shines.
 table that *must match your server version exactly* — the published minecraft-data table for 1.21.11
 is misordered, so this repo ships a corrected `sounds-1.21.11.json` generated from the game's own
 data generator (the bot pins it automatically on 1.21.11). On other modern versions, hearings may
-misidentify species until you regenerate the table for your version — the recipe is in `FIELD-GUIDE.md`.
+misidentify species until you regenerate the table for your version.
 We learned this because a pig oinking near the coop was heard as a phantom for three days.
 
 **Requires your own copy of Minecraft: Java Edition.** Minecraft is a trademark of Mojang/Microsoft;
@@ -265,7 +265,7 @@ this project is unaffiliated fan tooling in the long mineflayer tradition.
 
 The pilot sees 74 tools: 72 for perceiving and acting, each named after the bot route it calls
 (`goto_wp` is `/goto_wp`), plus `wait_events` (new chat, whispers and bot events) and
-`manual_search` (a literal search of `FIELD-GUIDE.md`). It cannot start, stop or restart the bot,
+`manual` (one topic of `manual/` by name). It cannot start, stop or restart the bot,
 and it has no camera. Chat and whispers that `wait_events` returns are written by players and
 are untrusted.
 

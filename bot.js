@@ -2330,7 +2330,7 @@ function hasLegalMove() {
 const app = express()
 installSecurity(app, { token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text) } })
 // ?brief=1 on ANY endpoint strips null/undefined fields from the reply — LLM pilots pay
-// by the token and "reason":null earns nothing. Empty ARRAYS survive on purpose: law 3
+// by the token and "reason":null earns nothing. Empty ARRAYS survive on purpose: law 2
 // makes [] a statement ("looked, found none") and silence a different one ("didn't look").
 // (Suggested by bones_ham — the harness's first outside pilot — 07-21. Fairness untouched.)
 const debrief = (v) => {

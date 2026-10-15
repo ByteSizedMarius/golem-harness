@@ -5,6 +5,7 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const http = require('node:http')
 const net = require('node:net')
+const os = require('node:os')
 const path = require('node:path')
 const { spawn } = require('node:child_process')
 const { EventEmitter } = require('node:events')
@@ -18,7 +19,6 @@ const { createServer } = require('../mcp/server')
 const { TOOLS } = require('../mcp/tools')
 
 const ROOT = path.join(__dirname, '..')
-const GUIDE = path.join(ROOT, 'FIELD-GUIDE.md')
 const ALLOW = ['me', 'tell', 'msg', 'w']
 const UNAUTHORIZED = { ok: false, error: 'unauthorized' }
 const UNAUTHORIZED_BODY = JSON.stringify(UNAUTHORIZED)
@@ -330,11 +330,21 @@ function fakeBot ({ token = MCP_TOKEN, reply = tickReply([chatLine(1, 'hi there'
   return { fetch, calls }
 }
 
-function mcpServer ({ reply, prove, serialize, guidePath = GUIDE, requestTimeoutMs } = {}) {
+function mcpServer ({ reply, prove, serialize, manualDir, requestTimeoutMs } = {}) {
   const f = fakeBot({ reply, prove, serialize })
-  const opts = { port: PORT, token: MCP_TOKEN, fetch: f.fetch, guidePath }
+  const opts = { port: PORT, token: MCP_TOKEN, fetch: f.fetch }
+  if (manualDir !== undefined) opts.manualDir = manualDir
   if (requestTimeoutMs !== undefined) opts.requestTimeoutMs = requestTimeoutMs
   return { srv: createServer(opts), calls: f.calls }
+}
+
+function manualFixture (t, files) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'golem-manual-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const dir = path.join(root, 'manual')
+  fs.mkdirSync(dir)
+  for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), body)
+  return dir
 }
 
 let nextId = 1
@@ -360,7 +370,7 @@ function errorText (r) {
   return r.result.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n')
 }
 
-const LOCAL_TOOLS = ['wait_events', 'manual_search']
+const LOCAL_TOOLS = ['wait_events', 'manual']
 const routedTools = () => TOOLS.filter((t) => t.route != null && !LOCAL_TOOLS.includes(t.name))
 
 function validValue (spec) {
@@ -757,12 +767,12 @@ async function actAfter (built) {
 const stoppedBuild = (why) => ({ mode: 'up', at: { x: 0, y: 65, z: 0 }, sealed: false, dug: 0, placed: 1, height: 3, gaps: [], exit: [], stopped: why })
 
 module.exports = {
-  ROOT, GUIDE, ALLOW, UNAUTHORIZED, UNAUTHORIZED_BODY, ILLEGAL, LONE_SURROGATE, HUNG, PORT, MCP_TOKEN,
+  ROOT, ALLOW, UNAUTHORIZED, UNAUTHORIZED_BODY, ILLEGAL, LONE_SURROGATE, HUNG, PORT, MCP_TOKEN,
   hmac, sha256, newNonce, otherKey, delay, waitFor, timed, proofOver,
   stripLead, serverCommand, strictCommand, assertNoForeignCommand, assertSafeChunks,
   guardRequest, DUMMY_ROUTES, rawRequest, startApp, stateControl, chatControl, referenceApp,
   rawReply, tickFrom, tickReply, tickOf, chatLine, eventLine, botProcess, missing,
-  fakeBot, mcpServer, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
+  fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
   botSource, functionSource, balanced, botConstant, loadBotFunctions, bunkerReflexIn,

@@ -19,7 +19,7 @@ governs play; sanctioned cheats are for testing only.
 - **`DRIVING.md` IN FULL before the first tool call. A pointer is not a read.** If only a
   summary of it is in context, stop and get the text. (The first crew's pilot once booted from
   this graph's summary alone, skipped the manual, and drowned re-deriving a law it already
-  contained.) `FIELD-GUIDE.md` stays on demand: `manual_search`, never loaded whole.
+  contained.) The topics under `manual/` stay on demand: `manual(topic: "water")`.
 - I never start or restart anything. A launcher owns the bot, the world and the port. If every
   tool call fails, I say so in chat and wait. I don't hunt for a way in.
 - Boot: `boot` → `waypoints` → `journal(n: 30)` → `state` → re-`equip` (restarts reset the
