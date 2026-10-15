@@ -3,6 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const shelter = require('../lib/shelter')
+const { overrideRecipes } = require('../lib/server-overrides')
 const { loadBotFunctions, botConstant } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty' }
@@ -75,7 +76,13 @@ function crafter ({ tableAt = null, needsTable = true } = {}) {
       async placeBlock () { log.push(['placeBlock']) },
       async equip (item) { log.push(['equip', item.name]) }
     },
-    env: { resolveBlockIds: () => [58], goals: { GoalNear: function (x, y, z, r) { Object.assign(this, { x, y, z, r }) } } }
+    env: {
+      resolveBlockIds: () => [58],
+      goals: { GoalNear: function (x, y, z, r) { Object.assign(this, { x, y, z, r }) } },
+      SERVER_RECIPES: null,
+      overrideRecipes,
+      mcData: { itemsByName: {} }
+    }
   })
   return { log, ctx: loadBotFunctions(['craftItem'], env) }
 }

@@ -15,6 +15,13 @@ and a ViaProxy plugin raises it to 256 for a 1.7.10 server. The chat line length
 lengths. The MCP wake log now names the params each tool call passed, never their values,
 so unused tools and params can be counted and trimmed later.
 
+**Server recipe overrides.** On the 1.7.10 testbed every crafted fence vanished a moment later. The
+bot crafted by the 1.21 recipe (4 planks and 2 sticks make 3) while the server knows only 6 sticks
+making 2, so the server refused the result and the resync wiped it. A door showed 3 and the server
+made 1. `GOLEM_RECIPE_OVERRIDES` names a JSON file of the server's own recipes, and `/craft` crafts
+an item listed there by that recipe only: it checks the ingredients against it and counts `made` by
+its yield. Without the variable crafting is unchanged.
+
 **Knockback.** A zombie hit never moved the bot. Since 1.21.9 the server sends entity
 velocity as an `lpVec3`, 48 bits sent as two bytes and one big-endian int (vanilla and
 ViaVersion alike). minecraft-protocol 1.66.2 reads and writes that int little-endian, so every

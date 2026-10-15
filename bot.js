@@ -22,6 +22,7 @@ const { isDoor, doorStep } = require('./lib/doors')
 const { stepView } = require('./lib/steps')
 const { countVerbs } = require('./lib/verbs')
 const { createChatLog } = require('./lib/chat-log')
+const { readServerOverrides, renameBlocks, overrideRecipes, craftable } = require('./lib/server-overrides')
 
 const HOST = process.env.MC_HOST || 'localhost'
 const PORT = parseInt(process.env.MC_PORT || '25565')
@@ -33,6 +34,8 @@ const VIEW_PORT = parseInt(process.env.VIEW_PORT || String(CTRL_PORT + 1))
 const LEGACY_1710 = process.env.GOLEM_MC_1710 === '1'
 // On 1.7.10 a full hit lands every 10 ticks at most, and the bot attacks 11 ticks apart.
 const LEGACY_HIT_MS = 550
+const SERVER_OVERRIDES = readServerOverrides(process.env.GOLEM_SERVER_OVERRIDES)
+const SERVER_RECIPES = SERVER_OVERRIDES && SERVER_OVERRIDES.recipes
 // The HMAC key that signs every control API request and response.
 const GOLEM_TOKEN = process.env.GOLEM_TOKEN || ''
 if (GOLEM_TOKEN.length < 32) {
@@ -158,6 +161,8 @@ function abandonCollect () {
 
 bot.once('spawn', () => {
   mcData = require('minecraft-data')(bot.version)
+  // bot.registry shares these block entries.
+  if (SERVER_OVERRIDES) renameBlocks(mcData, SERVER_OVERRIDES.blocks)
   const moves = new Movements(bot)
   // ---- CONSIDERATE PLAYER: don't vandalize builds/terrain, don't litter ----
   moves.canDig = false            // NEVER break blocks to travel — protects your house AND the
@@ -427,7 +432,8 @@ function resolveBlockIds(name) {
 }
 function resolveItem(name) {
   if (!mcData) return null
-  return mcData.itemsByName[name] || mcData.blocksByName[name] || null
+  const known = (SERVER_OVERRIDES && SERVER_OVERRIDES.items.get(name)) || name
+  return mcData.itemsByName[known] || mcData.blocksByName[known] || null
 }
 
 // ---- event stream (interrupts for the driver: damage, death, threats, night, hunger) ----
@@ -3480,12 +3486,16 @@ function placeSpot () {
 // Crafts count items of item at a crafting table within 16 blocks, or in the 2x2 grid when none stands
 // there and the recipe fits it. It never places a table.
 async function craftItem (item, count) {
+  const override = overrideRecipes(SERVER_RECIPES, item.name, mcData.itemsByName)
+  const recipesAt = (table) => override
+    ? craftable(override, table, (id) => bot.inventory.count(id, null))
+    : bot.recipesFor(item.id, null, 1, table)
   // Does this recipe need a 3x3 table? (craftable WITH an assumed table but not without one)
-  const needsTable = !bot.recipesFor(item.id, null, 1, null).length && !!bot.recipesFor(item.id, null, 1, true).length
+  const needsTable = !recipesAt(null).length && !!recipesAt(true).length
   // Tableless 2x2 crafting desyncs on 1.21.x: the client simulates the craft (materials down,
   // output up) but the server never performs it, and the next sync deletes the output. Route
   // every craft through a real table when one is reachable; 2x2 only as last resort.
-  const canUseTable = !!bot.recipesFor(item.id, null, 1, true).length
+  const canUseTable = !!recipesAt(true).length
   const near = bot.findBlock({ matching: resolveBlockIds('crafting_table'), maxDistance: 16 })
   if (needsTable && !near) throw new Error('no crafting table nearby, place one (place or placeitem) and craft again')
   const useTable = canUseTable && !!near
@@ -3499,7 +3509,7 @@ async function craftItem (item, count) {
   let made = 0, lastErr = null
   while (made < count) {
     const t = useTable ? bot.findBlock({ matching: resolveBlockIds('crafting_table'), maxDistance: 4 }) : null
-    const recipes = bot.recipesFor(item.id, null, 1, t)
+    const recipes = recipesAt(t)
     if (!recipes.length) { lastErr = `out of materials/recipe after ${made}${useTable ? ` (table nearby: ${!!t})` : ''}`; break }
     const perCraft = (recipes[0].result && recipes[0].result.count) || 1
     try { await bot.craft(recipes[0], 1, t || undefined); made += perCraft }
