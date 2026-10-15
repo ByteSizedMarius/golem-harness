@@ -4,9 +4,8 @@
 #   bash start.sh 59009 Sonnet     (name the in-game avatar — any model can don the body)
 #   MC_USER=Sonnet bash start.sh 59009   (env form works too; the arg wins if both given)
 #   touch stop.flag                (ends the watchdog after the current process exits)
-# NB on skins: offline-mode LAN servers derive the skin from the offline UUID (default
-# Steve/Alex family) — the CLIENT cannot push a custom skin. Naming after a premium account
-# only shows that account's skin on servers running a skin plugin (e.g. SkinsRestorer).
+# Skins: the bot cannot push one to an offline-mode server. Players see the files in skin/
+# through the client-side mod CustomSkinLoader (LocalSkin/skins/<name>.png).
 # First launch truncates bot.log, watchdog relaunches append to it.
 PORT=${1:?usage: bash start.sh <LAN port> [name]}
 export PATH="/c/Program Files/nodejs:$PATH"

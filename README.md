@@ -26,6 +26,10 @@ decade, and log4jpatcher exists because 2021 happened to 1.7.10 too.
 Underneath, the bot got a signed control API, an MCP server for the pilot, combat reflexes and a
 bunker it digs or pillars when a fight goes badly. `Running it` below has the details.
 
+---
+
+## About Golem
+
 This project lets a language model (in our case, Claude) **play Minecraft as a player** — not run it as
 a script, not command it as a god, but *play* it: look around, get lost, find sand, drown embarrassingly,
 build a porch, and remember where home is. A human and the model built it together, live, by playing —
@@ -246,10 +250,6 @@ this project is unaffiliated fan tooling in the long mineflayer tradition.
    command under a watchdog that starts it again (`GOLEM_TOKEN` must be exported), ends on
    `touch stop.flag`. `name` is the in-game avatar, default `Claude`.
 
-   *Skins:* offline-mode LAN derives the skin from the offline UUID (default Steve/Alex family), the
-   client cannot push a custom one. Naming after a premium account only shows that skin on servers
-   running a skin plugin (e.g. SkinsRestorer). Vanilla LAN always uses the default.
-
 3. **Register the MCP server** with your client under the name `golem`, with the same token and the
    control API port (`CTRL_PORT`, default 3000) as its argument:
 
@@ -286,6 +286,13 @@ A client of your own signs each request to the control API with three headers: `
 once) and `X-Golem-Sig` (HMAC-SHA256 with the token over the method, path and query, time and
 nonce, see `lib/sig.js`). A request without a valid signature gets a 401. Every reply carries an
 `X-Golem-Proof` header that the client should verify.
+
+### Skin
+
+The bot's skin and cape are in `skin/` (64x32, 1.7.10 layout). The bot cannot push a skin to an
+offline-mode server. Players see them through the client-side mod CustomSkinLoader, which loads
+`LocalSkin/skins/<player name>.png` and `LocalSkin/capes/<player name>.png` from the client's
+CustomSkinLoader folder. `make_skin.py` and `make_cape.py` rebuild them.
 
 ## Known sharp edges (alpha honesty)
 

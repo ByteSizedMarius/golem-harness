@@ -8,6 +8,9 @@ and leaves the stories here.
 
 ## 2026-10-15: live-play fixes
 
+Skin. The bot's skin and cape moved into `skin/`. On an offline-mode server players see them
+through the client-side mod CustomSkinLoader, since the bot cannot push a skin there.
+
 Building manual. Live, the pilot opened the owner's hut walls and put chests into the wall
 line. A solid block sat right above them, so they could not be opened, and skeletons shot
 through the gaps beside them. `manual/building.md` now says a chest needs a free block above
