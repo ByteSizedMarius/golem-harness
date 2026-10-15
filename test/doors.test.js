@@ -2,7 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
-const { isDoor, doorStep } = require('../lib/doors')
+const { isDoor, doorStep, panelAcross, doorCrossing } = require('../lib/doors')
 const { loadBotFunctions } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty', shapes: [] }
@@ -119,11 +119,117 @@ test('the doorway drill picks no door the bot cannot see', async () => {
       routeEnd: () => null,
       walkOnce: async () => { walks++; return 'changed' },
       goals: require('mineflayer-pathfinder').goals,
-      require,
+      panelAcross,
+      doorCrossing,
       console: { log () {} }
     })
     const { doorwayCommit } = loadBotFunctions(['doorwayCommit'], env)
-    assert.strictEqual(await doorwayCommit({}), false)
+    assert.strictEqual(await doorwayCommit({}), null)
     assert.strictEqual(walks, seen ? 1 : 0, seen ? 'control: a door in sight' : 'a hidden door')
   }
+})
+
+const FACINGS = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] }
+
+test('a door in a wall passes along its facing axis whatever its hinge and open state, entered from the side the feet stand on', () => {
+  for (const [facing, [fx, fz]] of Object.entries(FACINGS)) {
+    const axis = fx ? 'x' : 'z'
+    // The wall runs across the facing axis.
+    const walkable = (dx, dz) => (fx ? dz === 0 : dx === 0)
+    for (const hinge of ['left', 'right']) {
+      for (const open of [false, true]) {
+        const props = { facing, half: 'lower', hinge, open }
+        const at = `${facing} ${hinge} ${open ? 'open' : 'closed'}`
+        for (const s of [1, -1]) {
+          const feet = { x: 10.5 + s * Math.abs(fx) * 1.4, z: 20.5 + s * Math.abs(fz) * 1.4 }
+          assert.deepStrictEqual(doorCrossing(props, { x: 10, z: 20 }, feet, walkable), { axis, side: fx ? [s, 0] : [0, s] }, `${at}, feet on the ${s} side`)
+        }
+        assert.strictEqual(panelAcross('oak_door', props, axis), !open, at)
+      }
+    }
+  }
+})
+
+test('a door set sideways into a wall passes across its facing, walkable closed and a wall open', () => {
+  // A door facing south in a wall running north to south.
+  const walkable = (dx, dz) => dz === 0
+  const feet = { x: 9.2, z: 20.9 }
+  for (const hinge of ['left', 'right']) {
+    const props = { facing: 'south', half: 'lower', hinge, open: false }
+    assert.deepStrictEqual(doorCrossing(props, { x: 10, z: 20 }, feet, walkable), { axis: 'x', side: [-1, 0] })
+    assert.strictEqual(panelAcross('oak_door', props, 'x'), false, `${hinge} closed`)
+    assert.strictEqual(panelAcross('oak_door', { ...props, open: true }, 'x'), true, `${hinge} open`)
+  }
+})
+
+test('a gate stands across the way only while closed', () => {
+  for (const axis of ['x', 'z']) {
+    assert.strictEqual(panelAcross('oak_fence_gate', { facing: 'north', open: false }, axis), true)
+    assert.strictEqual(panelAcross('oak_fence_gate', { facing: 'north', open: true }, axis), false)
+  }
+})
+
+const COBBLE = { name: 'cobblestone_wall', boundingBox: 'block', shapes: [[0.25, 0, 0.25, 0.75, 1.5, 0.75]] }
+
+// The farm door at -308,63,81 on the live server, set into a cobblestone wall running north to south.
+function farmDoor (feet, state = { facing: 'west', hinge: 'left', open: true }) {
+  const lower = { name: 'oak_door', boundingBox: 'block', getProperties: () => ({ ...state, half: 'lower' }) }
+  const upper = { name: 'oak_door', boundingBox: 'block', getProperties: () => ({ ...state, half: 'upper' }) }
+  const extra = { '-308,63,81': lower, '-308,64,81': upper }
+  for (const z of [78, 79, 80, 82, 83, 84]) for (const y of [63, 64]) extra[ck(-308, y, z)] = COBBLE
+  const lines = []
+  const walks = []
+  const nudges = []
+  const activated = []
+  const bot = {
+    entity: { position: feet },
+    blockAt: (p) => ({ ...(extra[ck(p.x, p.y, p.z)] || (p.y <= 62 ? STONE : AIR)), position: new Vec3(p.x, p.y, p.z) }),
+    findBlocks: () => [new Vec3(-308, 63, 81), new Vec3(-308, 64, 81)],
+    activateBlock: async (b) => { activated.push(b.position.toString()); state.open = !state.open },
+    waitForTicks: async () => {},
+    pathfinder: { goal: null }
+  }
+  const env = {
+    bot,
+    mcData: { blocksByName: { oak_door: { id: 1, name: 'oak_door' } } },
+    cellKnown: () => true,
+    routeEnd: () => null,
+    walkOnce: async (g) => { walks.push([g.x, g.y, g.z]); bot.entity.position = new Vec3(g.x + 0.5, g.y, g.z + 0.5); return 'done' },
+    nudgeInto: async (cell) => { nudges.push([cell.x, cell.y, cell.z]); return false },
+    stopPath () {},
+    goals: require('mineflayer-pathfinder').goals,
+    isDoor,
+    panelAcross,
+    doorCrossing,
+    console: { log: (line) => lines.push(line) }
+  }
+  return { env, lines, walks, nudges, activated, ...loadBotFunctions(['doorwayCommit'], env) }
+}
+
+test('the drill crosses the live farm door along x from the side the bot stands on, never into the wall', async () => {
+  for (const [feet, near, far] of [
+    [new Vec3(-307.5, 63, 79.5), [-309, 63, 81], '(-307, 63, 81)'],
+    [new Vec3(-305.5, 63, 79.5), [-307, 63, 81], '(-309, 63, 81)']
+  ]) {
+    const { lines, walks, doorwayCommit } = farmDoor(feet)
+    await doorwayCommit({})
+    assert.deepStrictEqual(walks[0], near, `feet at ${feet}`)
+    assert.ok(lines[0].includes(`facing=west half=lower hinge=left open=true axis=x near=(${near.join(', ')}) far=${far}`), lines[0])
+  }
+})
+
+test('a door that will not let the body through ends the drill after two tries, toggled on the retry, with why', async () => {
+  const { nudges, activated, doorwayCommit } = farmDoor(new Vec3(-308.5, 63, 81.5))
+  const out = JSON.parse(JSON.stringify(await doorwayCommit({})))
+  assert.deepStrictEqual(out, { door: { name: 'oak_door', x: -308, y: 63, z: 81 }, through: false, why: 'did not let me through from the west after 2 tries' })
+  assert.deepStrictEqual(nudges, [[-308, 63, 81], [-308, 63, 81]])
+  // The retry closes the open door, finds the panel across and opens it again.
+  assert.deepStrictEqual(activated, ['(-308, 63, 81)', '(-308, 63, 81)'])
+})
+
+test('a closed door is opened from the near side before the body walks in', async () => {
+  const { env, nudges, activated, doorwayCommit } = farmDoor(new Vec3(-306.5, 63, 81.5), { facing: 'west', hinge: 'left', open: false })
+  env.nudgeInto = async (cell) => { nudges.push([cell.x, activated.length]); return true }
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(await doorwayCommit({}))), { door: { name: 'oak_door', x: -308, y: 63, z: 81 }, through: true })
+  assert.deepStrictEqual(nudges, [[-308, 1], [-309, 1]])
 })

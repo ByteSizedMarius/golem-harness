@@ -1,8 +1,90 @@
 diff --git a/node_modules/mineflayer-pathfinder/index.js b/node_modules/mineflayer-pathfinder/index.js
-index b38bd30..8382bd9 100644
+index b38bd30..752cecc 100644
 --- a/node_modules/mineflayer-pathfinder/index.js
 +++ b/node_modules/mineflayer-pathfinder/index.js
-@@ -520,10 +520,42 @@ function inject (bot) {
+@@ -11,6 +11,8 @@ const Vec3 = require('vec3').Vec3
+ const Physics = require('./lib/physics')
+ const nbt = require('prismarine-nbt')
+ const interactableBlocks = require('./lib/interactable.json')
++// LOCAL PATCH (Golem 10-15): a box this close to a shape's side touches it.
++const TOUCH = 0.001
+ 
+ function inject (bot) {
+   const waterType = bot.registry.blocksByName.water.id
+@@ -77,7 +79,19 @@ function inject (bot) {
+     if (options.startMove) {
+       start = options.startMove
+     } else {
+-      const p = startPos.floored()
++      let p = startPos.floored()
++      // LOCAL PATCH (Golem 10-15): a body touching a wall or fence in its floored cell plans from the nearest free cell it stands in.
++      if (boxMeets(startPos, p.x, p.z, TOUCH)) {
++        const w = bot.entity.width / 2
++        let best = null
++        for (let x = Math.floor(startPos.x - w); x < startPos.x + w; x++) {
++          for (let z = Math.floor(startPos.z - w); z < startPos.z + w; z++) {
++            const d = (x + 0.5 - startPos.x) ** 2 + (z + 0.5 - startPos.z) ** 2
++            if ((!best || d < best.d) && !boxMeets(startPos, x, z, TOUCH)) best = { x, z, d }
++          }
++        }
++        if (best) p = new Vec3(best.x, p.y, best.z)
++      }
+       const dy = startPos.y - p.y
+       const b = bot.blockAt(p) // The block we are standing in
+       // Offset the floored bot position by one if we are standing on a block that has not the full height but is solid
+@@ -168,7 +182,13 @@ function inject (bot) {
+   function postProcessPath (path) {
+     for (let i = 0; i < path.length; i++) {
+       const curPoint = path[i]
+-      if (curPoint.toBreak.length > 0 || curPoint.toPlace.length > 0) break
++      if (curPoint.toBreak.length > 0 || curPoint.toPlace.some(t => !t.useOne)) break
++      // LOCAL PATCH (Golem 10-15): a door node is aimed at its cell centre at its own feet height.
++      if (curPoint.toPlace.length > 0) {
++        curPoint.x = Math.floor(curPoint.x) + 0.5
++        curPoint.z = Math.floor(curPoint.z) + 0.5
++        continue
++      }
+       const b = bot.blockAt(new Vec3(curPoint.x, curPoint.y, curPoint.z))
+       if (b && (b.type === waterType || ((b.type === ladderId || b.type === vineId) && i + 1 < path.length && path[i + 1].y < curPoint.y))) {
+         curPoint.x = Math.floor(curPoint.x) + 0.5
+@@ -340,8 +360,34 @@ function inject (bot) {
+ 
+     // Make sure our bounding box don't collide with neighboring blocks
+     // otherwise recenter the position
+-    if (Math.abs(bot.entity.position.x - blockX) > 0.2) { bot.entity.position.x = blockX }
+-    if (Math.abs(bot.entity.position.z - blockZ) > 0.2) { bot.entity.position.z = blockZ }
++    // LOCAL PATCH (Golem 10-15)
++    const pos = bot.entity.position
++    if (Math.abs(pos.x - blockX) > 0.2 && !boxCollides(new Vec3(blockX, pos.y, pos.z))) { pos.x = blockX }
++    if (Math.abs(pos.z - blockZ) > 0.2 && !boxCollides(new Vec3(pos.x, pos.y, blockZ))) { pos.z = blockZ }
++  }
++
++  // Whether the player box at pos, widened by margin, meets a shape in column x, z above its feet.
++  function boxMeets (pos, x, z, margin) {
++    const w = bot.entity.width / 2 + margin
++    for (let y = Math.floor(pos.y); y < pos.y + bot.entity.height; y++) {
++      const b = bot.blockAt(new Vec3(x, y, z))
++      if (!b) continue
++      for (const s of b.shapes) {
++        if (x + s[0] < pos.x + w && x + s[3] > pos.x - w && z + s[2] < pos.z + w && z + s[5] > pos.z - w &&
++          y + s[4] > pos.y + TOUCH && y + s[1] < pos.y + bot.entity.height) return true
++      }
++    }
++    return false
++  }
++
++  function boxCollides (pos) {
++    const w = bot.entity.width / 2
++    for (let x = Math.floor(pos.x - w); x < pos.x + w; x++) {
++      for (let z = Math.floor(pos.z - w); z < pos.z + w; z++) {
++        if (boxMeets(pos, x, z, -TOUCH)) return true
++      }
++    }
++    return false
+   }
+ 
+   function moveToEdge (refBlock, edge) {
+@@ -520,10 +566,42 @@ function inject (bot) {
  
        // Open gates or doors
        if (placingBlock?.useOne) {
@@ -35,19 +117,19 @@ index b38bd30..8382bd9 100644
 +          } catch (e) { return !((useBlock.getProperties() || {}).open) }  // fallback: old open-flag rule
 +        })()
 +        if (!corridorBlocked) {
-+          lockUseBlock.release()
-+          placingBlock = nextPoint.toPlace.shift()
+           lockUseBlock.release()
+           placingBlock = nextPoint.toPlace.shift()
 +          if (!placingBlock) placing = false // LOCAL PATCH: empty queue must exit placing mode,
 +          return                             // else next tick falls into the scaffolding branch
 +        }
 +        bot.activateBlock(useBlock).then(() => {
-           lockUseBlock.release()
-           placingBlock = nextPoint.toPlace.shift()
++          lockUseBlock.release()
++          placingBlock = nextPoint.toPlace.shift()
 +          if (!placingBlock) placing = false // LOCAL PATCH: same exit after a real door-open
          }, err => {
            console.error(err)
            lockUseBlock.release()
-@@ -608,7 +640,17 @@ function inject (bot) {
+@@ -608,7 +686,17 @@ function inject (bot) {
      bot.setControlState('forward', true)
      bot.setControlState('jump', false)
  

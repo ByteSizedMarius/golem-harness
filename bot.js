@@ -18,7 +18,7 @@ const { ambientChange, sameVein } = require('./lib/wake')
 const { headFree } = require('./lib/head')
 const { sprintJump, passedNodes, step: nodeStep } = require('./lib/sprint')
 const { summarizePlan, planRisk } = require('./lib/plan')
-const { isDoor, doorStep } = require('./lib/doors')
+const { isDoor, doorStep, panelAcross, doorCrossing } = require('./lib/doors')
 const { stepView } = require('./lib/steps')
 const { countVerbs } = require('./lib/verbs')
 const { createChatLog } = require('./lib/chat-log')
@@ -615,7 +615,7 @@ reflexes.push({
       try {
         for (const e of liveEntities()) {
           if (!e.position) continue
-          const nm = String(e.name || e.mobType || '').toLowerCase()
+          const nm = String(e.name || e.displayName || '').toLowerCase()
           if (!HOSTILE_NAMES.has(nm)) continue
           const d = e.position.distanceTo(pos)
           if (d <= 16) { snap.hostiles.add(e.id); if (!nearest || d < nearest.d) nearest = { e, d, nm } }
@@ -3243,7 +3243,7 @@ function flatTo (p) {
 
 async function drillDoorway (route) {
   await pause(route, 700)
-  try { await doorwayCommit(route) } catch (e) { console.log('[doorway] commit failed: ' + e.message) }
+  try { return await doorwayCommit(route) } catch (e) { console.log('[doorway] commit failed: ' + e.message); return null }
 }
 
 // The pathfinder's plan for goal from where the body stands, worked out a slice per tick without walking.
@@ -3270,14 +3270,24 @@ async function stagedGoto (q, route, { stallMs = 4500, segLen = 18, preview = fa
   if (preview && (r.toward || r.nametag)) return { ...walkReply(r, 'unresolved'), plan: null }
   // A stalled hop gets the doorway drill again once the bot has moved a block since the last one.
   let drilledAt = null
+  let stuck = null
+  const drill = async () => {
+    const out = await drillDoorway(route)
+    stuck = out && out.through === false ? out : null
+  }
+  const gaveUp = (reason) => {
+    if (reason !== 'stalled' || !stuck) return walkReply(r, reason)
+    const { door: d, why } = stuck
+    return { ...walkReply(r, 'door'), hint: `the ${d.name} at ${d.x},${d.y},${d.z} ${why}. Open or close it with activate and walk again, or pick another way` }
+  }
   // A player known now by the nametag is walked toward in hops, each aimed at the cube the nametag shows in.
   while (r.toward || (r.live && flatTo(r.cell) > segLen)) {
     if (r.toward && flatTo(r.toward) <= 2) return walkReply(r, 'no-floor')
     const stop = await hopToward(r.toward || r.cell, route, opts)
     if (stop === 'stalled' && !(drilledAt && bot.entity.position.distanceTo(drilledAt) < 1)) {
       drilledAt = bot.entity.position.clone()
-      await drillDoorway(route)
-    } else if (stop) return walkReply(r, stop)
+      await drill()
+    } else if (stop) return gaveUp(stop)
     r = resolveTarget(q, walkSources())
     if (r.reason) return walkReply(r, r.reason)
   }
@@ -3307,14 +3317,14 @@ async function stagedGoto (q, route, { stallMs = 4500, segLen = 18, preview = fa
       await pause(route, 350)
     } else if (how === 'stalled' && !drilled) {
       drilled = true
-      await drillDoorway(route)
+      await drill()
     } else if (how === 'timeout' && !marched) {
       marched = true
       while (flatTo({ x: r.cell.x + 0.5, z: r.cell.z + 0.5 }) > 2) {
         const stop = await hopToward(r.cell, route, opts)
-        if (stop) return walkReply(r, stop)
+        if (stop) return gaveUp(stop)
       }
-    } else return walkReply(r, WALK_FAILED[how])
+    } else return gaveUp(WALK_FAILED[how])
   }
 }
 
@@ -3744,7 +3754,7 @@ async function followTick (st) {
     const taken = route.stopped
     route.stopped = () => taken() || followState !== st
     let crossed = false
-    try { crossed = await doorwayCommit(route) } catch (e) { console.log('[follow] drill error: ' + e.message) } finally { route.end() }
+    try { crossed = !!((await doorwayCommit(route)) || {}).through } catch (e) { console.log('[follow] drill error: ' + e.message) } finally { route.end() }
     if (followState !== st) return
     const live = !followHeld(Date.now()) && followTarget(st)
     if (live) armFollow(st, live)
@@ -5771,18 +5781,11 @@ async function nudgeInto (target, climbing, timeoutMs = 3000, route = null) {
   return (p.x === target.x && p.z === target.z && Math.abs(p.y - target.y) <= 1)
 }
 
-// DOORWAY COMMIT (07-15) — the helmsman's maneuver, in his words: "you gotta commit that one straight
-// ahead block walk before turning when going through." The pathfinder cheats doorways with a
-// diagonal (the stall path cost even shows the telltale 1.41) and clips the jamb — zero progress,
-// 'stuck' reset, replan, forever. So when a goto stalls near a door/gate, the body does what a
-// player does: square up on the near cell, clear the panel if it actually blocks the line (the
-// collision SHAPE decides, not the open flag — a sideways-placed door is walkable CLOSED and a
-// wall OPEN), then nudgeInto the door cell and the cell beyond — two dead-straight committed
-// steps, no pathfinder, no diagonal. Returns true if we ended up through; caller resumes route.
+// "you gotta commit that one straight ahead block walk before turning when going through." The pathfinder cuts doorways diagonally and clips the jamb.
+// Null when it found no door or was cut off, else the door and whether the body got through, with why not.
 async function doorwayCommit (route = null) {
   const cut = () => (route ? routeEnd(route) : bunker.building)
-  if (cut()) return false
-  const Vec3 = require('vec3').Vec3
+  if (cut()) return null
   const me = bot.entity.position.floored()
   // nearest door/gate within ~3.5 — check the walk plane and one up (upper door half)
   const ids = Object.values(mcData.blocksByName)
@@ -5792,40 +5795,59 @@ async function doorwayCommit (route = null) {
     .filter(b => { const h = (b.getProperties() || {}).half; return h !== 'upper' })  // feet cell only
     .filter(b => cellKnown(b.position))
     .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0]
-  if (!found) return false
+  if (!found) return null
   const D = found.position
-  const ddx = D.x + 0.5 - (me.x + 0.5), ddz = D.z + 0.5 - (me.z + 0.5)
-  const xT = Math.abs(ddx) >= Math.abs(ddz)
-  const sx = xT ? (ddx >= 0 ? 1 : -1) : 0, sz = xT ? 0 : (ddz >= 0 ? 1 : -1)
-  const nearC = D.offset(-sx, 0, -sz), farC = D.offset(sx, 0, sz)
-  console.log(`[doorway] commit via ${found.name} at ${D} axis=${xT ? 'x' : 'z'} near=${nearC} far=${farC}`)
-  // 1. square up on the near cell (a plain non-door walk; pathfinder is fine at this)
-  if (!(me.x === nearC.x && me.z === nearC.z)) {
-    const goal = new goals.GoalBlock(nearC.x, nearC.y, nearC.z)
-    const how = route ? await walkOnce(goal, route, 4500) : await walkAttempt(bot, goal, { stallMs: 4500, thinkTimeout: bot.pathfinder.thinkTimeout })
-    if (cut() || how === 'changed') return false
-    if (bot.pathfinder.goal === goal) stopPath()
-    const p = bot.entity.position.floored()
-    if (p.x !== nearC.x || p.z !== nearC.z) { console.log('[doorway] could not square up: ' + how); return false }
+  const props = found.getProperties() || {}
+  // A cell the bot has not seen counts as blocked.
+  const walkable = (dx, dz) => [0, 1].every(dy => {
+    const p = D.offset(dx, dy, dz)
+    const b = bot.blockAt(p)
+    return !!b && cellKnown(p) && b.boundingBox === 'empty'
+  })
+  const { axis, side } = doorCrossing(props, D, bot.entity.position, walkable)
+  const nearC = D.offset(side[0], 0, side[1]), farC = D.offset(-side[0], 0, -side[1])
+  const from = { '1,0': 'east', '-1,0': 'west', '0,1': 'south', '0,-1': 'north' }[side.join()]
+  console.log(`[doorway] commit via ${found.name} at ${D} facing=${props.facing} half=${props.half} hinge=${props.hinge} open=${props.open} axis=${axis} near=${nearC} far=${farC}`)
+  const door = { name: found.name, x: D.x, y: D.y, z: D.z }
+  const failed = (why) => { console.log(`[doorway] ${found.name} ${why}`); return { door, through: false, why } }
+  const across = () => { const b = bot.blockAt(D); return !!b && isDoor(b.name) && panelAcross(b.name, b.getProperties() || {}, axis) }
+  const toggle = async () => {
+    try { await bot.activateBlock(bot.blockAt(D)) } catch (e) { console.log('[doorway] activate failed: ' + e.message) }
+    await bot.waitForTicks(3)
   }
-  if (cut()) return false
-  // 2. does the panel actually block the straight line? collision shapes decide; open-flag fallback
-  const fresh = bot.blockAt(D)
-  let blocked
-  try {
-    const shapes = (fresh && fresh.shapes) || []
-    blocked = shapes.some(s => { const lo = xT ? s[2] : s[0], hi = xT ? s[5] : s[3]; return lo < 0.78 && hi > 0.22 })
-    if (!shapes.length) blocked = !((fresh.getProperties() || {}).open)
-  } catch (e) { blocked = !((fresh.getProperties() || {}).open) }
-  console.log(`[doorway] panel blocked=${blocked} shapes=${JSON.stringify(fresh && fresh.shapes)}`)
-  if (blocked) { try { await bot.activateBlock(fresh) } catch (e) {} ; await bot.waitForTicks(3) }
-  if (cut()) return false
-  // 3. the committed straight walk: door cell, then the cell beyond — no turning mid-threshold
-  if (!await nudgeInto(D, false, 3000, route)) { console.log('[doorway] stuck entering the threshold') ; return false }
-  if (cut()) return false
-  if (!await nudgeInto(farC, false, 3000, route)) { console.log('[doorway] crossed the door cell but not beyond') ; return false }
-  console.log('[doorway] through clean')
-  return true
+  const TRIES = 2
+  for (let tries = 1; tries <= TRIES; tries++) {
+    const p0 = bot.entity.position.floored()
+    if (p0.x !== nearC.x || p0.z !== nearC.z) {
+      const goal = new goals.GoalBlock(nearC.x, nearC.y, nearC.z)
+      const how = route ? await walkOnce(goal, route, 4500) : await walkAttempt(bot, goal, { stallMs: 4500, thinkTimeout: bot.pathfinder.thinkTimeout })
+      if (cut() || how === 'changed') return null
+      if (bot.pathfinder.goal === goal) stopPath()
+      const p = bot.entity.position.floored()
+      if (p.x !== nearC.x || p.z !== nearC.z) return failed(`could not be reached on its ${from} side (${how})`)
+    }
+    if (cut()) return null
+    // The server and this client can disagree on whether the door is open.
+    if (tries > 1) await toggle()
+    if (across()) await toggle()
+    console.log(`[doorway] panel across=${across()} shapes=${JSON.stringify((bot.blockAt(D) || {}).shapes)}`)
+    if (across()) return failed('stayed shut')
+    if (cut()) return null
+    if (!await nudgeInto(D, false, 3000, route)) {
+      if (cut()) return null
+      console.log(`[doorway] stuck entering the threshold, try ${tries}`)
+      continue
+    }
+    if (cut()) return null
+    if (!await nudgeInto(farC, false, 3000, route)) {
+      if (cut()) return null
+      console.log(`[doorway] crossed the door cell but not beyond, try ${tries}`)
+      continue
+    }
+    console.log('[doorway] through clean')
+    return { door, through: true }
+  }
+  return failed(`did not let me through from the ${from} after ${TRIES} tries`)
 }
 
 // Fills cell with a carried filler block from where the body stands. Null once it is solid, else why not.

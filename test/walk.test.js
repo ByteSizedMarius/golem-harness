@@ -606,6 +606,16 @@ test('a pilot stop while the walk is wedged ends it without the doorway drill', 
   }
 })
 
+test('a walk wedged at a door the drill could not cross replies door, naming the door and why', async () => {
+  const stuck = { door: { name: 'oak_door', x: -308, y: 63, z: 81 }, through: false, why: 'did not let me through from the west after 2 tries' }
+  const answer = update('success', [{ x: 1, y: 64, z: 0 }])
+  const r = await goto({ x: 5, z: 5 }, { answer, over: { doorwayCommit: async () => stuck } })
+  assert.strictEqual(r.reason, 'door')
+  assert.match(r.hint, /oak_door at -308,63,81 did not let me through from the west after 2 tries/)
+  const through = await goto({ x: 5, z: 5 }, { answer, over: { doorwayCommit: async () => ({ ...stuck, through: true }) } })
+  assert.strictEqual(through.reason, 'stalled', 'control: a door the drill crossed')
+})
+
 test('a reflex that takes the legs ends the route as stopped and keeps its goal, mid-hop and mid-walk', async () => {
   const flee = new goals.GoalNear(-20, 64, 0, 2)
   for (const x of [100, 5]) {

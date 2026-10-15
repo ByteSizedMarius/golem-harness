@@ -232,6 +232,32 @@ step. With no way to look into a furnace, the pilot once smelted a log only to r
 The new `furnace` tool lists a furnace's input, fuel, output and burn progress, and `take` moves one
 slot into the pockets.
 
+**Doorways.** The bot wedged at the farm's oak door, facing west in a cobblestone wall that runs
+north to south, again and again until the pilot dug through the wall. The doorway drill took its
+axis from where the bot stood. Standing north of the door it walked along z toward the wall cells
+on either side and timed out squaring up, four times in one session. Standing inside the farm it
+picked the right axis, found the open panel clear and still never entered, while the 1.7.10 server
+reset its position about 35 times at the door's west edge. The drill now reads the axis from the
+door's block state (facing, hinge, open), takes the other axis for a door set sideways into a wall,
+and squares up on the side the feet stand on. It opens the door there when the panel stands across
+the way, and a failed entry gets one more try after a toggle, which brings client and server back
+into agreement. A door that still holds ends the walk with reason `door` and a hint naming the door
+and why. bot.log carries the door's state and the chosen axis on the drill's first line. The
+narrator reflex no longer reads `entity.mobType`, whose deprecation trace filled bot.log 4854 times
+in one session.
+
+**Pathfinder at doors and walls.** Live, the bot never walked into the owner's hut, and a `walls`
+call looped `[path] reset stuck` for 3 minutes. mineflayer-pathfinder stops refining a path at the
+first node with a block to place, and opening a door counts as one. The door node and every node
+after it kept the north-west corner of their cell as the target, which sits behind the door jamb.
+The 1.7.10 server corrected the bot 14 times at the same spot while the stuck reset replanned the
+same short path every 3.5 s. A node that only opens a door or gate now aims at its cell centre at
+its own feet height, and the nodes after it are refined as usual. The planner also started from the
+cell under the body's centre, which for a body flush against a cobblestone wall was the wall's own
+cell, and routed from inside the wall. It now starts from the free cell the body stands in, and a
+stop no longer centres the body into a wall or fence. Both fixes live in
+`patches/mineflayer-pathfinder+2.4.5.patch`.
+
 **Queued requests and 1.7.10 item names.** Live, the owner asked the pilot to keep track of wheat,
 and it added a todo but never told him it was queued. A `todo` add with a `who` now answers
 `Tell <who> it is queued if you have not.` under the `Added` line. `craft("fence")` and

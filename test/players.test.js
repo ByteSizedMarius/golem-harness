@@ -9,6 +9,7 @@ const { crumbCentre, nametagGoal, routeDeadline } = require('../lib/walk')
 const { PRESENCE_GAP_MS, PRESENCE_FORGET_MS, PRESENCE_MAX, playerNamed, playersAround, presenceUpdate, presenceText } = require('../lib/players')
 const { QUIET_MS, LONG_QUIET_MS, legLedger } = require('../lib/legs')
 const { countVerbs } = require('../lib/verbs')
+const { isDoor, panelAcross, doorCrossing } = require('../lib/doors')
 const { loadBotFunctions } = require('./helpers')
 
 const ME = new Vec3(0.5, 64, 0.5)
@@ -240,7 +241,7 @@ function followHarness ({ position = new Vec3(10.5, 64, 0.5), gate = { seen: tru
   const doorAt = new Vec3(1, 64, 0)
   Object.assign(bot, {
     findBlocks: () => [doorAt],
-    blockAt: (p) => (p.equals(doorAt) ? { name: 'oak_door', position: doorAt, shapes: [], getProperties: () => ({ open: true, half: 'lower' }) } : { name: 'air', position: p }),
+    blockAt: (p) => (p.equals(doorAt) ? { name: 'oak_door', position: doorAt, shapes: [], getProperties: () => ({ facing: 'east', hinge: 'left', open: true, half: 'lower' }) } : { name: 'air', position: p }),
     lookAt: async () => { if (bot.onLook) bot.onLook() },
     activateBlock: async () => {},
     waitForTicks: async () => {}
@@ -267,6 +268,9 @@ function followHarness ({ position = new Vec3(10.5, 64, 0.5), gate = { seen: tru
     swimUpUntil: 0,
     mcData: { blocksByName: { oak_door: { id: 5, name: 'oak_door' } } },
     cellKnown: () => true,
+    isDoor,
+    panelAcross,
+    doorCrossing,
     followState: null,
     console: { log () {} },
     setTimeout: (fn, ms) => (ms === 700 && holdPause ? pauses.push(fn) : setImmediate(fn)),
