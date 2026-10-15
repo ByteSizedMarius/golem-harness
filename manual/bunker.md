@@ -13,9 +13,9 @@ Blocks come from your pockets: dirt first, then cobblestone and other stone-like
 - Dug in, when the three cells under the feet are natural ground (dirt, grass, stone, sand, gravel, netherrack and the like), each takes at most 1.5 s to dig (stone needs a pick), their sides and the floor below are solid and no liquid touches them. The body digs them, drops 3 and caps the shaft over its head with one block.
 - Pillared up 3 blocks, when it has that many, clear headroom and no block beside the pillar a mob could stand on, from its foot up to the head of the body on top. Then a shell on top: a ledge ring under the body, walls on four sides at feet and head height, and a roof. That takes up to 14 more blocks. Out of blocks, the shell keeps its gaps.
 
-Pillaring up holds against zombies, husks and zombie villagers, digging in against spiders. With feet or head in water or lava, any other mob near, both kinds near, or a mob too close for the build to finish first, the body flees instead.
+Pillaring up holds against zombies, husks and zombie villagers, digging in against spiders. Digging in also holds against skeletons, strays and bogged. With feet or head in water or lava, any other mob near, both kinds near, or a mob too close for the build to finish first, the body flees instead, and the `bunker` tool refuses.
 
-A mob's hit before the body is out of reach stops the build. After that hit, or a build that fails, the body flees. While it builds, no tool walks or digs (the refusal names the bunker), and `stop` ends the build.
+A mob's hit before the body is out of reach stops the build. After that hit, or a build that fails, the body flees. An arrow does not stop a dig-in. While it builds, no tool walks or digs (the refusal names the bunker), and `stop` ends the build.
 
 ## Inside and out
 

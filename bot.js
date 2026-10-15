@@ -1868,6 +1868,7 @@ function entityEngageable (en) {
     return losClear(bot.entity.position.offset(0, 1.62, 0), en.position.offset(0, 1.0, 0))
   } catch (e) { return true }
 }
+const { fleeHeading } = require('./lib/flee')
 // Hostiles within radius that the body perceives or that hit it, and that can reach it.
 function nearHostiles (fill, radius) {
   return liveEntities().filter(e => {
@@ -1910,8 +1911,9 @@ reflexes.unshift({
         bot.pathfinder.setGoal(new goals.GoalNear(ally.position.x, ally.position.y, ally.position.z, 2))
         emitEvent('flee_to_player', `fleeing to ${ally.username} ${compass(ally.position.x - here.x, ally.position.z - here.z)} ~${Math.round(ally.position.distanceTo(here))}`)
       } else {
-        const away = here.minus(threatPos).normalize().scaled(20)
-        bot.pathfinder.setGoal(new goals.GoalNear(here.x + away.x, here.y, here.z + away.z, 2))
+        const others = nearHostiles(this.fairFill(bot), 16).filter(e => e.id !== threat.id).map(e => e.position)
+        const away = fleeHeading(here, threatPos, others)
+        bot.pathfinder.setGoal(new goals.GoalNear(here.x + away.x * 20, here.y, here.z + away.z * 20, 2))
       }
       bot.setControlState('sprint', true)
       setTimeout(() => { try { bot.setControlState('sprint', false) } catch (e) {} }, 6000)
@@ -5325,9 +5327,11 @@ function shelterInputs (requested, height = BUNKER_HEIGHT) {
   return { requested, threats, problems, buildMs }
 }
 
-// A mob's hit after the pick and before the body is out of reach stops the build.
+// A mob's hit after the pick and before the body is out of reach stops the build. An arrow does not
+// stop a dig-in, which takes the body out of its line.
 function onBuildHit (attrib) {
   const cls = attrib && attrib.entity && !attrib.envHit ? mobClass(attrib.entity) : null
+  if (attrib && attrib.ranged && bunker.mode === 'down') return
   if (!bunker.stop && bunker.mode && ['hostile', 'creeper', 'heavy', 'provokable'].includes(cls) && !outOfReach()) bunker.stop = 'hit while building'
 }
 

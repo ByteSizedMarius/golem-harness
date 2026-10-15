@@ -220,6 +220,19 @@ test('a hit before the shelter is picked does not stop the build', async () => {
   assert.strictEqual(r.stopped, undefined, 'a hit in the combat wait or the centring stopped the build')
 })
 
+test('an arrow does not stop a dig-in, and still stops a pillar', () => {
+  const arrow = { ...BUILD_HIT, entity: { id: 4, name: 'skeleton', cls: 'hostile' }, ranged: true }
+  for (const [mode, stop] of [['up', 'hit while building'], ['down', null]]) {
+    const bunker = { building: true, stop: null, cell: null, mode, reached: 0 }
+    const ctx = loadBotFunctions(['onBuildHit'], { bunker, SHELTER: shelter.SHELTER, mobClass })
+    ctx.onBuildHit(BUILD_HIT)
+    assert.strictEqual(bunker.stop, 'hit while building', `control: a zombie's hit stops ${mode}`)
+    bunker.stop = null
+    ctx.onBuildHit(arrow)
+    assert.strictEqual(bunker.stop, stop, `an arrow during ${mode}`)
+  }
+})
+
 // ---- digIn and pillarShell ----
 
 const hit = (c) => c.onBuildHit(BUILD_HIT)

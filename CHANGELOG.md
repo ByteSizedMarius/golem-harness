@@ -145,6 +145,10 @@ Placing fixes from the same sessions:
   the pockets. A failed fill now says what failed.
 - `/digat` puts a carried tool that harvests the block back in hand, trying twice, or refuses.
 
+The combat flee ran straight away from one mob, sometimes into the next. It now runs away from
+every hostile it perceives within 16, the nearer ones pushing harder. The bunker digs in against
+skeletons, strays and bogged, and an arrow no longer stops a dig-in.
+
 These landed side by side, and three of them reached for the legs at once. The walk routes counted
 stops in one place and the jobs named reflexes in another, so a route could end unnamed or a name
 could point at a reflex that never stopped it. Now one ledger does both: every reflex that takes the

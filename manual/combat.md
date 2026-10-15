@@ -29,4 +29,4 @@ You are the strategist, the combat reflex is the trigger finger. It runs in the 
 
 ## Fleeing
 
-flee_to_player is on by default. When the combat reflex flees, it runs to a player within 24 blocks who stands farther from the threat than you, and a `flee_to_player` event arrives through `wait_events`. With no such player, or with the reflex off, it runs straight away from the threat. `reflexes(name: "flee_to_player", on: "0")` switches it off.
+flee_to_player is on by default. When the combat reflex flees, it runs to a player within 24 blocks who stands farther from the threat than you, and a `flee_to_player` event arrives through `wait_events`. With no such player, or with the reflex off, it runs away from the threat and the other hostiles you perceive within 16, the nearer ones counting more. `reflexes(name: "flee_to_player", on: "0")` switches it off.

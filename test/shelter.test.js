@@ -63,9 +63,22 @@ test('auto picks up against zombie and husk at 30, down against a spider at 30',
 
 test('a ranged mob or a zombie together with a spider refuses, naming the mob', () => {
   assertMode(choose('auto', [zombie(30)]), 'up', 'control')
-  const why = assertRefusal(choose('auto', [{ name: 'skeleton', baby: false, dist: 30 }]), 'skeleton')
-  assert.ok(why.includes('skeleton'), `the refusal names the mob, got ${JSON.stringify(why)}`)
+  const why = assertRefusal(choose('auto', [{ name: 'witch', baby: false, dist: 30 }]), 'witch')
+  assert.ok(why.includes('witch'), `the refusal names the mob, got ${JSON.stringify(why)}`)
   assertRefusal(choose('auto', [zombie(30), spider(30)]), 'zombie plus spider')
+})
+
+test('auto digs in against a skeleton, stray or bogged, and never pillars against one', () => {
+  const lead = requiredLead({ family: 'skeleton', baby: false, buildMs: BUILD.down })
+  assert.ok(Number.isFinite(lead), `control: a skeleton has a finite lead, got ${lead}`)
+  for (const name of ['skeleton', 'stray', 'bogged']) {
+    assert.strictEqual(mobFamily(name), 'skeleton', name)
+    assertMode(choose('auto', [{ name, baby: false, dist: lead }]), 'down', `${name} at its lead`)
+    assertRefusal(choose('auto', [{ name, baby: false, dist: lead - 0.01 }]), `${name} inside its lead`)
+    assertRefusal(choose('up', [{ name, baby: false, dist: 30 }]), `${name}, up requested`)
+  }
+  assertMode(choose('auto', [{ name: 'skeleton', baby: false, dist: 30 }, spider(30)]), 'down', 'a skeleton with a spider')
+  assertRefusal(choose('auto', [{ name: 'skeleton', baby: false, dist: 30 }, zombie(30)]), 'a skeleton with a zombie')
 })
 
 test('a zombie at 2 refuses, naming the zombie, its distance and the lead it needs', () => {
