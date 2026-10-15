@@ -14,6 +14,7 @@ const { performance } = require('node:perf_hooks')
 const express = require('express')
 const { Vec3 } = require('vec3')
 const shelter = require('../lib/shelter')
+const { legLedger } = require('../lib/legs')
 const { installSecurity } = require('../lib/install')
 const { createServer } = require('../mcp/server')
 const { TOOLS } = require('../mcp/tools')
@@ -552,6 +553,15 @@ function bunkerReflexIn (env) {
   return vm.runInContext(`(${literal})`, vm.createContext(env))
 }
 
+// The combat reflex of bot.js, evaluated over env.
+function combatReflexIn (env) {
+  const src = botSource()
+  const at = src.search(/\bname\s*:\s*['"]combat['"]/)
+  const literal = at < 0 ? '' : balanced(src, src.lastIndexOf('{', at))
+  assert.ok(literal, 'the combat reflex not found in bot.js')
+  return vm.runInContext(`(${literal})`, vm.createContext(env))
+}
+
 // ---- bunker fakes over sliced bot.js functions ----
 
 const HERE = new Vec3(0.5, 64, 0.5)
@@ -748,6 +758,7 @@ async function actAfter (built) {
   const env = {
     reflexes: [{ name: 'combat', fleeFrom (b, entity, why, klass) { flees.push({ entity, why, klass }) } }],
     emitEvent () {},
+    takeLegs () {},
     buildBunker: async () => built,
     bunkerSummary: shelter.bunkerSummary,
     shelterInputs: () => ({ requested: 'auto', threats: [{ ...threat('zombie', 6), entity: near }] }),
@@ -775,7 +786,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, functionSource, balanced, botConstant, loadBotFunctions, bunkerReflexIn,
+  botSource, functionSource, balanced, botConstant, loadBotFunctions, bunkerReflexIn, combatReflexIn,
   HERE, shelterInputsAmong, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild
 }

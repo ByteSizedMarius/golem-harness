@@ -7,6 +7,7 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const walk = require('../lib/walk')
 const { loadBotFunctions, botConstant, startApp } = require('./helpers')
+const { legLedger } = require('../lib/legs')
 
 const { UNLOADED, UNKNOWN, standCell, targetKind, resolveTarget, crumbCentre, arrivedAt, watchProgress, walkAttempt, routeDeadline } = walk
 
@@ -445,7 +446,7 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     arrivedAt,
     walkAttempt: (b, g, o) => walkAttempt(b, g, { ...o, clock: FAST }),
     routeDeadline,
-    legStops: 0,
+    legs: legLedger(),
     WALK_HINTS: {},
     WALK_FAILED: botConstant('WALK_FAILED'),
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
@@ -538,7 +539,7 @@ test('a pilot stop ends the walk, and the retry that would arrive never starts',
     const answer = (bot, g, env) => {
       set.push(g)
       if (set.length > 1) return arrive(bot, g)
-      if (pilot) env.legStops++
+      if (pilot) env.legs.take(null)
       bot.emit('path_stop')
     }
     const r = await goto({ x: 5, z: 5 }, { answer })
@@ -556,12 +557,12 @@ test('a reflex freeze ends the walk, mid-attempt or in the retry pause, and no w
     const answer = (bot, g, env) => {
       set.push(g)
       if (set.length > 1) return arrive(bot, g)
-      if (during === 'attempt') env.legStops++
+      if (during === 'attempt') env.legs.take('hurt')
       bot.emit('path_stop')
     }
     const { env, ctx } = walkBot({ answer })
     // The freeze stops the pathfinder, which sends no goal_updated.
-    if (during === 'pause') env.setTimeout = (fn) => { env.legStops++; setImmediate(fn) }
+    if (during === 'pause') env.setTimeout = (fn) => { env.legs.take('hurt'); setImmediate(fn) }
     const route = ctx.walkRoute()
     let r
     try { r = await ctx.stagedGoto({ x: 5, z: 5 }, route) } finally { route.end() }
@@ -577,7 +578,7 @@ test('a pilot stop while the walk is wedged ends it without the doorway drill', 
   for (const pilot of [false, true]) {
     let drills = 0
     const answer = (bot, g, env) => {
-      if (pilot) env.legStops++
+      if (pilot) env.legs.take(null)
       update('success', [{ x: 1, y: 64, z: 0 }])(bot)
     }
     const r = await goto({ x: 5, z: 5 }, { answer, over: { doorwayCommit: async () => { drills++; return false } } })
@@ -654,7 +655,7 @@ test('a pilot stop while a drop is being picked up ends /collect before the next
     const setup = (b) => { b.entities = Object.fromEntries(drops.map((d) => [d.id, d])) }
     const nearestDrop = (radius, skip) => drops.find((d) => !skip.has(d.id)) || null
     const { env, bot, ctx } = walkBot({ answer, setup, over: { nearestDrop } })
-    bot.waitForTicks = async () => { if (pilot) env.legStops++ }
+    bot.waitForTicks = async () => { if (pilot) env.legs.take(null) }
     const route = ctx.walkRoute()
     let done
     try { done = await ctx.collectDrops(16, route) } finally { route.end() }
@@ -671,6 +672,7 @@ test('a nudge ends when its route does and lets go of the controls', async () =>
   const env = {
     bot: { entity: { position: new Vec3(0.5, 64, 0.5) }, lookAt: async () => {}, setControlState: (k, v) => { controls[k] = v } },
     bunker: { building: false },
+    swimUpUntil: 0,
     require,
     setTimeout
   }

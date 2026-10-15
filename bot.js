@@ -266,12 +266,9 @@ bot.once('spawn', () => {
         // and nothing else lets go. Abort the dig and swim — air first, apologies after.
         if (o2 <= 8) {
           try { bot.stopDigging() } catch (e) {}
-          legStops++
+          takeLegs('drown', 'swim up')
           try { bot.pathfinder.setGoal(null) } catch (e) {}
-          try {
-            bot.setControlState('jump', true)
-            setTimeout(() => { try { bot.setControlState('jump', false) } catch (e) {} }, 4000)
-          } catch (e) {}
+          try { swimUp(4000) } catch (e) {}
           emitEvent('drowning', 'drown reflex: dig aborted, swimming up', {})
         }
       } catch (e) {}
@@ -474,6 +471,7 @@ reflexes.push({
       emitEvent('reflex', 'unstuck: opened ' + opened + ' — path continues')
       return
     }
+    legs.take('unstuck', 'break a pathing wedge')
     safeStop()                                                 // 2) break the wedge so the pilot can re-path
     try { bot.clearControlStates() } catch (e) {}
     emitEvent('reflex', 'unstuck: broke a pathing wedge — pilot, re-check the route')
@@ -562,42 +560,22 @@ reflexes.push({
 })
 
 // ---- async jobs registry (long actions run in background; driver keeps reacting) ----
-const jobs = (() => {
-  let jobSeq = 0
-  const registry = new Map()
-  function safeEmit(name, msg) {
-    try { if (typeof emitEvent === 'function') emitEvent('job', name + ': ' + msg) } catch (e) {}
-  }
-  function stopAll() {
-    // single-flight: at most one movement-driving job at a time. Preempt any running job.
-    let n = 0
-    for (const j of registry.values()) if (j.status === 'running') { j.cancelled = true; n++ }
-    safeStop()
-    return n
-  }
-  function start(name, fn) {
-    stopAll()                                        // auto-preempt a prior job so two loops don't fight one bot
-    const job = {
-      id: ++jobSeq, name, status: 'running', cancelled: false,
-      note: '', result: null, error: null, started: Date.now()
-    }
-    // progress stores the note SILENTLY (poll /job for it) — it does NOT flood the event stream
-    job.progress = (msg) => { job.note = msg }
-    registry.set(job.id, job)
-    // fire-and-forget: do NOT await, so the HTTP handler returns immediately
-    Promise.resolve()
-      .then(() => fn(job))
-      .then((r) => { job.status = job.cancelled ? 'cancelled' : 'done'; job.result = r; job.finished = Date.now(); safeEmit(name, job.status) })
-      .catch((e) => { job.status = job.cancelled ? 'cancelled' : 'error'; job.error = e && e.message ? e.message : String(e); job.finished = Date.now(); safeEmit(name, job.status + ' ' + job.error) })
-    return { id: job.id }
-  }
-  function stop(id) { const j = registry.get(id); if (j && j.status === 'running') { j.cancelled = true; safeStop(); return true } return false }
-  function get(id) { return registry.get(id) || null }
-  function list() {
-    return Array.from(registry.values()).map(j => ({ id: j.id, name: j.name, status: j.status, note: j.note, cancelled: j.cancelled }))
-  }
-  return { start, get, list, stop, stopAll }
-})()
+const { createJobs } = require('./lib/jobs')
+const { legLedger, takenText, laneBlocks: legsLaneBlocks } = require('./lib/legs')
+const jobs = createJobs({ stop: () => safeStop(), emit: (name, msg) => emitEvent('job', name + ': ' + msg) })
+// Each take of the legs ends every walk route begun before it.
+const legs = legLedger()
+// Ends the running job and its walk for a reflex that needs the body, naming the reflex in the job's takenBy.
+function yieldJob (reflex, why) {
+  if (!jobs.yieldTo({ reflex, why })) return
+  try { bot.stopDigging() } catch (e) {}
+  stopPath()
+}
+// A reflex takes the legs from every walk route and from the running job.
+function takeLegs (reflex, why) {
+  legs.take(reflex, why)
+  yieldJob(reflex, why)
+}
 
 // ---- MEMORY: waypoints (persisted to ./waypoints.json) + journal (journal.md) ----
 // Externalizes the driver's mental map to disk so it survives across sessions.
@@ -1045,7 +1023,8 @@ function floodPassable(b) {
   if (b.name === 'ladder' || b.name === 'scaffolding' || b.name === 'vine' || b.name.includes('vines')) return true
   return blockTransparent(b)
 }
-function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known = null } = {}) {
+// keepWalls returns the cells that stopped the flood as walls, a Map by ck key.
+function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known = null, keepWalls = false } = {}) {
   const o = (seed || bot.entity.position).floored()
   let s = o
   if (!floodPassable(bot.blockAt(s))) s = o.offset(0, 1, 0)   // feet cell solid (slab etc.) -> try head
@@ -1054,6 +1033,8 @@ function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known
   const queue = [[s.x, s.y, s.z]]
   cells.add(ck(s.x, s.y, s.z))
   let capped = false, reached = null, qi = 0, unknown = false
+  // The cells that stopped the flood.
+  const walls = known || keepWalls ? new Map() : null
   while (qi < queue.length) {
     const [x, y, z] = queue[qi++]                               // index pointer, not shift() — O(1)
     if (targets && targets.has(ck(x, y, z))) { reached = new Vec3(x, y, z); break }
@@ -1063,9 +1044,11 @@ function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known
       const k = ck(nx, ny, nz)
       if (cells.has(k)) continue
       const p = new Vec3(nx, ny, nz)
-      if (known && !unknown && !known(p)) unknown = true
       const b = bot.blockAt(p)
-      if (!floodPassable(b)) continue
+      if (!floodPassable(b)) {
+        if (walls) walls.set(k, p)
+        continue
+      }
       cells.add(k)
       if (b.name.includes('water')) liquid.add(k)
       if (cells.size >= cap) { capped = true; break }
@@ -1073,7 +1056,11 @@ function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known
     }
     if (capped) break
   }
-  return { cells, liquid, capped, reached, seed: s, unknown }
+  // Only the walls of a fill that stayed closed need to be known.
+  if (known && !reached && !capped) {
+    for (const p of walls.values()) if (!known(p)) { unknown = true; break }
+  }
+  return { cells, liquid, capped, reached, seed: s, unknown, ...(keepWalls && { walls }) }
 }
 
 // ---- reachability pre-check for /goto: a walled goal used to cost the pathfinder its whole ~10s
@@ -1494,10 +1481,7 @@ bot.on('health', async () => {
           emitEvent('hurt', `took ${dmg} damage while building the bunker${attrib ? `, ${attrib.desc}` : ''}, HP ${bot.health}/20`)
         }
       } else if (!attrib) {
-        legStops++
-        try { jobs.stopAll() } catch (e) {}
-        safeStop()
-        try { bot.clearControlStates() } catch (e) {}
+        freezeBody()
         const cause = ws && ws.buried ? 'SUFFOCATING inside a block' : ws && ws.inLava ? 'LAVA' : ws && ws.submerged ? 'drowning' : 'unknown — look around'
         if (Date.now() - lastHurtEmit > 3000) {
           lastHurtEmit = Date.now()
@@ -1520,10 +1504,7 @@ bot.on('health', async () => {
       // drowning = SWIM UP, don't freeze (learned live 07-12: the freeze held me under during the
       // farm flood; only the next walk order saved me). Hold jump ~3s to surface, then release.
       if (ws && ws.submerged && !ws.buried) {
-        try {
-          bot.setControlState('jump', true)
-          setTimeout(() => { try { bot.setControlState('jump', false) } catch (e) {} }, 3000)
-        } catch (e) {}
+        try { swimUp(3000) } catch (e) {}
       }
     }
     lastHp = bot.health
@@ -1750,9 +1731,25 @@ bot.once('spawn', () => {
 // SOFT lane: discretionary reflex goals (withdrawal, stance-berth kiting, chase) defer, but
 // interrupts (heavy-kite) and emergencies (creeper fuse, HP-critical) still pass. /brace
 // claims the HARD lane: only emergencies pass. The legs get ONE owner, and the pilot knows which.
-const pilotLane = { until: 0, why: null, hard: false, narrated: 0 }
-const claimLane = (why, ms, hard = false) => { pilotLane.until = Date.now() + ms; pilotLane.why = why; pilotLane.hard = hard }
-const releaseLane = () => { pilotLane.until = 0; pilotLane.hard = false }
+// token is the claim releaseLane may clear.
+const pilotLane = { until: 0, why: null, hard: false, narrated: 0, token: null }
+// Returns the token of this claim.
+function claimLane (why, ms, hard = false) {
+  pilotLane.until = Date.now() + ms
+  pilotLane.why = why
+  pilotLane.hard = hard
+  pilotLane.token = {}
+  return pilotLane.token
+}
+// Clears the lane only while token is still its claim.
+function releaseLane (token) {
+  if (token && pilotLane.token === token) clearLane()
+}
+function clearLane () {
+  pilotLane.until = 0
+  pilotLane.hard = false
+  pilotLane.token = null
+}
 // The bunker being built, and the cell of the last one the body reached. stop is why the build
 // has to end early, set by /stop, by a death and by a mob's hit. mode is the mode being built, and
 // reached the blocks the body has risen or sunk so far.
@@ -1773,18 +1770,31 @@ function bunkerHolds () {
   bunker.cell = null
   return false
 }
-const laneBlocks = (klass) => {              // klass: 'discretionary' | 'interrupt' | 'emergency'
-  if (bunkerHolds()) return true
-  if (Date.now() >= pilotLane.until) return false
-  if (klass === 'emergency') return false
-  if (klass === 'interrupt') return pilotLane.hard
-  return true
-}
+const laneBlocks = (klass) => legsLaneBlocks({
+  klass,
+  bunker: bunkerHolds(),
+  laneHeld: Date.now() < pilotLane.until,
+  hard: pilotLane.hard,
+  jobRunning: jobs.running(),
+  meleeThreat: meleeThreat()
+})
 const laneNarrate = (what) => {
   if (bunkerHolds()) return
   if (Date.now() - pilotLane.narrated < 6000) return
   pilotLane.narrated = Date.now()
-  emitEvent('combat', `${what} deferred — pilot lane held (${pilotLane.why})`)
+  if (Date.now() >= pilotLane.until && jobs.running()) emitEvent('combat', `${what} deferred, the running job keeps the legs`)
+  else emitEvent('combat', `${what} deferred — pilot lane held (${pilotLane.why})`)
+}
+// 1.7.10 takes a hit from 6 blocks with a clear eye-line and from 3 without.
+function meleeReach (en) {
+  return LEGACY_1710 ? (losClear(bot.entity.position.offset(0, 1.62, 0), en.position.offset(0, 1.0, 0)) ? 4.0 : 3.0) : 3.2
+}
+// True while the combat reflex's threat stands in melee reach.
+function meleeThreat () {
+  const combat = reflexes.find(r => r.name === 'combat')
+  const t = combat && combat.on && combat._threat
+  if (!t || !t.e || !bot.entities[t.e.id] || !bot.entity) return false
+  return t.e.position.distanceTo(bot.entity.position) <= meleeReach(t.e)
 }
 // ---- ENGAGEABLE vs WATCHED (07-21, the mansion debrief, the helmsman's diagnosis: creepers pacing
 // dark rooms OVERHEAD were air-connected and honestly perceptible, so the pack counter armed
@@ -1799,6 +1809,17 @@ function entityEngageable (en) {
     if (dy < 2.5) return true
     return losClear(bot.entity.position.offset(0, 1.62, 0), en.position.offset(0, 1.0, 0))
   } catch (e) { return true }
+}
+// Hostiles within radius that the body perceives or that hit it, and that can reach it.
+function nearHostiles (fill, radius) {
+  return Object.values(bot.entities).filter(e => {
+    if (!e || !e.position) return false
+    const c = mobClass(e)
+    if (c !== 'hostile' && c !== 'creeper' && c !== 'heavy') return false
+    if (e.position.distanceTo(bot.entity.position) >= radius) return false
+    if (!(AGGRO_CONFIRMED.has(e.id) || entityPerceptible(e, fill))) return false
+    return entityEngageable(e)   // the mansion lesson: the pack counts only what can reach me
+  })
 }
 
 // the watcher+responder reflex — priority ABOVE unstuck (unshift), toggle via /reflexes name=combat
@@ -1825,6 +1846,7 @@ reflexes.unshift({
       const here = bot.entity.position
       const anchor = reflexes.find(r => r.name === 'flee_to_player')
       const ally = anchor && anchor.on ? anchor.ally(bot, here, threatPos) : undefined
+      takeLegs('combat', 'flee')
       stopPath()
       if (ally) {
         bot.pathfinder.setGoal(new goals.GoalNear(ally.position.x, ally.position.y, ally.position.z, 2))
@@ -1870,6 +1892,7 @@ reflexes.unshift({
         }
       }
       if (bestCell) {
+        takeLegs('combat', 'take cover')
         stopPath()
         bot.pathfinder.setGoal(new goals.GoalBlock(bestCell.x, bestCell.y, bestCell.z))
         emitEvent('combat', `ranged chip from ${who || '?'} — BREAKING EYE-LINE: cover ${compass(bestCell.x - here.x, bestCell.z - here.z)} at (${bestCell.x},${bestCell.y},${bestCell.z})`)
@@ -2026,15 +2049,7 @@ reflexes.unshift({
         // OUTNUMBERED (07-18, death #4 autopsy + the helmsman's diagnosis: the close-in never
         // counted the room). 3+ perceptible hostiles inside 16 is not a duel — withdraw, don't
         // engage-nearest while the rest converge.
-        const fill = this.fairFill(bot)
-        const packList = Object.values(bot.entities).filter(e2 => {
-          if (!e2 || !e2.position) return false
-          const c2 = mobClass(e2)
-          if (c2 !== 'hostile' && c2 !== 'creeper' && c2 !== 'heavy') return false
-          if (e2.position.distanceTo(bot.entity.position) >= 16) return false
-          if (!(AGGRO_CONFIRMED.has(e2.id) || entityPerceptible(e2, fill))) return false
-          return entityEngageable(e2)   // the mansion lesson: the pack counts only what can reach me
-        })
+        const packList = nearHostiles(this.fairFill(bot), 16)
         const pack = packList.length
         if (pack >= 3) {
           // VANGUARD COMMITS (07-21, death #8: four zombies at 0.7 a bite outlasted a reflex
@@ -2065,8 +2080,8 @@ reflexes.unshift({
           }
         }
         const d = t.e.position.distanceTo(bot.entity.position)
-        // 1.7.10 takes a hit from 6 blocks with a clear eye-line and from 3 without.
-        const reach = LEGACY_1710 ? (losClear(bot.entity.position.offset(0, 1.62, 0), t.e.position.offset(0, 1.0, 0)) ? 4.0 : 3.0) : 3.2
+        const reach = meleeReach(t.e)
+        if (d <= reach) yieldJob('combat', 'fight in melee range')
         if (d > reach) {
           // Standoff band (the helmsman's 07-16 complaint: the reflex used to stand here sword-in-
           // hand, staring at skeletons that plink from 10). Stance decides: bow it, chase it, or
@@ -2078,6 +2093,7 @@ reflexes.unshift({
           }
           if (s.chase) {                                      // vanguard: run it down
             if (laneBlocks('discretionary')) { laneNarrate('chase'); await new Promise(r => setTimeout(r, 500)); continue }
+            takeLegs('combat', 'chase')
             try { bot.pathfinder.setGoal(new goals.GoalNear(t.e.position.x, t.e.position.y, t.e.position.z, 2)) } catch (e) {}
             await new Promise(r => setTimeout(r, 500))
             continue
@@ -2093,7 +2109,10 @@ reflexes.unshift({
           await new Promise(r => setTimeout(r, 250))
           continue
         }
-        if (s.chase) { try { bot.pathfinder.setGoal(null) } catch (e) {} }  // in reach — legs off, sword out
+        if (s.chase) {                                        // in reach — legs off, sword out
+          if (bot.pathfinder.goal) takeLegs('combat', 'fight in melee range')
+          try { bot.pathfinder.setGoal(null) } catch (e) {}
+        }
         try {
           if (LEGACY_1710) {
             // No equip wait and no guard beats: the block stays up, and a swing goes out once it is due.
@@ -2192,7 +2211,7 @@ reflexes.unshift({
         emitEvent('lava', `LAVA ${h.dir} ~${h.d}, not moving while the bunker is built`)
         return
       }
-      legStops++
+      takeLegs('lava_watch', 'back away from lava')
       stopPath()                                           // whatever the plan was, it ends here
       const here = bot.entity.position
       if (h.d === 0) {
@@ -2229,6 +2248,7 @@ reflexes.splice(reflexes.findIndex(r => r.name === 'combat'), 0, {
   async act (bot) {
     this._spent = true
     emitEvent('bunker', `HP ${Math.round(bot.health * 10) / 10} after a mob's hit, building a bunker`)
+    takeLegs('bunker', 'build a bunker')
     const built = await buildBunker('auto', BUNKER_HEIGHT)
     emitEvent('bunker', bunkerSummary(built))
     const cause = built.error || (BUNKER_HALTS.includes(built.stopped) ? null : built.stopped)
@@ -2623,6 +2643,7 @@ app.get('/strike', async (req, res) => {
   // The ids of the entities that died while the swings ran.
   const died = new Set()
   const onDead = (en) => died.add(en.id)
+  let lane = null
   try {
     if (!ready) return err(res, new Error('not ready'))
     const ename = req.query.name
@@ -2641,7 +2662,7 @@ app.get('/strike', async (req, res) => {
     if (/creeper/.test(String(target.name))) {
       return err(res, new Error('refusing: never melee a creeper — flee is the law'))
     }
-    claimLane('strike', 20000)                     // soft lane: the approach + swings are MINE (07-21)
+    lane = claimLane('strike', 20000)              // soft lane: the approach + swings are MINE (07-21)
     // ?max=N (07-21 latency session): bounded swing SEQUENCE in one round trip — re-acquire,
     // approach, swing, dead-watch, repeat. Exits honestly: dead / target gone / max.
     const max = Math.min(5, Math.max(1, parseInt(req.query.max || '1')))
@@ -2686,7 +2707,7 @@ app.get('/strike', async (req, res) => {
       try { await bot.pathfinder.goto(new goals.GoalNear(struckAt.x, struckAt.y, struckAt.z, 1)) } catch (e) {}  // hoover the drops
     }
     ok(res, { struck: ename, with: iname, swings, at: struckAt ? round(struckAt) : null, killed: dead, note: dead ? 'walked to drops' : swings ? 'still standing — swing again deliberately' : 'target left reach' })
-  } catch (e) { err(res, e) } finally { releaseLane(); bot.removeListener('entityDead', onDead) }
+  } catch (e) { err(res, e) } finally { releaseLane(lane); bot.removeListener('entityDead', onDead) }
 })
 
 // ---- /shoot (07-15, built the day the helmsman handed me a bow): the ranged verb — draw, hold a full
@@ -2796,6 +2817,22 @@ function stopPath () {
   bot.pathfinder.setGoal(null)
 }
 
+// Ends every walk route, job and movement for an unexplained hit, a path still being planned included.
+function freezeBody () {
+  takeLegs('hurt', 'freeze after an unexplained hit')
+  stopPath()
+  try { bot.clearControlStates() } catch (e) {}
+}
+
+// When the drown rescue lets go of jump.
+let swimUpUntil = 0
+// Holds jump for ms to surface.
+function swimUp (ms) {
+  swimUpUntil = Date.now() + ms
+  bot.setControlState('jump', true)
+  setTimeout(() => { try { if (Date.now() >= swimUpUntil) bot.setControlState('jump', false) } catch (e) {} }, ms)
+}
+
 // maxY is exclusive.
 function worldColumn () {
   return { minY: bot.game.minY, maxY: bot.game.minY + bot.game.height }
@@ -2846,24 +2883,27 @@ function walkReply (r, reason) {
   return { ...reply, dist: Math.round(dist / 5) * 5, bearing: compass(aim.x - me.x, aim.z - me.z) }
 }
 
-// Each bump ends every walk route begun before it.
-let legStops = 0
-
 function walkRoute () {
-  const gen = legStops
-  const route = { goal: null, taken: false }
+  const mark = legs.mark()
+  const route = { goal: null, taken: false, mark }
   const onGoal = (g) => { if (g && g !== route.goal) route.taken = true }
   const deadline = routeDeadline({ onExpire: () => releaseGoal(route) })
   bot.on('goal_updated', onGoal)
   route.expired = deadline.expired
   route.left = deadline.left
-  route.stopped = () => route.taken || legStops !== gen
+  route.stopped = () => route.taken || legs.mark() !== mark
   route.end = () => {
     deadline.cancel()
     bot.removeListener('goal_updated', onGoal)
     releaseGoal(route)
   }
   return route
+}
+
+// A stopped reply names the reflex that took the legs since mark, a legs.mark().
+function namedStop (reply, mark) {
+  const taken = reply.reason === 'stopped' ? legs.takenSince(mark) : null
+  return taken ? { ...reply, takenBy: takenText(taken) } : reply
 }
 
 // Clears the route's own goal, never one someone else set.
@@ -2977,12 +3017,13 @@ function gotoQuery (query) {
 }
 
 app.get('/goto', async (req, res) => {
+  let lane = null
   try {
     if (!ready) return err(res, new Error('not ready'))
     if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const q = gotoQuery(req.query)
     if (['x', 'y', 'z'].some(k => k in q && !Number.isFinite(q[k]))) return err(res, new Error('x, y and z must be numbers'))
-    claimLane('goto', 300000)
+    lane = claimLane('goto', 300000)
     const route = walkRoute()
     let r
     try { r = await stagedGoto(q, route) } finally { route.end() }
@@ -2991,8 +3032,8 @@ app.get('/goto', async (req, res) => {
       lastWaypoint = q.waypoint
       journal('goto', 'went to ' + q.waypoint)
     }
-    ok(res, r)
-  } catch (e) { err(res, e) } finally { releaseLane() }
+    ok(res, namedStop(r, route.mark))
+  } catch (e) { err(res, e) } finally { releaseLane(lane) }
 })
 
 app.get('/mine', async (req, res) => {
@@ -3048,11 +3089,12 @@ async function collectDrops (radius, route) {
 }
 
 app.get('/collect', async (req, res) => {
+  let lane = null
   try {
     if (!ready) return err(res, new Error('not ready'))
     if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const radius = parseInt(req.query.radius || '16')
-    claimLane('collect', 300000)
+    lane = claimLane('collect', 300000)
     const before = itemCounts()
     const route = walkRoute()
     let done
@@ -3060,8 +3102,8 @@ app.get('/collect', async (req, res) => {
     const now = itemCounts()
     const picked = {}
     for (const [name, n] of Object.entries(now)) if (n > (before[name] || 0)) picked[name] = n - (before[name] || 0)
-    ok(res, { picked, missed: done.missed, reason: done.reason })
-  } catch (e) { err(res, e) } finally { releaseLane() }
+    ok(res, namedStop({ picked, missed: done.missed, reason: done.reason }, route.mark))
+  } catch (e) { err(res, e) } finally { releaseLane(lane) }
 })
 
 app.get('/craft', async (req, res) => {
@@ -3214,7 +3256,7 @@ app.get('/chatlog', (req, res) => {
   const since = parseInt(req.query.since || '0')
   ok(res, { cursor: chatSeq, messages: chatLog.filter(m => m.id > since) })
 })
-app.get('/stop', (req, res) => { bunker.stop = 'stopped by the pilot'; legStops++; try { stopFollow() } catch {} ; stopPath(); try { bot.clearControlStates() } catch {} ; releaseLane(); const jobsCancelled = jobs.stopAll(); ok(res, { stopped: true, jobsCancelled }) })
+app.get('/stop', (req, res) => { bunker.stop = 'stopped by the pilot'; legs.take(null); try { stopFollow() } catch {} ; stopPath(); try { bot.clearControlStates() } catch {} ; clearLane(); const jobsCancelled = jobs.stopAll(); ok(res, { stopped: true, jobsCancelled }) })
 
 // GET /brace?sec=N : the PILOT-HOLD (07-21 debrief — the bounded version of switching the
 // combat reflex off to cross a room). For N seconds (cap 30) the legs answer no discretionary
@@ -3909,14 +3951,15 @@ app.get('/job', (req, res) => {
     if (!id) return err(res, new Error('missing id'))
     const j = jobs.get(id)
     if (!j) return err(res, new Error(`no job ${id}`))
+    const takenBy = j.takenBy ? takenText(j.takenBy) : undefined
     if (req.query.verbose) {
       return ok(res, { job: {
-        id: j.id, name: j.name, status: j.status, note: j.note,
+        id: j.id, name: j.name, status: j.status, note: j.note, takenBy,
         result: j.result, error: j.error, started: j.started, finished: j.finished || null
       } })
     }
     ok(res, { job: {
-      id: j.id, name: j.name, status: j.status, note: j.note,
+      id: j.id, name: j.name, status: j.status, note: j.note, takenBy,
       error: j.error, result: (j.status === 'done' ? j.result : null)
     } })
   } catch (e) { err(res, e) }
@@ -5238,6 +5281,7 @@ async function nudgeInto (target, climbing, timeoutMs = 3000, route = null) {
   const Vec3 = require('vec3').Vec3
   try {
     await bot.lookAt(new Vec3(target.x + 0.5, target.y + 0.5, target.z + 0.5), true)
+    if (cut()) return false
     bot.setControlState('forward', true)
     if (climbing) bot.setControlState('jump', true)
     const t0 = Date.now()
@@ -5250,7 +5294,13 @@ async function nudgeInto (target, climbing, timeoutMs = 3000, route = null) {
       // cell and sprints on (the 07-11 open-terrain overshoot to x-35). Settle+verify AFTER.
       if (p.x === target.x && p.z === target.z && yOk) break
     }
-  } finally { if (!bunker.building) { bot.setControlState('forward', false); bot.setControlState('jump', false) } }
+  } finally {
+    if (!bunker.building) {
+      bot.setControlState('forward', false)
+      // A drown rescue keeps its jump.
+      if (Date.now() >= swimUpUntil) bot.setControlState('jump', false)
+    }
+  }
   if (route && routeEnd(route)) return false
   await new Promise(r => setTimeout(r, 250))   // let physics settle (land + shed momentum), then verify
   const p = bot.entity.position.floored()
@@ -5276,6 +5326,7 @@ async function doorwayCommit (route = null) {
   const found = bot.findBlocks({ matching: ids, maxDistance: 4, count: 8 })
     .map(p => bot.blockAt(p)).filter(Boolean)
     .filter(b => { const h = (b.getProperties() || {}).half; return h !== 'upper' })  // feet cell only
+    .filter(b => cellKnown(b.position))
     .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0]
   if (!found) return false
   const D = found.position

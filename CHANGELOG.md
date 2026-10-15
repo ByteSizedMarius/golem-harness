@@ -6,6 +6,30 @@ the point, not just the diff. Dates are play-sessions, not releases. Full commit
 carry more detail (`git log`). The pilot's text (`DRIVING.md`, `manual/`) states the rules
 and leaves the stories here.
 
+## 2026-10-15: live-play fixes
+
+The walking review's deferrals: a lane claim returns a token, and a route's release clears only its
+own claim, so a stale handler can no longer drop the claim a newer route took after `/stop`. The
+hurt freeze clears the goal too, which ends a path still being planned before its first step. A
+nudge that ends during a drown rescue leaves the swim-up's jump held. The doorway drill picks only
+doors the bot has seen. `airPrecheck`'s flood asks whether a cell is known only for the walls of a
+fill that stayed closed, not for every cell it touches.
+
+Reflexes took the legs in silence: a job carried on fighting a flee, and a walk answered a bare
+`stopped`. Now a running job keeps the legs from flees, cover moves and chases until a mob stands
+in melee range. A reflex that does take them (melee, an emergency flee, lava, drowning, the
+unexplained-hit freeze, the bunker) ends the job and stops the job's walk with it, and its end
+event, `/job`, `/jobs` and a stopped `/goto` or `/collect` name the reflex in `takenBy`. A job
+cancelled this way stops counting as running at once, while it still winds down.
+
+These landed side by side, and three of them reached for the legs at once. The walk routes counted
+stops in one place and the jobs named reflexes in another, so a route could end unnamed or a name
+could point at a reflex that never stopped it. Now one ledger does both: every reflex that takes the
+legs (the hurt freeze, drowning, lava, a flee, a cover move, a chase, the vanguard's release in melee
+range, unstuck and the bunker) records itself there, and that record is what ends a walk route begun
+before it. `/stop` takes the legs for nobody and clears the lane. A melee fight ends a running job but
+leaves a pilot's walk its legs, as the lane says.
+
 ## 2026-10-15: one goto, and arrival means standing there
 
 A scenario suite that walks onto exact cells could not pass: `range=0` at a drop's own y
