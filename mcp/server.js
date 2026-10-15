@@ -410,7 +410,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
           if (boot !== null) cursor.boot = boot
           cursor.chat = tick.chat.cursor
           cursor.ev = tick.events.cursor
-          const said = tick.chat.messages.map((m) => ({ t: m.t, type: m.kind === 'whisper' ? 'whisper' : 'chat', from: m.from, msg: m.msg }))
+          const said = tick.chat.messages.map((m) => ({ t: m.t, type: m.kind === 'whisper' ? 'whisper' : 'chat', from: m.from, msg: m.msg, ...(m.pointsAt && { pointsAt: m.pointsAt }) }))
           const happened = tick.events.list.map((e) => ({ t: e.t, type: 'event', kind: e.kind, msg: e.msg }))
           items.push(...redact([...said, ...happened].sort((a, b) => a.t - b.t).map(({ t, ...item }) => item)))
           if (items.length > MAX_ITEMS) dropped += items.splice(0, items.length - MAX_ITEMS).length

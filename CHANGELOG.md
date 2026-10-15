@@ -74,6 +74,10 @@ view. A `stop` or `unfollow` during the drill ends it too, where the drill used 
 controls again afterwards. A `goto` toward a nametag walks in hops aimed where the nametag shows at
 each one, and its reply reads from the 5-block cube.
 
+"Here" in chat: a line with here, there, this or that from a player the bot sees within 32 blocks
+carries the block they looked at as it arrived, when the bot sees that block too. A crouching
+speaker's look starts from the crouched eye height.
+
 `/section` summarised "floor: down 13-16" over rows the capped air fill never reached, and the
 real ground lay 61 blocks down. A column now has a floor only where a solid block lies under its
 lowest sensed air, and that block counts only when the air fill stopped at it or the bot has seen
@@ -104,8 +108,8 @@ counted any block that faced air connected to the bot's pocket, caves it never s
 tier is gone. A block now reaches the pilot only in line of sight from the head and not in total
 darkness, or from the seen set, which a ray now stamps only where it is lit. That holds for `find`
 (its `sense` parameter is removed), the veins of `scene`, the ore callout, the ore, grid and
-narration of `/section`, the exits and walk-to cells of `/passages`, `/blockat`,
-`mine`, `gather` and `goto` to a block. A section column without seen air reads
+narration of `/section`, the exits and walk-to cells of `/passages`, `/blockat`, a pointed-at block
+in chat, `mine`, `gather` and `goto` to a block. A section column without seen air reads
 `out of sight from dN`, and `sealed` needs seen rock. `/passages` calls a pocket closed only when the
 bot has seen all its walls. Light comes from the chunk data. mineflayer computes none, and a 1.7.10
 server sends it only with a chunk, so around a block change sight alone counts until fresh light

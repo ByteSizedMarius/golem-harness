@@ -12,6 +12,7 @@ const { classifySound } = require('./lib/sounds')
 const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
 const { UNLOADED, standCell, resolveTarget, crumbCentre, nametagGoal, arrivedAt, walkAttempt, routeDeadline } = require('./lib/walk')
 const { playerNamed, playersAround, presenceUpdate, presenceText } = require('./lib/players')
+const { POINT_RANGE, deictic, lookedAt } = require('./lib/deixis')
 const { headFree } = require('./lib/head')
 const { sprintJump, passedNodes, step: nodeStep } = require('./lib/sprint')
 const { summarizePlan, planRisk } = require('./lib/plan')
@@ -344,13 +345,16 @@ bot.on('end', (r) => {
 // ---- chat capture (so the driver can hear the world, not just speak to it) ----
 let chatSeq = 0
 const chatLog = []
-function pushChat(from, message, kind) {
-  chatLog.push({ id: ++chatSeq, t: Date.now(), from, msg: message, kind })
+// pointsAt is the block the speaker looked at as they spoke, or null.
+function pushChat(from, message, kind, pointsAt = null) {
+  chatLog.push({ id: ++chatSeq, t: Date.now(), from, msg: message, kind, ...(pointsAt && { pointsAt }) })
   if (chatLog.length > 300) chatLog.splice(0, chatLog.length - 300)
   console.log(`[chat] <${from}> ${message}`)
 }
-bot.on('chat', (username, message) => { if (username !== USERNAME) pushChat(username, message, 'chat') })
-bot.on('whisper', (username, message) => pushChat(username, message, 'whisper'))
+// A pointer error leaves the line without one.
+const pointerOf = (from, message) => { try { return chatPointer(from, message) } catch (e) { return null } }
+bot.on('chat', (username, message) => { if (username !== USERNAME) pushChat(username, message, 'chat', pointerOf(username, message)) })
+bot.on('whisper', (username, message) => pushChat(username, message, 'whisper', pointerOf(username, message)))
 
 // ---- helpers ----
 const vecStr = (v) => v ? `(${v.x.toFixed(1)}, ${v.y.toFixed(1)}, ${v.z.toFixed(1)})` : null
@@ -2602,6 +2606,18 @@ function playerSighting (en, fill) {
   if (!nametagVisible(en)) return null
   const c = crumbCentre(en.position)
   return { tier: 'nametag', dist: Math.round(c.distanceTo(me) / 5) * 5, bearing: compass(c.x - me.x, c.z - me.z) }
+}
+// The block a chat line points at with "here", "there", "this" or "that": the one its speaker looks at as
+// it arrives, when the bot sees the speaker within POINT_RANGE and sees that block too. Else null.
+function chatPointer (from, msg) {
+  if (!ready || !deictic(msg)) return null
+  const en = playerEntity(from)
+  if (!en || en.position.distanceTo(bot.entity.position) > POINT_RANGE) return null
+  if (!entityPerceptible(en, reflexes.find(r => r.name === 'combat').fairFill(bot))) return null
+  const eye = en.position.offset(0, en.crouching ? 1.27 : 1.62, 0)
+  const hit = lookedAt(eye, en.headYaw ?? en.yaw, en.pitch, (p) => bot.blockAt(p))
+  if (!hit || !seesLit(hit.cell, 64)) return null
+  return { block: hit.block.name, x: hit.cell.x, y: hit.cell.y, z: hit.cell.z }
 }
 // A crumb's nametag is true when the player was known only by the nametag.
 function recordCrumbs () {

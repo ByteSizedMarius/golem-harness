@@ -76,6 +76,13 @@ test('wait_events caps and redacts every field of an item, not only the message'
   for (const ch of ['F', 'K', 'E']) assert.ok(!text.includes(ch.repeat(301)), `${ch} run over 300 units`)
 })
 
+test('a chat line keeps the block its speaker pointed at', { timeout: 20000 }, async () => {
+  const pointsAt = { block: 'oak_log', x: 3, y: 64, z: -2 }
+  const { srv } = mcpServer({ reply: tickReply([{ ...chatLine(1, 'put it here'), pointsAt }]) })
+  const [item] = JSON.parse(textOf(await call(srv, 'wait_events', { timeout: 1 }))).items
+  assert.deepStrictEqual(item, { type: 'chat', from: 'Alice', msg: 'put it here', pointsAt })
+})
+
 // ---- the 5 s gap between returns ----
 
 test('wait_events returns no sooner than 5 s after its previous return and gathers what came in between', { timeout: 30000 }, async () => {
