@@ -4744,37 +4744,66 @@ app.get('/outline', async (req, res) => {
 })
 
 // ---- chest / container interaction ----
-// resolve the target chest: exact x,y,z when given (the attic library has many), else nearest
+const CHEST_RADIUS = 12
+function sameChest (a, b) {
+  return a.y === b.y && Math.abs(a.x - b.x) + Math.abs(a.z - b.z) <= 1
+}
+// Trapped chests are left out because opening one powers redstone.
+function knownChests (radius) {
+  const here = bot.entity.position
+  const near = knownBlocks(resolveBlockIds('chest'), radius)
+    .map(p => ({ pos: p, dist: here.distanceTo(p.offset(0.5, 0.5, 0.5)) }))
+  return near.filter((c, i) => !near.slice(0, i).some(o => sameChest(o.pos, c.pos)))
+}
+function otherChests (p, radius) {
+  const others = knownChests(radius).filter(c => !sameChest(c.pos, p))
+  if (!others.length) return `no other chest seen within ${radius}`
+  return `other chests seen within ${radius}: ` + others.map(c => `${c.pos.x},${c.pos.y},${c.pos.z} (${c.dist.toFixed(1)} away)`).join(', ')
+}
 function targetChest(q) {
   if (q.x != null && q.y != null && q.z != null) {
     const Vec3 = require('vec3').Vec3
-    const b = bot.blockAt(new Vec3(parseInt(q.x), parseInt(q.y), parseInt(q.z)))
+    const p = new Vec3(Math.floor(parseFloat(q.x)), Math.floor(parseFloat(q.y)), Math.floor(parseFloat(q.z)))
+    if (!seenNow(p)) {
+      const remembered = rememberedStation(p, resolveBlockIds('chest'))
+      if (!remembered) throw outOfSight()
+      return { cb: remembered }
+    }
+    const b = bot.blockAt(p)
     if (!b || !b.name.includes('chest')) throw new Error(`no chest at ${q.x},${q.y},${q.z} (${b ? b.name : 'unloaded'})`)
-    return b
+    return { cb: b }
   }
-  return bot.findBlock({ matching: resolveBlockIds('chest'), maxDistance: 12 })
+  const radius = parseInt(q.radius || CHEST_RADIUS)
+  const chests = knownChests(radius)
+  if (!chests.length) throw new Error(`no chest seen within ${radius}`)
+  return { cb: bot.blockAt(chests[0].pos), chests }
 }
 app.get('/chest', async (req, res) => {
   try {
-    const cb = targetChest(req.query)
-    if (!cb) return err(res, new Error('no chest within 12'))
-    await bot.pathfinder.goto(new goals.GoalNear(cb.position.x, cb.position.y, cb.position.z, 2))
-    const chest = await bot.openContainer(cb)
+    const { cb, chests } = targetChest(req.query)
+    let chest
+    try {
+      await bot.pathfinder.goto(new goals.GoalNear(cb.position.x, cb.position.y, cb.position.z, 2))
+      chest = await bot.openContainer(arrivedStation(cb.position, (b) => b.name.includes('chest'), 'chest'))
+    } catch (e) {
+      e.message = `cannot open the chest at ${cb.position.x},${cb.position.y},${cb.position.z}: ${e.message}; ${otherChests(cb.position, parseInt(req.query.radius || CHEST_RADIUS))}`
+      throw e
+    }
     const items = chest.containerItems().map(i => ({ name: i.name, count: i.count }))
     chest.close()
-    ok(res, { at: round(cb.position), items })
+    const list = chests && { chests: chests.map(c => ({ at: round(c.pos), dist: Math.round(c.dist * 10) / 10 })) }
+    ok(res, { at: round(cb.position), items, ...list })
   } catch (e) { err(res, e) }
 })
 app.get('/withdraw', async (req, res) => {
   try {
     const name = req.query.name
     const count = parseInt(req.query.count || '64')
-    const cb = targetChest(req.query)
-    if (!cb) return err(res, new Error('no chest within 12'))
+    const { cb } = targetChest(req.query)
     await bot.pathfinder.goto(new goals.GoalNear(cb.position.x, cb.position.y, cb.position.z, 2))
-    const chest = await bot.openContainer(cb)
+    const chest = await bot.openContainer(arrivedStation(cb.position, (b) => b.name.includes('chest'), 'chest'))
     const item = chest.containerItems().find(i => i.name === name) || chest.containerItems().find(i => i.name.includes(name))
-    if (!item) { chest.close(); return err(res, new Error(`no ${name} in chest`)) }
+    if (!item) { chest.close(); return err(res, new Error(`no ${name} in chest; ${otherChests(cb.position, parseInt(req.query.radius || CHEST_RADIUS))}`)) }
     const take = Math.min(count, item.count)
     await chest.withdraw(item.type, null, take)
     chest.close()
@@ -4789,12 +4818,13 @@ app.get('/deposit', async (req, res) => {
     const name = req.query.name
     if (!name) return err(res, new Error('name required'))
     const want = req.query.count != null ? parseInt(req.query.count) : Infinity
-    const cb = targetChest(req.query)
-    if (!cb) return err(res, new Error('no chest within 12'))
+    const { cb } = targetChest(req.query)
     await bot.pathfinder.goto(new goals.GoalNear(cb.position.x, cb.position.y, cb.position.z, 2))
-    const chest = await bot.openContainer(cb)
+    const chest = await bot.openContainer(arrivedStation(cb.position, (b) => b.name.includes('chest'), 'chest'))
     const matches = bot.inventory.items().filter(it => it.name === name || it.name.includes(name))
     if (!matches.length) { chest.close(); return err(res, new Error(`no ${name} in inventory`)) }
+    const held = () => chest.containerItems().filter(i => i.name === name || i.name.includes(name)).reduce((s, i) => s + i.count, 0)
+    const before = held()
     let remaining = want, deposited = 0
     try {
       for (const it of matches) {
@@ -4804,11 +4834,12 @@ app.get('/deposit', async (req, res) => {
         deposited += take; remaining -= take
       }
     } catch (e) {
-      const inChest = chest.containerItems().filter(i => i.name === name || i.name.includes(name)).reduce((s, i) => s + i.count, 0)
+      const inChest = held()
       chest.close()
-      return err(res, new Error(`deposited ${deposited} then failed (chest full?): ${e.message}; ${name} in chest now ${inChest}`))
+      const others = otherChests(cb.position, parseInt(req.query.radius || CHEST_RADIUS))
+      return err(res, new Error(`deposited ${inChest - before} then failed (chest full?): ${e.message}; ${name} in chest now ${inChest}; ${others}`))
     }
-    const inChest = chest.containerItems().filter(i => i.name === name || i.name.includes(name)).reduce((s, i) => s + i.count, 0)
+    const inChest = held()
     chest.close()
     ok(res, { deposited, item: name, inChestNow: inChest })
   } catch (e) { err(res, e) }

@@ -11,7 +11,7 @@ const { GRAVESTONE } = require('../lib/server-overrides')
 const { balanced, botConstant, botSource, groundMemory, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
-const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4 }
+const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4, wheat: 5, chest: 6 }
 const NOON = 6000
 const MIDNIGHT = 18000
 
@@ -42,6 +42,9 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     ...groundMemory()
   }
 }
+
+// An empty station memory as bot.js keeps it.
+const stationMemory = () => ({ STATIONS: new Map(), STATION_CAP: botConstant('STATION_CAP'), STATION_RE: botConstant('STATION_RE'), stationEdits: 0 })
 
 // A room at x 0..3 with coal in its west wall, joined by a z 1 passage to a lit cave at x 5..8 behind a wall at x 4, with iron in the cave ceiling.
 function cave (roomLight, at = 0) {
@@ -792,6 +795,35 @@ test('a block change in a sealed room beside the bot raises no world event, the 
   const seenEarlier = besidePocket()
   seenEarlier.SEEN.add(ck(1, 64, -3))
   assert.deepStrictEqual(tilled(seenEarlier, [[1, 64, -3]], stoneAt, airAt), [], 'a wall seen earlier and out of sight now')
+})
+
+test('a chest seen and then broken out of sight stays listed until the bot sees its cell again', () => {
+  const ores = { '2,64,-2': 'chest' }
+  const env = besidePocket(ores)
+  Object.assign(env, {
+    require,
+    SEEN_CAP: 1000,
+    SURFACE: new Map(),
+    SURFACE_CAP: 1000,
+    surfaceEdits: 0,
+    ...stationMemory(),
+    resolveBlockIds: (name) => (name === 'chest' ? [IDS.chest] : [])
+  })
+  const inRoom = env.bot.entity.position
+  const inPocket = new Vec3(0.5, 64, -1.5)
+  const { markTrail, knownChests, targetChest } = loadBotFunctions(['markTrail', 'knownChests', 'targetChest'], env)
+  const listed = () => knownChests(12).map((c) => ck(c.pos.x, c.pos.y, c.pos.z))
+  const at = { x: '2', y: '64', z: '-2' }
+  env.bot.entity.position = inPocket
+  markTrail(inPocket.floored())
+  env.bot.entity.position = inRoom
+  assert.deepStrictEqual(listed(), ['2,64,-2'], 'control: the chest stands')
+  delete ores['2,64,-2']
+  assert.deepStrictEqual(listed(), ['2,64,-2'])
+  assert.deepStrictEqual(targetChest(at).cb.position, new Vec3(2, 64, -2))
+  env.bot.entity.position = inPocket
+  assert.deepStrictEqual(listed(), [])
+  assert.throws(() => targetChest(at), { message: 'no chest at 2,64,-2 (air)' })
 })
 
 test('digat at a cell seen before and out of sight now walks there before it says the cell is air', async () => {

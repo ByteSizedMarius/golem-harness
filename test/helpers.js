@@ -140,7 +140,7 @@ function guardRequest ({ token, port, method = 'GET', url = '/state', time, nonc
 // Recording handlers stand in for bot.js's own routes.
 const DUMMY_ROUTES = [
   '/state', '/tick', '/chatlog', '/walls', '/outline', '/roof', '/build', '/find', '/mine', '/collect', '/craft',
-  '/smelt', '/furnace', '/withdraw', '/deposit', '/gather', '/toss', '/goto', '/follow',
+  '/smelt', '/furnace', '/chest', '/withdraw', '/deposit', '/gather', '/toss', '/goto', '/follow',
   '/waypoint', '/waypoints', '/snapshot', '/record', '/stream', '/pov', '/sign', '/rename', '/bunker'
 ]
 

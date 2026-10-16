@@ -68,6 +68,10 @@ produce more interesting minds. Concretely:
 - **No x-ray.** Ore and structures are only reported if they are exposed to air and in lit sight from
   the bot's eyes, the darker the closer.
 - **No sensing through walls.** Mobs and players sealed behind rock are simply absent from perception.
+- **Only what a player could know.** Every reply, event, error and tool description passes the same
+  test. A block's current state shows only while it is in sight or touched by the body. Otherwise a
+  reply gives what the bot last saw there, or nothing. Chests, furnaces, crafting tables, anvils and
+  enchanting tables are used only where the bot saw one, and walks plan only through cells it knows.
 - **Considerate movement.** The pathfinder never breaks blocks to travel. Zero litter: scaffold blocks
   the bot places are tracked and reclaimed (`/tidy`). Doors and gates the bot opens are closed behind
   it (gate manners — pen integrity and safe retreat both depend on it). A `/goto` plans before it

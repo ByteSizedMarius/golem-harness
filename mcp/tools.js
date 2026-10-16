@@ -31,6 +31,7 @@ const COUNT = { type: 'int', min: 1, max: 576 }
 const SIZE = { type: 'int', min: 1, max: 64 }
 const RADIUS = { type: 'int', min: 1, max: 64 }
 const RANGE = { type: 'int', min: 1, max: 32 }
+const CHEST_RADIUS = { type: 'int', min: 1, max: 24 }
 const CURSOR = { type: 'int', min: 0, max: 1000000000 }
 const JOB_ID = { type: 'int', min: 1, max: 1000000000 }
 const FLAG = { type: 'bool' }
@@ -101,9 +102,9 @@ const TOOLS = [
   { name: 'useon', route: '/useon', body: true, description: 'Use an item on a nearby creature: shears on a sheep, a bucket on a cow.', params: { name: required(NAME), item: required(NAME) }, timeoutMs: LONGEST },
   { name: 'toss', route: '/toss', body: true, description: 'Drop items, or throw them toward a player with to. Walk away afterwards or you pick them up again.', params: { name: required(NAME), count: COUNT, to: PLAYER }, timeoutMs: EVENT },
   { name: 'fish', route: '/fish', body: true, description: 'Job: cast the fishing rod count times, at seen water (x,y,z) or ahead. Each catch arrives as an event.', params: { count: { type: 'int', min: 1, max: 32 }, ...AT } },
-  { name: 'chest', route: '/chest', body: true, description: 'List the chest at x,y,z or the nearest one within 12.', params: AT, timeoutMs: WALK + EVENT },
-  { name: 'withdraw', route: '/withdraw', body: true, description: 'Take items from the chest at x,y,z or the nearest one. name matches as a substring.', params: { name: required(NAME), count: COUNT, ...AT }, timeoutMs: WALK + EVENT },
-  { name: 'deposit', route: '/deposit', body: true, description: 'Put items into the chest at x,y,z or the nearest one. name matches as a substring, so mind what else it matches.', params: { name: required(NAME), count: COUNT, ...AT }, timeoutMs: WALK + EVENT },
+  { name: 'chest', route: '/chest', body: true, description: 'List the chest at x,y,z. Without x,y,z, list every chest seen within radius (default 12), nearest first, and the items of the nearest.', params: { ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
+  { name: 'withdraw', route: '/withdraw', body: true, description: 'Take items from the chest at x,y,z or the nearest seen within radius (default 12). name matches as a substring.', params: { name: required(NAME), count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
+  { name: 'deposit', route: '/deposit', body: true, description: 'Put items into the chest at x,y,z or the nearest seen within radius (default 12). name matches as a substring. When the chest fills, the error names the other chests seen.', params: { name: required(NAME), count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
   // The walk, the window and one withdraw per item kind.
   { name: 'grave', route: '/grave', body: true, description: 'List the gravestone at x,y,z or the nearest in sight. take: all or an item name.', params: { at: POINT, take: NAME }, timeoutMs: LONGEST },
 
