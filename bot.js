@@ -3205,6 +3205,34 @@ async function equipPickFor(blockName) {
   if (!bot.heldItem || bot.heldItem.name !== pick.name) { try { await bot.equip(pick, 'hand') } catch (e) {} }
   return PICK_TIER[pick.name] >= neededPickTier(blockName)
 }
+// Tools /digat may use besides pickaxes. A sword loses 2 durability per block, and a hoe speeds no 1.7.10 dig.
+const DIG_TOOL = /_axe$|_shovel$|^shears$/
+// The carried tool to dig b with, null for the bare hand.
+function digToolFor (b) {
+  const bare = b.digTime(null, false, false, false)
+  if (bare === 0) return null
+  if (String(b.material).split(';').some(t => t === 'mineable/pickaxe' || t.startsWith('incorrect_for_'))) return pickFor(b.name)
+  let tool = null
+  let fastest = bare
+  for (const i of bot.inventory.items()) {
+    const ms = DIG_TOOL.test(i.name) ? b.digTime(i.type, false, false, false) : Infinity
+    if (ms < fastest) { tool = i; fastest = ms }
+  }
+  return tool
+}
+// Holds digToolFor(b), or for the bare hand the first hotbar slot holding no tool, if any.
+async function holdDigTool (b) {
+  const tool = digToolFor(b)
+  if (tool) {
+    if (!bot.heldItem || bot.heldItem.name !== tool.name) { try { await bot.equip(tool, 'hand') } catch (e) {} }
+    return
+  }
+  if (!bot.heldItem || !(bot.heldItem.maxDurability > 0)) return
+  const slots = bot.inventory.slots.slice(bot.inventory.hotbarStart, bot.inventory.hotbarStart + 9)
+  const free = slots.findIndex(s => !s)
+  const slot = free >= 0 ? free : slots.findIndex(s => !(s.maxDurability > 0))
+  if (slot >= 0) bot.setQuickBarSlot(slot)
+}
 
 // ---- no-legal-move check: a canDig=false walker boxed in (e.g. self-trapped in its own dig) has
 // NO first move, and the pathfinder rejects with a cryptic "Path was stopped". Detect it and say it.
@@ -4843,11 +4871,11 @@ app.get('/digat', async (req, res) => {
     const b = bot.blockAt(p)
     if (!b || b.name === 'air') return ok(res, { already: 'air', at: round(p) })
     if (far()) await bot.pathfinder.goto(new goals.GoalNear(p.x, p.y, p.z, 3))
-    // TOOL GUARD (07-18, the bow-dug diamond): equipPickFor's equip can fail SILENTLY — the
+    // TOOL GUARD (07-18, the bow-dug diamond): holdDigTool's equip can fail SILENTLY — the
     // combat reflex was holding the bow, the swap lost the race, and the dig went ahead anyway.
     // For ore that needs a tier, verify a sufficient pick is actually IN HAND or refuse the dig;
     // a refused dig is recoverable, a destroyed drop is not.
-    await equipPickFor(b.name)
+    await holdDigTool(b)
     const needTier = neededPickTier(b.name)
     const heldTier = bot.heldItem ? PICK_TIER[bot.heldItem.name] : undefined
     if (needTier > 0 && (heldTier === undefined || heldTier < needTier)) {

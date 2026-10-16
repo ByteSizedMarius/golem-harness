@@ -6,7 +6,7 @@
 - `mine` gives up on a block it makes no progress toward for about 5 s, or after a minute, and its `reason` says `stalled` or `budget`. `tidy` stops the same way and keeps the rest queued.
 - A blocked route is your call: `dig_stair` or `dig_tunnel` on purpose, or another point.
 - A walk wedged for about 10 s gets the unstuck reflex: it replans, steps back, opens a door or jumps a step, and breaks the block in the way only when the same block is in your pockets to put back. When none of that frees you, it stops the walk and its event names where you are stuck, against what, and what it tried. Dig out yourself from there.
-- Equip the right tool right before digs you care about. Tool choice is pick-biased: `digat` grabs a pickaxe for planks and sand. When something else holds the hand, `digat` puts a carried tool that harvests the block back in it, or refuses the dig.
+- When something else holds the hand, `digat` puts a carried tool that harvests the block back in it, or refuses the dig.
 - A nearly broken tool raises a wear event.
 
 ## Pockets

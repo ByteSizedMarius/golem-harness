@@ -1,7 +1,11 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
-const { loadBotFunctions, botConstant } = require('./helpers')
+const { Vec3 } = require('vec3')
+const registry = require('prismarine-registry')('1.21.11')
+const Block = require('prismarine-block')(registry)
+const Item = require('prismarine-item')(registry)
+const { loadBotFunctions, botConstant, awaitRoute } = require('./helpers')
 
 const SWORD = { name: 'iron_sword', type: 1 }
 const WOOD_PICK = { name: 'wooden_pickaxe', type: 2 }
@@ -51,4 +55,49 @@ test('digat leaves the hand alone when it holds a harvester or none is carried',
   const dirt = hands({ held: SWORD, items: [SWORD, STONE_PICK] })
   assert.strictEqual(await dirt.holdHarvester({ name: 'dirt', harvestTools: undefined, canHarvest: () => true }), null)
   assert.strictEqual(dirt.bot.equips, 0, 'a block any hand harvests')
+})
+
+// /digat on blockName in reach, with hotbar holding item names (null for an empty slot) and slot held selected.
+async function digWith (blockName, hotbar, held) {
+  const block = Block.fromStateId(registry.blocksByName[blockName].defaultState, 0)
+  block.position = new Vec3(2, 64, 0)
+  const slots = new Array(45).fill(null)
+  hotbar.forEach((name, i) => { if (name) slots[36 + i] = new Item(registry.itemsByName[name].id, 1) })
+  const bot = {
+    entity: { position: new Vec3(0.5, 64, 0.5) },
+    inventory: { slots, hotbarStart: 36, items: () => slots.filter(Boolean) },
+    quickBarSlot: held,
+    get heldItem () { return slots[36 + this.quickBarSlot] },
+    setQuickBarSlot (i) { this.quickBarSlot = i },
+    equips: [],
+    async equip (item) { this.equips.push(item.name); this.quickBarSlot = slots.indexOf(item) - 36 },
+    blockAt: () => block,
+    async dig () { this.dugWith = this.heldItem ? this.heldItem.name : null }
+  }
+  const env = {
+    bot,
+    bunker: { building: false },
+    cellKnown: () => true,
+    seenNow: () => true,
+    require,
+    round: (v) => ({ x: v.x, y: v.y, z: v.z }),
+    PICK_TIER: botConstant('PICK_TIER'),
+    DIG_TOOL: botConstant('DIG_TOOL')
+  }
+  const reply = await awaitRoute('/digat', { x: '2', y: '64', z: '0' }, env)
+  return { reply, bot }
+}
+
+const TOOLS = ['wooden_pickaxe', 'stone_axe', 'wooden_shovel', 'iron_pickaxe', 'stone_pickaxe', null]
+
+test('digat digs a log with an axe, dirt with a shovel, ore with the lowest pick that keeps the drop and a crop bare-handed', async () => {
+  const log = await digWith('oak_log', TOOLS, 5)
+  assert.strictEqual(log.bot.dugWith, 'stone_axe')
+  assert.strictEqual(log.reply.with, 'stone_axe')
+  assert.strictEqual((await digWith('dirt', TOOLS, 0)).bot.dugWith, 'wooden_shovel')
+  assert.strictEqual((await digWith('iron_ore', TOOLS, 1)).bot.dugWith, 'stone_pickaxe')
+  const crop = await digWith('wheat', TOOLS, 0)
+  assert.deepStrictEqual(crop.bot.equips, [], 'a crop')
+  assert.strictEqual(crop.bot.dugWith, null)
+  assert.strictEqual(crop.reply.with, null)
 })

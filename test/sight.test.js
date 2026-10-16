@@ -527,6 +527,34 @@ test('use names a block in lit sight, never one in rock, around a corner or in t
   assert.match((await use(cave(DARK, FAR_END), coal)).error.message, UNSEEN)
 })
 
+test('digat digs a block in lit sight, never one seen before and dark now, around a corner or in the dark', async () => {
+  const digat = async (env, at) => {
+    const acts = []
+    withHands(env)
+    const base = env.bot.blockAt
+    env.bot.blockAt = (p) => ({ ...base(p), digTime: () => 750 })
+    env.bot.pathfinder.goto = async () => { acts.push('walk') }
+    Object.assign(env.bot, { equip: async () => { acts.push('equip') }, dig: async () => { acts.push('dig') } })
+    Object.assign(env, { bunker: { building: false }, PICK_TIER: botConstant('PICK_TIER'), DIG_TOOL: botConstant('DIG_TOOL') })
+    const { handle, res } = routeHandler('/digat', env)
+    await handle({ query: at }, res)
+    return { body: res.body, error: res.error, acts }
+  }
+  const coal = { x: '-1', y: '65', z: '0' }
+  const lit = await digat(cave(LIT), coal)
+  assert.strictEqual(lit.body.dug, 'coal_ore', 'control: in sight')
+  assert.deepStrictEqual(lit.acts, ['dig'])
+  const remembered = cave(DARK, FAR_END)
+  remembered.SEEN.add(ck(-1, 65, 0))
+  for (const [env, at] of [[cave(LIT), { x: '7', y: '66', z: '0' }], [cave(DARK, FAR_END), coal], [remembered, coal]]) {
+    const r = await digat(env, at)
+    assert.match(r.error.message, UNSEEN)
+    assert.doesNotMatch(r.error.message, /iron|coal|ore/)
+    assert.strictEqual(r.body, undefined)
+    assert.deepStrictEqual(r.acts, [], 'no walk, equip or dig')
+  }
+})
+
 test('activate presses a block in lit sight and gives its state only while it stays in sight', async () => {
   const activate = async (env, at) => {
     const { handle, res } = routeHandler('/activate', env)
