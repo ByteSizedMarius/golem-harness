@@ -59,18 +59,18 @@ test('placeitem refuses a cell the body overlaps after its walk, the head cell i
   }
 })
 
-// craftItem over a body at (0.5, 64, 0.5) carrying a crafting table, with a placed table at tableAt or none.
-// A 3x3 recipe needs the table, a 2x2 one does not. goto puts the body at its goal.
-function crafter ({ tableAt = null, needsTable = true } = {}) {
+// craftItem over a body at (0.5, 64, 0.5) carrying a crafting table, with a placed table at tableAt or none,
+// unseen when seen is false. A 3x3 recipe needs the table, a 2x2 one does not. goto puts the body 2.5 short of its goal in x.
+function crafter ({ tableAt = null, needsTable = true, seen = true } = {}) {
   const entity = body(0.5, 64, 0.5)
   const log = []
-  const table = tableAt && { name: 'crafting_table', position: tableAt }
   const recipe = { result: { count: needsTable ? 1 : 4 } }
-  const env = placingEnv(entity, ground(), {
+  const placed = tableAt ? { [key(tableAt)]: { name: 'crafting_table', boundingBox: 'block' } } : {}
+  const env = placingEnv(entity, ground(placed), {
     items: [{ name: 'crafting_table', count: 1 }],
     bot: {
       recipesFor: (id, meta, min, t) => (t || !needsTable ? [recipe] : []),
-      findBlock: ({ maxDistance }) => (table && table.position.distanceTo(entity.position) <= maxDistance ? table : null),
+      findBlocks: ({ maxDistance }) => (tableAt && tableAt.distanceTo(entity.position) <= maxDistance ? [tableAt] : []),
       pathfinder: { goto: async (g) => { log.push(['goto', g.x, g.y, g.z, g.r]); entity.position = new Vec3(g.x - 2.5, g.y, g.z + 0.5) } },
       async craft (r, n, t) { log.push(['craft', t ? key(t.position) : null]) },
       async placeBlock () { log.push(['placeBlock']) },
@@ -81,16 +81,30 @@ function crafter ({ tableAt = null, needsTable = true } = {}) {
       goals: { GoalNear: function (x, y, z, r) { Object.assign(this, { x, y, z, r }) } },
       SERVER_RECIPES: null,
       overrideRecipes,
-      mcData: { itemsByName: {} }
+      mcData: { itemsByName: {} },
+      cellKnown: (p) => seen || !tableAt || !p.equals(tableAt),
+      seenNow: (p) => seen || !tableAt || !p.equals(tableAt),
+      STATIONS: new Map()
     }
   })
   return { log, ctx: loadBotFunctions(['craftItem'], env) }
 }
 
+const NO_TABLE = 'no crafting table seen within 16, place one (place or placeitem) and craft again'
+
 test('craft with no table within 16 refuses a 3x3 recipe and places nothing', async () => {
   const { log, ctx } = crafter()
-  await assert.rejects(ctx.craftItem({ id: 1, name: 'chest' }, 1), { message: 'no crafting table nearby, place one (place or placeitem) and craft again' })
+  await assert.rejects(ctx.craftItem({ id: 1, name: 'chest' }, 1), { message: NO_TABLE })
   assert.deepStrictEqual(log, [])
+})
+
+test('craft treats an unseen crafting table as none, without walking to it or naming it', async () => {
+  const hidden = crafter({ tableAt: new Vec3(10, 64, 0), seen: false })
+  await assert.rejects(hidden.ctx.craftItem({ id: 1, name: 'chest' }, 1), { message: NO_TABLE })
+  assert.deepStrictEqual(hidden.log, [])
+  const grid = crafter({ tableAt: new Vec3(10, 64, 0), seen: false, needsTable: false })
+  await grid.ctx.craftItem({ id: 2, name: 'oak_planks' }, 4)
+  assert.deepStrictEqual(grid.log, [['craft', null]], 'a 2x2 recipe used the unseen table')
 })
 
 test('craft walks to a table 10 blocks off and crafts at it', async () => {

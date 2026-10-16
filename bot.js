@@ -1838,7 +1838,24 @@ function airPrecheck(dest, range = 1) {
 // fog-of-war memory (a player remembers what they've looked at; they never saw through rock).
 const SEEN = new Set()
 const SEEN_CAP = 400000
-const markSeen = (x, y, z) => { if (SEEN.size < SEEN_CAP) SEEN.add(ck(x, y, z)) }
+// The station last seen in each cell, 'x,y,z' -> block id.
+const STATIONS = new Map()
+const STATION_CAP = 20000
+const STATION_RE = /chest|furnace|crafting_table|anvil|enchanting_table|_bed$/
+function markSeen (x, y, z, b = bot.blockAt(new Vec3(x, y, z))) {
+  if (SEEN.size < SEEN_CAP) SEEN.add(ck(x, y, z))
+  rememberStation(x, y, z, b)
+}
+// A seen station is remembered in its cell, and a cell seen holding anything else forgets it.
+function rememberStation (x, y, z, b) {
+  if (!b) return
+  const key = ck(x, y, z)
+  if (!STATION_RE.test(b.name)) {
+    STATIONS.delete(key)
+  } else if (STATIONS.get(key) !== b.type && (STATIONS.has(key) || STATIONS.size < STATION_CAP)) {
+    STATIONS.set(key, b.type)
+  }
+}
 // forward vector from mineflayer yaw/pitch — same convention /scene's "ahead" probe uses
 function lookVec(yaw, pitch) {
   return new Vec3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch))
@@ -4321,8 +4338,35 @@ function placeSpot () {
   return null
 }
 
-// Crafts count items of item at a crafting table within 16 blocks, or in the 2x2 grid when none stands
-// there and the recipe fits it. It never places a table.
+// Cells within radius holding one of ids: seen there now, or remembered there while out of sight.
+function knownBlocks (ids, radius) {
+  const here = bot.entity.position
+  const found = bot.findBlocks({ matching: ids, maxDistance: radius, count: 256 }).filter(p => seenNow(p))
+  for (const [key, id] of STATIONS) {
+    if (!ids.includes(id)) continue
+    const p = new Vec3(...key.split(',').map(Number))
+    if (here.distanceTo(p) <= radius && !seenNow(p) && bot.blockAt(p)) found.push(p)
+  }
+  return found
+    .sort((a, b) => here.distanceTo(a.offset(0.5, 0.5, 0.5)) - here.distanceTo(b.offset(0.5, 0.5, 0.5)))
+}
+function nearestKnown (ids, radius) {
+  const p = knownBlocks(ids, radius)[0]
+  return p ? bot.blockAt(p) : null
+}
+// The block at p when the bot remembers a station of one of ids there, else null.
+function rememberedStation (p, ids) {
+  return ids.includes(STATIONS.get(ck(p.x, p.y, p.z))) ? bot.blockAt(p) : null
+}
+// The block at p once the walk to it ends, when it passes test. A remembered station found gone is forgotten.
+function arrivedStation (p, test, what) {
+  const b = bot.blockAt(p)
+  if (b && test(b)) return b
+  rememberStation(p.x, p.y, p.z, b)
+  throw new Error(`no ${what} at ${p.x},${p.y},${p.z} any more`)
+}
+
+// Crafts at a crafting table seen within 16 blocks, else in the 2x2 grid if the recipe fits, and never places a table.
 async function craftItem (item, count) {
   const override = overrideRecipes(SERVER_RECIPES, item.name, mcData.itemsByName)
   const recipesAt = (table) => override
@@ -4334,8 +4378,9 @@ async function craftItem (item, count) {
   // output up) but the server never performs it, and the next sync deletes the output. Route
   // every craft through a real table when one is reachable; 2x2 only as last resort.
   const canUseTable = !!recipesAt(true).length
-  const near = bot.findBlock({ matching: resolveBlockIds('crafting_table'), maxDistance: 16 })
-  if (needsTable && !near) throw new Error('no crafting table nearby, place one (place or placeitem) and craft again')
+  const tableIds = resolveBlockIds('crafting_table')
+  const near = nearestKnown(tableIds, 16)
+  if (needsTable && !near) throw new Error('no crafting table seen within 16, place one (place or placeitem) and craft again')
   const useTable = canUseTable && !!near
   if (useTable) {
     // walk within reach of an existing table (fixes today's "table 4 blocks away" failure)
@@ -4346,7 +4391,8 @@ async function craftItem (item, count) {
   // items (planks 4, sticks 4, torches 4) — stop as soon as we've made enough.
   let made = 0, lastErr = null
   while (made < count) {
-    const t = useTable ? bot.findBlock({ matching: resolveBlockIds('crafting_table'), maxDistance: 4 }) : null
+    const at = useTable && nearestKnown(tableIds, 4)
+    const t = at ? arrivedStation(at.position, (b) => b.name === 'crafting_table', 'crafting table') : null
     const recipes = recipesAt(t)
     if (!recipes.length) { lastErr = `out of materials/recipe after ${made}${useTable ? ` (table nearby: ${!!t})` : ''}`; break }
     const perCraft = (recipes[0].result && recipes[0].result.count) || 1
@@ -7043,14 +7089,14 @@ app.get('/enchant', async (req, res) => {
     const itemName = req.query.item
     const slot = req.query.slot === undefined ? null : parseInt(req.query.slot)
     if (!itemName) return err(res, new Error('item required'))
-    const tb = bot.findBlock({ matching: resolveBlockIds('enchanting_table'), maxDistance: 16 })
-    if (!tb) return err(res, new Error('no enchanting table within 16'))
+    const tb = nearestKnown(resolveBlockIds('enchanting_table'), 16)
+    if (!tb) return err(res, new Error('no enchanting table seen within 16'))
     await bot.pathfinder.goto(new goals.GoalNear(tb.position.x, tb.position.y, tb.position.z, 2))
     const item = bot.inventory.items().find(i => i.name === itemName)
     if (!item) return err(res, new Error(`no ${itemName} in pockets`))
     const lapis = bot.inventory.items().find(i => i.name === 'lapis_lazuli')
     if (!lapis) return err(res, new Error('no lapis_lazuli in pockets — the table burns 1-3 per enchant'))
-    const table = await bot.openEnchantmentTable(tb)
+    const table = await bot.openEnchantmentTable(arrivedStation(tb.position, (b) => b.name === 'enchanting_table', 'enchanting table'))
     const propTap = (p) => console.log(`[enchant] prop packet: windowId=${p.windowId} property=${p.property} value=${p.value}`)
     bot._client.on('craft_progress_bar', propTap)
     try {
@@ -7115,12 +7161,12 @@ app.get('/rename', async (req, res) => {
     if (!itemName || !newName) return err(res, new Error('item and name required'))
     // exact-match resolve skips the damaged variants — an anvil is an anvil, gather all three
     const anvilIds = ['anvil', 'chipped_anvil', 'damaged_anvil'].flatMap(n => resolveBlockIds(n))
-    const ab = bot.findBlock({ matching: anvilIds, maxDistance: 16 })
-    if (!ab) return err(res, new Error('no anvil within 16'))
+    const ab = nearestKnown(anvilIds, 16)
+    if (!ab) return err(res, new Error('no anvil seen within 16'))
     await bot.pathfinder.goto(new goals.GoalNear(ab.position.x, ab.position.y, ab.position.z, 2))
     const item = bot.inventory.items().find(i => i.name === itemName)
     if (!item) return err(res, new Error(`no ${itemName} in pockets`))
-    const anvil = await bot.openAnvil(ab)
+    const anvil = await bot.openAnvil(arrivedStation(ab.position, (b) => /anvil$/.test(b.name), 'anvil'))
     try {
       await anvil.rename(item, newName)
       emitEvent('rename', `${itemName} christened "${newName}" — now lv${bot.experience.level}`)
@@ -7132,10 +7178,20 @@ app.get('/rename', async (req, res) => {
 })
 
 function targetFurnace (q) {
-  if (q.at == null) return bot.findBlock({ matching: resolveBlockIds('furnace'), maxDistance: 8 })
+  if (q.at == null) {
+    const b = nearestKnown(resolveBlockIds('furnace'), 8)
+    if (!b) throw new Error('no furnace seen within 8')
+    return b
+  }
   const [x, y, z] = String(q.at).split(',').map(Number)
   if (![x, y, z].every(Number.isFinite)) throw new Error('at takes x,y,z')
-  const b = bot.blockAt(new Vec3(Math.floor(x), Math.floor(y), Math.floor(z)))
+  const p = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z))
+  if (!seenNow(p)) {
+    const remembered = rememberedStation(p, resolveBlockIds('furnace'))
+    if (!remembered) throw outOfSight()
+    return remembered
+  }
+  const b = bot.blockAt(p)
   if (!b || b.name !== 'furnace') throw new Error(`no furnace at ${q.at} (${b ? b.name : 'unloaded'})`)
   return b
 }
@@ -7163,10 +7219,9 @@ app.get('/smelt', async (req, res) => {
     const fuelName = req.query.fuel || 'coal'
     const want = Math.max(1, parseInt(req.query.count || '1'))
     if (!inputName) return err(res, new Error('item required'))
-    const fb = bot.findBlock({ matching: resolveBlockIds('furnace'), maxDistance: 8 })
-    if (!fb) return err(res, new Error('no furnace within 8'))
+    const fb = targetFurnace({})
     await bot.pathfinder.goto(new goals.GoalNear(fb.position.x, fb.position.y, fb.position.z, 2))
-    const furnace = await bot.openFurnace(fb)
+    const furnace = await bot.openFurnace(arrivedStation(fb.position, (b) => b.name === 'furnace', 'furnace'))
     try {
       const step = (what) => console.log(`[smelt] ${what} ${JSON.stringify(furnaceSlots(furnace))}`)
       step('opened')
@@ -7216,9 +7271,8 @@ app.get('/furnace', async (req, res) => {
     const take = req.query.take
     if (take != null && !['input', 'fuel', 'output'].includes(take)) return err(res, new Error('take is input, fuel or output'))
     const fb = targetFurnace(req.query)
-    if (!fb) return err(res, new Error('no furnace within 8'))
     await bot.pathfinder.goto(new goals.GoalNear(fb.position.x, fb.position.y, fb.position.z, 2))
-    const furnace = await bot.openFurnace(fb)
+    const furnace = await bot.openFurnace(arrivedStation(fb.position, (b) => b.name === 'furnace', 'furnace'))
     try {
       if (take == null) {
         // mineflayer reads a bar as 0 until a value arrives after its total.

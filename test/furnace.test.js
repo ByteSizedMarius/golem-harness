@@ -8,7 +8,9 @@ const { HUNG, awaitRoute, routeHandler, timed } = require('./helpers')
 
 const IDS = { iron_ore: 1, iron_ingot: 2, coal: 3, sand: 4, glass: 5 }
 const stack = (name, count) => ({ name, type: IDS[name], count, stackSize: 64 })
+const HERE = new Vec3(0.5, 64, 0.5)
 const AT = new Vec3(3, 64, 0)
+const UNSEEN = /not in my sight, blocked or unlit/
 
 // A fake furnace window whose transfer picks slots the way mineflayer's does.
 function furnaceWindow ({ input = null, fuel = null, output = null, pockets = [] }) {
@@ -50,18 +52,25 @@ function furnaceWindow ({ input = null, fuel = null, output = null, pockets = []
   return { window, transfer, pocket }
 }
 
-function furnaceEnv (f) {
+// seen tells whether the furnace cell is in lit sight or was seen, and walks collects the goals the pathfinder was sent.
+function furnaceEnv (f, seen = true) {
   const logs = []
+  const walks = []
   const block = { name: 'furnace', position: AT }
   const env = {
     bot: {
-      findBlock: () => block,
+      entity: { position: HERE },
+      findBlocks: ({ matching }) => (matching.includes(61) ? [AT] : []),
       blockAt: (p) => (p.equals(AT) ? block : { name: 'stone', position: p }),
-      pathfinder: { goto: async () => {} },
+      pathfinder: { goto: async (goal) => { walks.push(goal) } },
       openFurnace: async (b) => { assert.strictEqual(b, block); return f.window },
       transfer: async (o) => { assert.strictEqual(o.window, f.window); f.transfer(o) },
       waitForTicks: async () => {}
     },
+    cellKnown: (p) => seen || !p.equals(AT),
+    seenNow: (p) => seen || !p.equals(AT),
+    STATIONS: new Map(),
+    ck: (x, y, z) => x + ',' + y + ',' + z,
     ready: true,
     goals,
     Vec3,
@@ -70,7 +79,7 @@ function furnaceEnv (f) {
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     console: { log: (line) => logs.push(line) }
   }
-  return { env, logs }
+  return { env, logs, walks }
 }
 
 async function refusal (route, query, env) {
@@ -118,12 +127,12 @@ test('smelt takes its own finished output into the pockets and leaves a foreign 
   assert.strictEqual(foreign.pocket('glass'), 0)
 })
 
-test('the furnace tool lists the slots and the burn progress of the furnace at x,y,z', async () => {
+test('the furnace tool lists the slots and the burn progress of the seen furnace at x,y,z', async () => {
   const f = furnaceWindow({ input: stack('iron_ore', 10), fuel: stack('coal', 2), output: stack('iron_ingot', 6) })
   f.window.progress = 0.456
   f.window.fuel = 0.5
   const { env } = furnaceEnv(f)
-  env.bot.findBlock = () => null
+  env.bot.findBlocks = () => []
   const reply = await awaitRoute('/furnace', { at: '3,64,0' }, env)
   assert.deepStrictEqual(reply, { at: { x: 3, y: 64, z: 0 }, input: '10 iron_ore', fuel: '2 coal', output: '6 iron_ingot', progress: 0.46, fuelLeft: 0.5 })
   assert.ok(f.window.closed, 'the window stays open')
@@ -138,4 +147,18 @@ test('the furnace tool takes count from the input and the whole output stack', a
   const output = await awaitRoute('/furnace', { take: 'output', count: '2' }, env)
   assert.strictEqual(output.took, '6 iron_ingot')
   assert.deepStrictEqual([f.window.outputItem(), f.pocket('iron_ingot')], [null, 6])
+})
+
+test('furnace by x,y,z and smelt refuse an unseen furnace without walking to it or naming it', async () => {
+  const f = furnaceWindow({ input: stack('iron_ore', 10), pockets: [stack('iron_ore', 4), stack('coal', 5)] })
+  const { env, walks } = furnaceEnv(f, false)
+  env.bot.openFurnace = async () => assert.fail('opened an unseen furnace')
+  const atError = await refusal('/furnace', { at: '3,64,0' }, env)
+  assert.match(atError, UNSEEN)
+  assert.doesNotMatch(atError, /furnace|iron/)
+  const nearError = await refusal('/smelt', { item: 'iron_ore' }, env)
+  assert.match(nearError, /no furnace seen within 8/)
+  assert.doesNotMatch(nearError, /3,64,0|iron/)
+  assert.deepStrictEqual(walks, [])
+  assert.deepStrictEqual([f.window.inputItem().count, f.pocket('iron_ore'), f.pocket('coal')], [10, 4, 5])
 })

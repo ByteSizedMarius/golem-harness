@@ -5,11 +5,12 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const mcData = require('minecraft-data')('1.21.11')
+const { Vec3 } = require('vec3')
 const { readServerOverrides, renameBlocks, overrideRecipes, craftable } = require('../lib/server-overrides')
 const { awaitRoute, loadBotFunctions } = require('./helpers')
 
 const id = (name) => mcData.itemsByName[name].id
-const TABLE = { name: 'crafting_table', position: { x: 2, y: 64, z: 0 } }
+const TABLE = { name: 'crafting_table', position: new Vec3(2, 64, 0) }
 const OVERRIDES = {
   ingredients: {
     planks: { items: ['oak_planks', 'spruce_planks'] },
@@ -49,7 +50,9 @@ function crafter (items) {
       for (const d of recipe.delta) held.set(d.id, (held.get(d.id) || 0) + d.count)
       if (!recipe.delta.length) held.set(recipe.result.id, (held.get(recipe.result.id) || 0) + recipe.result.count)
     },
-    findBlock: () => TABLE,
+    entity: { position: new Vec3(0.5, 64, 0.5) },
+    findBlocks: () => [TABLE.position],
+    blockAt: () => TABLE,
     pathfinder: { goto: async () => {} }
   }
   return { bot, crafts, held }
@@ -64,6 +67,9 @@ function craftEnv (bot, serverRecipes) {
     craftable,
     resolveItem: (name) => mcData.itemsByName[name] || null,
     resolveBlockIds: () => [mcData.blocksByName.crafting_table.id],
+    cellKnown: () => true,
+    seenNow: () => true,
+    STATIONS: new Map(),
     goals: { GoalNear: class {} }
   }
 }
