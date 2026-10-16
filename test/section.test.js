@@ -3,7 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { sectionColumns, floorPhrase } = require('../lib/section')
-const { runRoute } = require('./helpers')
+const { botConstant, runRoute } = require('./helpers')
 
 const O = { x: 0, y: 64, z: 0 }
 const key = (x, y, z) => `${x},${y},${z}`
@@ -68,6 +68,8 @@ function closedRoom (light) {
     floorPhrase,
     SEEN: new Set(),
     ESTIMATED_LIGHT: new Map(),
+    SIGHT_MEMO: { t: 0, cells: new Map() },
+    SIGHT_MS: botConstant('SIGHT_MS')
   }
 }
 

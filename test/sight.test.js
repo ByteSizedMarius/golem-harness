@@ -7,7 +7,7 @@ const vm = require('node:vm')
 const { Vec3 } = require('vec3')
 const { sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
-const { botConstant, botSource, loadBotFunctions, routeHandler, runRoute, reflexIn } = require('./helpers')
+const { balanced, botConstant, botSource, loadBotFunctions, routeHandler, runRoute, reflexIn } = require('./helpers')
 const { GRAVESTONE } = require('../lib/server-overrides')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
@@ -37,6 +37,8 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     Vec3,
     SEEN: new Set(),
     ESTIMATED_LIGHT: new Map(),
+    SIGHT_MEMO: { t: 0, cells: new Map() },
+    SIGHT_MS: botConstant('SIGHT_MS'),
   }
 }
 
@@ -86,6 +88,50 @@ test('open sky at midnight shows ore 12 blocks out, not 13', () => {
   assert.strictEqual(findsCoal(plain(13, NOON)), true, 'control: noon')
   assert.strictEqual(findsCoal(plain(12, MIDNIGHT)), true)
   assert.strictEqual(findsCoal(plain(13, MIDNIGHT)), false)
+})
+
+test('a floor block five out shows by its top face, never under a block laid over it', () => {
+  // A lit corridor with coal in its floor at x 5, its east face open to a hole at 6,63,0.
+  const floor = (covered) => world({
+    open: (x, y, z) => z === 0 && ((x === 6 && y === 63) || ((y === 64 || y === 65) && x >= 0 && x <= 9 && !(covered && x === 5 && y === 64))),
+    ores: { '5,63,0': 'coal_ore' },
+    light: () => LIT
+  })
+  assert.strictEqual(findsCoal(floor(false)), true)
+  const covered = runRoute('/find', { name: 'coal' }, floor(true))
+  assert.strictEqual(covered.count, 0)
+  assert.doesNotMatch(JSON.stringify(covered), /coal_ore|"x":5,"y":63/)
+})
+
+test('ore open only on its bottom face to a dug cell shows from below at an angle', () => {
+  // A lit tunnel east along z 0, the wall cell 4,65,1 dug out and diamond above it.
+  const env = world({
+    open: (x, y, z) => (z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 6) || (x === 4 && y === 65 && z === 1),
+    ores: { '4,66,1': 'diamond_ore' },
+    light: () => LIT
+  })
+  assert.deepStrictEqual(runRoute('/find', { name: 'diamond' }, env).blocks.map((b) => [b.pos.x, b.pos.y, b.pos.z]), [[4, 66, 1]])
+})
+
+test('ore facing the bot from behind a wall stays hidden in every reply', async () => {
+  // A lit tunnel along z 0, a wall at z 1, a lit pocket along z 2 with diamond in its far wall at 5,64,3.
+  const behind = () => withHands(world({
+    open: (x, y, z) => (z === 0 || z === 2) && (y === 64 || y === 65) && x >= 0 && x <= 9,
+    ores: { '5,64,3': 'diamond_ore' },
+    light: () => LIT
+  }))
+  const leak = /diamond|"x":5,"y":64,"z":3|5,64,3/
+  const found = runRoute('/find', { name: 'diamond' }, behind())
+  assert.strictEqual(found.count, 0)
+  assert.doesNotMatch(JSON.stringify(found), leak)
+  const at = { x: '5', y: '64', z: '3' }
+  for (const route of ['/blockat', '/use']) {
+    const { handle, res } = routeHandler(route, behind())
+    await handle({ query: at }, res)
+    assert.match(res.error.message, UNSEEN, route)
+    assert.strictEqual(res.body, undefined, route)
+    assert.doesNotMatch(res.error.message, leak, route)
+  }
 })
 
 // The light data of the block types in world, a torch as type 5, an end_rod as type 6, fire as type 7 and lava as type 8.
@@ -275,11 +321,11 @@ test('section in total darkness names no ore and no air past two blocks', () => 
 })
 
 // A corridor at z 0, y 64..65 east from x 0 to 9 at light level light, or with bend, a room at
-// x 0..3 and a lit passage on at z 1 from x 3 to 9.
+// x 0..3 and a lit passage on south at x 3 from z 1 to 9.
 function corridor (light, bend = false) {
   const open = (x, y, z) => (y === 64 || y === 65) &&
-    (bend ? (z === 0 && x >= 0 && x <= 3) || (z === 1 && x >= 3 && x <= 9) : z === 0 && x >= 0 && x <= 9)
-  return world({ open, light: (x, z) => (z === 1 ? 15 : light) })
+    (bend ? (z === 0 && x >= 0 && x <= 3) || (x === 3 && z >= 1 && z <= 9) : z === 0 && x >= 0 && x <= 9)
+  return world({ open, light: (x, z) => (z >= 1 ? 15 : light) })
 }
 
 test('passages gives an exit in lit sight, never one around a corner or in the dark', () => {
@@ -429,12 +475,19 @@ test('the walked trail marks only what the body fills and sees by its light, nev
   assert.ok(!dark.has('3,64,0') && !dark.has('2,63,0'), 'past two blocks')
 })
 
-// The gaze reply of a body looking north from 0,64,0 over env, and the number of cells it marked seen.
+// The gaze reply of a body looking north from 0,64,0 over env, and the cells it marked seen.
 function gaze (env) {
   env.bot.entity.pitch = 0
   Object.assign(env, { markSeen: (x, y, z) => env.SEEN.add(ck(x, y, z)), DARK_RAY: botConstant('DARK_RAY') })
-  return { reply: runRoute('/gaze', {}, env), seen: env.SEEN.size }
+  return { reply: runRoute('/gaze', {}, env), seen: env.SEEN }
 }
+
+// The 'x,y,z' keys whose cell lies more than d blocks from the eye of a body at 0,64,0.
+const fartherThan = (keys, d) => [...keys].filter((k) => {
+  const [x, y, z] = k.split(',').map(Number)
+  const gap = (v, lo) => Math.max(lo - v, 0, v - lo - 1)
+  return Math.hypot(gap(0.5, x), gap(65.62, y), gap(0.5, z)) > d
+})
 
 const cavern = (light) => world({ open: (x, y, z) => Math.abs(x) <= 6 && Math.abs(z) <= 6 && y >= 64 && y <= 70, light: () => light })
 
@@ -443,6 +496,7 @@ test('gaze names nothing it would see only in total darkness, and says it is too
   assert.match(lit.reply.summary, /stone/, 'control: lit')
   const dark = gaze(cavern(DARK))
   assert.deepStrictEqual([dark.reply.surfaces, dark.reply.openings], [[], []])
+  assert.deepStrictEqual(fartherThan(dark.seen, 2), [], 'no cell past the two blocks light 0 shows')
   assert.doesNotMatch(dark.reply.summary, /stone|coal|open space/)
   assert.match(dark.reply.summary, /too dark to see/)
 })
@@ -459,3 +513,59 @@ test('gaze at the edge of the loaded world in the dark says too dark, not open s
   assert.doesNotMatch(dark, /open space/)
   assert.match(dark, /too dark to see/)
 })
+
+test('a line through the seam where two blocks meet at an edge sees nothing behind it', () => {
+  // Lit open ground with stone at 1,y,0 and 0,y,1 for y 64..66, the body at 0,64,0.
+  const env = world({ open: (x, y, z) => y >= 64 && !(y <= 66 && x + z === 1 && x * z === 0), light: () => LIT })
+  Object.assign(env, { markSeen: (x, y, z) => env.SEEN.add(ck(x, y, z)), DARK_RAY: botConstant('DARK_RAY') })
+  const { castRay, lookVec, entityPerceptible } = loadBotFunctions(['castRay', 'lookVec', 'entityPerceptible'], env)
+  const behind = () => [...env.SEEN].filter((k) => { const [x, , z] = k.split(',').map(Number); return x >= 1 && z >= 1 })
+  assert.strictEqual(castRay(lookVec(Math.PI / 4, 0), 24), null, 'control: open ground to the north-west')
+  assert.ok(env.SEEN.has('-2,65,-2'), 'control: the ground it crossed')
+  assert.strictEqual(castRay(lookVec(-3 * Math.PI / 4, 0), 24).name, 'stone')
+  assert.deepStrictEqual(behind(), [])
+  const zombie = (x, z) => entityPerceptible({ type: 'mob', name: 'zombie', position: new Vec3(x, 64, z), metadata: [0] }, { cells: new Set() })
+  assert.strictEqual(zombie(-2.5, -2.5), true, 'control: a zombie to the north-west')
+  assert.strictEqual(zombie(3.5, 3.5), false)
+})
+
+const LADDER = { name: 'ladder', boundingBox: 'block', light: LIT }
+const doorAt = (open) => ({ name: 'oak_door', boundingBox: 'block', light: LIT, getProperties: () => ({ open }) })
+
+
+test('an unloaded cell between the body and a block hides the block', () => {
+  const env = tunnel(5, LIT)
+  assert.strictEqual(findsCoal(env), true, 'control: every cell loaded')
+  const base = env.bot.blockAt
+  env.bot.blockAt = (p) => (p.x === 2 ? null : base(p))
+  assert.strictEqual(findsCoal(env), false)
+})
+
+// Runs the one blockUpdate handler of bot.js that names marker on env.bot.
+function wireBlockUpdate (env, marker, names) {
+  env.bot = Object.assign(new EventEmitter(), env.bot)
+  const src = botSource()
+  const handlers = [...src.matchAll(/^bot\.on\('blockUpdate', \(oldB, newB\) => /gm)]
+    .map((m) => m[0] + balanced(src, m.index + m[0].length) + ')')
+    .filter((h) => h.includes(marker))
+  assert.strictEqual(handlers.length, 1, `blockUpdate handlers of bot.js naming ${marker}`)
+  const ctx = loadBotFunctions(names, env)
+  vm.runInContext(handlers[0], ctx)
+  return ctx
+}
+
+test('a cell a block change walls off reads unseen at once, not once its kept sight runs out', () => {
+  let now = 1000
+  const cells = {}
+  const env = withCells(tunnel(4, LIT), cells)
+  env.Date = { now: () => now }
+  const { cellKnown } = wireBlockUpdate(env, 'SIGHT_MEMO', ['cellKnown'])
+  const beyond = new Vec3(3, 64, 0)
+  assert.strictEqual(cellKnown(beyond), true, 'control: in sight')
+  cells['2,64,0'] = cells['2,65,0'] = { name: 'stone', boundingBox: 'block', light: 0 }
+  now += 100
+  assert.strictEqual(cellKnown(beyond), true, 'control: walled off with no block update')
+  env.bot.emit('blockUpdate', airAt([2, 64, 0]), stoneAt([2, 64, 0]))
+  assert.strictEqual(cellKnown(beyond), false)
+})
+

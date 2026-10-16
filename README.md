@@ -98,7 +98,7 @@ over lava is eight. Beside the summary, `steps` is a 5×5 north-up grid of the s
 neighbouring cell (`+1`, `-2`, `#` wall, `v` drop, `~` liquid, `?` unseen).
 
 **`/gaze` — the ray-sweep retina.** The bot's head physically turns, then a 15×7 fan of rays (~100°×60°,
-a human-ish field of view) marches out from the eye, sampling every quarter-block until something opaque
+a human-ish field of view) marches out from the eye, through every cell it crosses, until something opaque
 stops each ray. Hits carry block identity, distance, and screen position; misses become "open space
 there." 105 pixels, where every pixel is a laser rangefinder that reports *material* instead of color.
 

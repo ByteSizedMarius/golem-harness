@@ -1322,7 +1322,7 @@ async function macroPlaceAt(Vec3, x, y, z, names, walk = true) {
 // Closes the x-ray cheat: bot.findBlocks() returns ore buried in solid stone no player could
 // see. We reject buried blocks, and ray-march from the eye to confirm an unobstructed view.
 function blockTransparent(b) {
-  if (!b) return true
+  if (!b) return false
   if (b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air') return true
   return b.boundingBox === 'empty'
 }
@@ -1339,35 +1339,76 @@ function touchesFill(p, fill) {
   }
   return false
 }
-// The open cell the eye sees block p by (p itself, else the one before it), null when p is unseen.
-function sightCell(p, maxDist) {
-  if (!isExposed(p)) return null
-  const eye = bot.entity.position.offset(0, 1.62, 0)
-  const target = new Vec3(p.x + 0.5, p.y + 0.5, p.z + 0.5)
-  const delta = target.minus(eye)
-  const dist = delta.norm()
-  if (dist > maxDist) return null
-  const at = new Vec3(p.x, p.y, p.z)
+function holdsWater (b) {
+  return !!b && (b.name.includes('water') || /^(kelp|kelp_plant|seagrass|tall_seagrass|bubble_column)$/.test(b.name) ||
+    (b.getProperties?.() || {}).waterlogged === true)
+}
+// Calls visit(cell, f) for each cell the segment a to b enters past a's own, f the fraction at entry, and returns true once visit does.
+function gridWalk (a, b, visit) {
+  const o = [a.x, a.y, a.z]
+  const d = [b.x - a.x, b.y - a.y, b.z - a.z]
+  const c = o.map(Math.floor)
+  // Segment fraction at the next cell boundary on each axis, and per cell along it.
+  const next = d.map((v, i) => (v > 0 ? (c[i] + 1 - o[i]) / v : v < 0 ? (c[i] - o[i]) / v : Infinity))
+  const span = d.map((v) => Math.abs(1 / v))
+  for (;;) {
+    const i = next[0] <= next[1] && next[0] <= next[2] ? 0 : next[1] <= next[2] ? 1 : 2
+    if (next[i] >= 1) return false
+    c[i] += Math.sign(d[i])
+    if (visit(new Vec3(c[0], c[1], c[2]), next[i])) return true
+    next[i] += span[i]
+  }
+}
+// The last cell the line from eye to point crosses short of cell at, null when the line is blocked.
+function lineCell(eye, point, at) {
   let from = eye.floored()
   let water = 0
-  if (dist >= 1e-6) {
-    const dir = delta.scaled(1 / dist)
-    const steps = Math.ceil(dist * 4)               // sample ~every 0.25 blocks
-    for (let s = 1; s < steps; s++) {
-      const c = eye.plus(dir.scaled((s / steps) * dist)).floored()
-      if (c.equals(at)) break
-      const b = bot.blockAt(c)
-      if (b && b.boundingBox === 'block' && !blockTransparent(b)) return null   // occluded
-      if (b && b.name.includes('lava')) return null
-      // Four cells of water hide what lies behind them.
-      if (b && b.name.includes('water') && !c.equals(from) && ++water > 3) return null
-      from = c
+  const blocked = gridWalk(eye, point, (cell) => {
+    if (cell.equals(at)) return false
+    const b = bot.blockAt(cell)
+    // Four cells of water past the eye's own hide what lies behind them.
+    if (!floodPassable(b) || (holdsWater(b) && ++water > 3)) return true
+    from = cell
+    return false
+  })
+  return blocked ? null : from
+}
+// The open cell the eye sees block p by (p itself, else the one before it), null when p is unseen.
+function sightCell(p, maxDist, lit = () => true) {
+  if (!isExposed(p)) return null
+  const eye = bot.entity.position.offset(0, 1.62, 0)
+  const at = new Vec3(p.x, p.y, p.z)
+  if (eye.distanceTo(at.offset(0.5, 0.5, 0.5)) > maxDist) return null
+  const b = bot.blockAt(at)
+  if (!b) return null
+  const open = blockTransparent(b)
+  if (open && !lit(at)) return null
+  const seenBy = (point) => {
+    const from = lineCell(eye, point, at)
+    return from && (open ? at : lit(from) ? from : null)
+  }
+  const centre = seenBy(at.offset(0.5, 0.5, 0.5))
+  if (centre) return centre
+  const e = [eye.x, eye.y, eye.z]
+  const q = [p.x, p.y, p.z]
+  for (let i = 0; i < 3; i++) {
+    for (const s of [-1, 1]) {
+      const plane = q[i] + (s + 1) / 2
+      if (s * (e[i] - plane) <= 0) continue
+      const n = [...q]
+      n[i] += s
+      if (!blockTransparent(bot.blockAt(new Vec3(n[0], n[1], n[2])))) continue
+      for (const [u, v] of [[0.5, 0.5], [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9]]) {
+        const point = [0, 0, 0]
+        point[i] = plane
+        point[(i + 1) % 3] = q[(i + 1) % 3] + u
+        point[(i + 2) % 3] = q[(i + 2) % 3] + v
+        const c = seenBy(new Vec3(point[0], point[1], point[2]))
+        if (c) return c
+      }
     }
   }
-  return blockTransparent(bot.blockAt(at)) ? at : from
-}
-function canSeeBlock(p, maxDist) {
-  return sightCell(p, maxDist) !== null
+  return null
 }
 // Estimated light of the cells changed since their column's light arrived, by column, then by cell.
 const ESTIMATED_LIGHT = new Map()
@@ -1503,8 +1544,20 @@ function eyeDist (p, h = 1) {
 }
 // Block p in line of sight, within the reach of the light on its open face.
 function seesLit(p, maxDist) {
-  const c = sightCell(p, maxDist)
-  return c !== null && eyeDist(p) <= lightRange(c)
+  const dist = eyeDist(p)
+  if (dist > lightReach(p)) return false
+  return sightCell(p, maxDist, (c) => dist <= lightRange(c)) !== null
+}
+// The largest lightRange among the cells sightCell can judge block p by: p when it is open, else its neighbours.
+function lightReach (p) {
+  const b = bot.blockAt(p)
+  if (!b) return 0
+  if (blockTransparent(b)) return lightRange(p, b)
+  let reach = 0
+  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+    reach = Math.max(reach, lightRange(new Vec3(p.x + dx, p.y + dy, p.z + dz)))
+  }
+  return reach
 }
 // findBlocks candidates (nearest-first) -> keep only what a player here could actually see
 function findVisible(ids, maxDist, count) {
@@ -1520,10 +1573,29 @@ function nearestVisible(ids, maxDist) {
   const v = findVisible(ids, maxDist, 1)
   return v.length ? bot.blockAt(v[0].pos) : null
 }
+// cellKnown's seesLit verdicts by ck key, all dropped every SIGHT_MS.
+const SIGHT_MEMO = { t: 0, cells: new Map() }
+// A verdict outlives the view it came from by at most this.
+const SIGHT_MS = 500
 // A cell the bot saw lit earlier or sees lit now.
 function cellKnown (p) {
-  return SEEN.has(ck(p.x, p.y, p.z)) || seesLit(p, 64)
+  const k = ck(p.x, p.y, p.z)
+  if (SEEN.has(k)) return true
+  const now = Date.now()
+  if (now - SIGHT_MEMO.t > SIGHT_MS) { SIGHT_MEMO.cells.clear(); SIGHT_MEMO.t = now }
+  let sees = SIGHT_MEMO.cells.get(k)
+  if (sees === undefined) SIGHT_MEMO.cells.set(k, sees = seesLit(p, 64))
+  return sees
 }
+// A changed block drops the verdicts of its cell and the six beside it.
+bot.on('blockUpdate', (oldB, newB) => {
+  const p = (newB || oldB)?.position
+  if (!p) return
+  SIGHT_MEMO.cells.delete(ck(p.x, p.y, p.z))
+  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) SIGHT_MEMO.cells.delete(ck(p.x + dx, p.y + dy, p.z + dz))
+})
+// A loaded column brings blocks no verdict saw.
+bot.on('chunkColumnLoad', () => SIGHT_MEMO.cells.clear())
 // A cell the body fills, or one in lit sight now.
 function perceived (p) {
   const o = bot.entity.position.floored()
@@ -1653,9 +1725,8 @@ function airPrecheck(dest, range = 1) {
   } catch (e) { return { verdict: 'inconclusive', why: e.message } }
 }
 
-// ---- the ray-sweep retina + the SEEN set. canSeeBlock was a verifier (given a block, is it
-// visible?); this flips it into a SENSOR: cast a fan of rays from the eye and whatever they hit IS
-// the perception. Every cell a ray crosses or strikes out of total darkness goes into SEEN — the fair
+// ---- the ray-sweep retina + the SEEN set, a SENSOR: cast a fan of rays from the eye and whatever
+// they hit IS the perception. Every cell a ray crosses or strikes out of total darkness goes into SEEN — the fair
 // fog-of-war memory (a player remembers what they've looked at; they never saw through rock).
 const SEEN = new Set()
 const SEEN_CAP = 400000
@@ -1668,31 +1739,29 @@ function lookVec(yaw, pitch) {
 const DARK_RAY = { dark: true }
 function castRay(dir, maxDist) {
   const eye = bot.entity.position.offset(0, 1.62, 0)
-  const steps = Math.ceil(maxDist * 4)
-  let px = null, py = null, pz = null
   // A struck surface shows by the light of the open cell the ray left.
   let range = lightRange(eye.floored())
   let lit = true
-  for (let s = 1; s <= steps; s++) {
-    const t = (s / steps) * maxDist
-    const q = eye.plus(dir.scaled(t))
-    const bx = Math.floor(q.x), by = Math.floor(q.y), bz = Math.floor(q.z)
-    if (bx === px && by === py && bz === pz) continue
-    px = bx; py = by; pz = bz
-    const c = new Vec3(bx, by, bz)
+  let hit = null
+  gridWalk(eye, eye.plus(dir.scaled(maxDist)), (c, f) => {
+    const t = f * maxDist
     const b = bot.blockAt(c)
-    if (!b) return lit ? null : DARK_RAY
+    if (!b) return true
     const liquid = b.name.includes('water') || b.name.includes('lava')
-    if ((b.boundingBox === 'block' && !blockTransparent(b)) || liquid) {
-      if (t > range) return DARK_RAY
-      markSeen(bx, by, bz)
-      return { pos: c, name: b.name, dist: +t.toFixed(1), liquid }
+    if (liquid || !floodPassable(b)) {
+      if (t > range) lit = false
+      else {
+        markSeen(c.x, c.y, c.z, b)
+        hit = { pos: c, name: b.name, dist: +t.toFixed(1), liquid }
+      }
+      return true
     }
     range = lightRange(c, b)
     lit = t <= range
-    if (lit) markSeen(bx, by, bz)                             // traversed open air — seen empty
-  }
-  return lit ? null : DARK_RAY
+    if (lit) markSeen(c.x, c.y, c.z, b)                          // traversed open air — seen empty
+    return false
+  })
+  return hit || (lit ? null : DARK_RAY)
 }
 // sweep a field of view around (yaw,pitch): hSteps x vSteps rays. Each hit carries u (-1 left ..
 // +1 right) and v (-1 low .. +1 high) so callers can talk about screen regions in words.
@@ -3207,22 +3276,19 @@ app.get('/find', (req, res) => {
 // EYE-RAY (07-17, the entity-sense extension the helmsman asked for): the air-flood caps at
 // ~34 for cost, but a big cavern, a chasm, or open terrain gives TRUE line of sight far beyond
 // it — and the server honestly tracks monsters to ~128. A straight unobstructed ray from my eyes
-// is the strictest perception there is: fair by construction, no flood needed. ~0.5-block
-// sampling; glass/leaves count as walls (honest: pixel sight, not entity-ESP).
+// is the strictest perception there is: fair by construction, no flood needed. Every cell between
+// the end cells counts; glass/leaves count as walls (honest: pixel sight, not entity-ESP).
 function losClear(from, to) {
   try {
-    const d = to.minus(from); const len = d.norm()
-    if (len > 160) return false               // past honest server tracking — nothing to see
-    const steps = Math.max(1, Math.ceil(len * 2))
-    const step = d.scaled(1 / steps)
-    let p = from
-    for (let i = 1; i < steps; i++) {
-      p = p.plus(step)
-      const b = bot.blockAt(p.floored())
-      if (!b) return false                    // unloaded chunk in the way — can't claim sight
-      if (b.boundingBox === 'block') return false
-    }
-    return true
+    if (to.distanceTo(from) > 160) return false   // past honest server tracking — nothing to see
+    const end = to.floored()
+    return !gridWalk(from, to, (c) => {
+      if (c.equals(end)) return false
+      const b = bot.blockAt(c)
+      if (!b) return true                     // unloaded chunk in the way — can't claim sight
+      if (b.boundingBox === 'block') return true
+      return false
+    })
   } catch (e) { return false }
 }
 function entityPerceptible(en, fill) {
