@@ -68,6 +68,24 @@ test('a path through a door aims at the centre of the door cell and of every cel
   assert.deepStrictEqual(result.path.slice(at).map((n) => [n.x, n.y, n.z]), [[2.5, 64, 0.5], [3.5, 64, 0.5], [4.5, 64, 0.5], [5.5, 64, 0.5]])
 })
 
+test('a body with no blocks to place finds no path across a pit past a door rather than one that bridges it', async () => {
+  // A walled corridor at z 0 from x 0 to 9, a door at x 2 and a pit at x 4 to 8, too wide to jump and too deep to drop into.
+  const cells = {}
+  for (let x = -1; x <= 10; x++) {
+    for (const y of [64, 65]) {
+      for (const z of [-1, 1]) cells[`${x},${y},${z}`] = ['stone', {}]
+      if (x === -1 || x === 10) cells[`${x},${y},0`] = ['stone', {}]
+    }
+  }
+  cells['2,64,0'] = door('lower')
+  cells['2,65,0'] = door('upper')
+  for (let x = 4; x <= 8; x++) for (let y = 50; y <= 63; y++) cells[`${x},${y},0`] = ['air', {}]
+  const { plan } = await body(new Vec3(0.5, 64, 0.5), cells)
+  const result = plan(new goals.GoalBlock(9, 64, 0))
+  const placed = result.path.flatMap((n) => n.toPlace.filter((p) => !p.useOne).map((p) => [p.x, p.y, p.z]))
+  assert.deepStrictEqual({ status: result.status, placed }, { status: 'noPath', placed: [] })
+})
+
 test('a body flush against a wall plans from the free cell it stands in, not from inside the wall', async () => {
   for (const [label, middle] of [['against an arm', WALL_ARM], ['into a post', WALL_POST]]) {
     const { plan } = await body(new Vec3(0.0125, 64, 0.5), wallLine(0, (z) => (z === 0 ? middle : WALL_ARM)))

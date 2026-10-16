@@ -149,7 +149,7 @@ index b38bd30..752cecc 100644
        bot.setControlState('sprint', false)
      } else if (stateMovements.allowSprinting && physics.canStraightLine(path, true)) {
 diff --git a/node_modules/mineflayer-pathfinder/lib/movements.js b/node_modules/mineflayer-pathfinder/lib/movements.js
-index a7e3505..369b6b2 100644
+index a7e3505..355546a 100644
 --- a/node_modules/mineflayer-pathfinder/lib/movements.js
 +++ b/node_modules/mineflayer-pathfinder/lib/movements.js
 @@ -1,6 +1,8 @@
@@ -187,7 +187,17 @@ index a7e3505..369b6b2 100644
  
      // Open fence gates
      if (this.canOpenDoors && blockC.openable && blockC.shapes && blockC.shapes.length !== 0) {
-@@ -454,6 +464,7 @@ class Movements {
+@@ -397,7 +407,8 @@ class Movements {
+ 
+     if (this.getBlock(node, 0, 0, 0).liquid) cost += this.liquidCost
+ 
+-    neighbors.push(new Move(blockC.position.x, blockC.position.y, blockC.position.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
++    // LOCAL PATCH (Golem 10-16): opening a door or gate uses up no block.
++    neighbors.push(new Move(blockC.position.x, blockC.position.y, blockC.position.z, node.remainingBlocks - toPlace.filter(p => !p.useOne).length, cost, toBreak, toPlace))
+   }
+ 
+   getMoveDiagonal (node, dir, neighbors) {
+@@ -454,6 +465,7 @@ class Movements {
        neighbors.push(new Move(blockC.position.x, blockC.position.y, blockC.position.z, node.remainingBlocks, cost, toBreak))
      } else if (this.getBlock(node, dir.x, -2, dir.z).physical || blockD.liquid) {
        if (!blockD.safe) return // don't self-immolate
@@ -195,7 +205,7 @@ index a7e3505..369b6b2 100644
        cost += this.getNumEntitiesAt(blockC.position, 0, -1, 0) * this.entityCost
        neighbors.push(new Move(blockC.position.x, blockC.position.y - 1, blockC.position.z, node.remainingBlocks, cost, toBreak))
      }
-@@ -473,6 +484,11 @@ class Movements {
+@@ -473,6 +485,11 @@ class Movements {
      return null
    }
  
@@ -207,7 +217,7 @@ index a7e3505..369b6b2 100644
    getMoveDropDown (node, dir, neighbors) {
      const blockB = this.getBlock(node, dir.x, 1, dir.z)
      const blockC = this.getBlock(node, dir.x, 0, dir.z)
-@@ -495,6 +511,7 @@ class Movements {
+@@ -495,6 +512,7 @@ class Movements {
  
      if (blockC.liquid) return // dont go underwater
  
@@ -215,7 +225,7 @@ index a7e3505..369b6b2 100644
      cost += this.getNumEntitiesAt(blockLand.position, 0, 0, 0) * this.entityCost // add cost for entities
  
      neighbors.push(new Move(blockLand.position.x, blockLand.position.y, blockLand.position.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
-@@ -515,6 +532,7 @@ class Movements {
+@@ -515,6 +533,7 @@ class Movements {
  
      if (this.getBlock(node, 0, 0, 0).liquid) return // dont go underwater
  
@@ -223,7 +233,7 @@ index a7e3505..369b6b2 100644
      cost += this.getNumEntitiesAt(blockLand.position, 0, 0, 0) * this.entityCost // add cost for entities
  
      neighbors.push(new Move(blockLand.position.x, blockLand.position.y, blockLand.position.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
-@@ -564,6 +582,8 @@ class Movements {
+@@ -564,6 +583,8 @@ class Movements {
      if (this.getBlock(node, 0, 0, 0).liquid) return // cant jump from water
  
      let cost = 1
@@ -232,7 +242,7 @@ index a7e3505..369b6b2 100644
  
      // Leaving entities at the ceiling level (along path) out for now because there are few cases where that will be important
      cost += this.getNumEntitiesAt(node, dir.x, 0, dir.z) * this.entityCost
-@@ -588,6 +608,7 @@ class Movements {
+@@ -588,6 +609,7 @@ class Movements {
  
        if (ceilingClear && blockB.safe && blockC.safe && blockD.physical) {
          cost += this.exclusionStep(blockB)
@@ -240,7 +250,7 @@ index a7e3505..369b6b2 100644
          // Forward
          neighbors.push(new Move(blockC.position.x, blockC.position.y, blockC.position.z, node.remainingBlocks, cost, [], [], true))
          break
-@@ -606,7 +627,8 @@ class Movements {
+@@ -606,7 +628,8 @@ class Movements {
          if (blockE.physical) {
            cost += this.exclusionStep(blockD)
            cost += this.getNumEntitiesAt(blockD.position, 0, 0, 0) * this.entityCost
