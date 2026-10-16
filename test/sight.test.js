@@ -608,6 +608,56 @@ test('an unloaded cell between the body and a block hides the block', () => {
   assert.strictEqual(findsCoal(env), false)
 })
 
+// The verbose scene reply as JSON and the boot summary over env, the senses besides the lay of the land and the sky stubbed.
+function summaries (env) {
+  Object.assign(env.bot, { health: 20, food: 20, heldItem: null, username: 'Bot', experience: { level: 0 }, inventory: { slots: [] } })
+  const stubs = {
+    require,
+    round: (v) => v,
+    ready: true,
+    sceneEntities: () => ({ threats: [], groups: {} }),
+    resolveBlockIds: () => [],
+    veinScan: () => null,
+    waterState: () => null,
+    hearSummary: () => null,
+    doorsInSight: () => [],
+    stepView: () => null,
+    indoors: () => false,
+    heldInfo: () => null,
+    jobs: { list: () => [] },
+    chatLog: { cursor: 0 },
+    waypoints: { list: () => ({}) },
+    reflexes: [{ name: 'combat', fairFill: () => ({ cells: new Set() }) }]
+  }
+  return [JSON.stringify(runRoute('/scene', { verbose: '1' }, { ...env, ...stubs })), runRoute('/boot', {}, { ...env, ...stubs }).summary]
+}
+
+// A lit room at x -3..3, z -3..3 on a stone floor over a lava lake at y 34, with a one-wide hole at x 2, z 0
+// from the floor down to y bottom.
+function roomOverLava (bottom) {
+  const open = (x, y, z) => ((y === 64 || y === 65) && Math.abs(x) <= 3 && Math.abs(z) <= 3) ||
+    (x === 2 && z === 0 && y >= bottom && y <= 63) || (y === 34 && Math.abs(x) <= 6 && Math.abs(z) <= 6)
+  const env = world({ open, light: () => LIT })
+  const base = env.bot.blockAt
+  env.bot.blockAt = (p) => (p.y === 34 && open(p.x, p.y, p.z) ? { ...LAVA, position: new Vec3(p.x, p.y, p.z), skyLight: 0 } : base(p))
+  return env
+}
+
+test('scene and boot name no lava and no depth down a shaft the bot cannot see into', () => {
+  const [scene, boot] = summaries(roomOverLava(35))
+  for (const s of [scene, boot]) assert.doesNotMatch(s, /LAVA|lava|~30/)
+  assert.deepStrictEqual(summaries(roomOverLava(63)), [scene, boot], 'the shaft and the lake read unlike a hole one deep')
+})
+
+test('scene and boot report a drop on open ground the bot can see, with the lava at its foot', () => {
+  // A plateau to x 2 above a lava pool at y 55 on a floor at y 54, all under open sky.
+  const env = world({ open: (x, y) => y >= (x <= 2 ? 64 : 55), light: () => LIT, skyLight: () => 15 })
+  env.bot.registry = REGISTRY
+  const base = env.bot.blockAt
+  env.bot.blockAt = (p) => (p.x >= 3 && p.y === 55 ? { ...LAVA, type: 8, position: new Vec3(p.x, p.y, p.z), skyLight: 14 } : base(p))
+  for (const s of summaries(env)) assert.match(s, /falls away E at 3, floor ~9 down \(LAVA below\)/)
+})
+
 // Runs the one blockUpdate handler of bot.js that names marker on env.bot.
 function wireBlockUpdate (env, marker, names) {
   env.bot = Object.assign(new EventEmitter(), env.bot)

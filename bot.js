@@ -1097,98 +1097,89 @@ function yawToCompass(yaw) {
   const dx = -Math.sin(yaw), dz = -Math.cos(yaw)
   return compass(dx, dz)
 }
-// spatialSummary: turn the blocks immediately around the bot into NAVIGATION MEANING — enclosed /
-// cliff / elevated / under-cover / clear — instead of a raw ASCII grid I have to parse. A glance
-// should say "boxed in, open door W", not make me decode voxels. Heuristic + heavily guarded.
-function spatialSummary(bot) {
-  try {
-    const p = bot.entity.position.floored()
-    const at = (x, y, z) => bot.blockAt(new Vec3(x, y, z))
-    const solid = (b) => !!(b && b.boundingBox === 'block')
-    const air = (b) => !b || b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air' || b.boundingBox === 'empty'
-    const card = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] }
-    const walled = [], open = []
-    for (const d in card) {
-      const [dx, dz] = card[d]
-      if (solid(at(p.x + dx, p.y, p.z + dz)) || solid(at(p.x + dx, p.y + 1, p.z + dz))) walled.push(d)
-      else open.push(d)
-    }
-    const roofed = solid(at(p.x, p.y + 2, p.z))
-    let airBelow = 0
-    for (let i = 1; i <= 6; i++) { if (air(at(p.x, p.y - i, p.z))) airBelow++; else break }
-    const parts = []
-    if (walled.length >= 3) parts.push(`enclosed (${walled.length} sides)${open.length ? ', open ' + open.join('/') : (roofed ? '' : ', open up')}`)
-    else if (walled.length) parts.push(`walls ${walled.join('/')}`)
-    if (roofed) parts.push('under cover')
-    if (airBelow >= 3) parts.push(`elevated (~${airBelow}${airBelow >= 6 ? '+' : ''} below)`)
-    for (const d of open) {                                  // cliffs: ground much lower a couple out?
-      const [dx, dz] = card[d]
-      let gy = null
-      for (let y = p.y + 1; y > p.y - 8; y--) { if (solid(at(p.x + dx * 2, y, p.z + dz * 2))) { gy = y + 1; break } }
-      if (gy === null) parts.push(`drop ${d} (deep)`)
-      else if (p.y - gy >= 3) parts.push(`drop ${d} (~${p.y - gy})`)
-    }
-    return parts.length ? parts.join('; ') : 'open ground'
-  } catch (e) { return null }
-}
-
 // ---- 3D LAY-OF-THE-LAND: the honest describer (the "vision" upgrade). Reports the measured
 // FACTS of the space around the bot — walls with distance, where the ground FALLS AWAY and how
 // deep, ceiling, footing, nearest lava — and NOTHING that's a verdict ("safe/fatal/go-here" is
-// the pilot's call, not the sense's). It marches real blocks and every scan STOPS at the first
-// solid, so it only ever perceives open space + exposed surfaces, never through stone to buried
-// ore (fairness floor intact). Fixed vocabulary so a word never misreads: wall / falls away /
-// floor ~N down / floor out of sight / ceiling / open. Fresh every call (samples live blocks).
+// the pilot's call, not the sense's). Every scan STOPS at the first solid or at the first cell the
+// bot does not know, and an unknown cell gives no fact. Fixed vocabulary so a word never misreads:
+// wall / falls away / floor ~N down / floor out of sight / ceiling / open. Fresh every call.
 function spatial3D(bot) {
   try {
     const V = require('vec3').Vec3
     const o = bot.entity.position.floored()
-    const at = (x, y, z) => bot.blockAt(new V(x, y, z))
     const solid = (b) => !!(b && b.boundingBox === 'block')
     const liquid = (b) => b && (b.name.includes('water') || b.name.includes('lava'))
     const R = 24, DOWN = 40
     const feet = o.y, head = o.y + 1
-    const groundY = (x, z, from) => { for (let y = from; y > from - DOWN; y--) if (solid(at(x, y, z))) return y; return null }
+    const look = (x, y, z) => {
+      const p = new V(x, y, z)
+      return knownCell(p) ? bot.blockAt(p) : null
+    }
+    // { y } of the first solid (or under the top liquid when unknown cells follow), { unseen } of the first unknown,
+    // {} none.
+    const floorOf = (x, z) => {
+      let wetY = null
+      for (let y = feet; y > feet - DOWN; y--) {
+        const b = look(x, y, z)
+        if (!b) return wetY === null ? { unseen: y } : { y: wetY - 1 }
+        if (solid(b)) return { y }
+        if (wetY === null && liquid(b)) wetY = y
+      }
+      return {}
+    }
 
     const DIRS = { N: [0, -1], NE: [1, -1], E: [1, 0], SE: [1, 1], S: [0, 1], SW: [-1, 1], W: [-1, 0], NW: [-1, -1] }
     const walls = [], drops = [], opens = []
     let lava = null
     for (const [name, [dx, dz]] of Object.entries(DIRS)) {
-      let wall = 0
+      let wall = 0, scanTo = R, unseen = false
       for (let d = 1; d <= R; d++) {
         const x = o.x + dx * d, z = o.z + dz * d
-        const fb = at(x, feet, z)
-        if (fb && fb.name.includes('lava') && (!lava || d < lava.dist)) lava = { dir: name, dist: d }
-        if (solid(fb) && solid(at(x, head, z))) { wall = d; break }
+        const fb = look(x, feet, z)
+        if (!fb) { scanTo = d - 1; unseen = true; break }
+        if (fb.name.includes('lava') && (!lava || d < lava.dist)) lava = { dir: name, dist: d }
+        if (solid(fb)) {
+          const hb = look(x, head, z)
+          if (!hb) { scanTo = d - 1; unseen = true; break }
+          if (solid(hb)) { wall = d; scanTo = d - 1; break }
+        }
       }
       // floor profile OUTWARD along this direction: find the first ledge, then keep reading the
-      // floor as it opens away — a step reads flat, the mouth of a cavern reads deepening. Honest:
-      // 'deep' (floor out of sight) when a column bottoms past our look-range, never a guessed number.
-      const scanTo = wall ? wall - 1 : R
+      // floor as it opens away — a step reads flat, the mouth of a cavern reads deepening.
+      // 'deep' when open air runs at least 3 down and past the deepest floor seen, into unknown cells or DOWN.
       let dropAt = 0, firstFloor = 0, deepest = 0, deep = false, wet = null
       for (let d = 1; d <= scanTo; d++) {
         const x = o.x + dx * d, z = o.z + dz * d
-        const gy = groundY(x, z, feet)
-        if (gy === null) { if (!dropAt) { dropAt = d } ; deep = true; break }
-        const depth = (feet - 1) - gy
+        const f = floorOf(x, z)
+        if (f.y === undefined) {
+          const seen = f.unseen === undefined ? DOWN : (feet - 1) - f.unseen
+          if (seen >= 3 && seen > deepest) { if (!dropAt) dropAt = d; deep = true }
+          if (f.unseen !== undefined) unseen = true
+          break
+        }
+        const depth = (feet - 1) - f.y
         if (!dropAt && depth >= 3) { dropAt = d; firstFloor = depth; deepest = depth }
         if (dropAt) {
           if (depth > deepest) deepest = depth
-          const surf = at(x, gy + 1, z)
+          const surf = look(x, f.y + 1, z)
           if (!wet && liquid(surf)) wet = surf.name.includes('lava') ? 'lava' : 'water'
         }
       }
       if (dropAt) drops.push({ name, dropAt, firstFloor, deepest, deep, wet, opensBeyond: (deepest - firstFloor) >= 4 })
       else if (wall && wall <= 2) walls.push(`${name} ${wall}`)
-      else opens.push(name)
+      else if (!unseen) opens.push(name)
     }
-    let ceil = 0
-    for (let d = 1; d <= R; d++) if (solid(at(o.x, head + d, o.z))) { ceil = d; break }
+    let ceil = 0, ceilSeen = true
+    for (let d = 1; d <= R; d++) {
+      const b = look(o.x, head + d, o.z)
+      if (!b) { ceilSeen = false; break }
+      if (solid(b)) { ceil = d; break }
+    }
 
     const parts = []
-    const under = at(o.x, feet - 1, o.z)
+    const under = look(o.x, feet - 1, o.z)
     if (liquid(under)) parts.push(`standing in ${under.name.includes('lava') ? 'LAVA' : 'water'}`)
-    else if (!solid(under)) parts.push('no floor underfoot')
+    else if (under && !solid(under)) parts.push('no floor underfoot')
     if (walls.length) parts.push('wall ' + walls.join('/'))
     for (const dr of drops) {
       const wetStr = dr.wet ? ` (${dr.wet === 'lava' ? 'LAVA' : 'water'} below)` : ''
@@ -1200,11 +1191,11 @@ function spatial3D(bot) {
       parts.push(phrase)
     }
     if (lava) parts.push(`LAVA ${lava.dir} ${lava.dist}`)
-    if (!ceil) parts.push('open above')
-    else if (ceil <= 3) parts.push(`ceiling ${ceil} up`)
+    if (!ceil && ceilSeen) parts.push('open above')
+    else if (ceil && ceil <= 3) parts.push(`ceiling ${ceil} up`)
     if (opens.length >= 7) parts.push('open all round')
     else if (opens.length) parts.push('open ' + opens.join('/'))
-    return parts.length ? parts.join('; ') : 'enclosed'
+    return parts.length ? parts.join('; ') : null
   } catch (e) { return null }
 }
 
@@ -5516,7 +5507,7 @@ app.get('/scene', (req, res) => {
       (resPhrases.length ? `Resources: ${resPhrases.join(', ')}.` : `No notable resources in ${SCENE_RESOURCE_R}.`)
 
     const payload = { summary, facing, biome, time, threats, spatial: around, veins, sky: oh, water: ws, hear: heard, doors, steps }
-    if (verbose) { payload.entities = groups; payload.ahead = ahead; payload.resources = notable; payload.held = held; payload.spatial_old = spatialSummary(bot) }
+    if (verbose) { payload.entities = groups; payload.ahead = ahead; payload.resources = notable; payload.held = held }
     ok(res, payload)
   } catch (e) { err(res, e) }
 })
