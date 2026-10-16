@@ -3,17 +3,18 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
-const { smeltYield } = require('../lib/furnace')
+const { smeltYield, burnItems, COOK_PROBE_TICKS } = require('../lib/furnace')
 const { HUNG, awaitRoute, routeHandler, timed } = require('./helpers')
 
-const IDS = { iron_ore: 1, iron_ingot: 2, coal: 3, sand: 4, glass: 5 }
+const IDS = { iron_ore: 1, iron_ingot: 2, coal: 3, sand: 4, glass: 5, stone: 6, stick: 7, blaze_rod: 8, deepslate_bricks: 9 }
 const stack = (name, count) => ({ name, type: IDS[name], count, stackSize: 64 })
 const HERE = new Vec3(0.5, 64, 0.5)
 const AT = new Vec3(3, 64, 0)
 const UNSEEN = /not in my sight, blocked or unlit/
 
-// A fake furnace window whose transfer picks slots the way mineflayer's does.
-function furnaceWindow ({ input = null, fuel = null, output = null, pockets = [] }) {
+// A fake furnace window whose transfer picks slots the way mineflayer's does. While input and fuel
+// are loaded, cook progress shows from tick cookFrom on, and never when cookFrom is null.
+function furnaceWindow ({ input = null, fuel = null, output = null, pockets = [], cookFrom = 0 }) {
   const slots = [input, fuel, output, ...pockets]
   while (slots.length < 39) slots.push(null)
   const set = (i, item) => { slots[i] = item && { ...item, slot: i } }
@@ -38,7 +39,12 @@ function furnaceWindow ({ input = null, fuel = null, output = null, pockets = []
     inventoryEnd: 39,
     progress: null,
     fuel: null,
+    ticks: 0,
     closed: false,
+    tick (n) {
+      window.ticks += n
+      if (cookFrom !== null && window.ticks >= cookFrom && slots[0] && (slots[1] || window.fuel > 0)) window.progress = Math.max(window.progress || 0, 0.01)
+    },
     inputItem: () => slots[0],
     fuelItem: () => slots[1],
     outputItem: () => slots[2],
@@ -65,7 +71,7 @@ function furnaceEnv (f, seen = true) {
       pathfinder: { goto: async (goal) => { walks.push(goal) } },
       openFurnace: async (b) => { assert.strictEqual(b, block); return f.window },
       transfer: async (o) => { assert.strictEqual(o.window, f.window); f.transfer(o) },
-      waitForTicks: async () => {}
+      waitForTicks: async (n) => f.window.tick(n)
     },
     cellKnown: (p) => seen || !p.equals(AT),
     seenNow: (p) => seen || !p.equals(AT),
@@ -75,6 +81,8 @@ function furnaceEnv (f, seen = true) {
     goals,
     Vec3,
     smeltYield,
+    burnItems,
+    COOK_PROBE_TICKS,
     resolveBlockIds: () => [61],
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     console: { log: (line) => logs.push(line) }
@@ -119,7 +127,8 @@ test('smelt takes its own finished output into the pockets and leaves a foreign 
   assert.strictEqual(own.pocket('iron_ingot'), 4)
   assert.strictEqual(ownReply.output, null)
 
-  const foreign = furnaceWindow({ fuel: stack('coal', 1), output: stack('glass', 5), pockets: [stack('iron_ore', 6)] })
+  // A foreign output stops the furnace, so its stall is no verdict on the recipe.
+  const foreign = furnaceWindow({ fuel: stack('coal', 1), output: stack('glass', 5), pockets: [stack('iron_ore', 6)], cookFrom: null })
   const foreignReply = await awaitRoute('/smelt', { item: 'iron_ore', count: '6' }, furnaceEnv(foreign).env)
   assert.strictEqual(foreignReply.took, undefined)
   assert.strictEqual(foreignReply.output, '5 glass')
@@ -161,4 +170,47 @@ test('furnace by x,y,z and smelt refuse an unseen furnace without walking to it 
   assert.doesNotMatch(nearError, /3,64,0|iron/)
   assert.deepStrictEqual(walks, [])
   assert.deepStrictEqual([f.window.inputItem().count, f.pocket('iron_ore'), f.pocket('coal')], [10, 4, 5])
+})
+
+test('smelt takes an input the furnace never cooks back into the pockets, leaves the fuel and answers no-recipe', async () => {
+  const f = furnaceWindow({ pockets: [stack('stone', 8), stack('coal', 5)], cookFrom: null })
+  const { handle, res } = routeHandler('/smelt', furnaceEnv(f).env)
+  await handle({ query: { item: 'stone', count: '8' } }, res)
+  assert.ok(res.error, `smelt answered ${JSON.stringify(res.body)}`)
+  assert.strictEqual(res.error.reason, 'no-recipe')
+  assert.strictEqual(res.error.message, 'this server does not smelt stone: took 8 stone back, left the 1 coal in the fuel slot')
+  assert.deepStrictEqual([f.window.inputItem(), f.window.fuelItem().count, f.pocket('stone'), f.pocket('coal')], [null, 1, 8, 4])
+  assert.ok(f.window.ticks >= COOK_PROBE_TICKS, `gave up after ${f.window.ticks} ticks`)
+  assert.ok(f.window.closed, 'the window stays open')
+})
+
+test('smelt loads an input its table does not know once the furnace cooks it', async () => {
+  const f = furnaceWindow({ pockets: [stack('deepslate_bricks', 4), stack('coal', 1)] })
+  const reply = await awaitRoute('/smelt', { item: 'deepslate_bricks', count: '4' }, furnaceEnv(f).env)
+  assert.deepStrictEqual(reply, { at: { x: 3, y: 64, z: 0 }, loaded: 4, input: '4 deepslate_bricks', fuel: '1 coal', output: null, doneInSec: 40 })
+})
+
+test('smelt waits for a furnace slow to start cooking and leaves it loaded', async () => {
+  const f = furnaceWindow({ pockets: [stack('iron_ore', 8), stack('coal', 1)], cookFrom: 30 })
+  const reply = await awaitRoute('/smelt', { item: 'iron_ore', count: '8' }, furnaceEnv(f).env)
+  assert.deepStrictEqual([reply.input, reply.fuel, reply.doneInSec], ['8 iron_ore', '1 coal', 80])
+  assert.ok(f.window.ticks >= 30, `replied after ${f.window.ticks} ticks, before the furnace cooked`)
+})
+
+test('smelt reports the burn time only for what its fuel covers, a stick half an item and a blaze rod twelve', async () => {
+  const sticks = furnaceWindow({ pockets: [stack('iron_ore', 8), stack('stick', 1)] })
+  const stick = await awaitRoute('/smelt', { item: 'iron_ore', count: '8', fuel: 'stick' }, furnaceEnv(sticks).env)
+  assert.deepStrictEqual([stick.fuel, stick.doneInSec, stick.fuelFor], ['1 stick', 5, 0.5])
+
+  const rods = furnaceWindow({ pockets: [stack('iron_ore', 12), stack('blaze_rod', 3)] })
+  const rod = await awaitRoute('/smelt', { item: 'iron_ore', count: '12', fuel: 'blaze_rod' }, furnaceEnv(rods).env)
+  assert.deepStrictEqual([rod.fuel, rod.doneInSec, rod.fuelFor], ['1 blaze_rod', 120, undefined])
+  assert.strictEqual(rods.pocket('blaze_rod'), 2)
+})
+
+test('smelt counts the fuel the flame shows still burning', async () => {
+  const f = furnaceWindow({ pockets: [stack('iron_ore', 12), stack('coal', 5)] })
+  f.window.fuel = 0.5
+  const reply = await awaitRoute('/smelt', { item: 'iron_ore', count: '12' }, furnaceEnv(f).env)
+  assert.deepStrictEqual([reply.fuel, reply.doneInSec, f.pocket('coal')], ['1 coal', 120, 4])
 })

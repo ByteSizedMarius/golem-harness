@@ -25,7 +25,7 @@ const { stepView } = require('./lib/steps')
 const { countVerbs } = require('./lib/verbs')
 const { createChatLog } = require('./lib/chat-log')
 const { GRAVESTONE, readServerOverrides, renameBlocks, overrideRecipes, craftable } = require('./lib/server-overrides')
-const { smeltYield } = require('./lib/furnace')
+const { smeltYield, burnItems, COOK_PROBE_TICKS } = require('./lib/furnace')
 
 const HOST = process.env.MC_HOST || 'localhost'
 const PORT = parseInt(process.env.MC_PORT || '25565')
@@ -7242,6 +7242,15 @@ async function takeSlot (furnace, item, n) {
     sourceStart: item.slot, sourceEnd: item.slot + 1, destStart: furnace.inventoryStart, destEnd: furnace.inventoryEnd })
 }
 
+// A furnace lights its fuel and cooks only an input the server has a recipe for.
+async function furnaceCooks (furnace) {
+  for (let t = 0; t < COOK_PROBE_TICKS; t++) {
+    if (furnace.progress > 0) return true
+    await bot.waitForTicks(1)
+  }
+  return furnace.progress > 0
+}
+
 // GET /smelt?item=&fuel=&count= : loads the nearest furnace and returns without waiting for the burn.
 app.get('/smelt', async (req, res) => {
   try {
@@ -7250,10 +7259,13 @@ app.get('/smelt', async (req, res) => {
     const fuelName = req.query.fuel || 'coal'
     const want = Math.max(1, parseInt(req.query.count || '1'))
     if (!inputName) return err(res, new Error('item required'))
+    if (burnItems(fuelName) == null) return err(res, new Error(`no known burn time for ${fuelName}`))
     const fb = targetFurnace({})
     await bot.pathfinder.goto(new goals.GoalNear(fb.position.x, fb.position.y, fb.position.z, 2))
     const furnace = await bot.openFurnace(arrivedStation(fb.position, (b) => b.name === 'furnace', 'furnace'))
     try {
+      // The flame bar arrives after the window.
+      await bot.waitForTicks(2)
       const step = (what) => console.log(`[smelt] ${what} ${JSON.stringify(furnaceSlots(furnace))}`)
       step('opened')
       const pocketCount = (name) => furnace.items().filter(i => i.name === name).reduce((s, i) => s + i.count, 0)
@@ -7265,6 +7277,11 @@ app.get('/smelt', async (req, res) => {
       if (n < 1) throw new Error(`the furnace input is full with ${curIn.count} ${curIn.name}`)
       const fuelIn = furnace.fuelItem()
       if (!fuelIn && !pocketCount(fuelName)) throw new Error(`no ${fuelName} for fuel`)
+      // A fuel slot holding another item is used as it is.
+      const per = burnItems(fuelIn ? fuelIn.name : fuelName)
+      if (per == null) throw new Error(`no known burn time for the ${fuelIn.count} ${fuelIn.name} in the fuel slot`)
+      // The flame shows the share of one fuel item left to burn, taken as the fuel in use.
+      const burning = (furnace.fuel || 0) * per
       let took, note
       const out = furnace.outputItem()
       if (out && out.name === smeltYield(inputName) && pocketRoom(furnace, out) >= out.count) {
@@ -7277,18 +7294,31 @@ app.get('/smelt', async (req, res) => {
       await furnace.putInput(inItem.type, null, n)
       step('loaded input')
       const total = (curIn ? curIn.count : 0) + n
-      // A fuel slot holding another item is used as it is.
-      if (!fuelIn || fuelIn.name === fuelName) {
-        // Items smelted per fuel item: 8 for coal and charcoal, 1.5 for wood.
-        const per = /coal/.test(fuelName) ? 8 : /planks|log|_wood|bamboo|stick/.test(fuelName) ? 1.5 : 8
-        const add = Math.min(pocketCount(fuelName), Math.ceil(total / per) - (fuelIn ? fuelIn.count : 0))
+      const pocketFuel = furnace.items().find(i => i.name === fuelName)
+      if (pocketFuel && (!fuelIn || fuelIn.name === fuelName)) {
+        const held = fuelIn ? fuelIn.count : 0
+        const add = Math.min(pocketCount(fuelName), Math.ceil((total - burning) / per) - held, pocketFuel.stackSize - held)
         if (add > 0) {
-          await furnace.putFuel(furnace.items().find(i => i.name === fuelName).type, null, add)
+          await furnace.putFuel(pocketFuel.type, null, add)
           step('loaded fuel')
         }
       }
+      // A stall behind an occupied output says nothing about the recipe.
+      if (!furnace.outputItem() && !await furnaceCooks(furnace)) {
+        const back = furnace.inputItem()
+        const held = back.count
+        const moved = Math.min(held, pocketRoom(furnace, back))
+        await takeSlot(furnace, back, moved)
+        step('no recipe')
+        const fuelLeft = furnace.fuelItem()
+        const left = [held > moved && `${held - moved} ${inputName} in the input`, fuelLeft && `the ${fuelLeft.count} ${fuelLeft.name} in the fuel slot`].filter(Boolean)
+        throw Object.assign(new Error(`this server does not smelt ${inputName}: took ${moved} ${inputName} back${left.length ? `, left ${left.join(' and ')}` : ''}`), { reason: 'no-recipe' })
+      }
+      const fuelNow = furnace.fuelItem()
+      const covers = Math.round((burning + (fuelNow ? fuelNow.count * per : 0)) * 100) / 100
       // A furnace smelts one item every 10 s.
-      ok(res, { at: round(fb.position), loaded: n, ...furnaceSlots(furnace), took, note, doneInSec: total * 10 })
+      ok(res, { at: round(fb.position), loaded: n, ...furnaceSlots(furnace), took, note,
+        doneInSec: Math.round(Math.min(total, covers) * 10), fuelFor: covers < total ? covers : undefined })
     } finally {
       furnace.close()
     }

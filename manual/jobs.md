@@ -2,7 +2,7 @@
 
 ## Key rules
 
-- `smelt` is no job and does not wait for the burn: it loads the furnace and returns with `doneInSec`, 10 s per item.
+- `smelt` is no job and does not wait for the burn: it loads the furnace and returns with `doneInSec`, 10 s per item the fuel covers.
 - A furnace smelts only while its output is empty or holds what the input makes.
 - Take the output with `furnace(take: "output")` once `doneInSec` has passed.
 
@@ -21,4 +21,5 @@
 ## Smelting
 
 - `smelt` uses fuel already in the slot and takes the finished output of the same input into your pockets. It refuses a furnace busy with another input and leaves an output of another item in place.
+- If the furnace has not started cooking within 3 s with its output empty, `smelt` takes the input back, leaves the fuel in the slot and fails with `no-recipe`.
 - `furnace` shows a furnace's slots, and with `take` moves one into your pockets.
