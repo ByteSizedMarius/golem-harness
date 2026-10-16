@@ -2998,18 +2998,7 @@ reflexes.unshift({
     // combat owns the hand, so food ratchets down across engagements and regen quits at 17.
     // The moment the hand is free is the moment to eat — before the next wave claims it.)
     if (bot.food <= 14 && !bunker.building) {
-      try {
-        const foods = (mcData && mcData.foods) || {}
-        const bite = bot.inventory.items().filter(i => foods[i.type] && i.name !== 'golden_apple')
-          .sort((a, b) => (foods[b.type].foodPoints || 0) - (foods[a.type].foodPoints || 0))[0]
-        if (bite) {
-          const prevHeld = bot.heldItem
-          await bot.equip(bite, 'hand')
-          await bot.consume()
-          emitEvent('combat', `refueled on ${bite.name} after the fight — food ${bot.food}/20`)
-          if (prevHeld) await bot.equip(prevHeld, 'hand')
-        }
-      } catch (e) {}                                          // a failed snack must never wedge the reflex
+      try { await refuelAfterFight() } catch (e) {}
       await pilotGuard()                                      // the food in hand ended the pilot's block
     }
   }
@@ -4406,23 +4395,58 @@ app.get('/equip', async (req, res) => {
     ok(res, { equipped: req.query.name })
   } catch (e) { err(res, e) }
 })
-// GET /eat?food=<name> — MANUAL eating. We deliberately did NOT install auto-eat: food is the
-// pilot's job (mine). Equips the named food, or the most-filling edible in the inventory if none is
-// named, then consumes it. Watch food level in /scene and call this yourself. Restores held item after.
+// Foods that poison, starve or nauseate, eaten only by name.
+const RISKY_FOODS = ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish']
+// How long a meal waits for the server's food update.
+const FOOD_UPDATE_MS = 1500
+// The most filling carried food outside RISKY_FOODS and skip, else undefined.
+function safeFood (skip = []) {
+  const foods = (mcData && mcData.foods) || {}
+  return bot.inventory.items().filter(i => foods[i.type] && !RISKY_FOODS.includes(i.name) && !skip.includes(i.name))
+    .sort((a, b) => (foods[b.type].foodPoints || 0) - (foods[a.type].foodPoints || 0))[0]
+}
+// True once an update_health raises food or saturation above before, false after FOOD_UPDATE_MS.
+function foodUpdate (before) {
+  const raised = () => bot.food > before.food || bot.foodSaturation > before.saturation
+  if (raised()) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    const done = (confirmed) => { clearTimeout(timer); bot.removeListener('health', onHealth); resolve(confirmed) }
+    const onHealth = () => { if (raised()) done(true) }
+    const timer = setTimeout(() => done(false), FOOD_UPDATE_MS)
+    bot.on('health', onHealth)
+  })
+}
+// Eats the most filling safe food other than a golden apple and reports the food level.
+async function refuelAfterFight () {
+  const bite = safeFood(['golden_apple'])
+  if (!bite) return
+  const prevHeld = bot.heldItem
+  const before = { food: bot.food, saturation: bot.foodSaturation }
+  await bot.equip(bite, 'hand')
+  try {
+    await bot.consume()
+    const confirmed = await foodUpdate(before)
+    emitEvent('combat', `refueled on ${bite.name} after the fight, food ${bot.food}/20${confirmed ? '' : ' (unconfirmed, no food update from the server yet)'}`)
+  } finally {
+    if (prevHeld && bot.inventory.items().includes(prevHeld)) await bot.equip(prevHeld, 'hand')
+  }
+}
+// GET /eat?food=<name>: equips the named food, or the most filling safeFood, eats it and puts the held item back.
 app.get('/eat', async (req, res) => {
   try {
     const want = req.query.food || req.query.name   // accept both (the salmon/porkchop mystery: name= was ignored)
     const items = bot.inventory.items()
-    const foods = (mcData && mcData.foods) || {}
     let food = null
     if (want) food = items.find(i => i.name === want) || items.find(i => i.name.includes(want))
-    if (!food) {   // best available: highest foodPoints among edible items
-      food = items.filter(i => foods[i.type])
-        .sort((a, b) => (foods[b.type].foodPoints || 0) - (foods[a.type].foodPoints || 0))[0]
+    if (!food) food = safeFood()
+    if (!food) {
+      const foods = (mcData && mcData.foods) || {}
+      const risky = [...new Set(items.filter(i => foods[i.type]).map(i => i.name))]
+      return err(res, new Error(risky.length ? `no safe food in inventory, ${risky.join(', ')} only when named in food` : 'no food in inventory'))
     }
-    if (!food) return err(res, new Error('no food in inventory'))
     const prevHeld = bot.heldItem
     const before = bot.food
+    const was = { food: bot.food, saturation: bot.foodSaturation }
     await bot.equip(food, 'hand')
     try {
       await bot.consume()
@@ -4437,7 +4461,8 @@ app.get('/eat', async (req, res) => {
       } else throw e
     }
     try { if (prevHeld && prevHeld.type !== food.type) await bot.equip(prevHeld, 'hand') } catch (e) {}
-    ok(res, { ate: food.name, foodBefore: before, foodNow: bot.food })
+    const confirmed = await foodUpdate(was)
+    ok(res, { ate: food.name, foodBefore: before, foodNow: bot.food, ...(confirmed ? {} : { unconfirmed: `no food update from the server within ${FOOD_UPDATE_MS} ms, foodNow may predate the meal` }) })
   } catch (e) { err(res, e) }
 })
 
