@@ -67,8 +67,7 @@ function closedRoom (light) {
     sectionColumns,
     floorPhrase,
     SEEN: new Set(),
-    STALE_LIGHT: new Set(),
-    OPENED_LIGHT: new Map()
+    ESTIMATED_LIGHT: new Map(),
   }
 }
 

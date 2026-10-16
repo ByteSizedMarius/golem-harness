@@ -88,8 +88,7 @@ function doorScene (wall = true) {
     isDoor,
     ck,
     Vec3,
-    STALE_LIGHT: new Set(),
-    OPENED_LIGHT: new Map()
+    ESTIMATED_LIGHT: new Map()
   }
 }
 

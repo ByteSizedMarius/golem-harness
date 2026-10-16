@@ -1369,49 +1369,114 @@ function sightCell(p, maxDist) {
 function canSeeBlock(p, maxDist) {
   return sightCell(p, maxDist) !== null
 }
-// Chunk sections whose held light may predate a light source placed near them.
-const STALE_LIGHT = new Set()
-// Estimated light of the cells opened since their column's light arrived, by column, then by cell.
-const OPENED_LIGHT = new Map()
-function lightSection(x, y, z) {
-  return (x >> 4) + ',' + (y >> 4) + ',' + (z >> 4)
-}
-// The light the client holds for cell p, or the estimate for a cell opened since.
+// Estimated light of the cells changed since their column's light arrived, by column, then by cell.
+const ESTIMATED_LIGHT = new Map()
+// The light the client holds for cell p, or the estimate for a cell changed since.
 function heldLight (p, b) {
-  const column = OPENED_LIGHT.get((p.x >> 4) + ',' + (p.z >> 4))
+  const column = ESTIMATED_LIGHT.get((p.x >> 4) + ',' + (p.z >> 4))
   return (column && column.get(ck(p.x, p.y, p.z))) || b
+}
+function estimateLight (p, levels) {
+  const key = (p.x >> 4) + ',' + (p.z >> 4)
+  if (!ESTIMATED_LIGHT.has(key)) ESTIMATED_LIGHT.set(key, new Map())
+  const held = heldLight(p, bot.blockAt(p))
+  ESTIMATED_LIGHT.get(key).set(ck(p.x, p.y, p.z), { light: held.light, skyLight: held.skyLight, ...levels })
+}
+// Block light b gives off, litOnly for a block whose data gives it light only while lit.
+function emission (b, litOnly) {
+  // The 1.7.10 gravestone shows as an end_rod and gives no light.
+  if (b.name === GRAVESTONE) return 0
+  const lit = b.getProperties().lit
+  if (lit === false) return 0
+  return bot.registry.blocks[b.type].emitLight || (lit === true ? litOnly : 0)
+}
+// A cell light crosses undimmed on 1.21 and on 1.7.10.
+function lightClear (b) {
+  return !!b && b.boundingBox === 'empty' && bot.registry.blocks[b.type].filterLight === 0
+}
+// Every cell above p up to the dimension's build ceiling is loaded and clear.
+function openSky (p) {
+  for (let y = p.y + 1; y <= bot.game.minY + bot.game.height - 1; y++) if (!lightClear(bot.blockAt(new Vec3(p.x, y, p.z)))) return false
+  return true
+}
+// Raises block light around a source of level at p, one less per step through clear cells.
+function lightAround (p, level) {
+  const reached = new Map([[ck(p.x, p.y, p.z), level]])
+  const queue = [p]
+  for (let i = 0; i < queue.length; i++) {
+    const q = queue[i]
+    const l = reached.get(ck(q.x, q.y, q.z))
+    if (l > heldLight(q, bot.blockAt(q)).light) estimateLight(q, { light: l })
+    if (l === 1) continue
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+      const n = new Vec3(q.x + dx, q.y + dy, q.z + dz)
+      const k = ck(n.x, n.y, n.z)
+      if (!reached.has(k) && lightClear(bot.blockAt(n))) { reached.set(k, l - 1); queue.push(n) }
+    }
+  }
+}
+// Darkens every cell whose block light could come from a source of level at p.
+function dimAround (p, level) {
+  const r = level - 1
+  for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) for (let dz = -r; dz <= r; dz++) {
+    const d = Math.abs(dx) + Math.abs(dy) + Math.abs(dz)
+    if (d > r) continue
+    const q = new Vec3(p.x + dx, p.y + dy, p.z + dz)
+    const b = bot.blockAt(q)
+    if (!b) continue
+    const held = heldLight(q, b)
+    if (held.light > 0 && held.light <= level - d) estimateLight(q, { light: 0 })
+  }
+}
+// Fire and flowing liquid, which change too often to relight.
+function flickers (b) {
+  if (b.name === 'fire' || b.name === 'soul_fire') return true
+  return (b.name === 'lava' || b.name === 'water') && Number(b.getProperties().level) > 0
+}
+// A roof laid at p: p and the cells below it holding sky light 15 take 14, the most a covered cell holds.
+function roofOver (p) {
+  for (let q = p; ; q = new Vec3(q.x, q.y - 1, q.z)) {
+    const b = bot.blockAt(q)
+    if (!b) return
+    if (heldLight(q, b).skyLight === 15) estimateLight(q, { skyLight: 14 })
+    else if (q !== p) return
+  }
+}
+// With the roof at p gone under open sky, the clear cells below it that held sky 15 in their chunk get it back.
+function unroof (p) {
+  for (let q = new Vec3(p.x, p.y - 1, p.z); ; q = new Vec3(q.x, q.y - 1, q.z)) {
+    const b = bot.blockAt(q)
+    if (!lightClear(b) || b.skyLight !== 15) return
+    estimateLight(q, { skyLight: 15 })
+  }
 }
 function lightChanged (oldB, newB) {
   if (!oldB || !newB || oldB.stateId === newB.stateId) return
   const p = newB.position
-  // Light reaches emit - 1 cells from a source.
-  const r = (bot.registry.blocks[newB.type].emitLight || (newB.getProperties().lit === true ? 15 : 0)) - 1
-  if (r >= 0) {
-    for (let x = (p.x - r) >> 4; x <= (p.x + r) >> 4; x++) for (let y = (p.y - r) >> 4; y <= (p.y + r) >> 4; y++) for (let z = (p.z - r) >> 4; z <= (p.z + r) >> 4; z++) {
-      STALE_LIGHT.add(x + ',' + y + ',' + z)
+  if (!blockTransparent(oldB) && blockTransparent(newB)) {
+    let light = 0, skyLight = 0
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+      const q = new Vec3(p.x + dx, p.y + dy, p.z + dz)
+      const n = bot.blockAt(q)
+      if (!n) continue
+      const held = heldLight(q, n)
+      light = Math.max(light, held.light - 1)
+      skyLight = Math.max(skyLight, held.skyLight - 1)
     }
+    const open = openSky(p)
+    estimateLight(p, { light, skyLight: open ? 15 : skyLight })
+    if (open) unroof(p)
   }
-  if (blockTransparent(oldB) || !blockTransparent(newB)) return
-  let light = 0, skyLight = 0
-  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-    const q = new Vec3(p.x + dx, p.y + dy, p.z + dz)
-    const n = bot.blockAt(q)
-    if (!n) continue
-    const held = heldLight(q, n)
-    light = Math.max(light, held.light - 1)
-    skyLight = Math.max(skyLight, held.skyLight - 1)
-  }
-  const key = (p.x >> 4) + ',' + (p.z >> 4)
-  if (!OPENED_LIGHT.has(key)) OPENED_LIGHT.set(key, new Map())
-  OPENED_LIGHT.get(key).set(ck(p.x, p.y, p.z), { light, skyLight })
+  if (flickers(oldB) || flickers(newB)) return
+  if (lightClear(oldB) && !lightClear(newB)) roofOver(p)
+  const was = emission(oldB, 15)
+  const now = emission(newB, 0)
+  if (was > now) dimAround(p, was)
+  if (now > 0) lightAround(p, now)
 }
 bot.on('blockUpdate', lightChanged)
 function freshLight(cx, cz) {
-  for (const k of STALE_LIGHT) {
-    const [x, , z] = k.split(',').map(Number)
-    if (x === cx && z === cz) STALE_LIGHT.delete(k)
-  }
-  OPENED_LIGHT.delete(cx + ',' + cz)
+  ESTIMATED_LIGHT.delete(cx + ',' + cz)
 }
 bot.on('chunkColumnLoad', (p) => freshLight(p.x >> 4, p.z >> 4))
 bot._client.on('update_light', (packet) => freshLight(packet.chunkX, packet.chunkZ))
@@ -1423,9 +1488,9 @@ function skyDarken () {
   const angle = f + ((1 - Math.cos(f * Math.PI)) / 2 - f) / 3
   return Math.floor((1 - Math.min(1, Math.max(0, 0.5 + 2 * Math.cos(angle * Math.PI * 2)))) * 11)
 }
-// How many blocks away a thing in open cell p shows by the light there, Infinity when that light is missing or may be stale.
+// How many blocks away a thing in open cell p shows by the light there, Infinity when that light is missing.
 function lightRange (p, b = bot.blockAt(p)) {
-  if (!b || STALE_LIGHT.has(lightSection(p.x, p.y, p.z))) return Infinity
+  if (!b) return Infinity
   const held = heldLight(p, b)
   const level = Math.max(held.light, held.skyLight - skyDarken())
   return level >= 7 ? Infinity : [2, 4, 6, 8, 12, 16, 24][Math.max(0, level)]
@@ -1493,7 +1558,7 @@ function overheadCover() {
       }
     }
     const head = bot.blockAt(o.offset(0, 1, 0))
-    const skyShows = knownToTop || (!!head && head.skyLight === 15 && !STALE_LIGHT.has(lightSection(o.x, o.y + 1, o.z)))
+    const skyShows = knownToTop || (!!head && heldLight(o.offset(0, 1, 0), head).skyLight === 15)
     if (!cover) return skyShows ? { sky: true } : { sky: false, unseen: true }
     const canopy = [...names].every(n => n.includes('leaves') || n.endsWith('_log') || n.endsWith('_wood'))
     return skyShows ? { sky: false, canopy, firstUp, cover, topY: topSolidY } : { sky: false, canopy, firstUp }

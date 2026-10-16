@@ -8,6 +8,7 @@ const { Vec3 } = require('vec3')
 const { sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
 const { botConstant, botSource, loadBotFunctions, routeHandler, runRoute, reflexIn } = require('./helpers')
+const { GRAVESTONE } = require('../lib/server-overrides')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4 }
@@ -30,13 +31,12 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
   const blocks = [{ id: 1, name: 'coal_ore' }, { id: 2, name: 'iron_ore' }, { id: 4, name: 'diamond_ore' }]
   return {
     ready: true,
-    bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay } },
+    bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay }, game: { minY: -64, height: 384 } },
     mcData: { blocksArray: blocks, blocksByName: Object.fromEntries(blocks.map((b) => [b.name, b])) },
     ck,
     Vec3,
     SEEN: new Set(),
-    STALE_LIGHT: new Set(),
-    OPENED_LIGHT: new Map()
+    ESTIMATED_LIGHT: new Map(),
   }
 }
 
@@ -88,32 +88,108 @@ test('open sky at midnight shows ore 12 blocks out, not 13', () => {
   assert.strictEqual(findsCoal(plain(13, MIDNIGHT)), false)
 })
 
-// Makes env.bot an emitter and wires it to the blockUpdate handlers of bot.js.
-function wireBlockUpdate (env) {
-  env.bot = Object.assign(new EventEmitter(), env.bot)
-  const lines = [...botSource().matchAll(/^bot\.on\('blockUpdate', ([A-Za-z_$][\w$]*)\)$/gm)]
+// The light data of the block types in world, a torch as type 5, an end_rod as type 6, fire as type 7 and lava as type 8.
+const REGISTRY = { blocks: { 0: { emitLight: 0, filterLight: 0 }, 1: { emitLight: 0, filterLight: 15 }, 2: { emitLight: 0, filterLight: 15 }, 3: { emitLight: 0, filterLight: 15 }, 4: { emitLight: 0, filterLight: 15 }, 5: { emitLight: 14, filterLight: 0 }, 6: { emitLight: 14, filterLight: 0 }, 7: { emitLight: 15, filterLight: 0 }, 8: { emitLight: 15, filterLight: 1 } } }
+const block = (name, type, boundingBox) => (p) => ({ name, type, stateId: type, boundingBox, position: new Vec3(...p), getProperties: () => ({}) })
+const stoneAt = block('stone', 3, 'block')
+const airAt = block('air', 0, 'empty')
+const torchAt = block('torch', 5, 'empty')
+
+// Makes env.bot an emitter and wires it to the block update and chunk load handlers of bot.js.
+function wireLight (env) {
+  env.bot = Object.assign(new EventEmitter(), env.bot, { registry: REGISTRY })
+  env.GRAVESTONE = GRAVESTONE
+  const lines = [...botSource().matchAll(/^bot\.on\('(?:blockUpdate|chunkColumnLoad)', (?:\(\w+\) => )?([A-Za-z_$][\w$]*)\b.*\)$/gm)]
   vm.runInContext(lines.map((m) => m[0]).join('\n'), loadBotFunctions(lines.map((m) => m[1]), env))
+  return env
 }
 
-test('a dig in a dark tunnel leaves ore 10 blocks out unseen, a torch placed by it shows it', () => {
-  const env = tunnel(11, DARK)
-  const stone = { name: 'stone', type: 3, stateId: 1, boundingBox: 'block' }
-  const block = (name, type, stateId, boundingBox, p) => ({ name, type, stateId, boundingBox, position: new Vec3(...p), getProperties: () => ({}) })
-  env.bot.registry = { blocks: { 0: { emitLight: 0 }, 3: { emitLight: 0 }, 5: { emitLight: 14 } } }
-  wireBlockUpdate(env)
-  env.bot.emit('blockUpdate', { ...stone, position: new Vec3(1, 65, -1) }, block('air', 0, 0, 'empty', [1, 65, -1]))
-  assert.strictEqual(findsCoal(env), false, 'after the dig')
-  env.bot.emit('blockUpdate', block('air', 0, 0, 'empty', [9, 64, 0]), block('torch', 5, 2, 'empty', [9, 64, 0]))
-  assert.strictEqual(findsCoal(env), true, 'after the torch')
+test('a gravestone placed on a 1.7.10 server lights nothing, an end_rod on a modern one does', () => {
+  // The server overrides show the 1.7.10 gravestone under the end_rod block type.
+  const lightBeside = (name) => {
+    const env = wireLight(tunnel(11, DARK))
+    env.bot.emit('blockUpdate', airAt([9, 64, 0]), block(name, 6, 'empty')([9, 64, 0]))
+    const at = new Vec3(8, 64, 0)
+    return env.heldLight(at, env.bot.blockAt(at)).light
+  }
+  assert.strictEqual(lightBeside('end_rod'), 13)
+  assert.strictEqual(lightBeside(GRAVESTONE), 0)
+})
+
+test('a placed torch lights the cells within its falloff, not past it or through rock', () => {
+  // The coal at 30,65,0 shows from 29.5 blocks out by light 7 on the cell before it.
+  const coalAfter = (torch) => {
+    const env = wireLight(tunnel(30, DARK))
+    env.bot.emit('blockUpdate', stoneAt(torch), torchAt(torch))
+    return findsCoal(env)
+  }
+  assert.strictEqual(coalAfter([23, 64, 0]), true, '7 steps from the cell before the coal')
+  assert.strictEqual(coalAfter([22, 64, 0]), false, '8 steps')
+  assert.strictEqual(coalAfter([29, 65, 2]), false, '2 cells away behind rock')
+})
+
+test('a torch taken away darkens the cells it could have lit, not those lit past its reach, until fresh light arrives', () => {
+  const torchTaken = (light) => {
+    const env = wireLight(world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x < 20, ores: { '20,65,0': 'coal_ore' }, light }))
+    env.bot.emit('blockUpdate', torchAt([17, 65, 0]), airAt([17, 65, 0]))
+    return env
+  }
+  const torchLit = torchTaken((x) => Math.max(0, 14 - Math.abs(x - 17)))
+  assert.strictEqual(findsCoal(torchLit), false, 'lit by the torch alone')
+  assert.strictEqual(findsCoal(torchTaken((x) => (x === 19 ? 13 : 0))), true, 'brighter than the torch reaches')
+  torchLit.bot.emit('chunkColumnLoad', new Vec3(16, 0, 0))
+  assert.strictEqual(findsCoal(torchLit), true, 'the light of a fresh chunk')
 })
 
 test('a cell opened beside a lit one takes its light, one level down', () => {
-  const env = tunnel(3, 5)
-  env.bot.registry = { blocks: { 0: { emitLight: 0 } } }
-  const { lightChanged, heldLight } = loadBotFunctions(['lightChanged', 'heldLight'], env)
+  const env = wireLight(tunnel(3, 5))
   const at = new Vec3(1, 65, -1)
-  lightChanged({ name: 'stone', type: 3, stateId: 1, boundingBox: 'block', position: at }, { name: 'air', type: 0, stateId: 0, boundingBox: 'empty', position: at, getProperties: () => ({}) })
-  assert.deepStrictEqual({ ...heldLight(at, env.bot.blockAt(at)) }, { light: 4, skyLight: 0 })
+  env.bot.emit('blockUpdate', stoneAt([1, 65, -1]), airAt([1, 65, -1]))
+  assert.deepStrictEqual({ ...env.heldLight(at, env.bot.blockAt(at)) }, { light: 4, skyLight: 0 })
+})
+
+test('a cell opened under open sky takes the full sky light, one under a roof a level less', () => {
+  const skyAfterDig = (roof) => {
+    const env = wireLight(world({ open: (x, y, z) => y >= 64 && !(roof && x === 0 && z === 0 && y === 70), light: () => 0, skyLight: () => 15 }))
+    const at = new Vec3(0, 63, 0)
+    env.bot.emit('blockUpdate', stoneAt([0, 63, 0]), airAt([0, 63, 0]))
+    return env.heldLight(at, env.bot.blockAt(at)).skyLight
+  }
+  assert.strictEqual(skyAfterDig(false), 15)
+  assert.strictEqual(skyAfterDig(true), 14, 'rock at y 70')
+})
+
+test('a cell opened under open sky in a 1.7.10 dimension takes the full sky light', () => {
+  const env = wireLight(world({ open: (x, y) => y >= 64, light: () => 0, skyLight: () => 15 }))
+  const modern = env.bot.blockAt
+  env.bot.game = { minY: 0, height: 256 }
+  env.bot.blockAt = (p) => (p.y < 0 || p.y > 255 ? null : modern(p))
+  const at = new Vec3(0, 63, 0)
+  env.bot.emit('blockUpdate', stoneAt([0, 63, 0]), airAt([0, 63, 0]))
+  assert.strictEqual(env.heldLight(at, env.bot.blockAt(at)).skyLight, 15)
+})
+
+const fireAt = block('fire', 7, 'empty')
+const lavaAt = (level) => (p) => ({ ...block('lava', 8, 'empty')(p), stateId: 80 + level, getProperties: () => ({ level: String(level) }) })
+
+test('fire and flowing lava relight nothing, a placed torch or lava source lights its falloff', () => {
+  // A dark field, the cell at 0,64,0 changing from what was to what is.
+  const after = (was, is) => {
+    const env = wireLight(world({ open: (x, y) => y >= 64, light: () => 0 }))
+    const base = env.bot.blockAt
+    let reads = 0
+    env.bot.blockAt = (p) => { reads++; return base(p) }
+    env.bot.emit('blockUpdate', was([0, 64, 0]), is([0, 64, 0]))
+    const at = new Vec3(3, 64, 0)
+    return { light: env.heldLight(at, base(at)).light, reads }
+  }
+  for (const [was, is, what] of [[airAt, fireAt, 'fire flaring up'], [fireAt, airAt, 'fire going out'], [lavaAt(2), lavaAt(3), 'lava flowing']]) {
+    const { light, reads } = after(was, is)
+    assert.strictEqual(light, 0, what)
+    assert.ok(reads < 20, `${what} read ${reads} cells`)
+  }
+  assert.strictEqual(after(airAt, torchAt).light, 11, 'control: a torch')
+  assert.strictEqual(after(airAt, lavaAt(0)).light, 12, 'a lava source poured from a bucket')
 })
 
 test('ore under lava or more than three cells of water is not named', () => {
@@ -154,13 +230,6 @@ test('an old seen.json is dropped, one saved now loads again', () => {
   env.SEEN.clear()
   assert.strictEqual(loadSeen(saved), true, 'control: the current format')
   assert.deepStrictEqual([...env.SEEN], ['3,64,0'])
-})
-
-test('light the client may hold from before a block change leaves sight alone to decide', () => {
-  const env = cave(DARK, FAR_END)
-  env.STALE_LIGHT.add('0,4,0')
-  assert.strictEqual(runRoute('/find', { name: 'coal' }, env).count, 1)
-  assert.strictEqual(runRoute('/find', { name: 'iron' }, env).count, 0)
 })
 
 test('the veins of scene name ore in lit sight, never ore around a corner or in the dark', () => {
