@@ -341,6 +341,30 @@ test('stop ends the watch without a verdict', () => {
   assert.strictEqual(w.pathfinder.listenerCount('path_update'), 0)
 })
 
+test('guarded work that throws at once rejects and leaves no watch, interval or deadline behind', async () => {
+  const clock = fakeClock()
+  const pathfinder = new EventEmitter()
+  let stops = 0
+  const thrown = new Error('thrown')
+  const out = walk.guardWork(() => { throw thrown }, {
+    position: () => ({ x: 0.5, y: 64, z: 0.5 }),
+    onPathUpdate: (fn) => {
+      pathfinder.on('path_update', fn)
+      return () => pathfinder.off('path_update', fn)
+    },
+    stop: () => stops++,
+    stallMs: 4500,
+    thinkTimeout: 10000,
+    budgetMs: 60000,
+    clock
+  })
+  await assert.rejects(out, (e) => e === thrown)
+  assert.strictEqual(pathfinder.listenerCount('path_update'), 0)
+  assert.strictEqual(clock.pending(), 0)
+  clock.advance(120000)
+  assert.strictEqual(stops, 0, 'neither the stall watch nor the deadline stops later work')
+})
+
 // A bot whose pathfinder answers each goal it is given with answer(bot, goal).
 function fakeWalker (answer) {
   const bot = new EventEmitter()

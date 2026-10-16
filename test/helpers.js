@@ -54,6 +54,7 @@ function fakeClock () {
     setTimeout: (fn, ms) => add(fn, ms, false),
     clearInterval: (id) => timers.delete(id),
     clearTimeout: (id) => timers.delete(id),
+    pending: () => timers.size,
     advance (ms) {
       const end = t + ms
       for (;;) {
