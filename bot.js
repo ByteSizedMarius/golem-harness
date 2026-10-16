@@ -1449,7 +1449,7 @@ function emission (b, litOnly) {
 }
 // A cell light crosses undimmed on 1.21 and on 1.7.10.
 function lightClear (b) {
-  return !!b && b.boundingBox === 'empty' && bot.registry.blocks[b.type].filterLight === 0
+  return !!b && (b.boundingBox === 'empty' || b.transparent === true) && bot.registry.blocks[b.type].filterLight === 0
 }
 // Every cell above p up to the dimension's build ceiling is loaded and clear.
 function openSky (p) {

@@ -338,3 +338,14 @@ test('a corridor built in the air on a modern server, which sends no sky light t
   const result = plan(new goals.GoalBlock(-27, 204, 40))
   assert.strictEqual(result.status, 'success', `${result.path.length} nodes`)
 })
+
+test('a corridor built in the air on a 1.7.10 server walks to the foot of its ladder', async () => {
+  // A 1.7.10 server sends light only with a chunk, so the client keeps the open-sky light of the empty air the
+  // corridor was built in, with bot.js's estimates for the blocks laid since.
+  const { build, ground } = course(150, 70)
+  const cells = new Map()
+  const { plan, place } = await lit(new Vec3(0.5, 152, 40.5), cells, ground, (p) => (p.y > 70 ? 15 : 0))
+  for (const [key, block] of build) place(key, block)
+  const result = plan(new goals.GoalBlock(4, 152, 40))
+  assert.strictEqual(result.status, 'success', `${result.path.length} nodes`)
+})
