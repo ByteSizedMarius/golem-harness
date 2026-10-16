@@ -19,6 +19,7 @@ You are the strategist, the combat reflex is the trigger finger. It runs in the 
 - Bow beyond about 6 blocks (`shoot`), sword to finish (`strike`).
 - Creepers: the reflex flees them for you, and your bow may take them from range. A creeper 8 or more blocks off counts only when it can walk to you within your stance's flee distance. One below a cliff with no way up is `watched:`.
 - Break a skeleton's line of sight. Spiders climb walls. At night, retreat early.
+- How each mob notices you, paths and attacks: `manual(topic: "mobs")`.
 - Night is survivable by civics, not swordplay. Claim a bed spawn by day (`activate` the bed), and at night sleep (`activate` it again, with no monsters within about 8).
 - The bunker is the last resort: `manual(topic: "bunker")`.
 
