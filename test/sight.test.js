@@ -42,6 +42,7 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     SKY_IN_SIGHT: new Map(),
     SIGHT_MEMO: { t: 0, cells: new Map() },
     SIGHT_MS: botConstant('SIGHT_MS'),
+    LEGACY_1710: false,
     ...groundMemory()
   }
 }
@@ -290,6 +291,33 @@ test('water high over open ground on a modern server holds the sky light that re
   }
   const sky = (y) => env.heldLight(new Vec3(0, y, 0), env.bot.blockAt(new Vec3(0, y, 0))).skyLight
   assert.deepStrictEqual([sky(101), sky(100), sky(99), sky(98)], [15, 14, 13, 12])
+})
+
+// A 1.7.10 world from y 0 to 255 with a pool three deep at 0,61..63,0 in the ground at y 63 over an air pocket at
+// 0,60,0, open to the sky until a roof is laid at 0,64,0. The chunk holds the sky light a 1.7.10 server sends there.
+function pool1710 (roofed) {
+  const roof = new Set()
+  const env = wireLight({ ...world({ open: (x, y, z) => (y >= 64 && !roof.has(ck(x, y, z))) || (x === 0 && y === 60 && z === 0), light: () => 0 }), LEGACY_1710: true })
+  env.bot.game = { minY: 0, height: 256, dimension: 'overworld' }
+  const ground = env.bot.blockAt
+  const sent = { 63: 12, 62: 9, 61: 6, 60: 5 }
+  env.bot.blockAt = (pos) => {
+    const p = pos.floored()
+    if (p.y < 0 || p.y > 255) return null
+    const column = p.x === 0 && p.z === 0
+    const b = column && p.y >= 61 && p.y <= 63 ? block('water', 9, 'empty')([p.x, p.y, p.z]) : ground(p)
+    return { ...b, light: 0, skyLight: column && p.y in sent ? sent[p.y] : b.name === 'air' ? 15 : 0 }
+  }
+  if (roofed) {
+    roof.add(ck(0, 64, 0))
+    env.bot.emit('blockUpdate', airAt([0, 64, 0]), stoneAt([0, 64, 0]))
+  }
+  return (y) => env.heldLight(new Vec3(0, y, 0), env.bot.blockAt(new Vec3(0, y, 0))).skyLight
+}
+
+test('water on a 1.7.10 server dims sky light by 3 a cell, and a cell below it by at least 1', () => {
+  assert.deepStrictEqual([64, 63, 62, 61, 60].map(pool1710(false)), [15, 12, 9, 6, 5])
+  assert.deepStrictEqual([63, 62, 61].map(pool1710(true)), [11, 8, 5], 'under a roof')
 })
 
 test('air under one cell of water on a modern server takes sky light at least 1 below the water', () => {

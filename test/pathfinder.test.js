@@ -336,6 +336,7 @@ async function lit (pos, cells, ground, sky) {
     SIGHT_MEMO: { t: 0, cells: new Map() },
     SIGHT_MS: botConstant('SIGHT_MS'),
     GRAVESTONE,
+    LEGACY_1710: false,
     ...groundMemory()
   }
   const fns = loadBotFunctions(['knownMoves', 'lightChanged'], env)

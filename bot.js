@@ -1466,9 +1466,9 @@ function lightClear (b) {
 function skyCrosses (b) {
   return lightClear(b) || (!!b && b.boundingBox === 'empty')
 }
-// The sky light a cell sky light crosses takes away.
+// The sky light a cell sky light crosses takes away. Water takes 3 on 1.7.10, where the 1.21 data says 1.
 function skyFilter (b) {
-  return bot.registry.blocks[b.type].filterLight
+  return LEGACY_1710 && b.name === 'water' ? 3 : bot.registry.blocks[b.type].filterLight
 }
 // Every cell above p up to the dimension's build ceiling is loaded and clear.
 function openSky (p) {
