@@ -38,3 +38,7 @@ How 1.7.10 mobs notice, move and attack. Distances are in blocks, feet to feet.
 ## Daylight
 
 - Zombies and skeletons catch fire in daylight under open sky. A helmet takes the damage instead. Water and rain put the fire out, and baby zombies do not burn.
+
+## Tactics
+
+- The flee from a swelling creeper you see heads for a cell within 4 steps that hides you from it, at least 3 from it. Without one it runs 8 to 16 blocks.

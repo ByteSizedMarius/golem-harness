@@ -2834,11 +2834,12 @@ function entityEngageable (en) {
     return losClear(bot.entity.position.offset(0, 1.62, 0), en.position.offset(0, 1.0, 0))
   } catch (e) { return true }
 }
-const { planFlee, routeWithin } = require('./lib/flee')
+const { planFlee, creeperCover, routeWithin } = require('./lib/flee')
 // The cells as the body knows them, in the shape planFlee and routeWithin read.
 function fleeWorld () {
   const kinds = new Map()
   const hazards = new Map()
+  const covers = new Map()
   const memo = (map, x, y, z, read) => {
     const k = ck(x, y, z)
     if (!map.has(k)) map.set(k, read(new Vec3(x, y, z)))
@@ -2849,19 +2850,30 @@ function fleeWorld () {
       const b = bot.blockAt(p)
       if (!b || !cellKnown(p)) return 'unknown'
       if (/lava|fire/.test(b.name)) return 'hazard'
-      return b.boundingBox === 'block' ? 'solid' : 'open'
+      if (b.boundingBox === 'block') return b.shapes && b.shapes.some(s => s[4] > 1) ? 'tall' : 'solid'
+      return holdsWater(b) ? 'water' : 'open'
     }),
     hazard: (x, y, z) => memo(hazards, x, y, z, (p) => {
       const b = bot.blockAt(p)
       return !!b && /lava|fire/.test(b.name) && cellKnown(p)
+    }),
+    cover: (x, y, z) => memo(covers, x, y, z, (p) => {
+      const b = bot.blockAt(p)
+      return !!b && cellKnown(p) && !!b.shapes && b.shapes.length === 1 && b.shapes[0].join() === '0,0,0,1,1,1'
     })
   }
+}
+// True while creeper e swells or burns an ignited fuse, as its metadata shows.
+function creeperSwelling (e) {
+  const keys = (mcData && mcData.entitiesByName.creeper && mcData.entitiesByName.creeper.metadataKeys) || []
+  const at = (key) => (e.metadata || [])[keys.indexOf(key)]
+  return at('swell_dir') > 0 || at('is_ignited') === true
 }
 // The deepest drop a creeper route takes.
 const CREEPER_DROP = 22
 // True when creeper e walks to within 2 of the body in maxSteps steps or fewer over known cells.
-function creeperRoute (e, maxSteps) {
-  return routeWithin(fleeWorld(), e.position.floored(), bot.entity.position.floored(), maxSteps, CREEPER_DROP)
+function creeperRoute (from, maxSteps) {
+  return routeWithin(fleeWorld(), from.floored(), bot.entity.position.floored(), maxSteps, CREEPER_DROP)
 }
 // A closing mob beyond GUARD_REACH blocks, or more than GUARD_STEPS steps away on foot, gets no standoff guard.
 const GUARD_REACH = 6
@@ -2892,15 +2904,21 @@ function fleeLog (threat, ally, plan) {
   const score = plan.ally ? '' : ` score ${plan.score.toFixed(1)},`
   return `${from}:${to} goal ${at(plan.goal)},${score} ${plan.steps} steps, ${plan.mobDist.toFixed(1)} from the nearest mob, solid floor, no drop over 3 on the way or beside it, no lava or fire within 2, ${plan.candidates} candidates${refused}, ${rejected}`
 }
-// Hostiles within radius that the body perceives or that hit it, and that can reach it.
-function nearHostiles (fill, radius) {
-  return liveEntities().filter(e => {
-    if (!e.position) return false
+// Hostiles within radius that can reach the body, as { e, at }, an unperceived one that hit it placed at seenAt.
+function nearHostiles (fill, radius, seenAt) {
+  return liveEntities().flatMap(e => {
+    if (!e.position) return []
     const c = mobClass(e)
-    if (c !== 'hostile' && c !== 'creeper' && c !== 'heavy') return false
-    if (e.position.distanceTo(bot.entity.position) >= radius) return false
-    if (!(AGGRO_CONFIRMED.has(e.id) || entityPerceptible(e, fill))) return false
-    return entityEngageable(e)   // the mansion lesson: the pack counts only what can reach me
+    if (c !== 'hostile' && c !== 'creeper' && c !== 'heavy') return []
+    const confirmed = AGGRO_CONFIRMED.has(e.id)
+    // An unproven mob counts only while perceived, at its live position.
+    if (!confirmed && e.position.distanceTo(bot.entity.position) >= radius) return []
+    const seen = entityPerceptible(e, fill)
+    if (!(confirmed || seen)) return []
+    const at = seen ? e.position : seenAt.get(e.id)
+    if (!at || at.distanceTo(bot.entity.position) >= radius) return []
+    if (!entityEngageable(e)) return []
+    return [{ e, at }]
   })
 }
 // what, then where e stands from the body when the body perceives it: "flee: creeper E ~10, 8 below".
@@ -2923,8 +2941,10 @@ bot.on('chunkColumnLoad', () => { reflexes.find(r => r.name === 'combat')._fill 
 reflexes.unshift({
   name: 'combat', on: true, active: false,
   _hist: new Map(), _lastNarrate: new Map(), _threat: null,
-  // _fleeCls is the mobClass of the threat the last flee ran from.
-  _fill: null, _fillT: 0, _fillSeed: null, _fleeUntil: 0, _fleeT: 0, _fleeCls: null, _coverUntil: 0, _holdUntil: 0,
+  // _seenAt maps an entity id to where the body last perceived it.
+  _seenAt: new Map(),
+  // _fleeCls is the mobClass of the threat the last flee ran from, _sprint the token of its sprint.
+  _fill: null, _fillT: 0, _fillSeed: null, _fleeUntil: 0, _fleeT: 0, _fleeCls: null, _sprint: null, _coverUntil: 0, _holdUntil: 0,
   // FLEE LATCH (07-16, the first-death autopsy: twelve 'disengaging' events, zero escape — every
   // 300ms re-entry safeStop'd the previous flee goal and re-planned from scratch, so the body
   // SHUFFLED IN PLACE while a same-speed drowned ate it 1.4 at a time. A flee is set ONCE, held
@@ -2935,6 +2955,9 @@ reflexes.unshift({
     if (now - (this._lastNarrate.get(key) || 0) <= 8000) return
     this._lastNarrate.set(key, now)
     emitEvent('combat', text)
+  },
+  perceivedAt (e, seen) {
+    return seen ? e.position : this._seenAt.get(e.id) || null
   },
   // Returns 'held' when no safe cell exists and the body holds its ground instead.
   fleeFrom (bot, threat, why, klass = 'discretionary') {
@@ -2949,26 +2972,45 @@ reflexes.unshift({
     this._fleeUntil = now + 6000
     try {
       const here = bot.entity.position
+      const fill = this.fairFill(bot)
+      const seen = entityPerceptible(threat, fill)
+      const at = this.perceivedAt(threat, seen)
       const anchor = reflexes.find(r => r.name === 'flee_to_player')
-      const ally = anchor && anchor.on ? anchor.ally(bot, here, threat.position) : undefined
-      const mobs = nearHostiles(this.fairFill(bot), 16).filter(e => e.id !== threat.id).map(e => e.position)
-      const plan = planFlee({ world: fleeWorld(), here, threat: threat.position, mobs, ally: ally ? ally.position : null })
-      console.log(fleeLog(threat, ally, plan))
+      const ally = at && anchor && anchor.on ? anchor.ally(bot, here, at, fill) : undefined
+      const mobs = nearHostiles(fill, 16, this._seenAt).filter(h => h.e.id !== threat.id).map(h => h.at)
+      const world = fleeWorld()
+      // A swelling creeper stops once it loses sight of the body.
+      const cover = mobClass(threat) === 'creeper' && creeperSwelling(threat) && seen
+        ? creeperCover({ world, here, creeper: threat.position, mobs })
+        : null
+      const plan = cover || (at ? planFlee({ world, here, threat: at, mobs, ally: ally ? ally.position : null }) : { goal: null })
+      if (cover) {
+        // The creeper walks round the cover in about 1 s, its fuse still lit.
+        this._fleeUntil = now + 1000
+        const [c, g] = [threat.position.floored(), cover.goal]
+        console.log(`[flee] from swelling creeper at (${c.x},${c.y},${c.z}): goal (${g.x},${g.y},${g.z}) out of its sight behind seen blocks, ${cover.steps} steps, ${cover.creeperDist.toFixed(1)} from it`)
+      } else if (at) console.log(fleeLog({ name: threat.name, position: at }, ally, plan))
+      else console.log('[flee] from something never perceived: no heading, holding')
       if (!plan.goal) {
         this._fleeUntil = 0
         this._holdUntil = now + 1500
-        takeLegs('combat', 'hold position')
+        const stand = at ? threatWhy('stand still, no safe cell to flee to', threat, fill) : 'stand still, nothing seen to flee from'
+        takeLegs('combat', stand)
         stopPath()
+        this.narrate('hold', takenText({ reflex: 'combat', why: stand }))
         return 'held'
       }
       this._fleeT = now
       this._fleeCls = mobClass(threat)
-      takeLegs('combat', 'flee')
+      const fled = threatWhy(cover ? 'break its sight' : 'flee', threat, fill)
+      takeLegs('combat', fled)
       stopPath()
       bot.pathfinder.setGoal(new goals.GoalBlock(plan.goal.x, plan.goal.y, plan.goal.z))
+      if (!why) this.narrate('flee', takenText({ reflex: 'combat', why: fled }))
       if (plan.ally) emitEvent('flee_to_player', `fleeing to ${ally.username} ${compass(ally.position.x - here.x, ally.position.z - here.z)} ~${Math.round(ally.position.distanceTo(here))}`)
       bot.setControlState('sprint', true)
-      setTimeout(() => { try { bot.setControlState('sprint', false) } catch (e) {} }, 6000)
+      const sprint = this._sprint = {}
+      setTimeout(() => { if (this._sprint === sprint) try { bot.setControlState('sprint', false) } catch (e) {} }, this._fleeUntil - now)
     } catch (e) { console.log('[flee] failed: ' + e.message) }
     if (why) emitEvent('combat', why)                    // ONE event per flee episode, not twelve
   },
@@ -2984,23 +3026,36 @@ reflexes.unshift({
     if (laneBlocks('interrupt')) { laneNarrate('take-cover'); return }
     this._coverUntil = now + 4000
     const seen = entityPerceptible(threat, this.fairFill(bot))
+    if (seen) this._seenAt.set(threat.id, threat.position.clone())
     const from = seen ? who || '?' : 'something'
+    // The shooter's eye where the body last perceived it, none for a shooter never perceived.
+    const at = this._seenAt.get(threat.id)
     try {
       const here = bot.entity.position.floored()
-      const eye = threat.position.offset(0, 1.62, 0)
+      const eye = at && at.offset(0, 1.62, 0)
       const stand = (x, y, z) => {
+        if (![y - 1, y, y + 1].every(v => knownCell(new Vec3(x, v, z)))) return false
         const f = bot.blockAt(new Vec3(x, y - 1, z)); if (!f || f.boundingBox !== 'block') return false
         const a = bot.blockAt(new Vec3(x, y, z)); const h = bot.blockAt(new Vec3(x, y + 1, z))
         return !!(a && h && a.boundingBox === 'empty' && h.boundingBox === 'empty' &&
-          !/water|lava/.test(a.name) && !/water|lava/.test(h.name))
+          !holdsWater(a) && !holdsWater(h) && !/lava/.test(a.name) && !/lava/.test(h.name))
+      }
+      // True when no block the body knows stands between the eye and head. An unknown cell reads as open.
+      const inSight = (head) => {
+        const end = head.floored()
+        return !gridWalk(eye, head, (c) => {
+          if (c.equals(end) || !knownCell(c)) return false
+          const b = bot.blockAt(c)
+          return !!b && b.boundingBox === 'block'
+        })
       }
       let bestCell = null; let bestD = Infinity
-      for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
+      if (eye) for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
         if (!dx && !dz) continue
         for (let dy = -1; dy <= 1; dy++) {
           const x = here.x + dx, y = here.y + dy, z = here.z + dz
           if (!stand(x, y, z)) continue
-          if (losClear(eye, new Vec3(x + 0.5, y + 1.62, z + 0.5))) continue   // still in the sightline
+          if (inSight(new Vec3(x + 0.5, y + 1.62, z + 0.5))) continue   // still in the sightline
           const d2 = dx * dx + dy * dy + dz * dz
           if (d2 < bestD) { bestD = d2; bestCell = { x, y, z } }
         }
@@ -3046,6 +3101,7 @@ reflexes.unshift({
         }
       }
       expireConfirmed(AGGRO_CONFIRMED, now, CONFIRMED_MS)
+      for (const id of this._seenAt.keys()) if (!bot.entities[id]) this._seenAt.delete(id)
       for (const e of liveEntities()) {
         if (!e.position) continue
         const cls = mobClass(e)
@@ -3053,21 +3109,26 @@ reflexes.unshift({
         const scoreable = cls === 'hostile' || cls === 'creeper' || cls === 'heavy' || !!confirmed ||
           (cls === 'player' && now < threatDebugUntil)
         if (!scoreable) continue
-        const dist = e.position.distanceTo(here)
         // DEATH #9 (07-23): this gate ran BEFORE the confirmed bypass, so a skeleton plinking
         // from ~33 was discarded every cycle — fourteen hits, zero responses, while the hurt
         // line swore the reflex "has it". What HIT me stays scored out to 48; everything
         // unproven keeps the old 24-block horizon.
-        if (dist > (confirmed ? CONFIRMED_HORIZON : 24)) { this._hist.delete(e.id); continue }
+        // An unproven mob scores only while perceived, at its live position.
+        if (!confirmed && e.position.distanceTo(here) > 24) { this._hist.delete(e.id); continue }
         // confirmed attackers bypass the sight gate (whatever HIT me announced itself); everything
         // else must share my connected air. History is kept, not wiped — brief occlusion mid-chase
         // shouldn't amnesia the pursuit evidence, the sample just doesn't accrue while unseen.
-        if (!confirmed && !entityPerceptible(e, this.fairFill(bot))) continue
+        const seen = entityPerceptible(e, this.fairFill(bot))
+        if (seen) this._seenAt.set(e.id, e.position.clone())
+        else if (!confirmed) continue
+        const at = this.perceivedAt(e, seen)
+        const dist = at ? at.distanceTo(here) : Infinity
+        if (at && dist > CONFIRMED_HORIZON) { this._hist.delete(e.id); continue }
         // WATCHED tier (the mansion lesson): perceptible but a floor away — narrate rarely, never score
         if (!entityEngageable(e)) { watch(e, cls, dist); continue }
         const h = this._hist.get(e.id) || { d: dist, t: now, closes: 0, logT: 0 }
         const dt = (now - h.t) / 1000
-        if (dt >= 0.25) {
+        if (at && dt >= 0.25) {
           const closingSpeed = (h.d - dist) / dt              // blocks/sec toward me
           // DECAY not reset (the helmsman's calibration question, 07-15): mob pathfinding stutters — one
           // slow sample must not erase pursuit evidence; only sustained non-approach drains it.
@@ -3079,21 +3140,23 @@ reflexes.unshift({
           }                                                    // zombie post-flip — tune from data
           h.d = dist; h.t = now
         }
-        this._hist.set(e.id, h)
+        if (at) this._hist.set(e.id, h)
         // sentinel stance: posturing doesn't count — only confirmed attackers score (creeper
         // proximity still does: fleeing a lit fuse is survival, not engagement)
         const closerAggro = STANCES[stance].engage === 'confirmed' ? false : h.closes >= 3
         const aggro = !!confirmed || closerAggro || (cls === 'creeper' && dist < 8)
         // A creeper from 8 out drives the legs only along a walk of at most the stance's fleeDist.
-        if (aggro && cls === 'creeper' && dist >= 8) {
-          const routeKey = `${stance} ${e.position.floored()} ${here.floored()}`
+        if (aggro && cls === 'creeper' && at && dist >= 8) {
+          const routeKey = `${stance} ${at.floored()} ${here.floored()}`
           if (h.routeKey !== routeKey) {
             h.routeKey = routeKey
-            h.route = creeperRoute(e, STANCES[stance].fleeDist)
+            h.route = creeperRoute(at, STANCES[stance].fleeDist)
           }
           if (!h.route) { watch(e, cls, dist); continue }
         }
-        if (aggro && (!best || dist < best.dist)) best = { e, cls, dist, confirmed: !!confirmed }
+        // A creeper the body perceives within the stance's flee distance outranks every other mob.
+        const urgent = cls === 'creeper' && dist <= STANCES[stance].fleeDist && seen
+        if (aggro && (!best || urgent > best.urgent || (urgent === best.urgent && dist < best.dist))) best = { e, cls, dist, confirmed: !!confirmed, urgent }
       }
       this._threat = best
       return !!best
@@ -3184,6 +3247,13 @@ reflexes.unshift({
     const t0 = Date.now()
     try {
       while (this.on && !bunker.building && bot.entities[t.e.id] && Date.now() - t0 < 10000) {
+        // An urgent creeper ends the melee, and the fought threat goes back into this._threat for meleeThreat().
+        const fought = this._threat
+        const creeperFirst = this.check(bot) && this._threat.urgent
+        this._threat = fought
+        if (creeperFirst) return
+        const seenNow = entityPerceptible(t.e, this.fairFill(bot))
+        const at = this.perceivedAt(t.e, seenNow)
         // A flee with no safe cell holds the ground and fights on.
         if (bot.health < disengageHp(t.cls)) {
           if (this.fleeFrom(bot, t.e, `HP ${Math.round(bot.health * 10) / 10} — disengaging from ${label}, sprinting`, 'emergency') !== 'held') return
@@ -3191,14 +3261,14 @@ reflexes.unshift({
         // OUTNUMBERED (07-18, death #4 autopsy + the helmsman's diagnosis: the close-in never
         // counted the room). 3+ perceptible hostiles inside 16 is not a duel — withdraw, don't
         // engage-nearest while the rest converge.
-        const packList = nearHostiles(this.fairFill(bot), 16)
+        const packList = nearHostiles(this.fairFill(bot), 16, this._seenAt)
         const pack = packList.length
         if (pack >= 3) {
           // VANGUARD COMMITS (07-21, death #8: four zombies at 0.7 a bite outlasted a reflex
           // that kept choosing withdrawals it couldn't execute in a corridor. A light-only pack
           // in room-clearing stance is sword work, not a rout — stand and swing. A heavy or a
           // creeper in the pack still makes it a real rout, and the HP floor still binds.)
-          const packHasHeavy = packList.some(e2 => { const c2 = mobClass(e2); return c2 === 'heavy' || c2 === 'creeper' })
+          const packHasHeavy = packList.some(h => { const c2 = mobClass(h.e); return c2 === 'heavy' || c2 === 'creeper' })
           const lightCommit = stance === 'vanguard' && !packHasHeavy && bot.health >= 12
           if (!lightCommit) {
             // ALLY SUPPRESSION (the helmsman's design, 07-20, en route to the dungeon reaping):
@@ -3221,7 +3291,7 @@ reflexes.unshift({
             }
           }
         }
-        const d = t.e.position.distanceTo(bot.entity.position)
+        const d = at ? at.distanceTo(bot.entity.position) : Infinity
         const reach = meleeReach(t.e)
         if (d <= reach) yieldJob('combat', 'fight in melee range')
         if (d > reach) {
@@ -3247,7 +3317,7 @@ reflexes.unshift({
           if (conf9 && conf9.ranged) { this.takeCover(bot, t.e, label); return }
           if (LEGACY_1710) { try { await swordInHand() } catch (e) {} }
           setStandoffGuard(d)
-          if (headFree(bot)) await bot.lookAt(t.e.position.offset(0, 1.2, 0), true)
+          if (headFree(bot) && at) await bot.lookAt(at.offset(0, 1.2, 0), true)
           await new Promise(r => setTimeout(r, 250))
           continue
         }
@@ -3295,17 +3365,17 @@ reflexes.unshift({
     }
   }
 })
-// flee_to_player: a combat flee runs to a player within 24 blocks who stands farther from the
-// threat, not straight away from it. It shapes the flee and never fires by itself.
+// flee_to_player: a combat flee runs to a player in sight within 24 blocks who stands farther from
+// the threat, not straight away from it. It shapes the flee and never fires by itself.
 reflexes.push({
   name: 'flee_to_player', on: true, active: false,
   check () { return false },
-  // The player to run to, or undefined.
-  ally (bot, here, threatPos) {
+  // The player to run to, or undefined. A nametag alone gives no route to run along.
+  ally (bot, here, threatPos, fill) {
     return liveEntities().find(e =>
       e.type === 'player' && e.username && e.username !== bot.username &&
       e.position && e.position.distanceTo(here) <= 24 &&
-      e.position.distanceTo(threatPos) > here.distanceTo(threatPos))
+      e.position.distanceTo(threatPos) > here.distanceTo(threatPos) && entityPerceptible(e, fill))
   }
 })
 // LAVA WATCH (07-17, death #3 autopsy: flowing lava advanced into a path that was air at plan
@@ -7068,10 +7138,15 @@ function shelterInputs (requested, height = BUNKER_HEIGHT) {
     const cls = mobClass(e)
     const confirmed = AGGRO_CONFIRMED.has(e.id)
     if (!(['hostile', 'creeper', 'heavy'].includes(cls) || (cls === 'provokable' && confirmed))) continue
-    const dist = e.position.distanceTo(here)
+    // A mob that has not hit the body counts only while perceived, at its live position.
+    if (!confirmed && e.position.distanceTo(here) > SHELTER.HORIZON) continue
+    const seen = entityPerceptible(e, combat.fairFill(bot))
+    if (!confirmed && !seen) continue
+    // One that hit the body counts out of sight where the body last perceived it, and not at all if it never did.
+    const at = combat.perceivedAt(e, seen)
+    if (!at) continue
+    const dist = at.distanceTo(here)
     if (dist > (confirmed ? CONFIRMED_HORIZON : SHELTER.HORIZON) || !entityEngageable(e)) continue
-    // A mob that has not hit the body counts only where the body perceives it.
-    if (!confirmed && !entityPerceptible(e, combat.fairFill(bot))) continue
     const data = mcData && mcData.entitiesByName[e.name]
     threats.push({ name: e.name, baby: babyFlag(e.metadata, data && data.metadataKeys), dist, entity: e })
   }

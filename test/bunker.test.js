@@ -300,7 +300,7 @@ test('a mob out of sight counts as a bunker threat only after it hit the body', 
   const entities = {
     1: { id: 1, name: 'zombie', cls: 'hostile', position: HERE.offset(30, 0, 0), seen: true },
     2: { id: 2, name: 'skeleton', cls: 'hostile', position: HERE.offset(-6, 0, 0), seen: false },
-    3: { id: 3, name: 'husk', cls: 'hostile', position: HERE.offset(0, 0, 20), seen: false },
+    3: { id: 3, name: 'husk', cls: 'hostile', position: HERE.offset(0, 0, 20), seen: false, seenAt: HERE.offset(0, 0, 20) },
     4: { id: 4, name: 'creeper', cls: 'creeper', position: HERE.offset(0, -8, 4), seen: true }
   }
   const { input, names, fills } = shelterInputsAmong(entities, [3])
@@ -313,6 +313,15 @@ test('a mob out of sight counts as a bunker threat only after it hit the body', 
   assert.strictEqual(pick.mode, 'up', `the pick refused: ${pick.refuse}`)
 })
 
+test('a mob that hit the body and went out of sight counts where the body last perceived it', () => {
+  const zombie = (seen, seenAt) => ({ 1: { id: 1, name: 'zombie', cls: 'hostile', position: HERE.offset(4, 0, 0), seen, seenAt } })
+  const dist = (entities) => Array.from(shelterInputsAmong(entities, [1]).input.threats, (t) => t.dist)
+  assert.deepStrictEqual(dist(zombie(true, HERE.offset(12, 0, 0))), [4], 'control: in sight it counts where it stands')
+  assert.deepStrictEqual(dist(zombie(false, HERE.offset(12, 0, 0))), [12], 'out of sight, the steps it took closer count')
+  assert.deepStrictEqual(dist(zombie(false, undefined)), [], 'a mob never perceived counts at a distance')
+  const far = botConstant('CONFIRMED_HORIZON') + 2
+  assert.deepStrictEqual(dist(zombie(false, HERE.offset(far, 0, 0))), [], 'last perceived past the horizon, it counts from where it stands')
+})
 
 test('a mob that hit the body counts as a bunker threat out to a farther horizon than one that did not', () => {
   const near = shelter.SHELTER.HORIZON
@@ -329,7 +338,7 @@ test('a mob that hit the body counts as a bunker threat out to a farther horizon
 
 test('a hit counts toward the bunker only while the aggro is fresh', () => {
   const confirmedMs = botConstant('CONFIRMED_MS')
-  const at = (id, name, cls, dx, dy, dz, seen = true) => ({ id, name, cls, position: HERE.offset(dx, dy, dz), seen })
+  const at = (id, name, cls, dx, dy, dz, seen = true) => ({ id, name, cls, position: HERE.offset(dx, dy, dz), seen, seenAt: HERE.offset(dx, dy, dz) })
   const entities = {
     1: at(1, 'enderman', 'provokable', 6, 0, 0),
     2: at(2, 'zombified_piglin', 'provokable', -6, 0, 0),

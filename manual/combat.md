@@ -35,8 +35,8 @@ You are the strategist, the combat reflex is the trigger finger. It runs in the 
 
 ## Fleeing
 
-A flee ends on a cell you have seen: solid floor, no drop over 3 beside it or on the way there, no lava or fire within 2 of it or of the way. It lies 8 to 16 blocks away from the threat and the other hostiles you perceive within 16. With no such cell the body stands still and raises its guard.
+A flee ends on a cell you have seen: solid floor, no drop over 3 beside it or on the way there, no lava or fire within 2 of it or of the way. It lies 8 to 16 blocks away from the threat and the other hostiles you perceive within 16. With no such cell the body stands still and raises its guard. A creeper flee and a stand each raise one combat event, at most one per 8 s.
 
-flee_to_player is on by default. When the combat reflex flees, it runs to a player within 24 blocks who stands farther from the threat than you, if such a way leads there, and a `flee_to_player` event arrives through `wait_events`. `reflexes(name: "flee_to_player", on: "0")` switches it off.
+flee_to_player is on by default. When the combat reflex flees, it runs to a player you see within 24 blocks, farther from the threat than you, if such a way leads there, and a `flee_to_player` event arrives through `wait_events`. `reflexes(name: "flee_to_player", on: "0")` switches it off.
 
 On top of a `pillar` the body stays put. It leaves only when a mob that can hit you in melee has your health under the disengage tripwire. A flee it holds back raises a combat event too.

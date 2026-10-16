@@ -99,9 +99,9 @@ test('the narrator says nothing of a mob of the dimension before until the serve
 })
 
 // The bunker reflex, the hit attribution and the dimension change of bot.js, at 5 HP a second after a
-// zombie's hit, with entity 1 a zombie 3 blocks east that the body sees when seen.
+// zombie's hit, with entity 1 a zombie 3 blocks east that the body sees when seen and last perceived there.
 function threatScene (seen = true) {
-  const zombie = { id: 1, name: 'zombie', cls: 'hostile', seen, position: new Vec3(3.5, 64, 0.5) }
+  const zombie = { id: 1, name: 'zombie', cls: 'hostile', seen, position: new Vec3(3.5, 64, 0.5), seenAt: new Vec3(3.5, 64, 0.5) }
   const { env } = shelterEnv({ 1: zombie }, [])
   Object.assign(env.reflexes[0], { _fleeT: 0, _fleeCls: null, _fleeUntil: 0, _coverUntil: 0 })
   env.reflexes.push({ name: 'bunker', _spent: false })

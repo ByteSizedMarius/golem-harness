@@ -667,8 +667,8 @@ function wireListeners (env, event) {
 
 const HERE = new Vec3(0.5, 64, 0.5)
 
-// Entities carry seen and cls, ages maps an id to the ms since its hit.
-// A confirmed id missing from entities stands for a mob no longer loaded.
+// seenAt is where the body last perceived an entity, ages[id] the ms since its hit, and a confirmed id missing from
+// entities is unloaded.
 function shelterInputsAmong (entities, confirmed, ages = {}) {
   const { env, fills } = shelterEnv(entities, confirmed, ages)
   const input = loadBotFunctions(['shelterInputs'], env).shelterInputs('auto')
@@ -681,7 +681,12 @@ function shelterEnv (entities, confirmed, ages = {}) {
   let fills = 0
   const env = {
     bot: { entity: { position: HERE }, entities, blockAt: (p) => ({ name: 'dirt', position: p }) },
-    reflexes: [{ name: 'combat', fairFill (b) { fills++; assert.strictEqual(b, env.bot, 'fairFill got another bot'); return FILL } }],
+    reflexes: [{
+      name: 'combat',
+      fairFill (b) { fills++; assert.strictEqual(b, env.bot, 'fairFill got another bot'); return FILL },
+      _seenAt: new Map(Object.values(entities).filter((e) => e.seenAt).map((e) => [e.id, e.seenAt])),
+      perceivedAt (e, seen) { return seen ? e.position : this._seenAt.get(e.id) || null }
+    }],
     staleEntities: new Set(),
     AGGRO_CONFIRMED: new Map(confirmed.map((id) => [id, { name: entities[id] ? entities[id].name : 'zombie', t: Date.now() - (ages[id] || 0) }])),
     expireConfirmed: shelter.expireConfirmed,
