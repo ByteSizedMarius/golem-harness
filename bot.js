@@ -5112,6 +5112,43 @@ async function reachToPlace (cell) {
   if (entityInCell(cell, [bot.entity])) throw new Error(`refusing to place into ${cell.x},${cell.y},${cell.z}: my body overlaps that cell, step out of it first`)
 }
 
+// True for a block that a click opens or toggles. Iron doors and trapdoors take redstone only.
+function isInteractive (b) {
+  return !!b && !/^iron_/.test(b.name) &&
+    /(^|_)(chest|barrel|furnace|smoker|crafting_table|crafter|door|trapdoor|fence_gate|lever|button|bed|anvil|enchanting_table|brewing_stand|hopper|dispenser|dropper|beacon|note_block|jukebox|repeater|comparator|daylight_detector|cake|shulker_box|loom|stonecutter|grindstone|cartography_table|smithing_table|lectern|bell|sign|flower_pot)$/.test(b.name)
+}
+
+async function sneakPlace (ref, place) {
+  if (!isInteractive(ref)) return place()
+  bot.setControlState('sneak', true)
+  try {
+    await bot.waitForTicks(1)
+    return await place()
+  } catch (e) {
+    if (bot.currentWindow) bot.closeWindow(bot.currentWindow)
+    const what = cellKnown(ref.position) ? `the ${ref.name} at ${cellText(ref.position)}` : 'the block it went against'
+    throw new Error(`did not place while sneaking against ${what} (${e.message})`)
+  } finally { bot.setControlState('sneak', false) }
+}
+
+// The axis a door or gate at cell passes along, 'x' or 'z', when solid neighbours seen now form a line on the other axis.
+function passageAxis (cell) {
+  const solid = (dx, dz) => {
+    const p = cell.offset(dx, 0, dz)
+    const b = seenNow(p) && bot.blockAt(p)
+    return !!b && b.boundingBox === 'block' && !isSoftCover(b)
+  }
+  const lineZ = solid(0, -1) || solid(0, 1)
+  const lineX = solid(1, 0) || solid(-1, 0)
+  return lineZ === lineX ? null : lineZ ? 'x' : 'z'
+}
+
+// The name of the block keeping a placement out of cell p, when the bot sees p now.
+function occupant (p) {
+  const b = bot.blockAt(p)
+  return b && b.name !== 'air' && b.boundingBox !== 'empty' && !isSoftCover(b) && seenNow(p) ? b.name : null
+}
+
 app.get('/placeitem', async (req, res) => {
   try {
     const Vec3 = require('vec3').Vec3
@@ -5119,22 +5156,28 @@ app.get('/placeitem', async (req, res) => {
     const name = req.query.name
     const it = bot.inventory.items().find(i => i.name === name)
     if (!it) return err(res, new Error(`no ${name} in inventory`))
-    const tb = bot.blockAt(new Vec3(x, y, z))
-    if (tb && tb.name !== 'air' && tb.boundingBox !== 'empty' && !isSoftCover(tb)) return err(res, new Error(`cell occupied by ${tb.name}`))
+    const known = (p) => cellKnown(p) || bodyTouches(p)
+    if (!known(new Vec3(x, y, z))) return err(res, outOfSight())
+    const taken = occupant(new Vec3(x, y, z))
+    if (taken) return err(res, new Error(`cell occupied by ${taken}`))
     // ref: prefer the block below (top-face place); else chain sideways off any solid
     // neighbor — courses in mid-air (roof stairs, ridge lines) grow E/W from the gable
-    // ends with nothing underneath them.
-    let ref = bot.blockAt(new Vec3(x, y - 1, z))
-    let faceVec = new Vec3(0, 1, 0)
-    if (!ref || ref.boundingBox !== 'block' || isSoftCover(ref)) {
-      ref = null
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nb = bot.blockAt(new Vec3(x + dx, y, z + dz))
-        if (nb && nb.boundingBox === 'block' && !isSoftCover(nb)) { ref = nb; faceVec = new Vec3(-dx, 0, -dz); break }
-      }
-      if (!ref) return err(res, new Error('nothing solid below or beside the target to place against'))
+    // ends with nothing underneath them. An interactive neighbour serves only when nothing else does.
+    let ref = null
+    let faceVec = null
+    let interactive = null
+    for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]) {
+      const np = new Vec3(x + dx, y + dy, z + dz)
+      const nb = seenNow(np) && bot.blockAt(np)
+      if (!nb || nb.boundingBox !== 'block' || isSoftCover(nb)) continue
+      if (!isInteractive(nb)) { ref = nb; faceVec = new Vec3(-dx, -dy, -dz); break }
+      interactive = interactive || [nb, new Vec3(-dx, -dy, -dz)]
     }
+    if (!ref && interactive) [ref, faceVec] = interactive
+    if (!ref) return err(res, new Error('nothing solid I can see below or beside the target to place against'))
     await reachToPlace(new Vec3(x, y, z))
+    const takenThere = occupant(new Vec3(x, y, z))
+    if (takenThere) return err(res, new Error(`cell occupied by ${takenThere}`))
     await clearSoftCover(new Vec3(x, y, z))
     await bot.equip(it, 'hand')
     // face= (07-14): deliberate orientation for stairs & other facing blocks. The server derives
@@ -5142,26 +5185,35 @@ app.get('/placeitem', async (req, res) => {
     // "steps ascend toward north." We aim the body at a far compass point, then click with
     // forceLook:'ignore' so _genericPlace doesn't re-aim at the reference face and clobber it.
     const faceDir = (req.query.face || '').toUpperCase()
-    if (faceDir) {
-      const FD = { N: [0, -16], S: [0, 16], E: [16, 0], W: [-16, 0] }[faceDir]
-      if (!FD) return err(res, new Error('face must be N, S, E or W'))
+    let FD = faceDir ? { N: [0, -16], S: [0, 16], E: [16, 0], W: [-16, 0] }[faceDir] : null
+    if (faceDir && !FD) return err(res, new Error('face must be N, S, E or W'))
+    // A door or gate in a fence or wall line looks across the line from the body's side.
+    const axis = /(_door|_fence_gate)$/.test(name) ? passageAxis(new Vec3(x, y, z)) : null
+    const feet = bot.entity.position
+    if (!FD && axis) FD = axis === 'x' ? [feet.x < x + 0.5 ? 16 : -16, 0] : [0, feet.z < z + 0.5 ? 16 : -16]
+    if (FD) {
       await bot.lookAt(new Vec3(x + 0.5 + FD[0], bot.entity.position.y + 1.6, z + 0.5 + FD[1]), true)
       await bot.waitForTicks(2)  // rotation PACKET goes out on the next physics tick — click too
                                  // fast and the server orients the stair by the stale rotation
                                  // (calibration row proved it: each stair wore the PREVIOUS aim)
       stampOwnEdit({ x, y, z })  // _placeBlockWithOptions bypasses the wrapped bot.placeBlock, stamp by hand
-      await bot._placeBlockWithOptions(ref, faceVec, { swingArm: 'right', forceLook: 'ignore', half: 'bottom' })
+      await sneakPlace(ref, () => bot._placeBlockWithOptions(ref, faceVec, { swingArm: 'right', forceLook: 'ignore', half: 'bottom' }))
     } else {
       await bot.lookAt(new Vec3(x + 0.5, y + 0.5, z + 0.5), true)
-      await bot.placeBlock(ref, faceVec)
+      await sneakPlace(ref, () => bot.placeBlock(ref, faceVec))
     }
+    // The facing the server set, with the wanted axis when it is off.
+    let facing
+    const placedBlock = axis && bot.blockAt(new Vec3(x, y, z))
+    const got = placedBlock && /(_door|_fence_gate)$/.test(placedBlock.name) ? placedBlock.getProperties().facing : null
+    if (got) facing = /^(east|west)$/.test(got) === (axis === 'x') ? got : `${got}, wanted ${axis === 'x' ? 'east-west' : 'north-south'}`
     // ?then=blockat (bones_ham, 07-21): fold act+verify into one trip. Scoped fairness —
     // you may always verify the one cell you just acted on (you clicked its neighbor with
     // line of sight); this also cures the close-range /blockat blindness for self-checks.
     const verify = (req.query.then === 'blockat')
       ? (() => { const b = bot.blockAt(new Vec3(x, y, z)); return { name: b ? b.name : '?', at: { x, y, z } } })()
       : undefined
-    ok(res, { placed: name, at: { x, y, z }, face: faceDir || undefined, verify })
+    ok(res, { placed: name, at: { x, y, z }, face: faceDir || undefined, facing, verify })
   } catch (e) {
     // then=blockat turns the notorious blockUpdate FALSE-FAIL (the block stands, the
     // event never fired) into an honest answer: the error AND what the cell holds now.
@@ -5190,19 +5242,24 @@ app.get('/sign', async (req, res) => {
     const itName = req.query.item || 'oak_sign'
     const it = bot.inventory.items().find(i => i.name === itName)
     if (!it) return err(res, new Error(`no ${itName} in inventory`))
-    const tb = bot.blockAt(new Vec3(x, y, z))
-    if (tb && tb.name !== 'air' && tb.boundingBox !== 'empty' && !isSoftCover(tb)) return err(res, new Error(`cell occupied by ${tb.name}`))
-    let ref = bot.blockAt(new Vec3(x, y - 1, z))
+    const known = (p) => cellKnown(p) || bodyTouches(p)
+    if (!known(new Vec3(x, y, z))) return err(res, outOfSight())
+    const taken = occupant(new Vec3(x, y, z))
+    if (taken) return err(res, new Error(`cell occupied by ${taken}`))
+    let ref = seenNow(new Vec3(x, y - 1, z)) && bot.blockAt(new Vec3(x, y - 1, z))
     let faceVec = new Vec3(0, 1, 0)
     if (!ref || ref.boundingBox !== 'block' || isSoftCover(ref)) {
       ref = null
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nb = bot.blockAt(new Vec3(x + dx, y, z + dz))
+        const np = new Vec3(x + dx, y, z + dz)
+        const nb = seenNow(np) && bot.blockAt(np)
         if (nb && nb.boundingBox === 'block' && !isSoftCover(nb)) { ref = nb; faceVec = new Vec3(-dx, 0, -dz); break }
       }
-      if (!ref) return err(res, new Error('nothing solid below or beside the target to place against'))
+      if (!ref) return err(res, new Error('nothing solid I can see below or beside the target to place against'))
     }
     await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 3))
+    const takenThere = occupant(new Vec3(x, y, z))
+    if (takenThere) return err(res, new Error(`cell occupied by ${takenThere}`))
     await clearSoftCover(new Vec3(x, y, z))
     await bot.equip(it, 'hand')
     // SNEAK while placing: the natural home of a label is ON a chest lid, and a bare click on

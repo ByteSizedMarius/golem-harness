@@ -4,7 +4,7 @@ const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const shelter = require('../lib/shelter')
 const { overrideRecipes } = require('../lib/server-overrides')
-const { loadBotFunctions, botConstant } = require('./helpers')
+const { loadBotFunctions, botConstant, awaitRoute, routeHandler } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty' }
 const STONE = { name: 'stone', boundingBox: 'block' }
@@ -166,4 +166,119 @@ test('a dig step that cannot be filled says why', async () => {
   assert.strictEqual(await run({ items: [{ name: 'torch', count: 8 }] }, new Vec3(1, 64, 0)), 'no filler blocks carried')
   assert.strictEqual(await run({ items: [{ name: 'dirt', count: 8 }], bot: { async placeBlock () { throw new Error('timeout') } } }, new Vec3(1, 64, 0)), 'the block did not place (timeout)')
   assert.strictEqual(await run({ items: [{ name: 'dirt', count: 8 }] }, new Vec3(1, 70, 0)), 'nothing solid beside it to place against')
+})
+
+// placeitem by a body at (-1.5, 64, 0.5) carrying name over the floor plus extra, blind to the cells in hidden,
+// remembering the cells in unseen without seeing them now.
+// A click leaves placedAs (default a block of name) in the target. log records looks, sneaks and places.
+function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen = [] } = {}) {
+  const log = []
+  const world = { ...extra }
+  let sneaking = false
+  const place = (ref, face) => {
+    log.push(`place against ${ref.name} sneaking=${sneaking}`)
+    world[key(ref.position.plus(face))] = placedAs || { name, boundingBox: 'block' }
+  }
+  const env = placingEnv(body(-1.5, 64, 0.5), ground(world), {
+    items: [{ name, count: 1 }],
+    bot: {
+      pathfinder: { goto: async () => {} },
+      async lookAt (p) { log.push(`look ${p.x},${p.z}`) },
+      async waitForTicks () {},
+      setControlState (c, on) { if (c === 'sneak') { sneaking = on; log.push(`sneak ${on}`) } },
+      async placeBlock (ref, face) { place(ref, face) },
+      async _placeBlockWithOptions (ref, face) { place(ref, face) }
+    },
+    env: { require, goals: { GoalNear: function () {} }, cellKnown: (p) => !hidden.includes(key(p)), seenNow: (p) => !hidden.includes(key(p)) && !unseen.includes(key(p)), clearSoftCover: async () => {}, stampOwnEdit () {} }
+  })
+  return { log, env }
+}
+
+const FENCE_NS = { '1,64,-1': { name: 'oak_fence', boundingBox: 'block' }, '1,64,1': { name: 'oak_fence', boundingBox: 'block' } }
+const gate = (facing) => ({ name: 'oak_fence_gate', boundingBox: 'block', getProperties: () => ({ facing }) })
+
+test('a gate placed into a north-south fence line looks east before placing, and a wrong facing from the server is named', async () => {
+  const at = { x: '1', y: '64', z: '0', name: 'oak_fence_gate' }
+  const right = placeitemRig('oak_fence_gate', { extra: FENCE_NS, placedAs: gate('east') })
+  assert.strictEqual((await awaitRoute('/placeitem', at, right.env)).facing, 'east', 'control: a facing along the passage')
+  const wrong = placeitemRig('oak_fence_gate', { extra: FENCE_NS, placedAs: gate('north') })
+  assert.strictEqual((await awaitRoute('/placeitem', at, wrong.env)).facing, 'north, wanted east-west')
+  const looks = wrong.log.slice(0, wrong.log.findIndex((l) => l.startsWith('place'))).filter((l) => l.startsWith('look'))
+  assert.deepStrictEqual(looks.at(-1), 'look 17.5,0.5', 'the last look before the click was not due east')
+})
+
+test('a gate looks along no fence line the bot remembers out of sight', async () => {
+  const at = { x: '1', y: '64', z: '0', name: 'oak_fence_gate' }
+  const unseen = Object.keys(FENCE_NS)
+  const fenced = placeitemRig('oak_fence_gate', { extra: FENCE_NS, placedAs: gate('north'), unseen })
+  const open = placeitemRig('oak_fence_gate', { placedAs: gate('north'), unseen })
+  assert.deepStrictEqual(await awaitRoute('/placeitem', at, fenced.env), await awaitRoute('/placeitem', at, open.env))
+  assert.deepStrictEqual(fenced.log, open.log)
+})
+
+test('placeitem against a chest holds sneak through the place call', async () => {
+  const rig = placeitemRig('oak_planks', { extra: { '1,63,0': { name: 'chest', boundingBox: 'block' } } })
+  await awaitRoute('/placeitem', { x: '1', y: '64', z: '0', name: 'oak_planks' }, rig.env)
+  assert.deepStrictEqual(rig.log.filter((l) => !l.startsWith('look')), ['sneak true', 'place against chest sneaking=true', 'sneak false'])
+})
+
+test('placeitem goes against a stone face beside a chest, without sneaking', async () => {
+  const extra = { '1,63,0': { name: 'chest', boundingBox: 'block' }, '2,64,0': STONE }
+  const rig = placeitemRig('oak_planks', { extra })
+  await awaitRoute('/placeitem', { x: '1', y: '64', z: '0', name: 'oak_planks' }, rig.env)
+  assert.deepStrictEqual(rig.log.filter((l) => !l.startsWith('look')), ['place against stone sneaking=false'])
+})
+
+async function placeitemRefusal (rig) {
+  const { handle, res } = routeHandler('/placeitem', rig.env)
+  await handle({ query: { x: '1', y: '64', z: '0', name: 'oak_planks' } }, res)
+  assert.ok(res.error, 'placeitem did not refuse')
+  assert.deepStrictEqual(rig.log.filter((l) => l.startsWith('place')), [])
+  return res.error.message
+}
+
+const SIGN_AT = { x: '1', y: '64', z: '0', text: 'hi' }
+
+async function signRefusal (rig) {
+  const { handle, res } = routeHandler('/sign', rig.env)
+  await handle({ query: SIGN_AT }, res)
+  assert.ok(res.error, 'sign did not refuse')
+  assert.deepStrictEqual(rig.log.filter((l) => l.startsWith('place')), [])
+  return res.error.message
+}
+
+test('placeitem and sign name the block in a seen target cell, and refuse an unseen one alike whatever it holds', async () => {
+  const ORE = { '1,64,0': { name: 'diamond_ore', boundingBox: 'block' } }
+  for (const [route, refusal, name] of [['/placeitem', placeitemRefusal, 'oak_planks'], ['/sign', signRefusal, 'oak_sign']]) {
+    assert.match(await refusal(placeitemRig(name, { extra: ORE })), /cell occupied by diamond_ore/, `${route} control: a seen cell`)
+    const hiddenOre = await refusal(placeitemRig(name, { extra: ORE, hidden: ['1,64,0'] }))
+    assert.doesNotMatch(hiddenOre, /diamond_ore/, route)
+    assert.strictEqual(hiddenOre, await refusal(placeitemRig(name, { hidden: ['1,64,0'] })), `${route}: an unseen empty cell refuses the same`)
+  }
+})
+
+test('placeitem and sign place only against a block they know', async () => {
+  const at = { x: '1', y: '64', z: '0', name: 'oak_planks' }
+  const side = { '2,64,0': { name: 'cobblestone', boundingBox: 'block' } }
+  const floorOnly = placeitemRig('oak_planks', { extra: side })
+  await awaitRoute('/placeitem', at, floorOnly.env)
+  assert.deepStrictEqual(floorOnly.log.filter((l) => l.startsWith('place')), ['place against stone sneaking=false'], 'control: the floor first')
+  const sideways = placeitemRig('oak_planks', { extra: side, hidden: ['1,63,0'] })
+  await awaitRoute('/placeitem', at, sideways.env)
+  assert.deepStrictEqual(sideways.log.filter((l) => l.startsWith('place')), ['place against cobblestone sneaking=false'])
+  await placeitemRefusal(placeitemRig('oak_planks', { hidden: ['1,63,0'] }))
+
+  const sign = placeitemRig('oak_sign', { extra: side, hidden: ['1,63,0'] })
+  sign.env.bot.updateSign = async () => {}
+  await awaitRoute('/sign', SIGN_AT, sign.env)
+  assert.deepStrictEqual(sign.log.filter((l) => l.startsWith('place')), ['place against cobblestone sneaking=true'], 'sign')
+  assert.match(await signRefusal(placeitemRig('oak_sign', { hidden: ['1,63,0'] })), /^nothing solid I can see below or beside/)
+})
+
+test('placeitem and sign answer a remembered support out of sight the same whatever holds it now', async () => {
+  const dug = { '1,63,0': AIR }
+  const placeitem = (extra) => placeitemRefusal(placeitemRig('oak_planks', { extra, unseen: ['1,63,0'] }))
+  assert.strictEqual(await placeitem({}), await placeitem(dug))
+  const sign = (extra) => signRefusal(placeitemRig('oak_sign', { extra, unseen: ['1,63,0'] }))
+  assert.strictEqual(await sign({}), await sign(dug))
 })
