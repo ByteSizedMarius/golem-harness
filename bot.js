@@ -1437,7 +1437,8 @@ function heldLight (p, b) {
   for (let y = top; y >= p.y; y--) {
     const c = y === p.y ? b : bot.blockAt(new Vec3(p.x, y, p.z))
     if (!skyCrosses(c)) return held
-    sky -= skyFilter(c)
+    // A cell below the first dimmed one takes at least 1.
+    sky -= sky < 15 ? Math.max(1, skyFilter(c)) : skyFilter(c)
     if (sky <= held.skyLight) return held
   }
   return { light: held.light, skyLight: sky }

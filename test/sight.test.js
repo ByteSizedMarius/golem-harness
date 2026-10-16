@@ -292,6 +292,21 @@ test('water high over open ground on a modern server holds the sky light that re
   assert.deepStrictEqual([sky(101), sky(100), sky(99), sky(98)], [15, 14, 13, 12])
 })
 
+test('air under one cell of water on a modern server takes sky light at least 1 below the water', () => {
+  // A stone pocket at y 98 to 100 above y 79, the highest a modern server sent sky light for, water at 0,100,0 over air at 0,99,0.
+  const pocket = (x, y, z) => Math.abs(x) <= 1 && Math.abs(z) <= 1 && y >= 98 && y <= 100 && !(x === 0 && z === 0 && y === 99)
+  const env = wireLight(world({ open: (x, y, z) => y >= 64 && !pocket(x, y, z), light: () => 0 }))
+  env.bot.game.dimension = 'overworld'
+  const sent = env.bot.blockAt
+  env.bot.blockAt = (pos) => {
+    const p = pos.floored()
+    const b = p.x === 0 && p.y === 100 && p.z === 0 ? block('water', 9, 'empty')([p.x, p.y, p.z]) : sent(p)
+    return { ...b, light: 0, skyLight: b.name === 'air' && p.y < 80 ? 15 : 0 }
+  }
+  const sky = (y) => env.heldLight(new Vec3(0, y, 0), env.bot.blockAt(new Vec3(0, y, 0))).skyLight
+  assert.deepStrictEqual([sky(101), sky(100), sky(99)], [15, 14, 13])
+})
+
 test('a fence, gate or wall on open ground lets the sky through to the floor beneath it', () => {
   // A modern server sends no sky light this high and marks these blocks opaque, though light crosses them undimmed.
   const beneath = (name) => {
