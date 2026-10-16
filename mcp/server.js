@@ -22,7 +22,8 @@ const KEY_RULES_MAX = 3
 const PRIMED_BY = new Map([
   ...['chest', 'deposit', 'withdraw', 'walls', 'roof', 'build', 'outline'].map((name) => [name, { topic: 'building' }]),
   ['placeitem', { topic: 'building', when: ({ name }) => name.toLowerCase().includes('chest') }],
-  ...['smelt', 'furnace'].map((name) => [name, { topic: 'jobs' }])
+  ...['smelt', 'furnace'].map((name) => [name, { topic: 'jobs' }]),
+  ['grave', { topic: 'death' }]
 ])
 const WAIT_DEFAULT_S = 60
 const WAIT_GAP_MS = 5000
