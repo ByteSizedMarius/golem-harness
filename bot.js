@@ -2300,7 +2300,6 @@ bot.on('health', async () => {
     if (bot.health < lastHp - 0.5) {
       const dmg = +(lastHp - bot.health).toFixed(1)
       const hurtDue = (ms) => dmg >= BIG_HIT || Date.now() - lastHurtEmit > ms
-      // A sourceless hit beside a player gets its attribution once the swing window has closed.
       if (swingWait) {
         lastHp = bot.health                               // a health update during the wait counts from here
         await swingWait
@@ -2491,7 +2490,7 @@ const SWING_MS = 50
 const SWING_GAP_MS = 300
 // How far in radians a swinger's facing may point past the bot.
 const SWING_FACING = Math.PI / 4
-// Resolves once a sourceless hit beside a player has its attribution.
+// Resolves once a sourceless hit beside a player or with an arrow in flight has its attribution.
 let swingWait = null
 // The players within 4 blocks who stand no farther from the bot than hostile.
 function playersNear (hostile) {
@@ -2500,11 +2499,67 @@ function playersNear (hostile) {
   return liveEntities().filter(e => e.type === 'player' && e.position &&
     e.position.distanceTo(here) <= reach)
 }
-// True when yaw, the facing of player e, points at the bot within SWING_FACING.
+// True when yaw, the facing of e, points at the bot within SWING_FACING.
 function facesBot (e, yaw) {
   const d = bot.entity.position.minus(e.position)
   const off = ((yaw - Math.atan2(-d.x, -d.z)) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI
   return Math.abs(off) <= SWING_FACING
+}
+// Arrows by entity id: the entity, where it appeared (from), when (t) and when it vanished (gone, 0 while it flies).
+const arrows = new Map()
+// An arrow flies at most ARROW_FLIGHT_MS and vanishes within ARROW_HIT_MS of the hit it makes, before or after it.
+const ARROW_FLIGHT_MS = 5000
+const ARROW_HIT_MS = 300
+// The skeleton family, and how far a skeleton shoots.
+const SHOOTERS = new Set(['skeleton', 'stray', 'bogged'])
+const ARROW_RANGE = 15
+const ARROWS = new Set(['arrow', 'spectral_arrow'])
+// How far from the shooter's eye an arrow appears.
+const ARROW_LOOSE = 2
+bot.on('entitySpawn', (e) => {
+  if (!e || !ARROWS.has(e.name) || !bot.entity) return
+  const now = Date.now()
+  for (const [id, a] of arrows) if (now - a.t > ARROW_FLIGHT_MS + ARROW_HIT_MS) arrows.delete(id)
+  // The body's own arrows leave from its eyes.
+  if (e.position.distanceTo(bot.entity.position.offset(0, 1.62, 0)) < 2) return
+  arrows.set(e.id, { e, from: e.position.clone(), t: now, gone: 0 })
+})
+bot.on('entityGone', (e) => {
+  const a = e && arrows.get(e.id)
+  if (a && !a.gone) a.gone = Date.now()
+})
+// True when arrow a appeared within shooting range of the body.
+function arrowInRange (a) {
+  return a.from.distanceTo(bot.entity.position) <= ARROW_RANGE + 1
+}
+// The arrows in range that appeared up to ARROW_FLIGHT_MS before a hit at t and vanished within ARROW_HIT_MS of it.
+function arrowsOf (t) {
+  return [...arrows.values()].filter(a => a.t <= t && t - a.t <= ARROW_FLIGHT_MS && a.gone && Math.abs(a.gone - t) <= ARROW_HIT_MS && arrowInRange(a))
+}
+// Credits the arrow hit at t to its shooter when perceived, else to the arrow's seen bearing.
+function arrowAttrib (arrow, t, cause) {
+  const here = bot.entity.position
+  const fill = reflexes.find(r => r.name === 'combat').fairFill(bot)
+  const shooter = cause && entityPerceptible(cause, fill) ? cause : liveEntities()
+    .filter(e => SHOOTERS.has(e.name) && e.position && e.position.distanceTo(here) <= ARROW_RANGE &&
+      arrow.from.distanceTo(e.position.offset(0, e.height * 0.85, 0)) <= ARROW_LOOSE &&
+      facesBot(e, e.headYaw ?? e.yaw) && entityPerceptible(e, fill))
+    .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0]
+  if (shooter) {
+    const dir = compass(shooter.position.x - here.x, shooter.position.z - here.z)
+    return { t, desc: `${shooter.username || shooter.name} ${dir} ~${Math.round(shooter.position.distanceTo(here))} (arrow)`, entity: shooter, ranged: true }
+  }
+  const seen = [arrow.from, arrow.e.position].find(p => p.distanceTo(here) > 2 && entityPerceptible({ position: p }, fill))
+  return { t, desc: seen ? `hit by an arrow from ${compass(seen.x - here.x, seen.z - here.z)}` : 'hit by an arrow', entity: null, ranged: true }
+}
+// The hit at t as an arrow hit, or null.
+function arrowHitOf (t, sourceless, direct, cause) {
+  if (sourceless) {
+    const hits = arrowsOf(t).map(arrow => arrowAttrib(arrow, t, null))
+    return hits.find(a => a.entity) || hits[0] || null
+  }
+  if (!direct || !ARROWS.has(direct.name)) return null
+  return arrowAttrib(arrows.get(direct.id) || { e: direct, from: direct.position }, t, cause)
 }
 // the wire: 1.21.11 sends damage_event with sourceCauseId = attacker entityId + 1 (0 = none).
 // Validation ritual (the helmsman's design): he punches the machine for science, we expect his name.
@@ -2539,9 +2594,10 @@ bot.once('spawn', () => {
           console.log(`[combat] sourceless hit, ${name} swung nearby`)
           return
         }
-        // The swing of a player beside the bot may still follow.
-        if (near.length && !waited) {
-          const wait = new Promise(r => setTimeout(r, SWING_MS)).then(() => {
+        // The swing of a player beside the bot may still follow, and an arrow in flight may vanish.
+        const flying = sourceless && [...arrows.values()].some(a => !a.gone && t - a.t <= ARROW_FLIGHT_MS && arrowInRange(a))
+        if ((near.length || flying) && !waited) {
+          const wait = new Promise(r => setTimeout(r, flying ? ARROW_HIT_MS : SWING_MS)).then(() => {
             if (swingWait === wait) swingWait = null
             onDamage(packet, t, true)
           })
@@ -2550,6 +2606,13 @@ bot.once('spawn', () => {
         }
         const cause = sourceless ? hostile : causeId >= 0 ? bot.entities[causeId] : null
         const direct = directId >= 0 ? bot.entities[directId] : null
+        const a = arrowHitOf(t, sourceless, direct, cause)
+        if (a) {
+          if (!newer) lastAttrib = a
+          if (a.entity) AGGRO_CONFIRMED.set(a.entity.id, { name: a.entity.username || a.entity.name, t: Date.now(), ranged: true })
+          console.log(`[combat] attributed: ${a.entity ? 'hit by ' : ''}${a.desc}`)
+          return
+        }
         // PROJECTILE TELL (07-23, death #9: the events said "zombie E ~33" while something plinked
         // me at bow range — almost certainly a skeleton wearing a misattributed name. Whatever the
         // cause entity claims to be, cause≠direct means the hit ARRIVED as a projectile, and the

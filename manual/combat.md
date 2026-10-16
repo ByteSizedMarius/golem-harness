@@ -11,7 +11,7 @@ You are the strategist, the combat reflex is the trigger finger. It runs in the 
 
 - Species gate: it scores true hostiles only and never starts a fight with a neutral (endermen, zombie pigmen, wolves). Attacking one manufactures an enemy.
 - Behaviour gate: sustained closing at pursuit pace. A zombie charges at about 3.8 blocks/s, and the trigger is 0.6.
-- Attribution: whatever damages you is named ("hit by zombie SW ~2") and engaged past both gates.
+- Attribution: an attacker you perceive is named ("hit by zombie SW ~2"), any other reads as "something", and both are engaged past both gates. An arrow names the nearest skeleton you see within 15 that faces you. Otherwise it is "hit by an arrow", with a bearing only when you saw the arrow.
 - It kites what it cannot afford to trade with (creepers always, and wither skeletons) and disengages on a tripwire scaled to the last hit taken.
 - Damage with no attribution at all freezes all action. A fall, lava, fire, or a sourceless hit with no hostile within 4 blocks only raises a hurt event.
 - Perception may flow through the floor, urgency must flow through the path. Enemies a storey away with no eye line are `watched:`: narrated, never driving the legs or the pack count.
