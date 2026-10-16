@@ -14,7 +14,10 @@ const STRING_CAP = 300
 const STRUCTURAL_CAP = 4000
 const RESULT_CAP = 32000
 const MAX_ITEMS = 50
-const MANUAL_CAP = 4000
+// Bytes of a topic with LF line ends.
+const MANUAL_CAP = 6000
+// CRLF line ends at most double a topic on disk.
+const MANUAL_DISK_CAP = 2 * MANUAL_CAP
 const MANUAL_DIR = path.join(__dirname, '..', 'manual')
 const TOPIC_FILE = /^[a-z0-9-]{1,32}\.md$/
 const KEY_RULES_MAX = 3
@@ -94,24 +97,25 @@ function loadManual (dir) {
   const texts = new Map()
   for (const topic of fs.readdirSync(real).filter((name) => TOPIC_FILE.test(name)).map((name) => name.slice(0, -3)).sort()) {
     const file = path.join(real, `${topic}.md`)
-    const refused = () => new TypeError(`manual topic ${topic} is not a single-link regular file of at most ${MANUAL_CAP} bytes`)
+    const refused = () => new TypeError(`manual topic ${topic} is not a single-link regular file of at most ${MANUAL_CAP} bytes with LF line ends`)
     // Windows file ids exceed 2^53.
     const checked = fs.lstatSync(file, { bigint: true })
-    if (checked.isSymbolicLink() || !checked.isFile() || checked.nlink !== 1n || checked.size > BigInt(MANUAL_CAP)) throw refused()
+    if (checked.isSymbolicLink() || !checked.isFile() || checked.nlink !== 1n || checked.size > BigInt(MANUAL_DISK_CAP)) throw refused()
     const fd = fs.openSync(file, 'r')
     try {
       const opened = fs.fstatSync(fd, { bigint: true })
       // The file was replaced between the lstat and the open.
       if (opened.dev !== checked.dev || opened.ino !== checked.ino) throw refused()
-      const buf = Buffer.alloc(MANUAL_CAP + 1)
+      const buf = Buffer.alloc(MANUAL_DISK_CAP + 1)
       let size = 0
       while (size < buf.length) {
         const n = fs.readSync(fd, buf, size, buf.length - size, size)
         if (n === 0) break
         size += n
       }
-      if (size > MANUAL_CAP) throw refused()
-      texts.set(topic, buf.toString('utf8', 0, size))
+      const text = buf.toString('utf8', 0, size).replace(/\r\n/g, '\n')
+      if (size > MANUAL_DISK_CAP || Buffer.byteLength(text) > MANUAL_CAP) throw refused()
+      texts.set(topic, text)
     } finally {
       fs.closeSync(fd)
     }

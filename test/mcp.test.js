@@ -63,11 +63,14 @@ test('the bunker tool and the /bunker route share their bounds', () => {
   for (const [k, spec] of numeric) assert.deepStrictEqual(ROUTE_BOUNDS['/bunker'][k], [spec.min, spec.max], `/bunker ${k}`)
 })
 
-test('every manual file is at most 4000 bytes and DRIVING.md lists exactly the manual topics', () => {
+test('every manual file is at most 4000 bytes with LF ends and DRIVING.md lists exactly the manual topics', () => {
   const dir = path.join(__dirname, '..', 'manual')
   const files = fs.readdirSync(dir)
   assert.ok(files.length > 0, 'manual/ holds files')
-  for (const f of files) assert.ok(fs.statSync(path.join(dir, f)).size <= 4000, `${f} is over 4000 bytes`)
+  for (const f of files) {
+    const size = Buffer.byteLength(fs.readFileSync(path.join(dir, f), 'utf8').replace(/\r\n/g, '\n'))
+    assert.ok(size <= 4000, `${f} has ${size} bytes, split topics past 4000`)
+  }
   const line = /^Topics for manual\(topic\): (.+)$/m.exec(fs.readFileSync(path.join(__dirname, '..', 'DRIVING.md'), 'utf8'))
   assert.ok(line, 'DRIVING.md has a topics line')
   assert.deepStrictEqual(line[1].split(', ').sort(), files.map((f) => f.replace(/\.md$/, '')).sort())
@@ -532,8 +535,16 @@ test('manual refuses an unlisted topic, a case variant and a path, and reads not
   assert.strictEqual(calls.length, 0)
 })
 
-test('createServer refuses a manual dir with an oversize topic file and names the topic', (t) => {
-  const dir = manualFixture(t, { 'water.md': WATER })
+test('a manual checked out with CRLF line ends loads and serves each topic with LF ends', async (t) => {
+  const shipped = path.join(__dirname, '..', 'manual')
+  const topics = fs.readdirSync(shipped).map((f) => [f, fs.readFileSync(path.join(shipped, f), 'utf8').replace(/\r\n/g, '\n')])
+  const dir = manualFixture(t, Object.fromEntries(topics.map(([f, text]) => [f, text.replace(/\n/g, '\r\n')])))
+  const { srv } = mcpServer({ manualDir: dir })
+  for (const [f, text] of topics) assert.strictEqual(textOf(await call(srv, 'manual', { topic: f.slice(0, -3) })), text, f)
+})
+
+test('createServer loads a topic past 4000 bytes, refuses an oversize one and names it', (t) => {
+  const dir = manualFixture(t, { 'water.md': WATER, 'long.md': 'o'.repeat(5000) })
   assert.doesNotThrow(() => mcpServer({ manualDir: dir }), 'control')
   fs.writeFileSync(path.join(dir, 'huge.md'), 'o'.repeat(1 << 20))
   assert.throws(() => mcpServer({ manualDir: dir }), { name: 'TypeError', message: /\bhuge\b/ })
