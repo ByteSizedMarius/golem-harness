@@ -862,6 +862,19 @@ test('a block shows through an open door or a ladder, never through a closed doo
   assert.strictEqual(through(doorAt(false)), false)
 })
 
+test('a lit floor indoors shows through a closed fence gate or a fence, never through a wall', () => {
+  // A lit corridor under rock along z 0, blocked at x 3, with the floor cell 6,63,0 beyond.
+  const through = (cell) => {
+    const env = withCells(world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 8, light: () => LIT }), { '3,64,0': cell, '3,65,0': cell })
+    return loadBotFunctions(['knownCell'], env).knownCell(new Vec3(6, 63, 0))
+  }
+  const post = (name) => ({ name, boundingBox: 'block', light: LIT, getProperties: () => ({ open: false }) })
+  assert.strictEqual(through(AIR), true, 'control: nothing in the way')
+  assert.strictEqual(through(post('oak_fence_gate')), true, 'closed fence gate')
+  assert.strictEqual(through(post('oak_fence')), true, 'fence')
+  assert.strictEqual(through(post('cobblestone_wall')), false)
+})
+
 test('an unloaded cell between the body and a block hides the block', () => {
   const env = tunnel(5, LIT)
   assert.strictEqual(findsCoal(env), true, 'control: every cell loaded')

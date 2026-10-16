@@ -1338,9 +1338,14 @@ function blockTransparent(b) {
   if (b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air') return true
   return b.boundingBox === 'empty'
 }
+// A fence or fence gate, seen through between its posts and rails. A wall blocks sight.
+function isFence (b) {
+  return !!b && /_fence(_gate)?$/.test(b.name)
+}
 function isExposed(p) {
   for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-    if (blockTransparent(bot.blockAt(new Vec3(p.x + dx, p.y + dy, p.z + dz)))) return true
+    const n = bot.blockAt(new Vec3(p.x + dx, p.y + dy, p.z + dz))
+    if (blockTransparent(n) || isFence(n)) return true
   }
   return false
 }
@@ -1371,15 +1376,16 @@ function gridWalk (a, b, visit) {
     next[i] += span[i]
   }
 }
-// The last cell the line from eye to point crosses short of cell at, null when the line is blocked.
-function lineCell(eye, point, at) {
+// The last cell the line from eye to point crosses short of cell at, null when the line is blocked. A sight line
+// crosses fences and fence gates.
+function lineCell(eye, point, at, sight = false) {
   let from = eye.floored()
   let water = 0
   const blocked = gridWalk(eye, point, (cell) => {
     if (cell.equals(at)) return false
     const b = bot.blockAt(cell)
     // Four cells of water past the eye's own hide what lies behind them.
-    if (!floodPassable(b) || (holdsWater(b) && ++water > 3)) return true
+    if (!(floodPassable(b) || (sight && isFence(b))) || (holdsWater(b) && ++water > 3)) return true
     from = cell
     return false
   })
@@ -1396,7 +1402,7 @@ function sightCell(p, maxDist, lit = () => true) {
   const open = blockTransparent(b)
   if (open && !lit(at)) return null
   const seenBy = (point) => {
-    const from = lineCell(eye, point, at)
+    const from = lineCell(eye, point, at, true)
     return from && (open ? at : lit(from) ? from : null)
   }
   const centre = seenBy(at.offset(0.5, 0.5, 0.5))
@@ -1409,7 +1415,8 @@ function sightCell(p, maxDist, lit = () => true) {
       if (s * (e[i] - plane) <= 0) continue
       const n = [...q]
       n[i] += s
-      if (!blockTransparent(bot.blockAt(new Vec3(n[0], n[1], n[2])))) continue
+      const nb = bot.blockAt(new Vec3(n[0], n[1], n[2]))
+      if (!blockTransparent(nb) && !isFence(nb)) continue
       for (const [u, v] of [[0.5, 0.5], [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9]]) {
         const point = [0, 0, 0]
         point[i] = plane
