@@ -1456,9 +1456,10 @@ function emission (b, litOnly) {
   if (lit === false) return 0
   return bot.registry.blocks[b.type].emitLight || (lit === true ? litOnly : 0)
 }
-// A cell light crosses undimmed on 1.21 and on 1.7.10.
+// A cell light crosses undimmed on 1.21 and on 1.7.10. Fences, gates and walls do, though 1.21 data marks them opaque.
 function lightClear (b) {
-  return !!b && (b.boundingBox === 'empty' || b.transparent === true) && bot.registry.blocks[b.type].filterLight === 0
+  return !!b && (b.boundingBox === 'empty' || b.transparent === true || /_fence(_gate)?$|_wall$/.test(b.name)) &&
+    bot.registry.blocks[b.type].filterLight === 0
 }
 // A cell sky light crosses, dimmed by its filter: a clear one, or one with no collision box such as water.
 function skyCrosses (b) {

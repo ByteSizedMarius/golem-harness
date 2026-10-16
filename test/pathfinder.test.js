@@ -258,7 +258,7 @@ test('the pathfinder never plans along a sky-lit ravine floor 20 under the groun
   assert.strictEqual(await statusOf(43), 'noPath')
 })
 
-// A one-wide corridor at z 40 from x -36 with stairs, a slab, gaps, a ladder and roofed water, floored at y0, over stone
+// A one-wide corridor at z 40 from x -36 with stairs, a slab, gaps, a ladder, roofed water, a door and a fence gate, floored at y0, over stone
 // up to y top, as cells in build order.
 function course (y0, top) {
   const x0 = -36
@@ -283,6 +283,8 @@ function course (y0, top) {
   for (let height = 2; height <= 5; height++) build.push([`${x0 + 40},${y0 + height},${z}`, ['ladder', { facing: 'west', waterlogged: 'false' }]])
   box(x0 + 46, y0 + 5, z, x0 + 49, y0 + 5, z, ['water', { level: '0' }])
   box(x0 + 45, y0 + 8, z, x0 + 50, y0 + 8, z, STONE)
+  build.push([`${x0 + 57},${y0 + 6},${z}`, door('lower')], [`${x0 + 57},${y0 + 7},${z}`, door('upper')])
+  build.push([`${x0 + 64},${y0 + 6},${z}`, ['oak_fence_gate', { facing: 'east', in_wall: 'false', open: 'false', powered: 'false' }]])
   const ground = (c) => [c.y <= top ? 'stone' : 'air', {}]
   return { build, ground }
 }
@@ -361,4 +363,14 @@ test('a corridor built in the air on a 1.7.10 server walks to the foot of its la
   for (const [key, block] of build) place(key, block)
   const result = plan(new goals.GoalBlock(4, 152, 40))
   assert.strictEqual(result.status, 'success', `${result.path.length} nodes`)
+})
+
+test('a corridor built in the air walks from past its door straight through its closed fence gate', async () => {
+  for (const [server, y0, top, sky] of [['1.7.10', 150, 70, (p) => (p.y > 70 ? 15 : 0)], ['modern', 200, 120, (p) => (p.y < 144 ? 15 : 0)]]) {
+    const { build, ground } = course(y0, top)
+    const { plan, place } = await lit(new Vec3(24.5, y0 + 6, 40.5), new Map(), ground, sky)
+    for (const [key, block] of build) place(key, block)
+    const result = plan(new goals.GoalBlock(31, y0 + 6, 40))
+    assert.deepStrictEqual(cellsOf(result.path), [25, 26, 27, 28, 29, 30, 31].map((x) => [x, y0 + 6, 40]), `${server}: ${result.status}`)
+  }
 })

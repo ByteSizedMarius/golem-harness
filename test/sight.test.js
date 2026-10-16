@@ -292,6 +292,23 @@ test('water high over open ground on a modern server holds the sky light that re
   assert.deepStrictEqual([sky(101), sky(100), sky(99), sky(98)], [15, 14, 13, 12])
 })
 
+test('a fence, gate or wall on open ground lets the sky through to the floor beneath it', () => {
+  // A modern server sends no sky light this high and marks these blocks opaque, though light crosses them undimmed.
+  const beneath = (name) => {
+    const env = world({ open: (x, y) => y >= 64, light: () => 0 })
+    env.bot.game.dimension = 'overworld'
+    env.bot.registry = { blocks: { ...REGISTRY.blocks, 10: { emitLight: 0, filterLight: name === 'stone' ? 15 : 0 } } }
+    const sent = env.bot.blockAt
+    env.bot.blockAt = (pos) => (pos.floored().equals(new Vec3(0, 64, 0)) ? { ...block(name, 10, 'block')([0, 64, 0]), light: 0, skyLight: 0 } : sent(pos))
+    const { heldLight, onSurface } = loadBotFunctions(['heldLight', 'onSurface'], env)
+    const post = new Vec3(0, 64, 0)
+    const floor = new Vec3(0, 63, 0)
+    return [heldLight(post, env.bot.blockAt(post)).skyLight, onSurface(floor, env.bot.blockAt(floor))]
+  }
+  assert.deepStrictEqual(beneath('stone'), [0, false], 'control: a block light does not cross')
+  for (const name of ['oak_fence', 'oak_fence_gate', 'cobblestone_wall']) assert.deepStrictEqual(beneath(name), [15, true], name)
+})
+
 // Open sky over ground at y 63, cut by a ravine at x 3..12 with its floor block at y floor, the body at x = at.
 function ravine (floor, at = 0) {
   const env = world({ open: (x, y) => y > (x >= 3 && x <= 12 ? floor : 63), light: () => LIT, skyLight: () => 15, at })
