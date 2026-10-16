@@ -1733,6 +1733,25 @@ function skyPhrase(oh) {
   if (oh.topY == null) return `UNDERGROUND, rock overhead (first solid ${oh.firstUp} up, unknown past it). `
   return `UNDERGROUND — rock overhead (first solid ${oh.firstUp} up, ~${oh.cover} cover, top ~y${oh.topY}). `
 }
+const INDOORS = new Map()
+bot.on('physicsTick', () => INDOORS.clear())
+// Under a known roof, in a space of at most 8x8 and 4 high closed off by known walls and closed doors.
+function indoors (oh) {
+  const o = bot.entity.position.floored()
+  const key = ck(o.x, o.y, o.z)
+  if (!INDOORS.has(key)) INDOORS.set(key, !!oh?.firstUp && roomClosed())
+  return INDOORS.get(key)
+}
+function roomClosed () {
+  const fill = airFlood({ radius: 8, cap: 8 * 8 * 4 + 1, known: knownCell, knownOnly: true })
+  if (fill.capped || fill.unknown) return false
+  const cells = [...fill.cells].map((k) => k.split(',').map(Number))
+  const span = (i) => Math.max(...cells.map((c) => c[i])) - Math.min(...cells.map((c) => c[i])) + 1
+  return span(0) <= 8 && span(2) <= 8 && span(1) <= 4
+}
+function coverPhrase (oh) {
+  return indoors(oh) ? `Indoors, roof ${oh.firstUp} up. ` : skyPhrase(oh)
+}
 
 // ---- air flood-fill: the volume of air my body is CONNECTED to (BFS from my feet, 6-way).
 // The fill travels only through open cells my pocket already connects to. Lava stops it.
@@ -5578,9 +5597,27 @@ app.get('/job', (req, res) => {
   } catch (e) { err(res, e) }
 })
 
+// Why c is no cell to stand in, '' when it is one, null when an unknown cell leaves it open.
+function standFault (c) {
+  const up = c.offset(0, 1, 0), down = c.offset(0, -1, 0)
+  const known = (p) => !!bot.blockAt(p) && unstuckKnows(p)
+  if (known(c) && !passable(c)) return bot.blockAt(c).name
+  if (known(up) && !passable(up)) return bot.blockAt(up).name + ' above'
+  // An open feet cell in sight shows the floor under it.
+  const floorKnown = known(down) || (known(c) && !!bot.blockAt(down))
+  if (floorKnown && bot.blockAt(down).boundingBox !== 'block') return 'no floor'
+  return known(c) && known(up) && floorKnown ? '' : null
+}
+// On a distance tie, level cells win, then cells above.
+function standBeside (c) {
+  const ring = []
+  for (const dy of [0, 1, -1]) for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) if (dx || dy || dz) ring.push(c.offset(dx, dy, dz))
+  return ring.sort((a, b) => a.distanceSquared(c) - b.distanceSquared(c)).find((p) => standFault(p) === '') || null
+}
+
 // ---- MEMORY endpoints: waypoints + journal ----
 // GET /waypoint?name=&x=&y=&z=  -> if x/y/z given, store that; else if stored, return it;
-//                                  else stamp the bot's current rounded position.
+//                                  else stamp the cell the bot stands in.
 // GET /waypoint?name=[&x=&y=&z=][&note=][&kind=place|resource][&rm=1][&linkto=<wp>]
 //  - rm=1 DELETES (the resource-hygiene verb: a mined-out vein waypoint is a lie — remove it)
 //  - note/kind update in place without moving the point
@@ -5600,9 +5637,19 @@ app.get('/waypoint', (req, res) => {
     if (req.query.kind != null) extra.kind = String(req.query.kind) === 'resource' ? 'resource' : 'place'
     const hasCoords = req.query.x != null && req.query.y != null && req.query.z != null
     const existing = waypoints.get(name)
-    let wp = null, from
+    let wp = null, from, moved
     if (hasCoords) {
-      wp = waypoints.set(name, { x: parseFloat(req.query.x), y: parseFloat(req.query.y), z: parseFloat(req.query.z) }, extra)
+      let at = { x: parseFloat(req.query.x), y: parseFloat(req.query.y), z: parseFloat(req.query.z) }
+      const cell = new Vec3(Math.floor(at.x), Math.floor(at.y), Math.floor(at.z))
+      const why = standFault(cell)
+      if (why) {
+        const beside = standBeside(cell)
+        const named = `(${cellText(cell)})`
+        if (!beside) return err(res, new Error(`${named} is no cell to stand in (${why}) and no cell beside it is known to be one`))
+        at = { x: beside.x, y: beside.y, z: beside.z }
+        moved = `from ${named}, no cell to stand in (${why})`
+      }
+      wp = waypoints.set(name, at, extra)
       from = 'coords'
     } else if (existing && (extra.note != null || extra.kind != null)) {
       wp = waypoints.set(name, existing, extra)               // annotate in place
@@ -5610,14 +5657,14 @@ app.get('/waypoint', (req, res) => {
     } else if (existing) {
       wp = existing; from = 'stored'
     } else {
-      wp = waypoints.set(name, round(bot.entity.position), extra)   // stamp where I stand
+      wp = waypoints.set(name, bot.entity.position.floored(), extra)
       from = 'current'
       if (lastWaypoint && lastWaypoint !== name) waypoints.link(lastWaypoint, name)   // I walked here from there
       lastWaypoint = name
     }
     if (req.query.linkto) { const okd = waypoints.link(name, String(req.query.linkto)); if (okd) journal('waypoint', 'linked ' + name + ' <-> ' + req.query.linkto) }
     if (from !== 'stored') journal('waypoint', from + ' ' + name + ' = ' + JSON.stringify({ x: wp.x, y: wp.y, z: wp.z }))
-    return ok(res, { name, at: wp, from })
+    return ok(res, { name, at: wp, from, ...(moved && { moved }) })
   } catch (e) { err(res, e) }
 })
 
@@ -5701,9 +5748,9 @@ app.get('/map', (req, res) => {
     }
     // the vertical fix: a stone slice at depth looks IDENTICAL to a mountaintop — say which this is.
     const oh = overheadCover()
-    if (oh && !oh.sky && !oh.canopy) {
+    if (oh && !oh.sky && !oh.canopy && !indoors(oh)) {
       payload.underground = true
-      payload.note = `this map is a SLICE at your depth, NOT the surface — ${skyPhrase(oh).trim()}`
+      payload.note = `this map is a SLICE at your depth, NOT the surface: ${skyPhrase(oh).trim()}`
     } else payload.underground = false
     if (verbose) payload.rows = rows
     ok(res, payload)
@@ -5849,7 +5896,7 @@ app.get('/scene', (req, res) => {
       `${biome ? biome + ' biome, ' : ''}${phase} (t=${tod}). ` +
       `HP ${bot.health}/20, food ${bot.food}/20, holding ${held}. ` +
       `Ahead: ${ahead ? ahead.name + ' @' + ahead.dist : 'open'}. ` +
-      skyPhrase(oh) + dim +
+      coverPhrase(oh) + dim +
       (around ? `Around: ${around}. ` : '') +
       (veins ? `Veins: ${veins}. ` : '') +
       (heard ? `Hear: ${heard}. ` : '') +
@@ -6921,7 +6968,7 @@ app.get('/boot', (req, res) => {
       `holding ${held ? held.name + (held.durability != null ? ` (${held.durability}/${held.maxDurability})` : '') : 'nothing'}. ` +
       (armor.length ? `Wearing: ${armor.map(a => a.name + ' (' + a.slot + ')').join(', ')}. ` : 'No armor worn. ') +
       ((bot.inventory.slots[45] && bot.inventory.slots[45].name) ? `Offhand: ${bot.inventory.slots[45].name}. ` : '') +
-      skyPhrase(oh) + (around ? `Around: ${around}. ` : '') +
+      coverPhrase(oh) + (around ? `Around: ${around}. ` : '') +
       (jl.length ? `RUNNING JOBS: ${jl.map(j => j.id + ':' + j.name).join(', ')}. ` : 'No jobs running. ') +
       `Chat cursor: ${chatLog.cursor}.`
     ok(res, {

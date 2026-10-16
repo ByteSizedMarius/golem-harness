@@ -133,7 +133,7 @@ const TOOLS = [
   { name: 'gesture', route: '/gesture', body: true, description: 'Nod, shake, wave, or point at=x,y,z: presence without words.', params: { name: required({ type: 'enum', values: ['nod', 'shake', 'wave', 'point'] }), at: POINT } },
 
   // Memory and jobs
-  { name: 'waypoint', route: '/waypoint', description: 'Store x,y,z under a name, or without coordinates stamp where you stand, linked to the waypoint you last stood at. note is one line of up to 200 characters, kind is place or resource, linkto asserts an edge you truly walked, rm deletes.', params: { name: required(WAYPOINT), ...AT, note: { type: 'str', maxLen: 200 }, kind: { type: 'enum', values: ['place', 'resource'] }, linkto: WAYPOINT, rm: FLAG } },
+  { name: 'waypoint', route: '/waypoint', description: 'Name a cell x,y,z to stand in, or without coordinates stamp where you stand, linked to the waypoint you last stood at. note is one line of up to 200 characters, kind is place or resource, linkto asserts an edge you truly walked, rm deletes.', params: { name: required(WAYPOINT), ...AT, note: { type: 'str', maxLen: 200 }, kind: { type: 'enum', values: ['place', 'resource'] }, linkto: WAYPOINT, rm: FLAG } },
   { name: 'waypoints', route: '/waypoints', description: 'Your map: every named place with its kind and note, and the edges you walked.', params: { verbose: FLAG }, structural: ['graph'] },
   { name: 'journal', route: '/journal', description: 'The last n lines of the journal the bot writes: waypoint changes and goto arrivals at a waypoint.', params: { n: { type: 'int', min: 1, max: 50 } } },
   { name: 'jobs', route: '/jobs', description: 'List jobs with id, name, status (running, done, cancelled, error) and the latest progress note.', params: {}, lists: ['jobs'] },
