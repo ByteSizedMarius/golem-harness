@@ -86,6 +86,7 @@ async function stareCycles (moving) {
     disengageHp: () => 8,
     yieldJob () {},
     drawAndLoose: async () => false,
+    strikeRun: { lane: null },
     laneBlocks: () => false,
     laneNarrate () {},
     // Each 250 ms wait ends a cycle. The zombie leaves after three.

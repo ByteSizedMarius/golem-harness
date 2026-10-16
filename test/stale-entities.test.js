@@ -108,6 +108,7 @@ function threatScene (seen = true) {
   Object.assign(env.bot, { health: 5, game: { dimension: 'overworld' } })
   Object.assign(env, {
     bunker: { cell: null },
+    guardState: { up: false, slot: -1, pilot: false },
     playerCrumbs: {},
     crumbDimension: 'overworld',
     lastHit: { dmg: 3, t: Date.now() - 1000, cls: 'hostile' },

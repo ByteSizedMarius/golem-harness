@@ -10,7 +10,7 @@ const { AsyncLocalStorage } = require('async_hooks')
 const { Vec3 } = require('vec3')
 const { installSecurity, chatMaxLen, BUNKER_MODES } = require('./lib/install')
 const { classifySound } = require('./lib/sounds')
-const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
+const { SHELTER, mobFamily, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
 const { standCell, resolveTarget, crumbCentre, nametagGoal, arrivedAt, walkAttempt, routeDeadline, guardWork } = require('./lib/walk')
 const { playerNamed, playersAround, presenceUpdate, presenceText } = require('./lib/players')
 const { POINT_RANGE, deictic, lookedAt } = require('./lib/deixis')
@@ -2414,7 +2414,7 @@ async function drawAndLoose (target) {
   // NO LOS, NO LOOSE (07-17, ten arrows into a wall: a skeleton in a sealed neighbor pocket was
   // PERCEPTIBLE by connected air — fair for awareness, like hearing — but the reflex treated
   // "perceptible" as "shootable". A firing solution needs an actual clear eye-ray.)
-  if (!losClear(bot.entity.position.offset(0, 1.62, 0), target.position.offset(0, 1.0, 0))) return false
+  if (!bowLine(target)) return false
   const alreadyHeld = bot.heldItem && bot.heldItem.name === 'bow'
   await bot.equip(bow, 'hand')
   if (!alreadyHeld) await bot.waitForTicks(4)
@@ -2423,12 +2423,19 @@ async function drawAndLoose (target) {
   await bot.lookAt(aim(), true)
   await bot.waitForTicks(2)                       // the tick race, as ever
   bot.activateItem()                              // draw...
-  await new Promise(r => setTimeout(r, 1150))     // ...full charge
-  if (!bot.entities[target.id]) { try { bot.deactivateItem() } catch (e) {} ; return true }
-  await bot.lookAt(aim(), true)                   // re-aim in case the target shuffled
-  await bot.waitForTicks(2)
-  bot.deactivateItem()                            // loose!
+  try {
+    await new Promise(r => setTimeout(r, 1150))   // ...full charge
+    if (!bot.entities[target.id]) return true
+    await bot.lookAt(aim(), true)                 // re-aim in case the target shuffled
+    await bot.waitForTicks(2)
+  } finally {
+    bot.deactivateItem()
+  }
   return true
+}
+// True when the eyes have a clear line to the chest of target.
+function bowLine (target) {
+  return losClear(bot.entity.position.offset(0, 1.62, 0), target.position.offset(0, 1.0, 0))
 }
 const AGGRO_CONFIRMED = new Map()          // entityId -> {name, t} — fed by damage attribution
 // How far a mob that hit the body stays a threat.
@@ -2438,14 +2445,84 @@ const CONFIRMED_MS = 45000
 let threatDebugUntil = 0                   // /threatdebug window: score players, narrate only
 let lastHit = { dmg: 0, t: 0 }             // last hit taken (size + when) — scales the disengage tripwire while FRESH
 let lastAttackT = 0                        // when the bot last attacked
-// The raised guard, the off-hand shield or on 1.7.10 the sword block. up is true while it is raised,
-// slot is the hotbar slot it was raised from. On 1.7.10 /guard and the combat reflex share it, and
-// pilot is true while the pilot's last guard order was to raise it.
+// The raised guard (shield, or the 1.7.10 sword block), slot the hotbar slot it rose in, pilot set by /guard.
 const guardState = { up: false, slot: -1, pilot: false }
 // A 1.7.10 sword block ends once another hotbar slot or anything but a sword is in hand.
 bot.on('heldItemChanged', (item) => {
-  if (LEGACY_1710 && (bot.quickBarSlot !== guardState.slot || !item || !/_sword$/.test(item.name))) guardState.up = false
+  if (!LEGACY_1710) return
+  const sword = !!item && /_sword$/.test(item.name)
+  if (bot.quickBarSlot !== guardState.slot || !sword) guardState.up = false
+  if (!sword && !reflexes.find(r => r.name === 'combat').active) guardState.pilot = false
 })
+const MOVES = ['forward', 'back', 'left', 'right', 'sprint']
+function legsMoving () {
+  return MOVES.some(c => bot.controlState[c])
+}
+// Moving or attacking lowers the guard, and an eat, drink or bow draw holds the legs and drops attacks.
+function itemUseCosts () {
+  // The moves held back during an eat, a drink or a bow draw, else null.
+  let paused = null
+  const usedOverTime = (item) => !!item && (/^(bow|potion|milk_bucket)$/.test(item.name) || !!(mcData && mcData.foods[item.type]))
+  const setControlState = bot.setControlState.bind(bot)
+  const pause = () => {
+    if (paused) return
+    lowerGuard()
+    paused = Object.fromEntries(MOVES.map(c => [c, !!bot.controlState[c]]))
+    for (const c of MOVES) setControlState(c, false)
+  }
+  const resume = () => {
+    const held = paused
+    paused = null
+    for (const c of MOVES) if (held && held[c]) bot.setControlState(c, true)
+  }
+  bot.setControlState = (control, state) => {
+    if (MOVES.includes(control)) {
+      if (paused) { paused[control] = state; return }
+      if (state) lowerGuard()
+    }
+    return setControlState(control, state)
+  }
+  const attack = bot.attack.bind(bot)
+  bot.attack = (...a) => {
+    if (paused) return
+    lowerGuard()
+    return attack(...a)
+  }
+  const activateItem = bot.activateItem.bind(bot)
+  bot.activateItem = (offHand = false) => {
+    const pausing = !paused && usedOverTime(offHand ? bot.inventory.slots[45] : bot.heldItem)
+    if (pausing) pause()
+    try {
+      return activateItem(offHand)
+    } catch (e) {
+      if (pausing) resume()
+      throw e
+    }
+  }
+  const deactivateItem = bot.deactivateItem.bind(bot)
+  bot.deactivateItem = () => {
+    try {
+      return deactivateItem()
+    } finally {
+      resume()
+    }
+  }
+  const consume = bot.consume.bind(bot)
+  bot.consume = async () => {
+    pause()
+    try {
+      return await consume()
+    } finally {
+      resume()
+    }
+  }
+}
+bot.once('spawn', itemUseCosts)
+function lowerGuard () {
+  if (!guardState.up) return
+  try { bot.deactivateItem() } catch (e) {}
+  guardState.up = false
+}
 function mobClass (e) {
   if (!e || !e.name) return 'other'
   if (e.type === 'player' || (bot.players && Object.values(bot.players).some(p => p.entity === e))) return 'player'
@@ -2786,6 +2863,24 @@ const CREEPER_DROP = 22
 function creeperRoute (e, maxSteps) {
   return routeWithin(fleeWorld(), e.position.floored(), bot.entity.position.floored(), maxSteps, CREEPER_DROP)
 }
+// A closing mob beyond GUARD_REACH blocks, or more than GUARD_STEPS steps away on foot, gets no standoff guard.
+const GUARD_REACH = 6
+const GUARD_STEPS = 10
+// Whether the standoff guard goes up against e at distance d, and why: { up, why }.
+function standoffGuard (e, d, closing, fill) {
+  if (!entityPerceptible(e, fill)) return { up: false, why: 'out of sight' }
+  if (mobFamily(e.name) === 'skeleton') {
+    if (d > 15) return { up: false, why: 'a skeleton beyond 15' }
+    return losClear(bot.entity.position.offset(0, 1.62, 0), e.position.offset(0, 1.62, 0))
+      ? { up: true, why: 'a skeleton in sight within 15' }
+      : { up: false, why: 'a skeleton out of line of sight' }
+  }
+  if (!closing) return { up: false, why: 'not closing' }
+  if (d > GUARD_REACH) return { up: false, why: `closing beyond ${GUARD_REACH}` }
+  return routeWithin(fleeWorld(), e.position.floored(), bot.entity.position.floored(), GUARD_STEPS, CREEPER_DROP)
+    ? { up: true, why: `closing, a walk of at most ${GUARD_STEPS} steps to the body over seen cells` }
+    : { up: false, why: `no walk of ${GUARD_STEPS} steps or less to the body over seen cells` }
+}
 function fleeLog (threat, ally, plan) {
   const at = (c) => `(${c.x},${c.y},${c.z})`
   const r = plan.rejected
@@ -3022,14 +3117,14 @@ reflexes.unshift({
     if (t.cls === 'player') return                          // NEVER weapons on players — narrate only
     const s = STANCES[stance]
     // melee hostile: SHIELD POSTURE while it closes (the shield is a posture, not a parry —
-    // settled with the helmsman 07-15: nobody blocks the arrow, you walk shield-up while threatened;
+    // settled with the helmsman 07-15: nobody blocks the arrow, you stand shield-up while threatened;
     // posture decisions are slow decisions, so the 300ms reflex holds it, not the pilot),
     // then a swing about every 850 ms, the shield dropped for each (Java can't do both).
     // On 1.7.10 a sword block is the posture, held through swings LEGACY_HIT_MS apart.
     const sword = bot.inventory.items().find(i => /_sword$/.test(i.name))
     const canGuard = () => {
-      if (LEGACY_1710) return !!bot.heldItem && /_sword$/.test(bot.heldItem.name)
-      const s = bot.inventory.slots[45]; return s && s.name === 'shield'
+      if (LEGACY_1710) return !!bot.heldItem && /_sword$/.test(bot.heldItem.name) && !legsMoving()
+      const s = bot.inventory.slots[45]; return !!s && s.name === 'shield' && !legsMoving()
     }
     const guardUp = () => {
       if (!guardState.up && canGuard()) { try { bot.activateItem(!LEGACY_1710); guardState.up = true; guardState.slot = bot.quickBarSlot } catch (e) {} }
@@ -3047,6 +3142,26 @@ reflexes.unshift({
       guardUp()
       return true
     }
+    // pursuit carries on this._hist's closing count, guardCall is the last standoff decision.
+    const pursuit = { ...(this._hist.get(t.e.id) || { d: t.dist, t: now, closes: 0 }) }
+    let guardCall = null
+    const setStandoffGuard = (d) => {
+      if (!canGuard()) return
+      const at = Date.now()
+      if (at - pursuit.t >= 250) {
+        const speed = (pursuit.d - d) / ((at - pursuit.t) / 1000)
+        // A distance never perceived gives no speed.
+        if (Number.isFinite(speed)) pursuit.closes = speed > 0.6 ? pursuit.closes + 1 : Math.max(0, pursuit.closes - 1)
+        pursuit.d = d
+        pursuit.t = at
+      }
+      const g = standoffGuard(t.e, d, pursuit.closes > 0, this.fairFill(bot))
+      const was = guardCall ? guardCall.up : guardState.up
+      if (g.up !== was && (g.up || !guardState.pilot)) console.log(`[combat] guard ${g.up ? 'up' : 'down'} vs ${label} ~${Math.round(d)}: ${g.why}`)
+      guardCall = g
+      if (g.up) guardUp()
+      else if (!guardState.pilot) guardDown()
+    }
     if (t.cls === 'creeper' || t.cls === 'heavy') {
       // Never trade with these — but "never melee" stopped meaning "only run" when stances landed:
       // beyond the stance's berth and inside the bow band, the answer is an arrow, not distance.
@@ -3060,7 +3175,7 @@ reflexes.unshift({
       if (t.dist <= s.fleeDist) { flee(); return }
       const [lo, hi] = s.bowBand
       const bandLo = t.cls === 'heavy' ? Math.max(lo, 10) : lo   // heavies close FAST — bigger floor
-      if (t.dist >= bandLo && t.dist <= hi) {
+      if (seen && t.dist >= bandLo && t.dist <= hi) {
         try { if (await drawAndLoose(t.e)) return } catch (e) {}
       }
       flee()
@@ -3131,7 +3246,7 @@ reflexes.unshift({
           const conf9 = AGGRO_CONFIRMED.get(t.e.id)
           if (conf9 && conf9.ranged) { this.takeCover(bot, t.e, label); return }
           if (LEGACY_1710) { try { await swordInHand() } catch (e) {} }
-          guardUp()                                           // hold ground, face it, shield up
+          setStandoffGuard(d)
           if (headFree(bot)) await bot.lookAt(t.e.position.offset(0, 1.2, 0), true)
           await new Promise(r => setTimeout(r, 250))
           continue
@@ -3163,7 +3278,12 @@ reflexes.unshift({
         } catch (e) {}
         await new Promise(r => setTimeout(r, 250))            // about 850 ms per swing w/ the guard beats, 1.5 s after an equip
       }
-    } finally { if (!(await pilotGuard())) guardDown() }      // the pilot's block stays up, the reflex's comes down
+    } finally {                                               // the pilot's block stays up, the reflex's comes down
+      if (!(await pilotGuard())) {
+        if (guardCall && guardCall.up && guardState.up) console.log(`[combat] guard down vs ${label}: the fight ended`)
+        guardDown()
+      }
+    }
     // Out of sight, a vanished target may have despawned instead of died.
     if (!bot.entities[t.e.id] && entityPerceptible(t.e, this.fairFill(bot))) emitEvent('combat', `${t.e.username || t.e.name || '?'} is DOWN`)
     // POST-COMBAT REFUEL (07-21, the mill's slow-bleed autopsy: /eat fails silently while
@@ -5682,7 +5802,7 @@ app.get('/events', (req, res) => {
 })
 // GET /reflexes — list the always-on reflex layer; /reflexes?name=unstuck&on=0 toggles one off/on.
 // /guard?on=1|0 — raise/lower the shield by pilot order (the reflex manages it in combat
-// automatically; this is the manual posture for walking scary ground). Java shields only
+// automatically; this is the manual posture for holding scary ground). Java shields only
 // block while actively raised; raised = can't attack until lowered. Offhand slot is 45.
 app.get('/guard', (req, res) => {
   try {
@@ -5696,6 +5816,7 @@ app.get('/guard', (req, res) => {
         return ok(res, { guarding: false })
       }
       if (!bot.heldItem || !/_sword$/.test(bot.heldItem.name)) return err(res, new Error('no sword in hand, equip one first'))
+      if (legsMoving()) return err(res, new Error('the body is moving, and a walk lowers the block'))
       bot.activateItem()
       Object.assign(guardState, { up: true, slot: bot.quickBarSlot, pilot: true })
       return ok(res, { guarding: true })
@@ -5703,8 +5824,10 @@ app.get('/guard', (req, res) => {
     const s = bot.inventory.slots[45]
     if (!s || s.name !== 'shield') return err(res, new Error('no shield in offhand — /equip name=shield dest=off-hand first'))
     const on = req.query.on !== '0'
+    if (on && legsMoving()) return err(res, new Error('the body is moving, and a walk lowers the shield'))
     if (on) bot.activateItem(true)
     else bot.deactivateItem()
+    guardState.up = on
     ok(res, { guarding: on })
   } catch (e) { err(res, e) }
 })
@@ -7001,6 +7124,7 @@ function resetThreatState () {
   lastHit = { dmg: 0, t: 0 }
   reflexes.find(r => r.name === 'bunker')._spent = false
   bunker.cell = null
+  Object.assign(guardState, { up: false, pilot: false })
 }
 
 // The entities whose box keeps a block out of its cell.

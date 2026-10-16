@@ -167,6 +167,7 @@ async function meleeSwing ({ chase, goal }) {
     laneBlocks: () => false,
     laneNarrate () {},
     drawAndLoose: async () => false,
+    strikeRun: { lane: null },
     // The zombie dies after the first swing.
     setTimeout: (fn) => {
       if (++waits === 2) delete bot.entities[7]

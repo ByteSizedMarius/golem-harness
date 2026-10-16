@@ -657,6 +657,12 @@ function combatReflexIn (env) {
   return vm.runInContext(`(${literal})`, vm.createContext(env))
 }
 
+// Runs bot.js's top-level bot.on and bot.once lines for event over env.
+function wireListeners (env, event) {
+  const lines = [...botSource().matchAll(new RegExp(`^bot\\.(?:on|once)\\('${event}', ([A-Za-z_$][\\w$]*)\\)$`, 'gm'))]
+  vm.runInContext(lines.map((m) => m[0]).join('\n'), loadBotFunctions(lines.map((m) => m[1]), env))
+}
+
 // ---- bunker fakes over sliced bot.js functions ----
 
 const HERE = new Vec3(0.5, 64, 0.5)
@@ -992,7 +998,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn,
+  botSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild,
   buildVerbEnv, digInProblemWith, digJob

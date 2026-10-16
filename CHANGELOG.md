@@ -21,6 +21,11 @@ comes on the next call at once instead of being dropped. The bot has a side-effe
 `GET /cursors`, and the MCP server writes the chat and event cursors it handed the pilot to
 the wake log, so a supervising process sees whether anything new waits.
 
+Senses and item use. The body hears through shared air within 20 blocks, down from about 34.
+A sky-lit floor deeper than 15 below high ground on both sides counts as underground. Eating,
+drinking and drawing a bow stop the body's legs and drop its attacks until the use ends, and a
+walk, sprint or attack lowers a raised guard first.
+
 Skin. The bot's skin and cape moved into `skin/`. On an offline-mode server players see them
 through the client-side mod CustomSkinLoader, since the bot cannot push a skin there.
 
