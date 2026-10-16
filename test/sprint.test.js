@@ -133,7 +133,7 @@ test('the [sprint] line comes once per walk, then for a changed decision at most
   assert.strictEqual(h.logs.length, 1, 'a change within 5 s waits')
   h.clock.t += 5000
   h.ctx.sprintTick()
-  assert.deepStrictEqual(h.logs.slice(1), ['[sprint] no jump: food at 0 64 0'], 'the change 5 s on')
+  assert.deepStrictEqual(h.logs.slice(1), ['[sprint] no jump: too hungry at 0 64 0'], 'the change 5 s on')
   h.env.bot.pathfinder.goal = {}
   h.env.bot.entity.onGround = false
   h.ctx.sprintTick()
