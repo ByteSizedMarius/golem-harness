@@ -1425,9 +1425,13 @@ function sightCell(p, maxDist, lit = () => true) {
 // Estimated light of the cells changed since their column's light arrived, by column, then by cell.
 const ESTIMATED_LIGHT = new Map()
 // The light the client holds for cell p, or the estimate for a cell changed since.
+// Sky light 15 for a clear overworld cell above its column's ground top, whatever the chunk data says.
 function heldLight (p, b) {
   const column = ESTIMATED_LIGHT.get((p.x >> 4) + ',' + (p.z >> 4))
-  return (column && column.get(ck(p.x, p.y, p.z))) || b
+  const held = (column && column.get(ck(p.x, p.y, p.z))) || b
+  if (!(held.skyLight < 15) || bot.game.dimension !== 'overworld' || !lightClear(b)) return held
+  const top = groundTop(p.x, p.z)
+  return top !== null && p.y > top ? { light: held.light, skyLight: 15 } : held
 }
 function estimateLight (p, levels) {
   const key = (p.x >> 4) + ',' + (p.z >> 4)

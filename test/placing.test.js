@@ -6,7 +6,7 @@ const { Vec3 } = require('vec3')
 const shelter = require('../lib/shelter')
 const { overrideRecipes } = require('../lib/server-overrides')
 const { deathLedger } = require('../lib/deaths')
-const { loadBotFunctions, botConstant, awaitRoute, hookedRoute, routeHandler, buildVerbEnv } = require('./helpers')
+const { loadBotFunctions, botConstant, awaitRoute, hookedRoute, routeHandler, buildVerbEnv, groundMemory } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty' }
 const STONE = { name: 'stone', boundingBox: 'block' }
@@ -373,6 +373,53 @@ test('placeitem and sign place only against a block they know', async () => {
   await awaitRoute('/sign', SIGN_AT, sign.env)
   assert.deepStrictEqual(sign.log.filter((l) => l.startsWith('place')), ['place against cobblestone sneaking=true'], 'sign')
   assert.match(await signRefusal(placeitemRig('oak_sign', { hidden: ['1,63,0'] })), /^nothing solid I can see below or beside/)
+})
+
+// A walled stone platform, roofed when asked, where every cell holds light 0 and sky light 0.
+function heldPlatformRig (roofed) {
+  const placed = []
+  const solid = (x, y, z) => Math.abs(x) <= 4 && Math.abs(z) <= 4 &&
+    (y === 63 || (roofed && y === 66) || ((Math.abs(x) === 4 || Math.abs(z) === 4) && (y === 64 || y === 65)))
+  const blockAt = (pos) => {
+    const p = pos.floored()
+    const s = solid(p.x, p.y, p.z)
+    return { name: s ? 'stone' : 'air', type: s ? 1 : 0, boundingBox: s ? 'block' : 'empty', position: p, light: 0, skyLight: 0 }
+  }
+  const env = placingEnv(body(0.5, 64, 1.5), blockAt, {
+    items: [{ name: 'cobblestone', count: 1 }],
+    bot: {
+      registry: { blocks: { 0: { emitLight: 0, filterLight: 0 }, 1: { emitLight: 0, filterLight: 15 } } },
+      time: { timeOfDay: 6000 },
+      game: { minY: -64, height: 384, dimension: 'overworld' },
+      pathfinder: { goto: async () => {} },
+      async placeBlock (ref, face) { placed.push(`${key(ref.position)} face ${key(face)}`) }
+    },
+    env: {
+      require,
+      ck: (x, y, z) => `${x},${y},${z}`,
+      goals: { GoalNear: function () {} },
+      SEEN: new Set(['0,64,-2']),
+      SIGHT_MEMO: { t: 0, cells: new Map() },
+      SIGHT_MS: botConstant('SIGHT_MS'),
+      ESTIMATED_LIGHT: new Map(),
+      ...groundMemory(),
+      clearSoftCover: async () => {},
+      stampOwnEdit () {}
+    }
+  })
+  return { env, placed }
+}
+
+test('placeitem goes against a floor in open sky that the client holds no sky light for, never one in a dark room', async () => {
+  const at = { x: '0', y: '64', z: '-2', name: 'cobblestone' }
+  const open = heldPlatformRig(false)
+  await awaitRoute('/placeitem', at, open.env)
+  assert.deepStrictEqual(open.placed, ['0,63,-2 face 0,1,0'])
+  const roofed = heldPlatformRig(true)
+  const { handle, res } = routeHandler('/placeitem', roofed.env)
+  await handle({ query: at }, res)
+  assert.strictEqual(res.error && res.error.message, 'nothing solid I can see below or beside the target to place against')
+  assert.deepStrictEqual(roofed.placed, [])
 })
 
 test('placeitem and sign answer a remembered support out of sight the same whatever holds it now', async () => {

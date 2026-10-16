@@ -60,7 +60,8 @@ function closedRoom (light) {
     bot: {
       entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 },
       blockAt: (p) => (air(p) ? { name: 'air', boundingBox: 'empty', light, skyLight: 0 } : { name: 'stone', boundingBox: 'block', light: 0, skyLight: 0 }),
-      time: { timeOfDay: 6000 }
+      time: { timeOfDay: 6000 },
+      game: { minY: -64, height: 384 }
     },
     ck: (x, y, z) => x + ',' + y + ',' + z,
     Vec3,

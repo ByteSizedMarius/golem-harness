@@ -6,7 +6,8 @@ const { Vec3 } = require('vec3')
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
 const { Physics } = require('prismarine-physics')
-const { groundMemory, loadBotFunctions } = require('./helpers')
+const { GRAVESTONE } = require('../lib/server-overrides')
+const { botConstant, groundMemory, loadBotFunctions } = require('./helpers')
 
 const WALL_ARM = ['cobblestone_wall', { up: 'false', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
 const WALL_POST = ['cobblestone_wall', { up: 'true', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
@@ -25,7 +26,7 @@ async function body (pos, cells) {
   Object.assign(bot, {
     entity: { position: pos, velocity: new Vec3(0, 0, 0), width: 0.6, height: 1.8, onGround: true },
     entities: {},
-    game: { minY: -64, height: 384 },
+    game: { minY: -64, height: 384, dimension: 'overworld' },
     inventory: { items: () => [] },
     clearControlStates () {},
     blockAt (p) {
@@ -255,4 +256,85 @@ test('the pathfinder never plans along a sky-lit ravine floor 20 under the groun
   }
   assert.strictEqual(await statusOf(53), 'success', 'control: a floor 10 under the ground')
   assert.strictEqual(await statusOf(43), 'noPath')
+})
+
+// A one-wide corridor along z 40 from x -36, walled 10 above its floor at y0, with stairs, a slab, gaps and a ladder,
+// built in the air over stone up to y top, as cells 'x,y,z' -> [name, properties] in build order.
+function course (y0, top) {
+  const x0 = -36
+  const z = 40
+  const xEnd = x0 + 69
+  const build = []
+  const box = (xa, ya, za, xb, yb, zb, block) => {
+    for (let x = xa; x <= xb; x++) for (let y = ya; y <= yb; y++) for (let zz = za; zz <= zb; zz++) build.push([`${x},${y},${zz}`, block])
+  }
+  box(x0 - 1, y0 - 5, z - 1, xEnd, y0 + 10, z - 1, STONE)
+  box(x0 - 1, y0 - 5, z + 1, xEnd, y0 + 10, z + 1, STONE)
+  box(x0 - 1, y0 - 5, z, x0 - 1, y0 + 10, z, STONE)
+  box(xEnd, y0 - 5, z, xEnd, y0 + 10, z, STONE)
+  box(x0, y0 - 5, z, xEnd - 1, y0 - 5, z, STONE)
+  for (const [first, last, height] of [[0, 4, 0], [5, 5, 1], [6, 6, 2], [7, 9, 3], [10, 10, 2], [11, 11, 1], [12, 18, 0], [19, 23, 1], [25, 29, 1], [33, 40, 1], [41, 45, 5], [46, 49, 4], [50, 68, 5]]) {
+    box(x0 + first, y0, z, x0 + last, y0 + height, z, STONE)
+  }
+  for (const [column, height, facing] of [[4, 1, 'east'], [5, 2, 'east'], [6, 3, 'east'], [10, 3, 'west'], [11, 2, 'west'], [12, 1, 'west']]) {
+    build.push([`${x0 + column},${y0 + height},${z}`, ['oak_stairs', { facing, half: 'bottom', shape: 'straight', waterlogged: 'false' }]])
+  }
+  build.push([`${x0 + 18},${y0 + 1},${z}`, ['stone_slab', { type: 'bottom', waterlogged: 'false' }]])
+  for (let height = 2; height <= 5; height++) build.push([`${x0 + 40},${y0 + height},${z}`, ['ladder', { facing: 'west', waterlogged: 'false' }]])
+  const ground = (c) => [c.y <= top ? 'stone' : 'air', {}]
+  return { build, ground }
+}
+
+// The real pathfinder through bot.js's knownMoves, sight and light over a world whose cells hold the blocks cells
+// has, else ground(p), and the sky light sky(p) a client got with its chunks, for a body at pos at noon.
+async function lit (pos, cells, ground, sky) {
+  const b = await body(pos, {})
+  const Block = require('prismarine-block')(b.bot.registry)
+  b.bot.blockAt = (p) => {
+    const c = p.floored()
+    const [name, props] = cells.get(`${c.x},${c.y},${c.z}`) || ground(c)
+    const block = Block.fromProperties(name, props, 0)
+    block.position = c
+    block.light = 0
+    block.skyLight = block.boundingBox === 'empty' ? sky(c) : 0
+    return block
+  }
+  b.bot.time = { timeOfDay: 6000 }
+  b.moves.allowParkour = true
+  b.moves.allow1by1towers = false
+  b.moves.maxDropDown = 3
+  b.moves.scafoldingBlocks = []
+  const env = {
+    bot: b.bot,
+    Vec3,
+    ck: (x, y, z) => `${x},${y},${z}`,
+    PLAN_KNOWN: new Map(),
+    SEEN: new Set(),
+    ESTIMATED_LIGHT: new Map(),
+    SIGHT_MEMO: { t: 0, cells: new Map() },
+    SIGHT_MS: botConstant('SIGHT_MS'),
+    GRAVESTONE,
+    ...groundMemory()
+  }
+  const fns = loadBotFunctions(['knownMoves', 'lightChanged'], env)
+  fns.knownMoves(b.moves)
+  // Lays block at key as a blockUpdate does: the light estimate first, then the cached ground top above it goes.
+  const place = (key, block) => {
+    const p = new Vec3(...key.split(',').map(Number))
+    const old = b.bot.blockAt(p)
+    cells.set(key, block)
+    fns.lightChanged(old, b.bot.blockAt(p))
+    if (p.y >= env.GROUND_TOP.get(p.x + ',' + p.z)) env.GROUND_TOP.delete(p.x + ',' + p.z)
+  }
+  return { ...b, place }
+}
+
+test('a corridor built in the air on a modern server, which sends no sky light that high, walks up its stairs', async () => {
+  // A 1.21.11 server sends sky light only up to the section above a column's highest block and no light update
+  // after a block change, so the client holds 0 in every section above the ground at y 120.
+  const { build, ground } = course(200, 120)
+  const { plan, place } = await lit(new Vec3(-34.5, 201, 40.5), new Map(), ground, (p) => (p.y < 144 ? 15 : 0))
+  for (const [key, block] of build) place(key, block)
+  const result = plan(new goals.GoalBlock(-27, 204, 40))
+  assert.strictEqual(result.status, 'success', `${result.path.length} nodes`)
 })

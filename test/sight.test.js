@@ -953,13 +953,14 @@ const shaftToSky = (sky, timeOfDay = NOON) => world({ open: (x, y, z) => x === 0
 test('state and scene tell the time only while the sky shows', () => {
   const told = (env) => {
     Object.assign(env.bot.entity, { pitch: 0, onGround: true })
-    Object.assign(env.bot, { oxygenLevel: 20, game: { dimension: 'overworld' }, blockAtCursor: () => null })
+    Object.assign(env.bot, { oxygenLevel: 20, game: { dimension: 'overworld' }, registry: REGISTRY, blockAtCursor: () => null })
     const [scene] = summaries(env)
     const state = runRoute('/state', {}, { ...env, waterState: () => null, heldInfo: () => null, round: (v) => v, ready: true })
     return [state.timeOfDay, /"time"|day|t=6000/.test(scene)]
   }
   assert.deepStrictEqual(told(shaftToSky(15)), [NOON, true], 'control: under open sky')
-  assert.deepStrictEqual(told(shaftToSky(0)), [undefined, false])
+  const capped = world({ open: (x, y, z) => x === 0 && z === 0 && y >= 64 && y < 80, light: () => LIT })
+  assert.deepStrictEqual(told(capped), [undefined, false])
 })
 
 test('nightfall stays silent underground and fires once at the first sight of the sky', () => {
