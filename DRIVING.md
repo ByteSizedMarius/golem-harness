@@ -12,7 +12,7 @@ Every tool is `mcp__golem__<tool>`. This text writes the bare name, and a call w
 - Slow drift rings nothing: food creeping down, night coming. When nothing rang for a while, glance with `scene`, and `jobs` while work runs. Tighter in a fight or on a trip, looser while idle.
 - After a restart, which `wait_events` reports: `boot`, `equip` your tool again, and start again any job that was running.
 - Every step: query, act, verify, remember.
-- Body actions run one at a time in the order you call them.
+- While a body call runs, other body tools answer busy. Info and chat tools work. A call past 10 s answers later.
 
 ## Laws
 

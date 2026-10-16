@@ -347,13 +347,6 @@ function botFailure (e) {
 const cutMessage = (timeoutMs) =>
   `the bot did not answer within ${+(timeoutMs / 1000).toFixed(1)} s, and the action may still be running. Call state to see what the body is doing, or stop to end it.`
 
-// The names in first-seen order, a repeated one with its count: "deposit x7, goto".
-function countedNames (names) {
-  const counts = new Map()
-  for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1)
-  return [...counts].map(([name, n]) => (n > 1 ? `${name} x${n}` : name)).join(', ')
-}
-
 // The body bytes, or null once they pass cap.
 async function readCapped (body, cap) {
   const chunks = []
@@ -430,10 +423,8 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
   // The last wait_events left items for the next one.
   let leftover = false
   const noted = { papercut: 0, lesson: 0 }
-  // Body calls in arrival order, the running one first.
-  const queue = []
-  // Settles once every body call queued so far has run or left the queue.
-  let queueEnd = Promise.resolve()
+  // { name, since, cut } of the body call in flight, or of a cut one until a stop succeeds, else null.
+  let running = null
 
   // Throws ReplyRejected for a reply without a valid X-Golem-Proof. timeoutMs covers the body too.
   async function getJson (route, query, timeoutMs = requestTimeoutMs) {
@@ -469,23 +460,23 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
     }
   }
 
-  // waited and last, when not null, become the first and the final tail, waited also after an error.
-  async function callRouted (tool, values, last = null, waited = null) {
+  // last, when not null, becomes the final tail.
+  async function callRouted (tool, values, last = null, lease = null) {
     const timeoutMs = tool.timeoutMs ?? requestTimeoutMs
     let reply
     try {
       reply = await getJson(tool.route, toQuery(tool, values), timeoutMs)
     } catch (e) {
-      const failed = textResult(e && e.name === 'TimeoutError' ? cutMessage(timeoutMs) : botFailure(e), true)
-      if (waited !== null) failed.content.push({ type: 'text', text: waited })
-      return failed
+      const cut = e && e.name === 'TimeoutError'
+      if (cut && lease) lease.cut = true
+      return textResult(cut ? cutMessage(timeoutMs) : botFailure(e), true)
     }
     const body = reply.body
-    const tails = waited === null ? [] : [waited]
     // The ids a tick reply listed, before its lists are trimmed.
     const listed = tool.name === 'tick' && reply.status === 200 && usableTick(body)
       ? { chat: body.chat.messages.map((m) => m.id), ev: body.events.list.map((e) => e.id) }
       : null
+    const tails = []
     if (body !== null && typeof body === 'object' && Object.hasOwn(body, 'unreadChat')) {
       const note = unreadNote(body.unreadChat)
       if (note !== null) tails.push(note)
@@ -518,37 +509,24 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
     onDeliver({ ...frontier })
   }
 
-  // A call still waiting when its time budget ends, or cancelled, answers an error without reaching the bot.
-  async function inQueue (tool, values) {
-    const timeoutMs = tool.timeoutMs ?? requestTimeoutMs
-    const ahead = queue.map((entry) => entry.name)
-    const turn = queueEnd
-    let leave
-    const left = new Promise((resolve) => { leave = resolve })
-    queueEnd = turn.then(() => left)
-    const entry = { name: tool.name, cancel: null }
-    queue.push(entry)
+  // A body call while another is in flight or cut answers busy without reaching the bot.
+  async function bodyCall (tool, values) {
+    if (running && running.cut) return textResult(`busy: ${running.name} passed its time budget and may still run, stop ends it.`, true)
+    if (running) {
+      const s = Math.round((Date.now() - running.since) / 1000)
+      return textResult(`busy: ${running.name} has run ${s} s. Info and chat tools work meanwhile, stop cancels it.`, true)
+    }
+    const lease = { name: tool.name, since: Date.now(), cut: false }
+    running = lease
     try {
-      if (!ahead.length) return await callRouted(tool, values)
-      const since = Date.now()
-      const outcome = await new Promise((resolve) => {
-        const timer = setTimeout(() => resolve('late'), timeoutMs)
-        entry.cancel = (by) => { clearTimeout(timer); resolve(by) }
-        turn.then(() => { clearTimeout(timer); resolve(null) })
-      })
-      entry.cancel = null
-      const behind = `behind ${countedNames(ahead)}`
-      if (outcome === 'late') return textResult(`not run: it waited ${+(timeoutMs / 1000).toFixed(1)} s ${behind}, its whole time budget, and did nothing`, true)
-      if (outcome !== null) return textResult(`cancelled by ${outcome} before it ran`, true)
-      return await callRouted(tool, values, null, `Waited ${+((Date.now() - since) / 1000).toFixed(1)} s ${behind}.`)
+      return await callRouted(tool, values, null, lease)
     } finally {
-      queue.splice(queue.indexOf(entry), 1)
-      leave()
+      if (!lease.cut) running = null
     }
   }
 
   async function waitEvents ({ timeout = WAIT_DEFAULT_S }) {
-    if (waiting) return textResult('wait_events is already running', true)
+    if (waiting) return textResult('wait_events is already running, its result arrives when it returns', true)
     waiting = true
     onWaitStart()
     try {
@@ -735,11 +713,10 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
     if (tool.name === 'boot' && todoFile !== undefined) {
       return rpcResult(id, await callRouted(tool, values, todoListing() ?? 'the todo list could not be read'))
     }
-    if (tool.body) return rpcResult(id, await inQueue(tool, values))
-    if (tool.name === 'stop' || tool.name === 'job_stop') {
-      for (const waiting of queue) if (waiting.cancel) waiting.cancel(tool.name)
-    }
-    return rpcResult(id, await callRouted(tool, values))
+    if (tool.body) return rpcResult(id, await bodyCall(tool, values))
+    const result = await callRouted(tool, values)
+    if (tool.name === 'stop' && !result.isError && running && running.cut) running = null
+    return rpcResult(id, result)
   }
 
   async function handle (msg) {

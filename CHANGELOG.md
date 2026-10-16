@@ -8,6 +8,14 @@ and leaves the stories here.
 
 ## 2026-10-15: live-play fixes
 
+Busy body. A client that moves a tool call running past 10 s into the background lets the
+pilot chat and look around while a long walk runs, but the body queue held every body call
+sent meanwhile until the walk ended. The MCP server now refuses a body call while another
+runs, at once: `busy: goto has run 14 s. Info and chat tools work meanwhile, stop cancels
+it.` The `Waited` line and the queue's errors are gone, and `stop` and `job_stop` stop the
+running action with nothing queued to cancel. The wake log marks `wait_events started` beside
+`wait_events returned`, so a supervising process sees when a wait begins.
+
 Event backlog. `wait_events` now hands over the oldest items first, and a backlog over 50
 comes on the next call at once instead of being dropped. The bot has a side-effect-free
 `GET /cursors`, and the MCP server writes the chat and event cursors it handed the pilot to
