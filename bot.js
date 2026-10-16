@@ -1857,12 +1857,18 @@ function airPrecheck(dest, range = 1) {
 // fog-of-war memory (a player remembers what they've looked at; they never saw through rock).
 const SEEN = new Set()
 const SEEN_CAP = 400000
+// The top block last seen in each column, 'x,z' -> [block id, y].
+const SURFACE = new Map()
+const SURFACE_CAP = 100000
+// Count of SURFACE changes, for the saver.
+let surfaceEdits = 0
 // The station last seen in each cell, 'x,y,z' -> block id.
 const STATIONS = new Map()
 const STATION_CAP = 20000
 const STATION_RE = /chest|furnace|crafting_table|anvil|enchanting_table|_bed$/
 function markSeen (x, y, z, b = bot.blockAt(new Vec3(x, y, z))) {
   if (SEEN.size < SEEN_CAP) SEEN.add(ck(x, y, z))
+  rememberSurface(x, y, z, b)
   rememberStation(x, y, z, b)
 }
 // A seen station is remembered in its cell, and a cell seen holding anything else forgets it.
@@ -1874,6 +1880,26 @@ function rememberStation (x, y, z, b) {
   } else if (STATIONS.get(key) !== b.type && (STATIONS.has(key) || STATIONS.size < STATION_CAP)) {
     STATIONS.set(key, b.type)
   }
+}
+// A seen solid or fluid cell up to 4 over the feet becomes its column's top unless a higher top in that reach is remembered.
+function rememberSurface (x, y, z, b) {
+  const key = x + ',' + z
+  const top = SURFACE.get(key)
+  const reach = Math.floor(bot.entity.position.y) + 4
+  if (b && (b.boundingBox === 'block' || b.name === 'water' || b.name === 'lava')) {
+    if (y > reach || (top && (top[1] > y ? top[1] <= reach : top[1] === y && top[0] === b.type))) return
+    if (!top && SURFACE.size >= SURFACE_CAP) return
+    SURFACE.set(key, [b.type, y])
+    surfaceEdits++
+  } else if (top && top[1] === y) {
+    SURFACE.delete(key)
+    surfaceEdits++
+  }
+}
+// A loaded cell the bot perceives now: on the surface or in lit sight.
+function showsNow (p) {
+  const b = bot.blockAt(p)
+  return !!b && (onSurface(p, b) || seesLit(p, 64))
 }
 // forward vector from mineflayer yaw/pitch — same convention /scene's "ahead" probe uses
 function lookVec(yaw, pitch) {
@@ -5724,15 +5750,10 @@ app.get('/map', (req, res) => {
           const isFluid = b.name === 'water' || b.name === 'lava'
           if (b.boundingBox === 'block' || isFluid) { g = glyphFor(b.name); surfY = y; break }
         }
-        // FOG OF WAR (07-12 fairness): only render terrain I have actually SEEN (ray-swept via
-        // /gaze, or walked past — the trail marks a small disc). Everything else is '·' unexplored.
-        // The old map was a heightmap of loaded chunks — knowledge without looking, same class of
-        // leak as x-ray. Now looking around literally draws the map.
-        const nearMe = Math.abs(cx * scale) <= 4 && Math.abs(cz * scale) <= 4
-        if (!nearMe && g !== ' ') {
-          let seen = false
-          if (surfY != null) for (let dy = -1; dy <= 2 && !seen; dy++) if (SEEN.has(ck(x, surfY + dy, z))) seen = true
-          if (!seen) g = '·'
+        // Live where the top cell shows now, elsewhere the top last seen in this column, '·' with none.
+        if (!showsNow(new Vec3(x, surfY == null ? topY - 23 : surfY, z))) {
+          const top = SURFACE.get(x + ',' + z)
+          g = top && top[1] <= topY && top[1] > topY - 24 ? glyphFor(bot.registry.blocks[top[0]].name) : '·'
         }
         row += g
       }

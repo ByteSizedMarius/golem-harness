@@ -117,12 +117,11 @@ counts.
 
 ## How the model remembers
 
-**`seen.json` — attention, not content.** Every lit cell a gaze ray crosses is stamped into a persistent
-SEEN set — but only the *fact of having looked*, never what was there. The top-down `/map` renders live
-world data *through* that mask: fog-of-war where looking literally draws the map. Storing no content
-means the memory can never go stale and the map can never assert a lie — if the world changed, the next
-render shows the new truth. The one thing stored is the one thing the world itself can't provide: the
-history of the bot's attention.
+**`seen.json`: what the bot looked at.** Every lit cell a gaze ray crosses or the walk passes is stamped
+into a persistent SEEN set, the *fact of having looked*. Each column also keeps the top block the bot
+last saw there and its height. The top-down `/map` draws a column live while its top shows (under open
+sky or in sight), and otherwise as last seen: fog-of-war where looking draws the map. A change out of
+sight under cover or underground stays off the map until the bot looks there again.
 
 **`waypoints.json` — a knowledge graph of places that matter.** Nodes are named places with a kind
 (`place` = durable landmark; `resource` = *perishable claim* — extraction falsifies it, delete on

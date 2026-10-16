@@ -228,6 +228,31 @@ test('a cell opened under open sky in a 1.7.10 dimension takes the full sky ligh
   assert.strictEqual(env.heldLight(at, env.bot.blockAt(at)).skyLight, 15)
 })
 
+// A room at x 10..12, z -1..1 on the floor at y 63, walled to y 66 under open sky, the body at x = at. Its air holds
+// sky light 15 in the chunk, and its roof at y 66 is laid and taken off again roofs times after the chunk arrived.
+function roomUnder (at, roofs) {
+  const roof = new Set()
+  const wall = (x, z) => x >= 9 && x <= 13 && z >= -2 && z <= 2 && (x === 9 || x === 13 || z === -2 || z === 2)
+  const env = wireLight(world({ open: (x, y, z) => y >= 64 && !(y <= 66 && wall(x, z)) && !roof.has(ck(x, y, z)), light: () => 0, skyLight: () => 15, at }))
+  for (let i = 0; i < roofs; i++) {
+    for (let x = 10; x <= 12; x++) for (let z = -1; z <= 1; z++) {
+      const k = ck(x, 66, z)
+      const laid = !roof.has(k)
+      if (laid) roof.add(k)
+      else roof.delete(k)
+      env.bot.emit('blockUpdate', (laid ? airAt : stoneAt)([x, 66, z]), (laid ? stoneAt : airAt)([x, 66, z]))
+    }
+  }
+  return env
+}
+
+test('a roof laid over a room takes away the open sky its held light still shows', () => {
+  const floorKnown = (roofs) => loadBotFunctions(['knownCell'], roomUnder(0, roofs)).knownCell(new Vec3(11, 63, 0))
+  assert.strictEqual(floorKnown(0), true, 'control: open to the sky')
+  assert.strictEqual(floorKnown(1), false, 'the floor, unseen from outside the walls')
+  assert.strictEqual(floorKnown(2), true, 'the roof taken off again')
+})
+
 // Open sky over ground at y 63, cut by a ravine at x 3..12 with its floor block at y floor, the body at x = at.
 function ravine (floor, at = 0) {
   const env = world({ open: (x, y) => y > (x >= 3 && x <= 12 ? floor : 63), light: () => LIT, skyLight: () => 15, at })
@@ -905,6 +930,26 @@ test('scene and boot report a drop on open ground the bot can see, with the lava
   const base = env.bot.blockAt
   env.bot.blockAt = (p) => (p.x >= 3 && p.y === 55 ? { ...LAVA, type: 8, position: new Vec3(p.x, p.y, p.z), skyLight: 14 } : base(p))
   for (const s of summaries(env)) assert.match(s, /falls away E at 3, floor ~9 down \(LAVA below\)/)
+})
+
+test('map draws a floor changed out of sight as last seen, and the new block once in sight', () => {
+  let light = LIT
+  const planked = new Set()
+  // A room at x -5..5, z -5..5 with its ceiling above the map's top, on a stone floor at y 63.
+  const env = world({ open: (x, y, z) => Math.abs(x) <= 5 && Math.abs(z) <= 5 && y >= 64 && y <= 70, light: () => light })
+  const base = env.bot.blockAt
+  env.bot.blockAt = (p) => (planked.has(ck(p.x, p.y, p.z)) ? { ...base(p), name: 'oak_planks', type: 9 } : base(p))
+  env.bot.registry = { blocks: { 3: { name: 'stone' }, 9: { name: 'oak_planks' } } }
+  Object.assign(env, { require, SEEN_CAP: 1000, SURFACE: new Map(), SURFACE_CAP: 1000, surfaceEdits: 0, ...stationMemory(), indoors: () => false })
+  loadBotFunctions(['markTrail'], env).markTrail(new Vec3(0, 64, 0))
+  // The glyph of column x 3, z 0.
+  const glyph = () => runRoute('/map', { radius: '4' }, env).grid.split('\n')[4][7]
+  assert.strictEqual(glyph(), '#', 'control: the stone floor in sight')
+  light = DARK
+  planked.add('3,63,0')
+  assert.strictEqual(glyph(), '#')
+  light = LIT
+  assert.strictEqual(glyph(), '=')
 })
 
 // Runs the one blockUpdate handler of bot.js that names marker on env.bot.
