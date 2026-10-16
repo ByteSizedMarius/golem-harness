@@ -10,9 +10,9 @@ You are the strategist, the combat reflex is the trigger finger. It runs in the 
 - It kites what it cannot afford to trade with (creepers always, and wither skeletons) and disengages on a tripwire scaled to the last hit taken.
 - Damage with no attribution at all freezes all action. A fall, lava, fire, or a sourceless hit with no hostile within 4 blocks only raises a hurt event.
 - Perception may flow through the floor, urgency must flow through the path. Enemies a storey away with no eye line are `watched:`: narrated, never driving the legs or the pack count.
-- The legs have one owner. Your movement tools hold a soft lane that the reflex's own moves defer to, and `brace` holds a hard one that only survival overrides. Mid-fight, `follow` yields to combat entirely.
-- `stance` sets the posture the reflex fights by.
-- A `goto` or `collect` that a reflex stopped names the reflex in `takenBy`.
+- The legs have one owner. Your movement tools hold a soft lane that the reflex's own moves defer to, and `brace` holds a hard one that only a creeper, low health, lava, drowning, an unexplained hit or the bunker overrides. Mid-fight, `follow` yields to combat entirely.
+- `stance` sets the posture the reflex fights by. The reflex flees a creeper within 16 (12 vanguard, 8 skirmish). Farther out it shoots the creeper when it has a bow and a clear line, else flees.
+- A `goto`, `collect` or job that a reflex stopped names the reflex in `takenBy`. The combat reflex adds what it did and where a threat you perceive stands.
 
 ## Doctrine
 
@@ -34,4 +34,4 @@ A flee ends on a cell you have seen: solid floor, no drop over 3 beside it or on
 
 flee_to_player is on by default. When the combat reflex flees, it runs to a player within 24 blocks who stands farther from the threat than you, if such a way leads there, and a `flee_to_player` event arrives through `wait_events`. `reflexes(name: "flee_to_player", on: "0")` switches it off.
 
-On top of a `pillar` the body stays put. It leaves only when a mob in melee reach has your health under the disengage tripwire.
+On top of a `pillar` the body stays put. It leaves only when a mob that can hit you in melee has your health under the disengage tripwire. A flee it holds back raises a combat event too.

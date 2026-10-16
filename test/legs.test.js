@@ -163,6 +163,7 @@ async function meleeSwing ({ chase, goal }) {
     disengageHp: () => 8,
     yieldJob: (reflex, why) => takes.push(['job', reflex, why]),
     takeLegs: (reflex, why) => takes.push(['legs', reflex, why]),
+    threatWhy: (what) => what,
     laneBlocks: () => false,
     laneNarrate () {},
     drawAndLoose: async () => false,

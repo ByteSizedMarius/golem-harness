@@ -2403,7 +2403,7 @@ const HEAVY_MELEE = new Set(['vindicator', 'ravager', 'piglin_brute', 'wither_sk
 // the combat reflex reads: creeper/heavy berth, the bow band, whether to chase, what to score.
 const STANCES = {
   guard:    { fleeDist: 16, bowBand: [7, 24],  chase: false, engage: 'closers',   note: 'default: hold ground, melee closers, bow standoffs, wide creeper berth' },
-  skirmish: { fleeDist: 8,  bowBand: [4, 24],  chase: false, engage: 'closers',   note: 'fire support: bow-first from the perch, flee only inside blast radius' },
+  skirmish: { fleeDist: 8,  bowBand: [4, 24],  chase: false, engage: 'closers',   note: 'fire support: bow-first from the perch, creepers shot from 8 out' },
   vanguard: { fleeDist: 12, bowBand: [10, 24], chase: true,  engage: 'closers',   note: 'clear the room: run melee targets down, bow only the far ones' },
   sentinel: { fleeDist: 16, bowBand: [7, 24],  chase: false, engage: 'confirmed', note: 'work detail: ignore posturing, fight only what actually hits me' }
 }
@@ -2589,7 +2589,7 @@ bot.once('spawn', () => {
 // every 300ms; the pilot every 1-3s — ten to thirty free reflex moves between any two pilot
 // decisions, so orders kept landing on a body that had already left. Movement verbs claim a
 // SOFT lane: discretionary reflex goals (withdrawal, stance-berth kiting, chase) defer, but
-// interrupts (heavy-kite) and emergencies (creeper fuse, HP-critical) still pass. /brace
+// interrupts (heavy-kite) and emergencies (a creeper flee, HP-critical) still pass. /brace
 // claims the HARD lane: only emergencies pass. The legs get ONE owner, and the pilot knows which.
 // token is the claim releaseLane may clear.
 const pilotLane = { until: 0, why: null, hard: false, narrated: 0, token: null }
@@ -2745,6 +2745,14 @@ function nearHostiles (fill, radius) {
     return entityEngageable(e)   // the mansion lesson: the pack counts only what can reach me
   })
 }
+// what, then where e stands from the body when the body perceives it: "flee: creeper E ~10, 8 below".
+function threatWhy (what, e, fill) {
+  if (!entityPerceptible(e, fill)) return what
+  const here = bot.entity.position
+  const dy = Math.round(e.position.y - here.y)
+  const level = dy > 0 ? `${dy} above` : dy < 0 ? `${-dy} below` : 'same level'
+  return `${what}: ${e.username || e.name || '?'} ${compass(e.position.x - here.x, e.position.z - here.z)} ~${Math.round(e.position.distanceTo(here))}, ${level}`
+}
 // A block change in or beside the shared perception flood drops it, and so does a loaded column.
 bot.on('blockUpdate', (oldB, newB) => {
   const combat = reflexes.find(r => r.name === 'combat')
@@ -2763,12 +2771,21 @@ reflexes.unshift({
   // 300ms re-entry safeStop'd the previous flee goal and re-planned from scratch, so the body
   // SHUFFLED IN PLACE while a same-speed drowned ate it 1.4 at a time. A flee is set ONCE, held
   // 6s, and RUN at a sprint; re-entries bounce off the latch instead of resetting the goal.)
+  // Emits text as a combat event, at most once per 8 s for key.
+  narrate (key, text) {
+    const now = Date.now()
+    if (now - (this._lastNarrate.get(key) || 0) <= 8000) return
+    this._lastNarrate.set(key, now)
+    emitEvent('combat', text)
+  },
   // Returns 'held' when no safe cell exists and the body holds its ground instead.
   fleeFrom (bot, threat, why, klass = 'discretionary') {
     const now = Date.now()
-    // PILOT LANE (07-21): discretionary flees defer to a held lane; interrupts pass the
-    // soft lane only; emergencies (creeper fuse, HP-critical) pass any pilot lane.
-    if (laneBlocks(klass)) { laneNarrate(why || 'flee'); return }
+    if (laneBlocks(klass)) {
+      if (perchHolds()) this.narrate('hold', 'the combat reflex ' + threatWhy('kept the body on the pillar top instead of a flee', threat, this.fairFill(bot)))
+      laneNarrate(why || 'flee')
+      return
+    }
     if (now < this._fleeUntil) return                    // a flee is already running — let it run
     if (now < this._holdUntil) return 'held'
     this._fleeUntil = now + 6000
@@ -2831,7 +2848,7 @@ reflexes.unshift({
         }
       }
       if (bestCell) {
-        takeLegs('combat', 'take cover')
+        takeLegs('combat', threatWhy('take cover', threat, this.fairFill(bot)))
         stopPath()
         bot.pathfinder.setGoal(new goals.GoalBlock(bestCell.x, bestCell.y, bestCell.z))
         emitEvent('combat', `ranged chip from ${from} — BREAKING EYE-LINE: cover ${compass(bestCell.x - here.x, bestCell.z - here.z)} at (${bestCell.x},${bestCell.y},${bestCell.z})`)
@@ -3040,7 +3057,7 @@ reflexes.unshift({
           }
           if (s.chase && entityPerceptible(t.e, this.fairFill(bot))) {   // vanguard: run down a mob in sight
             if (laneBlocks('discretionary')) { laneNarrate('chase'); await new Promise(r => setTimeout(r, 500)); continue }
-            takeLegs('combat', 'chase')
+            takeLegs('combat', threatWhy('chase', t.e, this.fairFill(bot)))
             try { bot.pathfinder.setGoal(new goals.GoalNear(t.e.position.x, t.e.position.y, t.e.position.z, 2)) } catch (e) {}
             await new Promise(r => setTimeout(r, 500))
             continue
@@ -3057,7 +3074,7 @@ reflexes.unshift({
           continue
         }
         if (s.chase) {                                        // in reach — legs off, sword out
-          if (bot.pathfinder.goal) takeLegs('combat', 'fight in melee range')
+          if (bot.pathfinder.goal) takeLegs('combat', threatWhy('fight in melee range', t.e, this.fairFill(bot)))
           try { bot.pathfinder.setGoal(null) } catch (e) {}
         }
         try {
@@ -4684,8 +4701,8 @@ app.get('/stop', (req, res) => { bunker.stop = 'stopped by the pilot'; legs.take
 
 // GET /brace?sec=N : the PILOT-HOLD (07-21 debrief — the bounded version of switching the
 // combat reflex off to cross a room). For N seconds (cap 30) the legs answer no discretionary
-// reflex and no interrupt either: only true survival (creeper fuse, HP-critical disengage,
-// drowning) may move the body. Use it for deliberate moments — a careful shot, a ceremony,
+// reflex and no interrupt either: only true survival (a creeper flee, the HP disengage, lava,
+// drowning, the unexplained-hit freeze, the bunker) may move the body. Use it for deliberate moments — a careful shot, a ceremony,
 // standing ground beside a partner — then let it lapse. An armed brace is a debt like any mode.
 app.get('/brace', (req, res) => {
   try {
