@@ -1229,6 +1229,11 @@ function veinScan(bot) {
 // state LOUD in every /scene and /state so I can never miss it again. It's "feel the push," not
 // "see the block": read directly off my own body + the liquid touching it. Flow via block
 // metadata (0 = still source, !=0 = flowing/current).
+// A head suffocates only in an opaque full-cube block.
+function suffocates (b) {
+  if (!b || b.transparent || !Array.isArray(b.shapes) || b.shapes.length !== 1) return false
+  return b.shapes[0].every((v, i) => v === (i < 3 ? 0 : 1))
+}
 function waterState(bot) {
   try {
     const p = bot.entity.position
@@ -1241,7 +1246,7 @@ function waterState(bot) {
     const inLava = isL(feetB) || isL(headB)
     // ENTOMBMENT (07-12, the gravel lesson): a head inside SOLID is suffocation the water sense
     // never covered — I was buried in falling gravel and could not feel it; the helmsman dug me out.
-    const buried = !!(headB && headB.boundingBox === 'block')
+    const buried = suffocates(headB)
     let current = false
     for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const b = bot.blockAt(p.offset(dx, 0, dz).floored())
@@ -2188,6 +2193,14 @@ function markTrail (o) {
     if (perceived(p)) markSeen(p.x, p.y, p.z)
   }
 }
+// Digs out the block the head suffocates in, true once the dig starts.
+async function digOutHead () {
+  const hb = bot.blockAt(bot.entity.position.offset(0, 1.6, 0).floored())
+  if (!suffocates(hb) || OPENABLE.test(hb.name) || hb.name === 'bedrock') return false
+  await equipPickFor(hb.name)
+  bot.dig(hb).catch(() => {})
+  return true
+}
 bot.on('health', async () => {
   try {
     if (bot.health < lastHp - 0.5) {
@@ -2250,10 +2263,7 @@ bot.on('health', async () => {
       // SELF-RESCUE REFLEXES (the cases freezing makes WORSE — a frozen body suffocates or sinks):
       // buried = dig the head block NOW (my own cell, fairness-clean, like yanking a hand from fire)
       if (ws && ws.buried) {
-        try {
-          const hb = bot.blockAt(bot.entity.position.offset(0, 1.6, 0).floored())
-          if (hb && hb.boundingBox === 'block' && hb.name !== 'bedrock') { await equipPickFor(hb.name); bot.dig(hb).catch(() => {}) }
-        } catch (e) {}
+        try { await digOutHead() } catch (e) {}
       }
       // drowning = SWIM UP, don't freeze (learned live 07-12: the freeze held me under during the
       // farm flood; only the next walk order saved me). Hold jump ~3s to surface, then release.
