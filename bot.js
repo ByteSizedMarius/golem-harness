@@ -431,14 +431,7 @@ bot.once('spawn', () => {
           const en = bot.entities && bot.entities[id]
           if (!en || (en.position && en.position.distanceTo(bot.entity.position) > 24)) warnedMobs.delete(id)
         }
-        const tod = bot.time && bot.time.timeOfDay
-        if (typeof tod === 'number') {
-          if (tod >= 13000 && tod < 23000) {   // dusk..dawn window
-            if (!nightFired) { nightFired = true; emitEvent('nightfall', 'night has fallen', { timeOfDay: tod }) }
-          } else {
-            nightFired = false   // reset by day so it fires once per night
-          }
-        }
+        nightFired = nightfall(nightFired)
       } catch (e) {}
     }, 2000)
   } catch (e) { console.log('[bot] event listeners failed (non-fatal):', e.message) }
@@ -979,7 +972,7 @@ reflexes.push({
       const now = Date.now()
       const pos = bot.entity.position
       const snap = {
-        phase: dayPhase(bot.time ? bot.time.timeOfDay : 0),
+        phase: bot.time && skyInSight() ? dayPhase(bot.time.timeOfDay) : null,
         health: Math.round(bot.health), food: Math.round(bot.food),
         pos: pos.clone(), hostiles: new Set()
       }
@@ -998,7 +991,9 @@ reflexes.push({
       if (now - this._lastT < this._minGap) return false          // rate cap
 
       const L = this._last, ch = []
-      if (snap.phase !== L.phase) ch.push(snap.phase)
+      // Without the sky in sight the last phase seen stands.
+      if (snap.phase === null) snap.phase = L.phase
+      else if (snap.phase !== L.phase) ch.push(snap.phase)
       if (L.health - snap.health >= 2) ch.push(`HP ${L.health}→${snap.health}`)
       else if (snap.health - L.health >= 4) ch.push(`HP up ${L.health}→${snap.health}`)
       if (L.food - snap.food >= 2) ch.push(`food ${L.food}→${snap.food}`)
@@ -1900,6 +1895,34 @@ function rememberSurface (x, y, z, b) {
 function showsNow (p) {
   const b = bot.blockAt(p)
   return !!b && (onSurface(p, b) || seesLit(p, 64))
+}
+const SKY_IN_SIGHT = new Map()
+bot.on('physicsTick', () => SKY_IN_SIGHT.clear())
+function skyInSight () {
+  const head = bot.entity.position.floored().offset(0, 1, 0)
+  const key = ck(head.x, head.y, head.z)
+  if (!SKY_IN_SIGHT.has(key)) SKY_IN_SIGHT.set(key, skyFrom(head))
+  return SKY_IN_SIGHT.get(key)
+}
+// Sky light 15 at the head cell, or in an open cell within 4 of it in sight.
+function skyFrom (head) {
+  const hb = bot.blockAt(head)
+  if (hb && heldLight(head, hb).skyLight === 15) return true
+  for (let dx = -4; dx <= 4; dx++) for (let dy = -4; dy <= 4; dy++) for (let dz = -4; dz <= 4; dz++) {
+    const p = head.offset(dx, dy, dz)
+    const b = bot.blockAt(p)
+    if (b && blockTransparent(b) && heldLight(p, b).skyLight === 15 && sightCell(p, 8) !== null) return true
+  }
+  return false
+}
+// Emits nightfall at the first sight of the sky in each night and returns whether this night's event fired.
+function nightfall (fired) {
+  const tod = bot.time && bot.time.timeOfDay
+  if (typeof tod !== 'number') return fired
+  if (tod < 13000 || tod >= 23000) return false
+  if (fired || !skyInSight()) return fired
+  emitEvent('nightfall', 'night has fallen', { timeOfDay: tod })
+  return true
 }
 // forward vector from mineflayer yaw/pitch — same convention /scene's "ahead" probe uses
 function lookVec(yaw, pitch) {
@@ -3417,7 +3440,7 @@ app.get('/state', (req, res) => {
     xpLevel: bot.experience.level,   // enchanting currency — the table's offers cost levels
     ...(() => { const w = waterState(bot); return w ? { inWater: w.inWater, submerged: w.submerged, inCurrent: w.current, buried: w.buried } : {} })(),
     onGround: e.onGround, dimension: bot.game.dimension, gameMode: bot.game.gameMode,
-    timeOfDay: bot.time.timeOfDay,
+    ...(skyInSight() ? { timeOfDay: bot.time.timeOfDay } : {}),
     held: heldInfo(),
     lookingAt: (() => { const b = bot.blockAtCursor(5); return b ? { name: b.name, pos: round(b.position) } : null })()
   })
@@ -5841,7 +5864,7 @@ app.get('/scene', (req, res) => {
     if (tod >= 12000 && tod < 13800) phase = 'dusk'
     else if (tod >= 13800 && tod < 22200) phase = 'night'
     else if (tod >= 22200 && tod < 23500) phase = 'dawn'
-    const time = { timeOfDay: tod, phase }
+    const time = skyInSight() ? { timeOfDay: tod, phase } : undefined
 
     // block a few blocks ahead along yaw (sample 1..4 forward at eye level)
     let ahead = null
@@ -5914,7 +5937,7 @@ app.get('/scene', (req, res) => {
     const summary =
       bodyAlert +
       `Facing ${facing}. ` +
-      `${biome ? biome + ' biome, ' : ''}${phase} (t=${tod}). ` +
+      `${biome ? biome + (time ? ' biome, ' : ' biome. ') : ''}${time ? `${phase} (t=${tod}). ` : ''}` +
       `HP ${bot.health}/20, food ${bot.food}/20, holding ${held}. ` +
       `Ahead: ${ahead ? ahead.name + ' @' + ahead.dist : 'open'}. ` +
       coverPhrase(oh) + dim +

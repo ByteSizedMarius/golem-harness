@@ -37,6 +37,7 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     Vec3,
     SEEN: new Set(),
     ESTIMATED_LIGHT: new Map(),
+    SKY_IN_SIGHT: new Map(),
     SIGHT_MEMO: { t: 0, cells: new Map() },
     SIGHT_MS: botConstant('SIGHT_MS'),
     ...groundMemory()
@@ -251,6 +252,9 @@ test('a roof laid over a room takes away the open sky its held light still shows
   assert.strictEqual(floorKnown(0), true, 'control: open to the sky')
   assert.strictEqual(floorKnown(1), false, 'the floor, unseen from outside the walls')
   assert.strictEqual(floorKnown(2), true, 'the roof taken off again')
+  const skyInside = (roofs) => loadBotFunctions(['skyInSight'], roomUnder(11, roofs)).skyInSight()
+  assert.strictEqual(skyInside(0), true, 'control: open to the sky')
+  assert.strictEqual(skyInside(1), false)
 })
 
 // Open sky over ground at y 63, cut by a ravine at x 3..12 with its floor block at y floor, the body at x = at.
@@ -950,6 +954,37 @@ test('map draws a floor changed out of sight as last seen, and the new block onc
   assert.strictEqual(glyph(), '#')
   light = LIT
   assert.strictEqual(glyph(), '=')
+})
+
+// An open column above the body at 0,64,0 holding sky light sky.
+const shaftToSky = (sky, timeOfDay = NOON) => world({ open: (x, y, z) => x === 0 && z === 0 && y >= 64, light: () => LIT, skyLight: () => sky, timeOfDay })
+
+test('state and scene tell the time only while the sky shows', () => {
+  const told = (env) => {
+    Object.assign(env.bot.entity, { pitch: 0, onGround: true })
+    Object.assign(env.bot, { oxygenLevel: 20, game: { dimension: 'overworld' }, blockAtCursor: () => null })
+    const [scene] = summaries(env)
+    const state = runRoute('/state', {}, { ...env, waterState: () => null, heldInfo: () => null, round: (v) => v, ready: true })
+    return [state.timeOfDay, /"time"|day|t=6000/.test(scene)]
+  }
+  assert.deepStrictEqual(told(shaftToSky(15)), [NOON, true], 'control: under open sky')
+  assert.deepStrictEqual(told(shaftToSky(0)), [undefined, false])
+})
+
+test('nightfall stays silent underground and fires once at the first sight of the sky', () => {
+  const env = shaftToSky(0, MIDNIGHT)
+  const events = []
+  env.emitEvent = (kind) => events.push(kind)
+  const { nightfall } = loadBotFunctions(['nightfall'], env)
+  let fired = nightfall(false)
+  assert.deepStrictEqual(events, [])
+  const sky = shaftToSky(15, MIDNIGHT)
+  env.bot.blockAt = sky.bot.blockAt
+  // The next physics tick.
+  env.SKY_IN_SIGHT.clear()
+  fired = nightfall(fired)
+  fired = nightfall(fired)
+  assert.deepStrictEqual(events, ['nightfall'])
 })
 
 // Runs the one blockUpdate handler of bot.js that names marker on env.bot.
