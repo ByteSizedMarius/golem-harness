@@ -514,7 +514,9 @@ const UNSEEN = /not in my sight, blocked or unlit/
 
 test('use names a block in lit sight, never one in rock, around a corner or in the dark', async () => {
   const use = async (env, at) => {
-    const { handle, res } = routeHandler('/use', withHands(env))
+    withHands(env)
+    Object.assign(env.bot, { on () {}, removeListener () {} })
+    const { handle, res } = routeHandler('/use', { ...env, setTimeout: (fn) => fn(), clearTimeout () {} })
     await handle({ query: at }, res)
     return res
   }

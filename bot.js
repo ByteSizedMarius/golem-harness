@@ -4233,6 +4233,9 @@ app.get('/mine', async (req, res) => {
     const ids = resolveBlockIds(name)
     if (!ids.length) return err(res, new Error(`unknown block: ${name}`))
     if (collectLock.done) return err(res, collectBusy())
+    const items = gatherItems(ids)
+    const pocketed = () => bot.inventory.items().reduce((s, it) => s + (items.has(it.name) ? it.count : 0), 0)
+    const before = pocketed()
     let mined = 0
     // Why the collect stopped short: stalled, budget, busy or stopped.
     let reason = null
@@ -4250,9 +4253,9 @@ app.get('/mine', async (req, res) => {
       if (after && after.name !== b.name) mined++
       if (reason) break
     }
-    const have = bot.inventory.items().filter(it => it.name.includes(name) || name.includes(it.name))
-      .reduce((s, it) => s + it.count, 0)
-    ok(res, { mined, requested: count, inventoryMatching: have, reason })
+    // The slot update of a pickup can land a few ticks after the drop is gone.
+    for (let i = 0; i < 10 && pocketed() - before < mined; i++) await bot.waitForTicks(1)
+    ok(res, { mined, requested: count, gathered: pocketed() - before, reason })
   } catch (e) { err(res, e) }
 })
 
@@ -6070,10 +6073,41 @@ app.get('/passages', (req, res) => {
   } catch (e) { err(res, e) }
 })
 
+// The cell that must change when clicking b at p with held works, null when it may work and change nothing.
+function useTarget (b, p, held) {
+  const props = b.getProperties()
+  if ('open' in props) return p
+  if (!held) return null
+  if (held.endsWith('_hoe') && /^(dirt|grass_block|dirt_path|coarse_dirt|rooted_dirt)$/.test(b.name)) return p
+  if ((b.name === 'farmland' && /^(wheat_seeds|beetroot_seeds|melon_seeds|pumpkin_seeds|carrot|potato|torchflower_seeds|pitcher_pod)$/.test(held)) ||
+    (b.name === 'soul_sand' && held === 'nether_wart')) return p.offset(0, 1, 0)
+  if (held === 'bone_meal' && 'age' in props) return p
+  if (held === 'bucket' && /^(water|lava)$/.test(b.name)) return p
+  if (/^(water|lava)_bucket$/.test(held) && /^(cave_|void_)?air$/.test(b.name)) return p
+  return null
+}
+
+// Runs act, then waits until the server updates the block at p, at most ms.
+async function withBlockUpdate (p, ms, act) {
+  let updated
+  const update = new Promise((resolve) => { updated = resolve })
+  const onUpdate = (old, now) => { if (now && now.position.equals(p)) updated() }
+  bot.on('blockUpdate', onUpdate)
+  let timer
+  try {
+    await act()
+    await Promise.race([update, new Promise((resolve) => { timer = setTimeout(resolve, ms) })])
+  } finally {
+    clearTimeout(timer)
+    bot.removeListener('blockUpdate', onUpdate)
+  }
+}
+
 // GET /use?x=&y=&z=[&item=name] — the universal RIGHT-CLICK: equip item (optional) and activate it
 // on the block. Unlocks the whole interaction layer: till (hoe), sow (seeds), bone meal, fill/pour
 // bucket, open/close doors, shear sheep... For liquids (no activatable block) it aims and uses the
 // held item instead. Walks closer only if out of arm's reach (digat's lesson).
+// Replies ok false when a click that should change a cell (useTarget) left it as it was.
 app.get('/use', async (req, res) => {
   try {
     const p = new Vec3(Math.floor(parseFloat(req.query.x)), Math.floor(parseFloat(req.query.y)), Math.floor(parseFloat(req.query.z)))
@@ -6095,14 +6129,25 @@ app.get('/use', async (req, res) => {
     // On 1.7.10 a bucket used through activateBlock on grass, a flower or a torch pours nothing.
     const bucket = !!bot.heldItem && bot.heldItem.name.endsWith('bucket')
     const rawUse = bucket || b.name.includes('water') || b.name.includes('lava') || /^(cave_|void_)?air$/.test(b.name) || req.query.raw === '1'
-    if (rawUse) {
-      bot.activateItem()
-      await new Promise(r => setTimeout(r, 300))
-      try { bot.deactivateItem() } catch (e) {}
-    } else {
-      await bot.activateBlock(b)
+    const target = useTarget(b, p, bot.heldItem ? bot.heldItem.name : null)
+    const was = target && bot.blockAt(target)
+    await withBlockUpdate(target || p, 500, async () => {
+      if (rawUse) {
+        bot.activateItem()
+        await new Promise(r => setTimeout(r, 300))
+        try { bot.deactivateItem() } catch (e) {}
+      } else {
+        await bot.activateBlock(b)
+      }
+    })
+    const out = { used: bot.heldItem ? bot.heldItem.name : 'empty hand', on: b.name, at: round(p) }
+    // The walk into reach can leave the block out of sight.
+    if (seenNow(p)) out.now = (bot.blockAt(p) || {}).name
+    const after = target && bot.blockAt(target)
+    if (was && after && after.stateId === was.stateId && seenNow(target)) {
+      Object.assign(out, { ok: false, reason: `nothing changed at ${target.x},${target.y},${target.z}, still ${was.name}` })
     }
-    ok(res, { used: bot.heldItem ? bot.heldItem.name : 'empty hand', on: b.name, at: round(p), now: (bot.blockAt(p) || {}).name })
+    ok(res, out)
   } catch (e) { err(res, e) }
 })
 
@@ -6647,6 +6692,18 @@ app.get('/boot', (req, res) => {
 
 // ---- MACROS: high-level verbs with guardrails baked in, run ASYNC via jobs.start ----
 
+// The items a dig of the blocks ids lands in the pockets: their drops, or the block itself.
+function gatherItems (ids) {
+  const names = new Set()
+  for (const id of ids) {
+    const blk = mcData.blocks[id]
+    for (const d of blk.drops) names.add(mcData.items[d].name)
+    if (mcData.itemsByName[blk.name]) names.add(blk.name)
+  }
+  names.delete('air')
+  return names
+}
+
 // GET /gather?resource=&amount=&radius= : background job that repeatedly finds the
 // nearest matching block and mines it. GUARDRAILS: capped radius (default 40, hard-max
 // 64); never dig straight down (skip any target >~2 below feet, prefer at/above feet or
@@ -6665,7 +6722,13 @@ app.get('/gather', (req, res) => {
     if (!ids.length) return err(res, new Error(`unknown block: ${resource}`))
 
     const { id } = jobs.start(`gather ${resource} x${amount}`, async (job) => {
-      let mined = 0
+      // A dig whose drop never reaches the pockets counts nothing.
+      const items = gatherItems(ids)
+      const pocketed = () => bot.inventory.items().reduce((s, it) => s + (items.has(it.name) ? it.count : 0), 0)
+      const before = pocketed()
+      let gathered = 0
+      let dug = 0
+      let stop = null
       const tried = new Set()                     // positions we've given up on
       const key = (p) => `${p.x},${p.y},${p.z}`
       const startT = Date.now()
@@ -6682,9 +6745,9 @@ app.get('/gather', (req, res) => {
       // drop the think budget while gathering wood so unreachable targets are abandoned quickly.
       if (usingForestry) { bot.pathfinder.setMovements(forestryMoves); bot.pathfinder.thinkTimeout = 3000; job.progress('forestry nav: may clear leaves+logs') }
       try {
-      while (mined < amount) {
-        if (job.cancelled) { job.progress('cancelled'); break }
-        if (++iters > amount * 8 + 40 || Date.now() - startT > 180000) { job.progress('watchdog: stopping (iter/time bound)'); break }
+      while (gathered < amount) {
+        if (job.cancelled) { stop = 'cancelled'; job.progress(stop); break }
+        if (++iters > amount * 8 + 40 || Date.now() - startT > 180000) { stop = 'watchdog: stopping (iter/time bound)'; job.progress(stop); break }
         const feetY = Math.floor(bot.entity.position.y)
         // pull a batch so we can pick a SAFE candidate (not the raw nearest)
         const cands = bot.findBlocks({ matching: ids, maxDistance: radius, count: 40 })
@@ -6698,7 +6761,8 @@ app.get('/gather', (req, res) => {
           .filter(o => seesLit(o.p, radius))         // FAIRNESS: only what a player here could see
           .sort((a, b) => a.dist - b.dist)
         if (!ranked.length) {
-          job.progress(`no reachable ${resource} left (mined ${mined}/${amount})`)
+          stop = `no reachable ${resource} left (gathered ${gathered}/${amount})`
+          job.progress(stop)
           break
         }
         let progressed = false
@@ -6716,9 +6780,13 @@ app.get('/gather', (req, res) => {
           }
           try {
             await collectSafely(b, job.name, { wait: true })
-            mined++
-            progressed = true
-            job.progress(`mined ${resource} ${mined}/${amount} @ ${p.x},${p.y},${p.z}`)
+            dug++
+            // The slot update of a pickup can land a few ticks after the drop is gone.
+            for (let i = 0; i < 10 && pocketed() - before <= gathered; i++) await bot.waitForTicks(1)
+            const now = pocketed() - before
+            progressed = now > gathered
+            gathered = now
+            job.progress(progressed ? `gathered ${resource} ${gathered}/${amount} @ ${p.x},${p.y},${p.z}` : `dug ${resource} @ ${p.x},${p.y},${p.z}, nothing picked up`)
           } catch (e) {
             tried.add(key(p))
             job.progress(`dig failed @ ${p.x},${p.y},${p.z}: ${e.message}`)
@@ -6731,15 +6799,16 @@ app.get('/gather', (req, res) => {
         // reposition, instead of grinding the same unreachable logs.
         if (progressed) noProgress = 0
         else if (++noProgress >= 3) {
-          job.progress(`spot tapped out — no reachable ${resource} in ${noProgress} passes (mined ${mined}/${amount})`)
+          stop = `spot tapped out — no reachable ${resource} in ${noProgress} passes (gathered ${gathered}/${amount})`
+          job.progress(stop)
           break
         }
       }
-      const have = bot.inventory.items()
-        .filter(it => it.name.includes(resource) || resource.includes(it.name))
-        .reduce((s, it) => s + it.count, 0)
-      emitEvent('gather', `done ${resource} mined=${mined}`, { inventoryMatching: have })
-      return { mined, requested: amount, inventoryMatching: have }
+      const have = pocketed()
+      emitEvent('gather', `${gathered > 0 ? 'done' : 'failed'} ${resource} gathered=${gathered}`, { inventoryMatching: have })
+      const result = { gathered, dug, requested: amount, inventoryMatching: have }
+      if (gathered <= 0) Object.assign(result, { ok: false, reason: dug ? `dug ${dug} ${resource}, nothing reached the pockets` : stop })
+      return result
       } finally {
         if (usingForestry && considerateMoves) { bot.pathfinder.setMovements(considerateMoves); bot.pathfinder.thinkTimeout = prevThink }
       }

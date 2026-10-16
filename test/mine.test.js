@@ -10,7 +10,9 @@ const { goals } = require('mineflayer-pathfinder')
 const { CollectBlock } = require('mineflayer-collectblock/lib/CollectBlock')
 const { Targets } = require('mineflayer-collectblock/lib/Targets')
 const { guardWork } = require('../lib/walk')
-const { HUNG, awaitRoute, botConstant, fakeClock, loadBotFunctions, timed, waitFor } = require('./helpers')
+const { createJobs } = require('../lib/jobs')
+const { deathLedger } = require('../lib/deaths')
+const { HUNG, awaitRoute, botConstant, fakeClock, loadBotFunctions, routeHandler, runRoute, timed, waitFor } = require('./helpers')
 
 // The collect plugin switches on the class names.
 class Block {
@@ -33,7 +35,9 @@ function collector ({ blocks, reach, drifting = false, holdDig = false }) {
   let x = 0
   bot.entity = { get position () { return new Vec3(drifting ? x++ : 0, 64, 0) } }
   bot.blockAt = (p) => blocks[`${p.x},${p.y},${p.z}`] || null
-  bot.inventory = { items: () => [], emptySlotCount: () => 36 }
+  const pockets = []
+  bot.inventory = { items: () => pockets, emptySlotCount: () => 36 }
+  bot.waitForTicks = () => new Promise(setImmediate)
   bot.tool = { equipForBlock: async () => {} }
   bot.heldItem = null
   bot.targetDigBlock = null
@@ -90,7 +94,7 @@ function collector ({ blocks, reach, drifting = false, holdDig = false }) {
   const env = {
     bot,
     require,
-    mcData: { blocksArray: [] },
+    mcData: { blocksArray: [], blocks: { 1: { name: 'iron_ore', drops: [903] } }, items: { 903: { name: 'raw_iron' } }, itemsByName: { raw_iron: {}, iron_ore: {} } },
     Movements,
     navPlaced: [],
     collectLock: botConstant('collectLock'),
@@ -109,7 +113,7 @@ function collector ({ blocks, reach, drifting = false, holdDig = false }) {
   }
   // collectSafely hands abandonCollect on uncalled, so the route loader would not find it.
   loadBotFunctions(['abandonCollect'], env)
-  return { bot, env, clock, seen, blocks, stop: () => { ticking = false } }
+  return { bot, env, clock, seen, blocks, pockets, stop: () => { ticking = false } }
 }
 
 const ORE = { '1,64,0': new Block('iron_ore', new Vec3(1, 64, 0)) }
@@ -123,7 +127,7 @@ test('mine returns with stalled when the path to the block never gets anywhere',
   const reply = awaitRoute('/mine', { name: 'iron_ore', count: '2', radius: '8' }, c.env)
   assert.ok(await waitFor(() => c.seen.planned > 0, 2000), 'control: the walk to the block planned')
   c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
-  assert.deepStrictEqual(await within(reply), { mined: 0, requested: 2, inventoryMatching: 0, reason: 'stalled' })
+  assert.deepStrictEqual(await within(reply), { mined: 0, requested: 2, gathered: 0, reason: 'stalled' })
   assert.strictEqual(c.bot.pathfinder.goal, null, 'the walk is stopped')
 })
 
@@ -136,7 +140,7 @@ test('a collect walks under one stall watch, the gotos of the collect plugin inc
   assert.ok(await waitFor(() => c.seen.planned > 0, 2000), 'control: the walk to the block planned')
   assert.strictEqual(c.seen.watches, 1)
   c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
-  assert.deepStrictEqual(await within(reply), { mined: 0, requested: 1, inventoryMatching: 0, reason: 'stalled' })
+  assert.deepStrictEqual(await within(reply), { mined: 0, requested: 1, gathered: 0, reason: 'stalled' })
   assert.deepStrictEqual(c.seen.logs, ['[path] stalled at 0,64,0'])
 })
 
@@ -154,9 +158,20 @@ test('mine counts the dug block and returns with stalled when its drop is never 
       assert.strictEqual(c.seen.followed, 2, 'the first collect walks nowhere')
     }
     c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
-    assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, inventoryMatching: 0, reason: 'stalled' })
+    assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 0, reason: 'stalled' })
     assert.strictEqual(c.seen.digs, round)
   }
+})
+
+test('mine counts the drop that reached the pockets, raw_iron from iron_ore, and not what they held before', async (t) => {
+  const c = collector({ blocks: ORE, reach: () => true })
+  t.after(c.stop)
+  c.pockets.push({ name: 'raw_iron', count: 2 })
+  const reply = awaitRoute('/mine', { name: 'iron_ore' }, c.env)
+  assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the drop')
+  c.pockets[0] = { name: 'raw_iron', count: 3 }
+  c.bot.emit('entityGone', c.seen.drops[0])
+  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 1, reason: null })
 })
 
 test('a dig that outlasts the stall window is progress', async (t) => {
@@ -169,7 +184,7 @@ test('a dig that outlasts the stall window is progress', async (t) => {
   c.seen.finishDig()
   assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the drop')
   c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
-  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, inventoryMatching: 0, reason: 'stalled' })
+  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 0, reason: 'stalled' })
 })
 
 test('mine returns with budget when the walk moves but never arrives', async (t) => {
@@ -179,7 +194,7 @@ test('mine returns with budget when the walk moves but never arrives', async (t)
   assert.ok(await waitFor(() => c.seen.planned > 0, 2000), 'control: the walk to the block planned')
   c.clock.advance(botConstant('COLLECT_BUDGET_MS') - 500)
   c.clock.advance(1000)
-  assert.deepStrictEqual(await within(reply), { mined: 0, requested: 1, inventoryMatching: 0, reason: 'budget' })
+  assert.deepStrictEqual(await within(reply), { mined: 0, requested: 1, gathered: 0, reason: 'budget' })
 })
 
 test('tidy stops at a stalled reclaim, keeps the rest queued and says why', async (t) => {
@@ -192,4 +207,82 @@ test('tidy stops at a stalled reclaim, keeps the rest queued and says why', asyn
   c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
   assert.deepStrictEqual(await within(reply), { reclaimed: 0, alreadyGone: 0, failed: 1, remaining: 2, reason: 'stalled' })
   assert.deepStrictEqual(c.env.navPlaced.map((p) => p.x).sort(), [1, 2])
+})
+
+// A collector that runs gather jobs, wired to stop as bot.js wires them, and answers /stop.
+function jobRig () {
+  const c = collector({ blocks: ORE, reach: () => true, holdDig: true })
+  c.bot.findBlocks = () => [new Vec3(1, 64, 0)]
+  c.bot.clearControlStates = () => {}
+  Object.assign(c.env, {
+    goals,
+    seesLit: () => true,
+    emitEvent: () => {},
+    // The ore sits level with the feet.
+    GATHER_MAX_DROP: 0,
+    GATHER_MAX_RISE: 0,
+    bunker: {},
+    legs: { take: () => {} },
+    stopFollow: () => {},
+    clearLane: () => {}
+  })
+  const fns = loadBotFunctions(['stopCollect', 'safeStop'], c.env)
+  c.env.jobs = createJobs({ stop: () => { fns.safeStop(); fns.stopCollect() }, emit: () => {}, deaths: deathLedger() })
+  return c
+}
+
+async function gatherDigging (c) {
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
+  assert.ok(await waitFor(() => c.seen.finishDig, 2000), 'control: the gather job digs')
+  return () => c.env.jobs.get(job)
+}
+
+test('a /mine while a gather job collects is refused busy and the job still gathers its block', async (t) => {
+  const c = jobRig()
+  t.after(c.stop)
+  const job = await gatherDigging(c)
+  const plugin = c.bot.collectBlock
+  const before = { cage: plugin.movements, legs: c.bot.pathfinder.movements, targets: plugin.targets, listed: [...plugin.targets.targets] }
+  const { handle, res } = routeHandler('/mine', c.env)
+  assert.notStrictEqual((await timed(handle({ query: { name: 'iron_ore' } }, res), 2000)).out, HUNG, 'the /mine replied')
+  assert.strictEqual(res.error && res.error.reason, 'busy')
+  assert.match(res.error.message, /gather iron_ore x1/)
+  assert.strictEqual(plugin.movements, before.cage)
+  assert.strictEqual(c.bot.pathfinder.movements, before.legs)
+  assert.strictEqual(plugin.targets, before.targets)
+  assert.deepStrictEqual(plugin.targets.targets, before.listed)
+  assert.strictEqual(c.seen.digs, 1)
+  c.seen.finishDig()
+  assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the drop')
+  c.pockets.push({ name: 'raw_iron', count: 1 })
+  c.bot.emit('entityGone', c.seen.drops[0])
+  assert.ok(await waitFor(() => job().status !== 'running', 2000), 'the job ended')
+  assert.strictEqual(job().status, 'done')
+  assert.strictEqual(job().result.gathered, 1)
+})
+
+test('a gather whose digs land nothing in the pockets gathers zero and fails', async (t) => {
+  const c = jobRig()
+  t.after(c.stop)
+  const job = await gatherDigging(c)
+  c.seen.finishDig()
+  assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the drop')
+  c.bot.emit('entityGone', c.seen.drops[0])
+  assert.ok(await waitFor(() => job().status !== 'running', 2000), 'the job ended')
+  const { gathered, dug, ok, reason } = job().result
+  assert.deepStrictEqual([gathered, dug, ok], [0, 1, false])
+  assert.strictEqual(typeof reason, 'string')
+})
+
+test('/stop ends the collect of a gather job at once and frees the collect for the next caller', async (t) => {
+  const c = jobRig()
+  t.after(c.stop)
+  const job = await gatherDigging(c)
+  assert.deepStrictEqual(runRoute('/stop', {}, c.env), { stopped: true, jobsCancelled: 1 })
+  assert.ok(await waitFor(() => job().status !== 'running', 2000), 'the job ended')
+  assert.strictEqual(job().status, 'cancelled')
+  const { handle, res } = routeHandler('/mine', c.env)
+  handle({ query: { name: 'iron_ore' } }, res)
+  assert.ok(await waitFor(() => c.seen.digs === 2, 2000), 'the next /mine digs')
+  assert.strictEqual(res.error, undefined)
 })
