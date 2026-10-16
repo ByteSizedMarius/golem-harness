@@ -7,8 +7,8 @@ const vm = require('node:vm')
 const { Vec3 } = require('vec3')
 const { sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
-const { balanced, botConstant, botSource, loadBotFunctions, routeHandler, runRoute, reflexIn } = require('./helpers')
 const { GRAVESTONE } = require('../lib/server-overrides')
+const { balanced, botConstant, botSource, groundMemory, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4 }
@@ -39,6 +39,7 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     ESTIMATED_LIGHT: new Map(),
     SIGHT_MEMO: { t: 0, cells: new Map() },
     SIGHT_MS: botConstant('SIGHT_MS'),
+    ...groundMemory()
   }
 }
 
@@ -213,6 +214,72 @@ test('a cell opened under open sky in a 1.7.10 dimension takes the full sky ligh
   const at = new Vec3(0, 63, 0)
   env.bot.emit('blockUpdate', stoneAt([0, 63, 0]), airAt([0, 63, 0]))
   assert.strictEqual(env.heldLight(at, env.bot.blockAt(at)).skyLight, 15)
+})
+
+// Open sky over ground at y 63, cut by a ravine at x 3..12 with its floor block at y floor, the body at x = at.
+function ravine (floor, at = 0) {
+  const env = world({ open: (x, y) => y > (x >= 3 && x <= 12 ? floor : 63), light: () => LIT, skyLight: () => 15, at })
+  env.bot.registry = REGISTRY
+  return env
+}
+
+test('a ravine floor 20 down shows in lit sight or from memory', () => {
+  const known = (env) => loadBotFunctions(['knownCell'], env).knownCell(new Vec3(10, 44, 0))
+  assert.strictEqual(known(ravine(43)), false, 'control: from the ground away from the edge')
+  assert.strictEqual(known(ravine(43, 2)), true, 'at the edge, looking down')
+  const seen = ravine(43)
+  seen.SEEN.add(ck(10, 44, 0))
+  assert.strictEqual(known(seen), true, 'seen earlier')
+})
+
+// Ground at y 63 under open sky, at y 83 where high(x, z) and deep below 63 where low(x, z), unloaded where unloaded(x).
+function relief ({ high = () => false, low = () => false, deep = 20, unloaded = () => false }) {
+  const top = (x, z) => (high(x, z) ? 83 : low(x, z) ? 63 - deep : 63)
+  const env = world({ open: (x, y, z) => y > top(x, z), light: () => LIT, skyLight: () => 15 })
+  const loaded = env.bot.blockAt
+  env.bot.blockAt = (p) => (unloaded(p.x) ? null : loaded(p))
+  env.bot.registry = REGISTRY
+  return env
+}
+// knownCell of cells at z 100, out of sight of the body at 0,64,0.
+const knownFar = (env, cells) => {
+  const { knownCell, cellKnown } = loadBotFunctions(['knownCell', 'cellKnown'], env)
+  return cells.map(([x, y]) => {
+    assert.strictEqual(cellKnown(new Vec3(x, y, 100)), false, `control: ${x},${y},100 out of sight`)
+    return knownCell(new Vec3(x, y, 100))
+  })
+}
+
+test('out of sight the surface is known beside a cliff 20 high and on a ravine floor 10 down, never in a trench 20 deep', () => {
+  assert.deepStrictEqual({
+    cliffFoot: knownFar(relief({ high: (x) => x <= -5 }), [[-4, 64], [-4, 63]]),
+    shallowRavine: knownFar(relief({ low: (x) => x >= 3 && x <= 12, deep: 10 }), [[10, 54], [10, 53]]),
+    ravineAlongZ: knownFar(relief({ low: (x) => x >= 0 && x <= 2 }), [[1, 44], [1, 43], [0, 44]]),
+    ravineAlongX: knownFar(relief({ low: (x, z) => z >= 99 && z <= 101 }), [[1, 44], [1, 43]]),
+    widestRavine: knownFar(relief({ low: (x) => x >= 0 && x <= 14 }), [[7, 44], [7, 43]]),
+    valley: knownFar(relief({ high: (x) => x <= -10 || x >= 10 }), [[0, 64], [0, 63]])
+  }, {
+    cliffFoot: [true, true],
+    shallowRavine: [true, true],
+    ravineAlongZ: [false, false, false],
+    ravineAlongX: [false, false],
+    widestRavine: [false, false],
+    valley: [true, true]
+  })
+})
+
+test('an unloaded column hides the surface only where it could hold the far wall of a trench', () => {
+  const unloaded = (x) => x <= -3
+  assert.deepStrictEqual(knownFar(relief({ unloaded }), [[0, 64]]), [true], 'open ground')
+  assert.deepStrictEqual(knownFar(relief({ unloaded, low: (x) => x >= -2 && x <= 2 }), [[1, 44]]), [false], 'a ravine floor below its east wall')
+})
+
+test('a field stays on the surface in a world from y 0 to 255 that holds no block outside it', () => {
+  const env = relief({})
+  const loaded = env.bot.blockAt
+  env.bot.blockAt = (p) => (p.y < 0 || p.y > 255 ? null : loaded(p))
+  env.bot.game = { minY: 0, height: 256 }
+  assert.deepStrictEqual(knownFar(env, [[0, 64], [0, 63]]), [true, true])
 })
 
 const fireAt = block('fire', 7, 'empty')

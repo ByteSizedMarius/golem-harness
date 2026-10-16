@@ -6,7 +6,7 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const { legLedger } = require('../lib/legs')
 const { entityInCell } = require('../lib/shelter')
-const { botConstant, reflexIn } = require('./helpers')
+const { botConstant, reflexIn, loadBotFunctions } = require('./helpers')
 
 const key = (p) => `${p.x},${p.y},${p.z}`
 const FULL = [[0, 0, 0, 1, 1, 1]]
@@ -163,6 +163,19 @@ test('unstuck breaks nothing it cannot put back, and stops the walk saying where
   assert.deepStrictEqual(w.events, ['unstuck: stuck at 0,64,0 against oak_planks at 1,64,0, tried replan, break refused (no oak_planks in pockets to put back)'])
   assert.deepStrictEqual(w.digs, [])
   assert.strictEqual(w.bot.pathfinder.goal, null, 'the walk is stopped')
+})
+
+test('the boxed-in check beside a pit the bot has not seen answers the same whatever its depth', () => {
+  // A body walled in on three sides, with open feet and head cells to the east over a pit that ends at floorY.
+  const verdict = (floorY, seen) => {
+    const open = (p) => (p.x === 0 || p.x === 1) && p.z === 0 && (p.y === 64 || p.y === 65 || (p.x === 1 && p.y > floorY && p.y < 64))
+    const bot = { entity: { position: new Vec3(0.5, 64, 0.5) }, blockAt: (p) => (open(p) ? { name: 'air', boundingBox: 'empty' } : { name: 'stone', boundingBox: 'block' }) }
+    return loadBotFunctions(['hasLegalMove'], { bot, Vec3, knownCell: seen }).hasLegalMove()
+  }
+  const all = () => true
+  assert.deepStrictEqual([verdict(60, all), verdict(33, all)], [true, false], 'control: a floor in reach, and a pit too deep to drop into')
+  const unseenPit = (p) => !(p.x === 1 && p.y < 64)
+  assert.strictEqual(verdict(33, unseenPit), verdict(60, unseenPit))
 })
 
 test('unstuck never breaks a container or a door, even with the block in its pockets', async () => {

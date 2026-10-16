@@ -6,6 +6,7 @@ const { Vec3 } = require('vec3')
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
 const { Physics } = require('prismarine-physics')
+const { groundMemory, loadBotFunctions } = require('./helpers')
 
 const WALL_ARM = ['cobblestone_wall', { up: 'false', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
 const WALL_POST = ['cobblestone_wall', { up: 'true', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
@@ -24,7 +25,7 @@ async function body (pos, cells) {
   Object.assign(bot, {
     entity: { position: pos, velocity: new Vec3(0, 0, 0), width: 0.6, height: 1.8, onGround: true },
     entities: {},
-    game: { minY: -64 },
+    game: { minY: -64, height: 384 },
     inventory: { items: () => [] },
     clearControlStates () {},
     blockAt (p) {
@@ -185,4 +186,73 @@ test('the pathfinder walks straight across a field', async () => {
     [1, 2, 3, 4, 5, 6].map((x) => [x, 0, false]))
   const controls = await firstTick(cells)
   assert.deepStrictEqual([controls.forward, controls.jump], [true, false])
+})
+
+// body() over stone with air where open(p) holds and sky light 15 where sky(p) holds, planning through
+// bot.js's knownMoves for a bot that has seen the cells seen(p) holds.
+async function knowing (pos, { open, sky = () => false, seen }) {
+  const b = await body(pos, {})
+  const Block = require('prismarine-block')(b.bot.registry)
+  b.bot.blockAt = (p) => {
+    const c = p.floored()
+    const block = Block.fromProperties(open(c) ? 'air' : 'stone', {}, 0)
+    block.position = c
+    block.skyLight = sky(c) ? 15 : 0
+    return block
+  }
+  const env = { bot: b.bot, Vec3, cellKnown: seen, heldLight: (p, block) => block, ck: (x, y, z) => `${x},${y},${z}`, PLAN_KNOWN: new Map(), ...groundMemory() }
+  loadBotFunctions(['knownMoves'], env).knownMoves(b.moves)
+  return b
+}
+const cellsOf = (path) => path.map((n) => [Math.floor(n.x), Math.floor(n.y), Math.floor(n.z)])
+
+test('the pathfinder never plans through a cave the bot has not seen, so an open one plans like a sealed one', async () => {
+  // Two rooms in stone at x 0 to 2 and 6 to 8, joined by a tunnel at x 3 to 5 when it is open.
+  const tunnel = (p) => p.x >= 3 && p.x <= 5 && p.z === 0 && (p.y === 64 || p.y === 65)
+  const room = (p) => p.x >= 0 && p.x <= 8 && p.z === 0 && (p.y === 64 || p.y === 65) && !tunnel(p)
+  const planFor = async (open, seen) => {
+    const { plan } = await knowing(START, { open: (p) => room(p) || (open && tunnel(p)), seen })
+    const r = plan(new goals.GoalBlock(7, 64, 0))
+    return { status: r.status, cells: cellsOf(r.path) }
+  }
+  assert.strictEqual((await planFor(true, () => true)).status, 'success', 'control: a tunnel in sight')
+  const unseen = (p) => !tunnel(p)
+  const open = await planFor(true, unseen)
+  assert.deepStrictEqual(open, await planFor(false, unseen))
+  assert.strictEqual(open.status, 'noPath')
+})
+
+test('the pathfinder never plans across or down into a pit whose floor the bot has not seen', async () => {
+  // A corridor at x 0 to 8 over a pit at x 3 to 5 that reaches down to y 34.
+  const corridor = (p) => p.z === 0 && p.x >= 0 && p.x <= 8 && (p.y === 64 || p.y === 65)
+  const pit = (p) => p.z === 0 && p.x >= 3 && p.x <= 5 && p.y >= 34 && p.y <= 63
+  const across = new goals.GoalBlock(7, 64, 0)
+  const statusOf = async (open, seen, goal) => (await knowing(START, { open, seen })).plan(goal).status
+  assert.strictEqual(await statusOf(corridor, () => true, across), 'success', 'control: the corridor over solid floor')
+  for (const top of [63, 62]) {
+    const open = (p) => corridor(p) || pit(p)
+    const seen = (p) => !(pit(p) && p.y <= top)
+    assert.strictEqual(await statusOf(open, seen, across), 'noPath', `pit unseen from y ${top}: across`)
+    assert.strictEqual(await statusOf(open, seen, new goals.GoalBlock(4, 63, 0)), 'noPath', `pit unseen from y ${top}: down`)
+  }
+})
+
+test('the pathfinder plans over open ground the bot has not seen', async () => {
+  // Stone up to y 63 under open sky with a hill at x 3 to 5, and the bot has seen nothing past x 1.
+  const hill = (p) => p.x >= 3 && p.x <= 5 && p.z >= -1 && p.z <= 1 && p.y <= 65
+  const open = (p) => p.y > 63 && !hill(p)
+  const { plan } = await knowing(START, { open, sky: open, seen: (p) => p.x <= 1 })
+  assert.strictEqual(plan(new goals.GoalBlock(8, 64, 0)).status, 'success')
+})
+
+test('the pathfinder never plans along a sky-lit ravine floor 20 under the ground that the bot has not seen', async () => {
+  // Stone up to y 63 under open sky, cut by a ravine at x -2 to 40, z -1 to 1 down to its floor at y floor, the body on
+  // that floor having seen nothing past x 1.
+  const statusOf = async (floor) => {
+    const open = (p) => p.y > 63 || (p.x >= -2 && p.x <= 40 && p.z >= -1 && p.z <= 1 && p.y > floor)
+    const { plan } = await knowing(new Vec3(0.5, floor + 1, 0.5), { open, sky: open, seen: (p) => p.x <= 1 })
+    return plan(new goals.GoalBlock(8, floor + 1, 0)).status
+  }
+  assert.strictEqual(await statusOf(53), 'success', 'control: a floor 10 under the ground')
+  assert.strictEqual(await statusOf(43), 'noPath')
 })

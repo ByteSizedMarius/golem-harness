@@ -1,6 +1,6 @@
 # Perception
 
-You perceive the world only through what the tools say. The usual failure is acting blind: `mine(name: "stone")` with no stone nearby, or `goto` to a coordinate you made up. Look first, then move. A `goto` toward ground you have not seen walks there first and reports what it found.
+You perceive the world only through what the tools say. The usual failure is acting blind: `mine(name: "stone")` with no stone nearby, or `goto` to a coordinate you made up. Look first, then move. `goto` walks the open surface whether you have seen it or not, and below it only cells you have seen.
 
 ## No x-ray
 

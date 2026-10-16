@@ -462,6 +462,7 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     nearestVisible: () => null,
     resolveBlockIds: () => [1],
     cellKnown: () => true,
+    knownCell: () => true,
     hasLegalMove: () => true,
     airPrecheck: () => ({ verdict: 'connected' }),
     doorwayCommit: async () => false,
@@ -770,19 +771,68 @@ test('a retry pause never outlasts the route deadline', async () => {
   assert.deepStrictEqual(asked, [120, 350])
 })
 
-test('airPrecheck calls a goal walled only when every cell its flood read is known', () => {
-  // Two air rooms 2 blocks apart in stone: the bot stands in the first, the goal is in the second.
+test('the goto precheck calls a goal walled only when every cell its flood read is known, else names the unseen edge', () => {
+  // Two air rooms in stone, joined at x 3 and 4 by a tunnel when open.
+  const tunnel = (p) => (p.x === 3 || p.x === 4) && p.z === 0 && (p.y === 64 || p.y === 65)
   const room = (p) => (p.y === 64 || p.y === 65) && p.z === 0 && ((p.x >= 0 && p.x <= 2) || (p.x >= 5 && p.x <= 7))
+  let open = false
   const env = {
-    bot: { entity: { position: new Vec3(0.5, 64, 0.5) }, blockAt: (p) => (room(p) ? AIR : STONE) },
+    bot: { entity: { position: new Vec3(0.5, 64, 0.5) }, blockAt: (p) => (room(p) || (open && tunnel(p)) ? AIR : STONE) },
     cellKnown: () => true,
+    heldLight: (p, b) => b,
     ck: (x, y, z) => x + ',' + y + ',' + z,
     Vec3
   }
   const { airPrecheck } = loadBotFunctions(['airPrecheck'], env)
-  assert.strictEqual(airPrecheck(new Vec3(6, 64, 0), 0).verdict, 'walled', 'control: every cell known')
+  const precheck = () => {
+    const { verdict, edge, cells } = airPrecheck(new Vec3(6, 64, 0), 0)
+    return { verdict, edge: edge && edge.toString(), cells }
+  }
+  assert.strictEqual(precheck().verdict, 'walled', 'control: every cell known')
   env.cellKnown = (p) => !(p.x === 3 && p.y === 64 && p.z === 0)
-  assert.strictEqual(airPrecheck(new Vec3(6, 64, 0), 0).verdict, 'inconclusive')
+  const pre = precheck()
+  assert.deepStrictEqual([pre.verdict, pre.edge], ['unseen', '(2, 64, 0)'])
+  env.cellKnown = (p) => !tunnel(p)
+  const sealed = precheck()
+  open = true
+  assert.deepStrictEqual(precheck(), sealed, 'an unseen tunnel reads the same open or sealed')
+  env.cellKnown = () => true
+  assert.strictEqual(precheck().verdict, 'connected', 'control: an open tunnel in sight')
+})
+
+test('a /goto whose known way leaves the precheck radius is walked, not refused as walled', async () => {
+  // Corridors in stone: west from the bot along z 0, back east along z 2 to the goal, joined at x -31 when open.
+  // The precheck floods 30 blocks round the bot.
+  const corridor = (p) => (p.y === 64 || p.y === 65) && ((p.z === 0 && p.x >= -30 && p.x <= 0) || (p.z === 2 && p.x >= -31 && p.x <= 6))
+  const joint = (p) => p.x === -31 && (p.y === 64 || p.y === 65) && p.z >= 0 && p.z <= 1
+  const replyFor = (open) => {
+    let precheck = null
+    const setup = (bot) => {
+      bot.blockAt = (p) => (corridor(p) || (open && joint(p)) ? AIR : STONE)
+      precheck = loadBotFunctions(['airPrecheck'], { bot, cellKnown: () => true, heldLight: (p, b) => b, ck: (x, y, z) => x + ',' + y + ',' + z, Vec3 }).airPrecheck
+    }
+    return goto({ x: 6, y: 64, z: 2 }, { setup, answer: open ? arrive : update('noPath'), over: { cellKnown: () => true, airPrecheck: (...a) => precheck(...a) } })
+  }
+  assert.strictEqual((await replyFor(false)).reason, 'walled', 'control: the west corridor ends in known stone at the radius')
+  assert.strictEqual((await replyFor(true)).arrived, true)
+})
+
+test('a /goto walks past open ground it has not seen, and the same way under rock replies unseen-way', async () => {
+  // The bot has seen the ground round itself at x -2 to 1 and round the goal at x 5 to 8. A hill stands beside the way at x 2 to 4.
+  const hill = (p) => p.x >= 2 && p.x <= 4 && p.z >= 2 && p.z <= 4 && p.y <= 66
+  const cellKnown = (p) => Math.abs(p.z) <= 2 && p.y >= 63 && p.y <= 67 && ((p.x >= -2 && p.x <= 1) || (p.x >= 5 && p.x <= 8))
+  const replyFor = (underRock) => {
+    const solid = (p) => p.y <= 63 || hill(p) || (underRock && p.y >= 66)
+    let precheck = null
+    const setup = (bot) => {
+      bot.blockAt = (p) => ({ ...(solid(p) ? STONE : AIR), skyLight: underRock || solid(p) ? 0 : 15 })
+      precheck = loadBotFunctions(['airPrecheck'], { bot, cellKnown, heldLight: (p, b) => b, ck: (x, y, z) => x + ',' + y + ',' + z, Vec3 }).airPrecheck
+    }
+    return goto({ x: 6, y: 64, z: 0 }, { setup, answer: arrive, over: { cellKnown, airPrecheck: (...a) => precheck(...a) } })
+  }
+  assert.strictEqual((await replyFor(false)).arrived, true)
+  const buried = await replyFor(true)
+  assert.deepStrictEqual([buried.arrived, buried.reason, buried.edge], [false, 'unseen-way', { x: 1, y: 64, z: 0 }])
 })
 
 test('a nametag shows only for a player who neither sneaks nor is invisible, within 64 blocks', () => {
@@ -972,16 +1022,17 @@ test('a goto refuses a plan that ends far from the y asked or drops more than 3,
 test('a preview through terrain the bot has not seen reports only the part it knows', async () => {
   // The plan steps east, then drops 5 into a cave the bot never saw from x 3 on.
   const cave = async () => ({ status: 'success', path: [1, 2, 3, 4, 5].map((x) => new Vec3(x + 0.5, x < 3 ? 64 : 59, 0.5)) })
-  const { r, walks } = await plannedGoto({ x: 5, z: 0 }, { preview: true }, { over: { planPath: cave, cellKnown: (p) => p.x < 3 } })
+  const seen = { cellKnown: (p) => p.x < 3, knownCell: (p) => p.x < 3 }
+  const { r, walks } = await plannedGoto({ x: 5, z: 0 }, { preview: true }, { over: { planPath: cave, ...seen } })
   assert.strictEqual(walks, 0)
   assert.deepStrictEqual(r.target, { x: 5, z: 0 }, 'the target cell is unseen')
   assert.deepStrictEqual(r.plan, { reaches: null, length: 2, rise: 0, drop: 0, end: { x: 2, y: 64, z: 0 }, unseen: true })
   assert.ok(!JSON.stringify(r).includes('59'), 'the cave floor stays hidden')
-  const walked = await plannedGoto({ x: 5, z: 0 }, {}, { over: { planPath: cave, cellKnown: (p) => p.x < 3 }, answer: arrive })
+  const walked = await plannedGoto({ x: 5, z: 0 }, {}, { over: { planPath: cave, ...seen }, answer: arrive })
   assert.deepStrictEqual([walked.walks, walked.r.reason], [1, null], 'the hidden drop raises no refusal')
 })
 
-test('a preview of a failed search leaves reaches unknown, since the search may have run through unseen terrain', async () => {
+test('a preview of a failed search leaves reaches unknown, since unseen terrain may still hold a way', async () => {
   const failed = async () => ({ status: 'noPath', path: [new Vec3(1.5, 64, 0.5), new Vec3(2.5, 64, 0.5)] })
   const { r } = await plannedGoto({ x: 5, z: 0 }, { preview: true }, { over: { planPath: failed, cellKnown: (p) => p.x < 3 } })
   assert.deepStrictEqual(r.plan, { reaches: null, length: 2, rise: 0, drop: 0, end: { x: 2, y: 64, z: 0 }, unseen: false })

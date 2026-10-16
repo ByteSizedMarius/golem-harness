@@ -22,6 +22,7 @@ class Entity {
 
 class Movements {
   constructor () { this.openable = new Set() }
+  getBlock () { return {} }
   safeToBreak () { return true }
 }
 

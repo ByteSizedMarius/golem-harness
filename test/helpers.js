@@ -558,6 +558,11 @@ function botConstant (name) {
   return vm.runInNewContext(`(${m[1]})`)
 }
 
+// An empty ground-top memory and its limits as bot.js keeps them.
+function groundMemory () {
+  return { GROUND_TOP: new Map(), GROUND_SPAN: botConstant('GROUND_SPAN'), SURFACE_DEPTH: botConstant('SURFACE_DEPTH') }
+}
+
 // Also loads every bot.js function declaration they reach that env does not provide.
 function loadBotFunctions (names, env) {
   const ctx = vm.createContext(env)
@@ -883,7 +888,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, functionSource, balanced, botConstant, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn,
+  botSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild
 }

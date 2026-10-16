@@ -11,7 +11,7 @@ const { Vec3 } = require('vec3')
 const { installSecurity, chatMaxLen, BUNKER_MODES } = require('./lib/install')
 const { classifySound } = require('./lib/sounds')
 const { SHELTER, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
-const { UNLOADED, standCell, resolveTarget, crumbCentre, nametagGoal, arrivedAt, walkAttempt, routeDeadline, guardWork } = require('./lib/walk')
+const { standCell, resolveTarget, crumbCentre, nametagGoal, arrivedAt, walkAttempt, routeDeadline, guardWork } = require('./lib/walk')
 const { playerNamed, playersAround, presenceUpdate, presenceText } = require('./lib/players')
 const { POINT_RANGE, deictic, lookedAt } = require('./lib/deixis')
 const { WAKE_KINDS, serverLines, rateLimit, foldQuiet, quietText } = require('./lib/server-msg')
@@ -119,7 +119,7 @@ async function collectSafely (block, what, { wait = false } = {}) {
     if (collectLock.stops !== stops) throw stopped()
   }
   const prev = bot.pathfinder.movements   // considerate normally; forestry mid-/gather
-  const cage = new Movements(bot)
+  const cage = knownMoves(new Movements(bot))
   cage.canDig = true
   cage.maxDropDown = 3
   cage.liquidCost = 15
@@ -214,11 +214,31 @@ function abandonCollect () {
   bot.collectBlock.targets = new Targets(bot)
 }
 
+// knownCell of each cell knownMoves read this physics tick, by ck key.
+const PLAN_KNOWN = new Map()
+bot.on('physicsTick', () => PLAN_KNOWN.clear())
+// Makes m read a cell knownCell rejects as an unloaded one.
+function knownMoves (m) {
+  const getBlock = m.getBlock.bind(m)
+  m.getBlock = (pos, dx, dy, dz) => {
+    const b = getBlock(pos, dx, dy, dz)
+    // An unloaded cell keeps the pathfinder's reading, neither floor nor way.
+    if (!b.position) return b
+    const p = b.position
+    const k = ck(p.x, p.y, p.z)
+    let known = PLAN_KNOWN.get(k)
+    if (known === undefined) PLAN_KNOWN.set(k, known = knownCell(p))
+    if (known) return b
+    return { position: p, type: null, name: 'unknown', safe: false, physical: false, replaceable: false, liquid: false, climbable: false, canFall: false, openable: false, height: p.y + 1 }
+  }
+  return m
+}
+
 bot.once('spawn', () => {
   mcData = require('minecraft-data')(bot.version)
   // bot.registry shares these block entries.
   if (SERVER_OVERRIDES) renameBlocks(mcData, SERVER_OVERRIDES.blocks)
-  const moves = new Movements(bot)
+  const moves = knownMoves(new Movements(bot))
   // ---- CONSIDERATE PLAYER: don't vandalize builds/terrain, don't litter ----
   moves.canDig = false            // NEVER break blocks to travel — protects your house AND the
                                   // landscape (no tunneling shortcuts). NB: collectBlock swaps in
@@ -251,7 +271,7 @@ bot.once('spawn', () => {
   // leaf to free itself from a foliage wedge. Every other block (stone, dirt, ore, sand, and
   // every plank/door/block of your builds) stays UNbreakable, so the no-tunnel / no-x-ray
   // fairness floor is exactly as before. Swapped in only while /gather is harvesting wood.
-  forestryMoves = new Movements(bot)
+  forestryMoves = knownMoves(new Movements(bot))
   forestryMoves.canDig = true
   forestryMoves.maxDropDown = 2          // gentler drops off trunk tops → avoid fall damage
   forestryMoves.infiniteLiquidDropdownDistance = false
@@ -1596,11 +1616,79 @@ bot.on('blockUpdate', (oldB, newB) => {
 })
 // A loaded column brings blocks no verdict saw.
 bot.on('chunkColumnLoad', () => SIGHT_MEMO.cells.clear())
+// How many columns out groundAbove looks on each side.
+const GROUND_SPAN = 8
+// A sky-lit cell with ground more than this above it on two opposite sides is no surface.
+const SURFACE_DEPTH = 15
+// Ground top by column 'x,z': the y of its highest block that is not clear.
+const GROUND_TOP = new Map()
+// The ground top of column x, z, null while the column is unloaded.
+function groundTop (x, z) {
+  const k = x + ',' + z
+  let top = GROUND_TOP.get(k)
+  if (top !== undefined) return top
+  for (top = bot.game.minY + bot.game.height - 1; top >= bot.game.minY; top--) {
+    const b = bot.blockAt(new Vec3(x, top, z))
+    if (!b) return null
+    if (!lightClear(b)) break
+  }
+  GROUND_TOP.set(k, top)
+  return top
+}
+// True when a ground top within GROUND_SPAN along dx, dz lies above y, else null if a column there is unloaded.
+function groundAbove (x, z, dx, dz, y) {
+  let above = false
+  for (let i = 1; i <= GROUND_SPAN; i++) {
+    const top = groundTop(x + i * dx, z + i * dz)
+    if (top === null) above = null
+    else if (top > y) return true
+  }
+  return above
+}
+function forgetGround (x0, z0, x1, z1) {
+  for (let x = x0; x <= x1; x++) for (let z = z0; z <= z1; z++) GROUND_TOP.delete(x + ',' + z)
+}
+// Only a change at or above a column's ground top can move it.
+bot.on('blockUpdate', (oldB, newB) => {
+  const p = (newB || oldB)?.position
+  if (p && p.y >= GROUND_TOP.get(p.x + ',' + p.z)) forgetGround(p.x, p.z, p.x, p.z)
+})
+bot.on('chunkColumnLoad', (p) => forgetGround(p.x, p.z, p.x + 15, p.z + 15))
+bot.on('chunkColumnUnload', (p) => forgetGround(p.x, p.z, p.x + 15, p.z + 15))
+// Surface: sky 15 in p or the cell above, and no SURFACE_DEPTH cover on two opposite sides.
+function onSurface (p, b) {
+  if (heldLight(p, b).skyLight !== 15) {
+    const up = new Vec3(p.x, p.y + 1, p.z)
+    const a = bot.blockAt(up)
+    if (!a || heldLight(up, a).skyLight !== 15) return false
+  }
+  const y = p.y + SURFACE_DEPTH
+  for (const [dx, dz] of [[1, 0], [0, 1]]) {
+    if (groundAbove(p.x, p.z, dx, dz, y) !== false && groundAbove(p.x, p.z, -dx, -dz, y) !== false) return false
+  }
+  return true
+}
+// A loaded cell that is cellKnown or on the surface, which shows from anywhere.
+function knownCell (p) {
+  const b = bot.blockAt(p)
+  return !!b && (onSurface(p, b) || cellKnown(p))
+}
+// The refusal for a target cell the bot does not perceive.
+function outOfSight () {
+  return new Error('not in my sight, blocked or unlit: walk closer, clear the view or light it')
+}
 // A cell the body fills, or one in lit sight now.
 function perceived (p) {
   const o = bot.entity.position.floored()
   if (p.x === o.x && p.z === o.z && (p.y === o.y || p.y === o.y + 1)) return true
   return seesLit(p, 8)
+}
+// A cell the body fills or touches: feet, head, the cells above and below them and the four beside each.
+function bodyTouches (p) {
+  const o = bot.entity.position.floored()
+  const side = Math.abs(p.x - o.x) + Math.abs(p.z - o.z)
+  const dy = p.y - o.y
+  return side === 0 ? dy >= -1 && dy <= 2 : side === 1 && (dy === 0 || dy === 1)
 }
 
 // ==== VISION 2 (2026-07-11): the vertical sense, the air flood-fill, and the ray-sweep retina ====
@@ -1667,7 +1755,7 @@ function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known
   const liquid = new Set()
   const queue = [[s.x, s.y, s.z]]
   cells.add(ck(s.x, s.y, s.z))
-  let capped = false, reached = null, qi = 0, unknown = false
+  let capped = false, reached = null, qi = 0, unknown = false, cut = false
   // The cells that stopped the flood.
   const walls = known || keepWalls ? new Map() : null
   while (qi < queue.length) {
@@ -1675,7 +1763,6 @@ function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known
     if (targets && targets.has(ck(x, y, z))) { reached = new Vec3(x, y, z); break }
     for (const [dx, dy, dz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]) {
       const nx = x + dx, ny = y + dy, nz = z + dz
-      if (Math.max(Math.abs(nx - o.x), Math.abs(ny - o.y), Math.abs(nz - o.z)) > radius) continue
       const k = ck(nx, ny, nz)
       if (cells.has(k)) continue
       const p = new Vec3(nx, ny, nz)
@@ -1684,6 +1771,7 @@ function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known
         if (walls) walls.set(k, p)
         continue
       }
+      if (Math.max(Math.abs(nx - o.x), Math.abs(ny - o.y), Math.abs(nz - o.z)) > radius) { cut = true; continue }
       cells.add(k)
       if (b.name.includes('water')) liquid.add(k)
       if (cells.size >= cap) { capped = true; break }
@@ -1692,17 +1780,13 @@ function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known
     if (capped) break
   }
   // Only the walls of a fill that stayed closed need to be known.
-  if (known && !reached && !capped) {
+  if (known && !reached && !capped && !cut) {
     for (const p of walls.values()) if (!known(p)) { unknown = true; break }
   }
-  return { cells, liquid, capped, reached, seed: s, unknown, ...(keepWalls && { walls }) }
+  return { cells, liquid, capped, cut, reached, seed: s, unknown, ...(keepWalls && { walls }) }
 }
 
-// ---- reachability pre-check for /goto: a walled goal used to cost the pathfinder its whole ~10s
-// search before it admitted "no path". Air-connectivity is a cheap conservative filter: if no air
-// path even EXISTS, no walker path can — bail instantly. If air connects (or the fill hits its
-// cap), the pathfinder still owns the real walkability question. Leaks nothing new: A* already
-// explores exactly this connectivity while searching.
+// ---- reachability pre-check for /goto over knownCell cells.
 function airPrecheck(dest, range = 1) {
   try {
     const t0 = Date.now()
@@ -1712,15 +1796,26 @@ function airPrecheck(dest, range = 1) {
     const targets = new Set()
     for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) for (let dz = -r; dz <= r; dz++) {
       const p = d0.offset(dx, dy, dz)
-      if (!cellKnown(p)) return { verdict: 'inconclusive', why: 'cells around the goal are unknown' }
+      if (!knownCell(p)) return { verdict: 'inconclusive', why: 'cells around the goal are unknown' }
       if (floodPassable(bot.blockAt(p))) targets.add(ck(p.x, p.y, p.z))
     }
     if (!targets.size) return { verdict: 'sealed', ms: Date.now() - t0 }
     const span = Math.ceil(bot.entity.position.distanceTo(d0)) + 24
-    const fill = airFlood({ radius: Math.min(span, 64), cap: 15000, targets, known: cellKnown })
+    const fill = airFlood({ radius: Math.min(span, 64), cap: 15000, targets, known: knownCell, knownOnly: true, keepWalls: true })
     if (fill.reached) return { verdict: 'connected', cells: fill.cells.size, ms: Date.now() - t0 }
-    if (fill.capped) return { verdict: 'inconclusive', cells: fill.cells.size, ms: Date.now() - t0 }
-    if (fill.unknown) return { verdict: 'inconclusive', why: 'the flood read unknown cells', cells: fill.cells.size, ms: Date.now() - t0 }
+    if (fill.capped || fill.cut) return { verdict: 'inconclusive', cells: fill.cells.size, ms: Date.now() - t0 }
+    if (fill.unknown) {
+      let edge = null
+      let best = Infinity
+      for (const w of fill.walls.values()) {
+        for (const [dx, dy, dz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]) {
+          const n = w.offset(dx, dy, dz)
+          const d = n.distanceTo(d0)
+          if (d < best && fill.cells.has(ck(n.x, n.y, n.z)) && !knownCell(w)) { best = d; edge = n }
+        }
+      }
+      return { verdict: 'unseen', edge, cells: fill.cells.size, ms: Date.now() - t0 }
+    }
     return { verdict: 'walled', cells: fill.cells.size, ms: Date.now() - t0 }
   } catch (e) { return { verdict: 'inconclusive', why: e.message } }
 }
@@ -3087,7 +3182,15 @@ async function equipPickFor(blockName) {
 function hasLegalMove() {
   try {
     const o = bot.entity.position.floored()
-    const at = (x, y, z) => bot.blockAt(new Vec3(x, y, z))
+    // With no move found, an unknown neighbour cell makes the answer true.
+    let unknown = false
+    const known = (x, y, z) => {
+      const p = new Vec3(x, y, z)
+      if (knownCell(p) || bodyTouches(p)) return true
+      unknown = true
+      return false
+    }
+    const at = (x, y, z) => (known(x, y, z) ? bot.blockAt(new Vec3(x, y, z)) : null)
     const open = (x, y, z) => { const b = at(x, y, z); return b && floodPassable(b) }
     const solid = (x, y, z) => { const b = at(x, y, z); return b && b.boundingBox === 'block' }
     const wet = (x, y, z) => { const b = at(x, y, z); return b && b.name.includes('water') }
@@ -3095,12 +3198,12 @@ function hasLegalMove() {
       const x = o.x + dx, z = o.z + dz
       if (open(x, o.y, z) && open(x, o.y + 1, z)) {           // walk flat / step or swim down (≤3)
         if (wet(x, o.y, z)) return true
-        for (let dy = 0; dy >= -3; dy--) if (solid(x, o.y + dy - 1, z)) return true
+        for (let dy = 0; dy >= -3 && known(x, o.y + dy - 1, z); dy--) if (solid(x, o.y + dy - 1, z)) return true
       }
       // step UP 1: tread ahead solid, its feet+head open, and my own launch headroom open
       if (solid(x, o.y, z) && open(x, o.y + 1, z) && open(x, o.y + 2, z) && open(o.x, o.y + 2, o.z)) return true
     }
-    return false
+    return unknown
   } catch (e) { return true }                                  // uncertain -> don't block the attempt
 }
 
@@ -3771,7 +3874,7 @@ function walkSources () {
 }
 
 const WALK_HINTS = {
-  'no-path': 'the goal is walled off for a walker (canDig=false), reachable only by digging. Decide if a /dig_stair or /dig_tunnel is worth it, or pick an open point',
+  'no-path': 'no known way there. A walk crosses only the open surface and cells I have seen, so unseen ground may still hold one. Look or light the way, pick an open point, or dig with /dig_stair or /dig_tunnel',
   walled: 'reachable only by digging. Decide if a /dig_stair or /dig_tunnel is worth it, or pick an open point',
   sealed: 'pick an open cell, or carve to it deliberately with /dig_stair or /dig_tunnel, your call',
   stalled: 'goal is likely unreachable without digging. Decide if it is worth a /dig_stair or /dig_tunnel, or pick a reachable point',
@@ -3782,7 +3885,8 @@ const WALK_HINTS = {
   'no-floor': 'nothing to stand on in that column, pick another point',
   budget: 'try again to continue, or shorten the goal',
   risky: 'risk says what is wrong and plan holds the numbers. Pick another point, or walk it anyway with accept',
-  unresolved: 'the target is unloaded or out of sight from here, so there is no plan yet. Walk toward it first'
+  unresolved: 'the target is unloaded or out of sight from here, so there is no plan yet. Walk toward it first',
+  'unseen-way': 'the way there runs through cells I have not seen. Walk to edge, look or light the way, then try again'
 }
 // The reply reason for each way a walk attempt ends short of the goal.
 const WALK_FAILED = { done: 'not-reached', emptied: 'not-reached', stalled: 'stalled', 'no-path': 'no-path', timeout: 'no-path', stopped: 'stopped' }
@@ -3899,8 +4003,8 @@ async function hopToward (dest, route, { stallMs, segLen }) {
   const hx = from.x + dx * t
   const hz = from.z + dz * t
   const hy = dest.y == null ? from.y : from.y + (dest.y - from.y) * t
-  const cell = standCell((p) => bot.blockAt(p), hx, hz, hy, worldColumn())
-  const goal = cell && cell !== UNLOADED ? new goals.GoalNear(cell.x, cell.y, cell.z, 2) : new goals.GoalNearXZ(hx, hz, 2)
+  const cell = standCell((p) => bot.blockAt(p), hx, hz, hy, worldColumn(), knownCell)
+  const goal = cell && typeof cell === 'object' ? new goals.GoalNear(cell.x, cell.y, cell.z, 2) : new goals.GoalNearXZ(hx, hz, 2)
   const how = await walkOnce(goal, route, stallMs)
   if (routeEnd(route)) return routeEnd(route)
   if (how === 'stopped') return 'stopped'
@@ -3966,11 +4070,12 @@ async function stagedGoto (q, route, { stallMs = 4500, segLen = 18, preview = fa
   if (!r.nametag) {
     const pre = airPrecheck(r.cell, q.range ?? 0)
     if (pre.verdict === 'sealed' || pre.verdict === 'walled') return walkReply(r, pre.verdict)
+    if (pre.verdict === 'unseen') return { ...walkReply(r, 'unseen-way'), edge: round(pre.edge) }
   }
   if (preview || (!accept && !r.nametag)) {
     const planned = await planPath(r.goal, route)
     if (routeEnd(route)) return walkReply(r, routeEnd(route))
-    const plan = summarizePlan(bot.entity.position, planned, cellKnown)
+    const plan = summarizePlan(bot.entity.position, planned, knownCell)
     if (preview) return { ...walkReply(r, null), arrived: false, plan }
     const askedY = q.waypoint !== undefined ? (waypoints.get(q.waypoint) || {}).y : q.y
     const risk = planRisk(plan, askedY, q.range ?? 0)
@@ -4589,7 +4694,7 @@ function targetGrave (q) {
   const [x, y, z] = String(q.at).split(',').map(Number)
   if (![x, y, z].every(Number.isFinite)) throw new Error('at takes x,y,z')
   const p = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z))
-  if (!seesLit(p, GRAVE_SIGHT)) throw new Error('not in my sight, blocked or unlit: walk closer, clear the view or light it')
+  if (!seesLit(p, GRAVE_SIGHT)) throw outOfSight()
   const b = bot.blockAt(p)
   if (!b || b.name !== GRAVESTONE) throw new Error(`no gravestone at ${q.at} (${b ? b.name : 'unloaded'})`)
   return b
@@ -4760,7 +4865,7 @@ app.get('/activate', async (req, res) => {
     const x = Math.floor(parseFloat(req.query.x)), y = Math.floor(parseFloat(req.query.y)), z = Math.floor(parseFloat(req.query.z))
     const b = bot.blockAt(new Vec3(x, y, z))
     if (!b) return err(res, new Error('unloaded chunk'))
-    if (!seesLit({ x, y, z }, 20)) return err(res, new Error('not in my sight, blocked or unlit: walk closer, clear the view or light it'))
+    if (!seesLit({ x, y, z }, 20)) return err(res, outOfSight())
     if (bot.entity.position.distanceTo(new Vec3(x + 0.5, y + 0.5, z + 0.5)) > 3.5) {
       await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 2))
     }
@@ -5811,7 +5916,7 @@ app.get('/use', async (req, res) => {
     if (![p.x, p.y, p.z].every(Number.isFinite)) return err(res, new Error('x, y, z required'))
     const b = bot.blockAt(p)
     if (!b) return err(res, new Error('block not loaded'))
-    if (!seesLit(p, 6)) return err(res, new Error('not in my sight, blocked or unlit: walk closer, clear the view or light it'))
+    if (!seesLit(p, 6)) return err(res, outOfSight())
     if (req.query.item) {
       const it = bot.inventory.items().find(i => i.name === String(req.query.item))
       if (!it) return err(res, new Error('not carrying ' + req.query.item))
