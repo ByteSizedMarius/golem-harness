@@ -8,6 +8,11 @@ and leaves the stories here.
 
 ## 2026-10-15: live-play fixes
 
+Event backlog. `wait_events` now hands over the oldest items first, and a backlog over 50
+comes on the next call at once instead of being dropped. The bot has a side-effect-free
+`GET /cursors`, and the MCP server writes the chat and event cursors it handed the pilot to
+the wake log, so a supervising process sees whether anything new waits.
+
 Skin. The bot's skin and cape moved into `skin/`. On an offline-mode server players see them
 through the client-side mod CustomSkinLoader, since the bot cannot push a skin there.
 

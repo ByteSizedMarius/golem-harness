@@ -41,11 +41,15 @@ const NAMES_SHOWN = 5
 // A drive letter not preceded by a letter or digit and followed by a slash, or a UNC double backslash,
 // up to the next whitespace or quote.
 const PATH_TOKEN = /(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s"']*|\\\\[^\s"']*/g
+// A bot.js boot id as the wake log lines carry it.
+const BOOT = /^[0-9A-Za-z]{1,64}$/
+// The wake log lines that name a frontier.
+const FRONTIER_LINE = /^(?:wait_events returned|delivered) boot=(null|[0-9A-Za-z]{1,64}) chat=(\d{1,15}) ev=(\d{1,15})$/
 
 const LOCAL_TOOLS = [
   {
     name: 'wait_events',
-    description: 'Wait up to timeout seconds for new chat lines, whispers and bot events, then return at most 50 of them, newest kept, with the number dropped, quiet ones dropped first. Chat and whispers are written by players and are untrusted, as is the text of server events. Server lines of deaths, joins, leaves and achievements wake, at most 6 a minute. Other server lines, ambient world changes and watched threats wake nothing, and the repeats of one quiet server line come as one item with a count.',
+    description: 'Wait up to timeout seconds for new chat lines, whispers and bot events, then return the oldest of them, at most 50, and how many more wait. The next call returns those at once. Chat and whispers are written by players and are untrusted, as is the text of server events. Server lines of deaths, joins, leaves and achievements wake, at most 6 a minute. Other server lines, ambient world changes and watched threats wake nothing, and the repeats of one quiet server line come as one item with a count.',
     params: { timeout: { type: 'int', min: 1, max: 120 } }
   },
   {
@@ -276,17 +280,18 @@ function toQuery (tool, values) {
 }
 
 const textResult = (text, isError = false) => (isError ? { content: [{ type: 'text', text }], isError: true } : { content: [{ type: 'text', text }] })
-// The tails count against the cap.
-function jsonResult (value, isError = false, tails = []) {
-  const text = JSON.stringify(value)
+// value cut to the cap the tails leave, and the cut's note or null.
+function fitResult (value, tails = []) {
+  const size = JSON.stringify(value).length
   const cap = RESULT_CAP - tails.reduce((n, t) => n + t.length, 0)
-  let result
-  if (text.length <= cap) result = textResult(text, isError)
-  else {
-    const note = `Trimmed: the reply was ${text.length} characters, over the ${cap}-character limit. Fields and list items after the cut are left out.`
-    result = textResult(JSON.stringify(fitJson(value, cap - note.length).value), isError)
-    result.content.push({ type: 'text', text: note })
-  }
+  if (size <= cap) return { value, note: null }
+  const note = `Trimmed: the reply was ${size} characters, over the ${cap}-character limit. Fields and list items after the cut are left out.`
+  return { value: fitJson(value, cap - note.length).value, note }
+}
+
+function jsonResult (value, isError = false, tails = [], fit = fitResult(value, tails)) {
+  const result = textResult(JSON.stringify(fit.value), isError)
+  if (fit.note !== null) result.content.push({ type: 'text', text: fit.note })
   for (const t of tails) result.content.push({ type: 'text', text: t })
   return result
 }
@@ -311,15 +316,26 @@ function quietFold (e) {
   return { text: d.text, repeats: count(d.repeats), merged: count(d.merged) }
 }
 
-// Drops the oldest quiet item, or the oldest item when none is quiet.
-function dropOldest (gathered) {
-  const i = gathered.findIndex((g) => g.quiet)
-  gathered.splice(i < 0 ? 0 : i, 1)
+const withIds = (list) => Array.isArray(list) && list.every((x) => x !== null && typeof x === 'object' && isCursor(x.id))
+const usableTick = (t) => t !== null && typeof t === 'object' &&
+  t.chat !== null && typeof t.chat === 'object' && withIds(t.chat.messages) && isCursor(t.chat.cursor) &&
+  t.events !== null && typeof t.events === 'object' && withIds(t.events.list) && isCursor(t.events.cursor)
+const bootOf = (b) => (typeof b === 'string' && BOOT.test(b) ? b : null)
+
+// The ids of the leading items of full that kept holds unchanged.
+function wholeIds (full, kept) {
+  const ids = new Set()
+  if (!Array.isArray(full) || !Array.isArray(kept)) return ids
+  for (let i = 0; i < kept.length && JSON.stringify(kept[i]) === JSON.stringify(full[i]); i++) ids.add(kept[i].id)
+  return ids
 }
 
-const usableTick = (t) => t !== null && typeof t === 'object' &&
-  t.chat !== null && typeof t.chat === 'object' && Array.isArray(t.chat.messages) && isCursor(t.chat.cursor) &&
-  t.events !== null && typeof t.events === 'object' && Array.isArray(t.events.list) && isCursor(t.events.cursor)
+// A frontier field moved up to just before the first listed id the reply cut, or to cursor when it cut none.
+function reach (from, since, cursor, listed, shown) {
+  if (since > from) return from
+  const missed = listed.filter((id) => id > from && !shown.has(id))
+  return Math.max(from, missed.length ? Math.min(...missed) - 1 : cursor)
+}
 
 function botFailure (e) {
   if (e instanceof ReplyRejected) return 'the bot reply failed verification'
@@ -364,14 +380,20 @@ function untilAborted (promise, signal) {
   })
 }
 
-// onWake runs after every return of wait_events. onToolCall runs on every tools/call with the name from
-// the tool table, null for a name outside it, and the sorted names of the tool's params the call passed.
-function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, lessonsFile, todoFile, now = () => new Date() }) {
+// The frontier { boot, chat, ev }: every chat line and event of process boot up to those ids reached a wait_events or tick result.
+// onWaitStart runs as a wait_events call starts waiting, onWake and onDeliver get the frontier after each wait_events return and each tick that moved it.
+// onToolCall runs on every tools/call with the name from the tool table, null for a name outside it, and the sorted names of the tool's params the call passed.
+function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { boot: null, chat: 0, ev: 0 }, onWaitStart = () => {}, onWake = () => {}, onDeliver = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, lessonsFile, todoFile, now = () => new Date() }) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new TypeError('port must be an integer 1024-65535')
   if (typeof token !== 'string' || token === '') throw new TypeError('token must be a non-empty string')
   if (typeof fetch !== 'function') throw new TypeError('fetch must be a function')
   if (typeof manualDir !== 'string' || manualDir === '') throw new TypeError('manualDir must be a path')
+  if (start === null || typeof start !== 'object' || (start.boot !== null && bootOf(start.boot) === null) || !isCursor(start.chat) || !isCursor(start.ev)) {
+    throw new TypeError('start must be { boot, chat, ev } with boot null or a boot id and chat and ev cursors')
+  }
+  if (typeof onWaitStart !== 'function') throw new TypeError('onWaitStart must be a function')
   if (typeof onWake !== 'function') throw new TypeError('onWake must be a function')
+  if (typeof onDeliver !== 'function') throw new TypeError('onDeliver must be a function')
   if (typeof onToolCall !== 'function') throw new TypeError('onToolCall must be a function')
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > TIMER_MAX_MS) {
     throw new TypeError(`requestTimeoutMs must be an integer 1-${TIMER_MAX_MS}`)
@@ -402,10 +424,11 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
   }
   const listed = tools.map(listing)
   const closing = new AbortController()
-  // boot is the bot.js process the cursors belong to, null before the first tick that names one.
-  const cursor = { chat: 0, ev: 0, boot: null }
+  const frontier = { boot: start.boot, chat: start.chat, ev: start.ev }
   let waiting = false
   let lastReturn = -Infinity
+  // The last wait_events left items for the next one.
+  let leftover = false
   const noted = { papercut: 0, lesson: 0 }
   // Body calls in arrival order, the running one first.
   const queue = []
@@ -459,6 +482,10 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
     }
     const body = reply.body
     const tails = waited === null ? [] : [waited]
+    // The ids a tick reply listed, before its lists are trimmed.
+    const listed = tool.name === 'tick' && reply.status === 200 && usableTick(body)
+      ? { chat: body.chat.messages.map((m) => m.id), ev: body.events.list.map((e) => e.id) }
+      : null
     if (body !== null && typeof body === 'object' && Object.hasOwn(body, 'unreadChat')) {
       const note = unreadNote(body.unreadChat)
       if (note !== null) tails.push(note)
@@ -470,7 +497,25 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
       tails.push(primers.get(primer.topic))
     }
     if (last !== null) tails.push(last)
-    return jsonResult(redact(trimLists(body, tool.lists), tool.structural), reply.status !== 200, tails)
+    const shown = redact(trimLists(body, tool.lists), tool.structural)
+    const fit = fitResult(shown, tails)
+    if (listed !== null) tickDelivered(values, listed, body, shown, fit.value)
+    return jsonResult(shown, reply.status !== 200, tails, fit)
+  }
+
+  // Moves the frontier past the items a tick reply showed whole.
+  function tickDelivered (values, listed, body, shown, kept) {
+    const boot = bootOf(body.boot)
+    if (boot === null) return
+    const from = boot === frontier.boot ? frontier : { boot, chat: 0, ev: 0 }
+    const next = {
+      boot,
+      chat: reach(from.chat, values.chat ?? 0, body.chat.cursor, listed.chat, wholeIds(shown.chat.messages, kept.chat?.messages)),
+      ev: reach(from.ev, values.ev ?? 0, body.events.cursor, listed.ev, wholeIds(shown.events.list, kept.events?.list))
+    }
+    if (next.boot === frontier.boot && next.chat === frontier.chat && next.ev === frontier.ev) return
+    Object.assign(frontier, next)
+    onDeliver({ ...frontier })
   }
 
   // A call still waiting when its time budget ends, or cancelled, answers an error without reaching the bot.
@@ -505,88 +550,105 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, onWake = ()
   async function waitEvents ({ timeout = WAIT_DEFAULT_S }) {
     if (waiting) return textResult('wait_events is already running', true)
     waiting = true
+    onWaitStart()
     try {
-      return await gather(Date.now() + timeout * 1000, lastReturn + WAIT_GAP_MS)
+      return await gather(Date.now() + timeout * 1000, leftover ? -Infinity : lastReturn + WAIT_GAP_MS, leftover)
     } finally {
       lastReturn = Date.now()
       waiting = false
-      onWake()
+      onWake({ ...frontier })
     }
   }
 
-  // Polls /tick until activity came in and earliest has passed, or until deadline. Quiet events count
-  // as no activity and come along with the rest. Quiet server lines with the same text arrive as one item
-  // with their counts, and the oldest quiet items are dropped first.
-  async function gather (deadline, earliest) {
-    const start = { ...cursor }
-    // { item, quiet, fold }, oldest first.
-    const gathered = []
+  // Polls /tick from the frontier until activity came in and earliest has passed, or until deadline. Quiet items count as activity only when eager.
+  async function gather (deadline, earliest, eager) {
+    // The ids this call asks past and the process they belong to.
+    const seen = { ...frontier }
+    // { item, quiet, fold, boot, chat: the chat id, or ev: the first and last event id }, oldest first.
+    let gathered = []
     const notes = []
-    let dropped = 0
     let status
     let restarted = false
-    let woken = false
     for (;;) {
+      // A tick may have moved the frontier since the last poll.
+      if (frontier.boot === seen.boot) {
+        seen.chat = Math.max(seen.chat, frontier.chat)
+        seen.ev = Math.max(seen.ev, frontier.ev)
+        gathered = gathered.filter((g) => g.boot !== frontier.boot || (g.ev ? g.ev[1] > frontier.ev : g.chat > frontier.chat))
+      }
       let tick = null
       status = 'the bot is not ready'
       try {
-        tick = (await getJson('/tick', new URLSearchParams({ chat: String(cursor.chat), ev: String(cursor.ev) }))).body
+        tick = (await getJson('/tick', new URLSearchParams({ chat: String(seen.chat), ev: String(seen.ev) }))).body
       } catch (e) {
         if (e instanceof ReplyRejected) {
-          // The next call fetches again what this one gathered.
-          Object.assign(cursor, start)
           await sleep(Math.min(earliest, deadline) - Date.now())
           return textResult(botFailure(e), true)
         }
         status = botFailure(e)
       }
       if (usableTick(tick)) {
-        const boot = typeof tick.boot === 'string' ? tick.boot : null
-        const newProcess = boot !== null && cursor.boot !== null && boot !== cursor.boot
+        const boot = bootOf(tick.boot)
+        const newProcess = boot !== null && seen.boot !== null && boot !== seen.boot
         // A tick asked with the old process's cursors skipped the new process's first lines.
-        if (newProcess || tick.chat.cursor < cursor.chat || tick.events.cursor < cursor.ev) {
-          // Every restart moves the cursors to the newest process. Only the first one in a call asks again
-          // at once, so a boot that changes on every reply cannot spin.
-          if (boot !== null) cursor.boot = boot
-          cursor.chat = 0
-          cursor.ev = 0
+        if (newProcess || tick.chat.cursor < seen.chat || tick.events.cursor < seen.ev) {
+          const fresh = boot ?? seen.boot
+          // The frontier stays when a tick during this call already moved it into the new process.
+          if (fresh === seen.boot || frontier.boot !== fresh) Object.assign(frontier, { boot: fresh, chat: 0, ev: 0 })
+          Object.assign(seen, frontier)
           status = 'the bot restarted'
+          // Only the first restart in a call asks again at once, so a boot that changes on every reply cannot spin.
           if (!restarted) {
             restarted = true
             notes.push('the bot restarted, chat and events from before the restart are gone')
             if (Date.now() < deadline && !closing.signal.aborted) continue
           }
         } else {
-          if (boot !== null) cursor.boot = boot
-          cursor.chat = tick.chat.cursor
-          cursor.ev = tick.events.cursor
-          const said = tick.chat.messages.map((m) => ({ t: m.t, quiet: false, fold: null, item: { type: m.kind === 'whisper' ? 'whisper' : 'chat', from: m.from, msg: m.msg, ...(m.pointsAt && { pointsAt: m.pointsAt }) } }))
-          const happened = tick.events.list.map((e) => ({ t: e.t, quiet: e.quiet === true, fold: quietFold(e), item: { type: 'event', kind: e.kind, msg: e.msg } }))
-          if (said.length || happened.some((h) => !h.quiet)) woken = true
+          if (boot !== null) seen.boot = boot
+          seen.chat = tick.chat.cursor
+          seen.ev = tick.events.cursor
+          const said = tick.chat.messages.map((m) => ({ t: m.t, quiet: false, fold: null, chat: m.id, item: { type: m.kind === 'whisper' ? 'whisper' : 'chat', from: m.from, msg: m.msg, ...(m.pointsAt && { pointsAt: m.pointsAt }) } }))
+          const happened = tick.events.list.map((e) => ({ t: e.t, quiet: e.quiet === true, fold: quietFold(e), ev: [e.id, e.id], item: { type: 'event', kind: e.kind, msg: e.msg } }))
           for (const g of [...said, ...happened].sort((a, b) => a.t - b.t)) {
-            const same = g.fold && gathered.find((o) => o.fold && o.fold.text === g.fold.text)
+            const same = g.fold && gathered.find((o) => o.fold && o.boot === seen.boot && o.fold.text === g.fold.text)
             if (same) {
               same.fold.repeats += g.fold.repeats + 1
               same.fold.merged += g.fold.merged
               same.item.msg = redact(quietText(same.fold))
-            } else gathered.push({ item: redact(g.item), quiet: g.quiet, fold: g.fold })
+              same.ev[1] = g.ev[1]
+            } else gathered.push({ item: redact(g.item), quiet: g.quiet, fold: g.fold, boot: seen.boot, chat: g.chat, ev: g.ev })
           }
-          for (; gathered.length > MAX_ITEMS; dropped++) dropOldest(gathered)
           status = 'no new activity'
         }
       }
+      const woken = gathered.some((g) => !g.quiet) || (eager && gathered.length > 0)
       const now = Date.now()
       if ((woken && now >= earliest) || now >= deadline || closing.signal.aborted) break
       await sleep(Math.min(POLL_MS, (woken ? Math.min(earliest, deadline) : deadline) - now))
     }
-    if (!gathered.length) return jsonResult(redact({ items: [], dropped, notes, status }))
-    const body = { items: gathered.map((g) => g.item), dropped, notes: redact(notes) }
-    // Over the result cap, items are dropped as past MAX_ITEMS and counted.
-    while (gathered.length && JSON.stringify(body).length > RESULT_CAP) {
-      dropOldest(gathered)
-      body.items = gathered.map((g) => g.item)
-      body.dropped++
+    // Past MAX_ITEMS or the result cap, the newest items of this process wait for the next call.
+    const rest = (kept) => gathered.slice(kept).filter((g) => g.boot === seen.boot)
+    const bodyOf = (kept) => {
+      const more = rest(kept).length
+      return { items: gathered.slice(0, kept).map((g) => g.item), notes: redact(more ? [...notes, `${more} more waiting, the next wait_events returns them at once`] : notes) }
     }
+    let kept = Math.min(gathered.length, MAX_ITEMS)
+    let body = bodyOf(kept)
+    while (kept > 0 && JSON.stringify(body).length > RESULT_CAP) body = bodyOf(--kept)
+    const waitingItems = rest(kept)
+    const before = (ids, all) => (ids.length ? Math.min(...ids) - 1 : all)
+    const next = {
+      boot: seen.boot,
+      chat: before(waitingItems.filter((g) => !g.ev).map((g) => g.chat), seen.chat),
+      ev: before(waitingItems.filter((g) => g.ev).map((g) => g.ev[0]), seen.ev)
+    }
+    if (next.boot !== frontier.boot) Object.assign(frontier, next)
+    else {
+      frontier.chat = Math.max(frontier.chat, next.chat)
+      frontier.ev = Math.max(frontier.ev, next.ev)
+    }
+    leftover = waitingItems.length > 0
+    if (!gathered.length) body.status = status
     return jsonResult(body)
   }
 
@@ -751,10 +813,21 @@ function main () {
   }
   const token = process.env.GOLEM_TOKEN || ''
   if (token.length < TOKEN_MIN) fail(`GOLEM_TOKEN is missing or shorter than ${TOKEN_MIN} characters`)
-  // The wake log lets a supervising process count the wait_events returns and the tool calls.
+  // A restarted server resumes from the last frontier the wake log holds.
+  let start
+  let onWaitStart
   let onWake
+  let onDeliver
   let onToolCall
   if (args.length === 2) {
+    let text = ''
+    try {
+      text = fs.readFileSync(args[1], 'utf8')
+    } catch (e) {
+      if (e.code !== 'ENOENT') fail(`cannot read the wake log: ${e.message}`)
+    }
+    const m = text.split('\n').reverse().map((line) => FRONTIER_LINE.exec(line)).find(Boolean)
+    if (m) start = { boot: m[1] === 'null' ? null : m[1], chat: Number(m[2]), ev: Number(m[3]) }
     let fd
     try {
       fd = fs.openSync(args[1], 'a')
@@ -768,13 +841,16 @@ function main () {
         fail(`cannot write the wake log: ${e.message}`)
       }
     }
-    onWake = () => logLine('wait_events returned')
+    const tuple = (f) => `boot=${f.boot ?? 'null'} chat=${f.chat} ev=${f.ev}`
+    onWaitStart = () => logLine('wait_events started')
+    onWake = (f) => logLine(`wait_events returned ${tuple(f)}`)
+    onDeliver = (f) => logLine(`delivered ${tuple(f)}`)
     onToolCall = (name, used) => logLine(`tool call ${name === null ? '(unknown)' : name}${used.length ? ' ' + used.join(',') : ''}`)
   }
   const papercutsFile = process.env.GOLEM_PAPERCUTS || undefined
   const lessonsFile = process.env.GOLEM_LESSONS || undefined
   const todoFile = process.env.GOLEM_TODO || undefined
-  serveStdio(createServer({ port, token, fetch: globalThis.fetch, onWake, onToolCall, papercutsFile, lessonsFile, todoFile }))
+  serveStdio(createServer({ port, token, fetch: globalThis.fetch, start, onWaitStart, onWake, onDeliver, onToolCall, papercutsFile, lessonsFile, todoFile }))
 }
 
 if (require.main === module) main()

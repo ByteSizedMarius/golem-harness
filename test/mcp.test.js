@@ -2,6 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')
+const http = require('node:http')
 const os = require('node:os')
 const path = require('node:path')
 const { createServer, redact, PATH_TOKEN } = require('../mcp/server')
@@ -10,7 +11,7 @@ const { ROUTE_BOUNDS } = require('../lib/bounds')
 const {
   HUNG, PORT, MCP_TOKEN, proofOver, timed, delay, rawReply, mcpServer, manualFixture, call, rpc, callReq, isToolError, isRpcError, assertOk,
   textOf, errorText, LOCAL_TOOLS, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
-  baseEnv, assertEntryServes, assertEntryRefuses, fakeBot, runEntry
+  baseEnv, assertEntryServes, assertEntryRefuses, fakeBot, runEntry, tickFrom, tickReply, chatLine, botProcess, missing
 } = require('./helpers')
 
 const FORBIDDEN_ROUTES = ['/snapshot', '/record', '/pov', '/threatdebug', '/pathdebug', '/stream', '/batch']
@@ -596,4 +597,68 @@ test('the wake log names each called tool and its passed params and holds no arg
   e.child.kill()
   await e.exited
   assert.strictEqual(fs.readFileSync(log, 'utf8'), 'tool call papercut text\ntool call manual topic\ntool call (unknown)\n')
+})
+
+test('onWaitStart runs as a wait_events call starts, before its first /tick poll, and onWake once it returns', async () => {
+  const order = []
+  const reply = tickReply([chatLine(1, 'hi there')])
+  const { srv } = mcpServer({
+    reply: (url) => { if (url.pathname === '/tick') order.push('poll'); return reply(url) },
+    onWaitStart: () => order.push('start'),
+    onWake: () => order.push('wake')
+  })
+  assertOk(await call(srv, 'wait_events', { timeout: 1 }))
+  assert.strictEqual(order[1], 'poll', order.join())
+  assert.deepStrictEqual(order.filter((e) => e !== 'poll'), ['start', 'wake'])
+})
+
+// A bot on a real port that answers /tick from proc with a valid proof and records each request URL.
+async function httpBot (t, proc) {
+  const urls = []
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1')
+    urls.push(url)
+    const body = Buffer.from(JSON.stringify(url.pathname === '/tick' ? tickFrom(proc, url) : { ok: true }), 'utf8')
+    res.writeHead(200, { 'content-type': 'application/json', 'x-golem-proof': proofOver(MCP_TOKEN, req.headers['x-golem-nonce'], body) })
+    res.end(body)
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }))
+  return { port: server.address().port, urls }
+}
+
+function wakeLog (t, text) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golem-wake-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const log = path.join(dir, 'mcp-wakes.log')
+  if (text !== undefined) fs.writeFileSync(log, text)
+  return log
+}
+
+// Sends each request once the previous one was answered, then stops the server.
+async function served (t, port, log, reqs) {
+  const e = runEntry(t, [String(port), log], { ...baseEnv(), GOLEM_TOKEN: MCP_TOKEN })
+  const replies = []
+  for (const req of reqs) {
+    e.child.stdin.write(JSON.stringify(req) + '\n')
+    const r = await e.response(req.id, 15000)
+    assert.ok(r, `no reply to ${req.params.name}`)
+    replies.push(r)
+  }
+  e.child.kill()
+  await e.exited
+  return replies
+}
+
+test('a restarted MCP server takes its frontier from the last wake log line that names one', { timeout: 30000 }, async (t) => {
+  const proc = botProcess('b0', 'A', 9, 11)
+  const bot = await httpBot(t, proc)
+  const log = wakeLog(t, 'wait_events returned boot=b0 chat=2 ev=3\ndelivered boot=b0 chat=5 ev=6\ntool call tick\nwait_events returned boot=b0 chat=7 ev=9\ntool call state\n')
+  const [r] = await served(t, bot.port, log, [callReq('wait_events', { timeout: 1 })])
+  const text = textOf(r)
+  assert.deepStrictEqual(missing(text, [...proc.chat.slice(7), ...proc.events.slice(9)]), [], 'control: the newer lines arrive')
+  assert.deepStrictEqual([...proc.chat.slice(0, 7), ...proc.events.slice(0, 9)].filter((l) => text.includes(l.msg)).map((l) => l.msg), [])
+  const first = bot.urls.find((u) => u.pathname === '/tick')
+  assert.deepStrictEqual([first.searchParams.get('chat'), first.searchParams.get('ev')], ['7', '9'])
+  assert.ok(fs.readFileSync(log, 'utf8').endsWith('wait_events returned boot=b0 chat=9 ev=11\n'))
 })

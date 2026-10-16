@@ -52,12 +52,23 @@ test('wait_events refuses a timeout above 120 s, negative or not a number, witho
   assert.strictEqual(calls.length, 0)
 })
 
-test('wait_events keeps the newest 50 items when it drops some', { timeout: 20000 }, async () => {
+const labels = (text) => text.match(/L\d{4}:/g) || []
+
+test('wait_events returns the oldest 50 items with how many more wait, and the next call returns those at once', { timeout: 20000 }, async () => {
   const messages = Array.from({ length: 120 }, (_, i) => chatLine(i + 1, `L${String(i + 1).padStart(4, '0')}:x`))
+  const label = (m) => m.msg.slice(0, 6)
   const { srv } = mcpServer({ reply: tickReply(messages) })
-  const kept = new Set(textOf(await call(srv, 'wait_events', { timeout: 1 })).match(/L\d{4}:/g) || [])
-  const newest = messages.slice(-50).map((m) => m.msg.slice(0, 6))
-  assert.deepStrictEqual([...kept].sort(), newest)
+  const first = textOf(await call(srv, 'wait_events', { timeout: 1 }))
+  assert.deepStrictEqual(labels(first), messages.slice(0, 50).map(label))
+  assert.match(first, /\b70 more waiting\b/)
+  const firstReturn = Date.now()
+  const second = textOf(await call(srv, 'wait_events', { timeout: 20 }))
+  assert.ok(Date.now() - firstReturn < 2000, `the rest came ${Date.now() - firstReturn} ms after the previous return`)
+  assert.deepStrictEqual(labels(second), messages.slice(50, 100).map(label))
+  assert.match(second, /\b20 more waiting\b/)
+  const third = textOf(await call(srv, 'wait_events', { timeout: 20 }))
+  assert.deepStrictEqual(labels(third), messages.slice(100).map(label))
+  assert.doesNotMatch(third, /more waiting/)
 })
 
 test('wait_events caps and redacts every field of an item, not only the message', { timeout: 20000 }, async () => {
@@ -123,14 +134,19 @@ test('a quiet server line that repeats across polls arrives as one item with its
   ])
 })
 
-test('quiet items are dropped before any chat line or waking event', { timeout: 20000 }, async () => {
-  const chat = [chatLine(1, 'keep-this-chat')]
-  const events = [{ ...eventLine(1, 'keep-this-event'), t: 2 }]
+test('quiet items past the first 50 also come with the next call at once', { timeout: 20000 }, async () => {
+  const chat = [chatLine(1, 'first-chat')]
+  const events = [{ ...eventLine(1, 'first-event'), t: 2 }]
   for (let i = 0; i < 60; i++) events.push({ ...quietLine(i + 2, `quiet ${i}`), t: 3 + i })
   const { srv } = mcpServer({ reply: tickReply(chat, events) })
   const body = JSON.parse(textOf(await call(srv, 'wait_events', { timeout: 1 })))
-  assert.deepStrictEqual(body.items.slice(0, 2).map((i) => i.msg), ['keep-this-chat', 'keep-this-event'])
-  assert.deepStrictEqual([body.items.length, body.dropped, body.items[2].msg], [50, 12, 'quiet 12'])
+  assert.deepStrictEqual(body.items.slice(0, 2).map((i) => i.msg), ['first-chat', 'first-event'])
+  assert.deepStrictEqual([body.items.length, body.items[49].msg, body.dropped], [50, 'quiet 47', undefined])
+  assert.ok(body.notes.some((n) => /\b12 more waiting\b/.test(n)), JSON.stringify(body.notes))
+  const firstReturn = Date.now()
+  const rest = JSON.parse(textOf(await call(srv, 'wait_events', { timeout: 20 })))
+  assert.ok(Date.now() - firstReturn < 2000, `the quiet rest came ${Date.now() - firstReturn} ms after the previous return`)
+  assert.deepStrictEqual(rest.items.map((i) => i.msg), Array.from({ length: 12 }, (_, i) => `quiet ${48 + i}`))
 })
 
 test('a chat line keeps the block its speaker pointed at', { timeout: 20000 }, async () => {
@@ -209,5 +225,78 @@ test('with an unchanged boot wait_events keeps its cursors and repeats nothing',
   const second = textOf(await call(srv, 'wait_events', { timeout: 10 }))
   assert.deepStrictEqual(missing(second, fresh), [], 'the new lines arrive')
   assert.deepStrictEqual(old.filter((l) => second.includes(l.msg)).map((l) => l.msg), [], 'lines already delivered came again')
+})
+
+test('a restart a tick already handed over during a wait_events is not delivered again', { timeout: 20000 }, async () => {
+  const a = botProcess('0f3a9c1e5b7d2468', 'A', 5, 3)
+  const b = botProcess('9e8d7c6b5a493827', 'B', 8, 5)
+  const holder = { current: a }
+  let polls = 0
+  let polled
+  const firstPoll = new Promise((resolve) => { polled = resolve })
+  let ticked
+  const tickDone = new Promise((resolve) => { ticked = resolve })
+  // The wait's polls carry cursors, the tick tool's call none.
+  const reply = async (url) => {
+    const poll = url.searchParams.has('chat') ? ++polls : 0
+    if (poll > 1) await tickDone
+    const out = tickOf(holder)(url)
+    if (poll === 1) polled()
+    return out
+  }
+  const delivered = []
+  const { srv } = mcpServer({ reply, start: { boot: a.boot, chat: 5, ev: 3 }, onDeliver: (f) => delivered.push(f) })
+  const waiting = call(srv, 'wait_events', { timeout: 10 })
+  await firstPoll
+  holder.current = b
+  assert.deepStrictEqual(missing(textOf(await call(srv, 'tick', {})), [...b.chat, ...b.events]), [], 'control: the tick shows process B')
+  assert.deepStrictEqual(delivered, [{ boot: b.boot, chat: 8, ev: 5 }], 'control: the tick moved the frontier')
+  b.chat.push(chatLine(9, 'B-chat-009'))
+  ticked()
+  const text = textOf(await waiting)
+  assert.ok(text.includes('B-chat-009'), text.slice(0, 300))
+  assert.deepStrictEqual([...b.chat.slice(0, 8), ...b.events].filter((l) => text.includes(l.msg)).map((l) => l.msg), [], 'lines the tick handed over came again')
+})
+
+// ---- the frontier: the ids up to which every item reached the pilot ----
+
+test('onWake gets the ids of the last chat line and event a wait returned, not the newest the bot holds', { timeout: 30000 }, async () => {
+  // Chat and events alternate in time, so the oldest 50 items are chat 1-25 and events 1-25.
+  const proc = {
+    boot: 'b0',
+    chat: Array.from({ length: 40 }, (_, i) => ({ ...chatLine(i + 1, `C${i + 1}`), t: 2 * i })),
+    events: Array.from({ length: 40 }, (_, i) => ({ ...eventLine(i + 1, `E${i + 1}`), t: 2 * i + 1 }))
+  }
+  const returns = []
+  const { srv } = mcpServer({ reply: tickOf({ current: proc }), onWake: (f) => returns.push(f) })
+  await call(srv, 'wait_events', { timeout: 1 })
+  assert.deepStrictEqual(returns, [{ boot: 'b0', chat: 25, ev: 25 }])
+  await call(srv, 'wait_events', { timeout: 1 })
+  assert.deepStrictEqual(returns[1], { boot: 'b0', chat: 40, ev: 40 })
+})
+
+test('a new boot replaces the whole frontier, also with lower ids', { timeout: 20000 }, async () => {
+  const b = botProcess('9e8d7c6b5a493827', 'B', 2, 1)
+  const returns = []
+  const { srv } = mcpServer({ reply: tickOf({ current: b }), start: { boot: '0f3a9c1e5b7d2468', chat: 5, ev: 3 }, onWake: (f) => returns.push(f) })
+  const text = textOf(await call(srv, 'wait_events', { timeout: 10 }))
+  assert.deepStrictEqual(missing(text, [...b.chat, ...b.events]), [], 'process B lines skipped')
+  assert.deepStrictEqual(returns, [{ boot: '9e8d7c6b5a493827', chat: 2, ev: 1 }])
+})
+
+test('a tick from the frontier moves it to the last items its reply showed whole', { timeout: 20000 }, async () => {
+  // 50 chat lines of about 650 characters each pass the 32000-character result cap, so the cut falls inside chat.
+  const chat = Array.from({ length: 50 }, (_, i) => ({ id: i + 1, t: i + 1, from: 'F'.repeat(300), msg: `L${String(i + 1).padStart(4, '0')}:`.padEnd(300, 'M'), kind: 'chat' }))
+  const proc = { boot: 'b0', chat, events: [eventLine(1, 'after-the-cut'), eventLine(2, 'after-the-cut')] }
+  const delivered = []
+  const { srv } = mcpServer({ reply: tickOf({ current: proc }), onDeliver: (f) => delivered.push(f) })
+  const shown = JSON.parse((await call(srv, 'tick', {})).result.content[0].text)
+  const whole = shown.chat.messages.filter((m, i) => JSON.stringify(m) === JSON.stringify(chat[i])).length
+  assert.ok(whole >= 1 && whole < 50, `control: ${whole} chat lines shown whole`)
+  assert.strictEqual(shown.events, undefined, 'control: the cut left out the events')
+  assert.deepStrictEqual(delivered, [{ boot: 'b0', chat: whole, ev: 0 }])
+  const next = textOf(await call(srv, 'wait_events', { timeout: 1 }))
+  assert.deepStrictEqual(labels(next), chat.slice(whole).map((m) => m.msg.slice(0, 6)))
+  assert.ok(next.includes('after-the-cut'), next.slice(0, 300))
 })
 

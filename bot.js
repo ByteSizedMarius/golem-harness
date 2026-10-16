@@ -470,6 +470,8 @@ let eventSeq = 0
 const eventLog = []
 // The newest event id a /tick or /events reply carried.
 let eventsServed = 0
+// The id of the newest event that is not quiet.
+let wakeEv = 0
 // A quiet event rides along with the next wake of wait_events and wakes nothing itself. Returns the event, null
 // when it could not be logged.
 function emitEvent(kind, msg, data, { quiet = false } = {}) {
@@ -478,6 +480,7 @@ function emitEvent(kind, msg, data, { quiet = false } = {}) {
     const ev = { id: ++eventSeq, t: Date.now(), kind, msg, data: data || null, ...(quiet && { quiet }) }
     eventLog.push(ev)
     if (eventLog.length > 400) eventLog.splice(0, eventLog.length - 400)
+    if (!quiet) wakeEv = ev.id
     return ev
   } catch (e) { return null }
 }
@@ -3018,6 +3021,11 @@ app.get('/tick', (req, res) => {
     lastTickSnap = { pos: round(e.position), hp: bot.health, food: bot.food, xp: bot.experience.level, held: bot.heldItem ? bot.heldItem.name : null, jobsLen: (full.jobs || []).length }
     ok(res, full)
   } catch (e) { err(res, e) }
+})
+
+// GET /cursors: reads the cursors without marking chat read or events served.
+app.get('/cursors', (req, res) => {
+  ok(res, { boot: BOOT_ID, chat: chatLog.cursor, ev: eventSeq, wakeEv })
 })
 
 app.get('/state', (req, res) => {

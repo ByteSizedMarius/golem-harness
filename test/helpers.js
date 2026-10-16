@@ -363,9 +363,9 @@ function fakeBot ({ token = MCP_TOKEN, reply = tickReply([chatLine(1, 'hi there'
   return { fetch, calls }
 }
 
-function mcpServer ({ reply, prove, serialize, manualDir, requestTimeoutMs } = {}) {
+function mcpServer ({ reply, prove, serialize, manualDir, requestTimeoutMs, ...rest } = {}) {
   const f = fakeBot({ reply, prove, serialize })
-  const opts = { port: PORT, token: MCP_TOKEN, fetch: f.fetch }
+  const opts = { ...rest, port: PORT, token: MCP_TOKEN, fetch: f.fetch }
   if (manualDir !== undefined) opts.manualDir = manualDir
   if (requestTimeoutMs !== undefined) opts.requestTimeoutMs = requestTimeoutMs
   return { srv: createServer(opts), calls: f.calls }
