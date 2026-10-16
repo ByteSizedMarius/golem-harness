@@ -1861,6 +1861,8 @@ let surfaceEdits = 0
 const STATIONS = new Map()
 const STATION_CAP = 20000
 const STATION_RE = /chest|furnace|crafting_table|anvil|enchanting_table|_bed$/
+// Count of STATIONS changes, for the saver.
+let stationEdits = 0
 function markSeen (x, y, z, b = bot.blockAt(new Vec3(x, y, z))) {
   if (SEEN.size < SEEN_CAP) SEEN.add(ck(x, y, z))
   rememberSurface(x, y, z, b)
@@ -1871,9 +1873,10 @@ function rememberStation (x, y, z, b) {
   if (!b) return
   const key = ck(x, y, z)
   if (!STATION_RE.test(b.name)) {
-    STATIONS.delete(key)
+    if (STATIONS.delete(key)) stationEdits++
   } else if (STATIONS.get(key) !== b.type && (STATIONS.has(key) || STATIONS.size < STATION_CAP)) {
     STATIONS.set(key, b.type)
+    stationEdits++
   }
 }
 // A seen solid or fluid cell up to 4 over the feet becomes its column's top unless a higher top in that reach is remembered.
@@ -3227,30 +3230,82 @@ function oreCallout () {
 }
 setInterval(oreCallout, 4000)
 
-// ---- SEEN persistence: the fair fog-of-war memory survives restarts. Saved on a timer (and on
-// clean disconnect); loaded at spawn.
+// ---- SEEN persistence: the fair fog-of-war memory survives restarts, one cell list per world
+// (server address, dimension, world seed, spawn point). Saved on a timer and on clean disconnect.
 const SEEN_FILE = './seen.json'
-// Version of the sight rules that marked the saved cells.
-const SEEN_VERSION = 2
-// Loads a seen.json text into SEEN, false for one saved under older sight rules.
+// Version of the sight rules and the seen.json layout.
+const SEEN_VERSION = 3
+// Saved cell lists by world key, except the current world's, which SEEN holds.
+const SEEN_WORLDS = {}
+// Saved column tops by world key, except the current world's, which SURFACE holds.
+const SURFACE_WORLDS = {}
+// Saved stations by world key, except the current world's, which STATIONS holds.
+const STATION_WORLDS = {}
+// The world key whose cells SEEN holds, null before login.
+let seenKey = null
+// The hashed seed of the last login or respawn packet, '' for a protocol without one.
+let worldSeed = ''
+// Loads a seen.json text into SEEN_WORLDS, SURFACE_WORLDS and STATION_WORLDS, false for one saved under older rules.
 function loadSeen (text) {
   const saved = JSON.parse(text)
   if (saved.version !== SEEN_VERSION) return false
-  for (const k of saved.cells) { if (SEEN.size >= SEEN_CAP) break; SEEN.add(k) }
+  Object.assign(SEEN_WORLDS, saved.worlds)
+  Object.assign(SURFACE_WORLDS, saved.surfaces)
+  Object.assign(STATION_WORLDS, saved.stations)
   return true
 }
 function seenJson () {
-  return JSON.stringify({ version: SEEN_VERSION, cells: [...SEEN] })
+  const worlds = { ...SEEN_WORLDS }
+  const surfaces = { ...SURFACE_WORLDS }
+  const stations = { ...STATION_WORLDS }
+  if (seenKey !== null) {
+    worlds[seenKey] = [...SEEN]
+    surfaces[seenKey] = [...SURFACE]
+    stations[seenKey] = [...STATIONS]
+  }
+  return JSON.stringify({ version: SEEN_VERSION, worlds, surfaces, stations })
 }
-bot.once('spawn', () => {
-  try {
-    if (loadSeen(fs.readFileSync(SEEN_FILE, 'utf8'))) console.log('[bot] loaded SEEN memory: ' + SEEN.size + ' cells')
-    else console.log('[bot] dropped SEEN memory saved under older sight rules')
-  } catch (e) {}
-})
+// A 1.7.10 server behind ViaProxy reports hashed seed 0.
+function seenWorldKey () {
+  const p = bot.spawnPoint
+  return `${HOST}:${PORT}|${bot.game.dimension}|${worldSeed}|${p ? `${p.x},${p.y},${p.z}` : ''}`
+}
+// Moves SEEN's cells, SURFACE's tops and STATIONS to the old world's lists and refills them from the current world's.
+function enterSeenWorld () {
+  const key = seenWorldKey()
+  if (key === seenKey) return
+  if (seenKey !== null) {
+    SEEN_WORLDS[seenKey] = [...SEEN]
+    SURFACE_WORLDS[seenKey] = [...SURFACE]
+    STATION_WORLDS[seenKey] = [...STATIONS]
+  }
+  SEEN.clear()
+  SURFACE.clear()
+  STATIONS.clear()
+  for (const k of SEEN_WORLDS[key] || []) { if (SEEN.size >= SEEN_CAP) break; SEEN.add(k) }
+  for (const [k, top] of SURFACE_WORLDS[key] || []) { if (SURFACE.size >= SURFACE_CAP) break; SURFACE.set(k, top) }
+  for (const [k, id] of STATION_WORLDS[key] || []) { if (STATIONS.size >= STATION_CAP) break; STATIONS.set(k, id) }
+  delete SEEN_WORLDS[key]
+  delete SURFACE_WORLDS[key]
+  delete STATION_WORLDS[key]
+  seenKey = key
+  seenDirty = -1
+  console.log('[bot] SEEN memory of ' + key + ': ' + SEEN.size + ' cells')
+}
+try {
+  if (!loadSeen(fs.readFileSync(SEEN_FILE, 'utf8'))) console.log('[bot] dropped SEEN memory saved under older rules')
+} catch (e) {}
+for (const name of ['login', 'respawn']) {
+  bot._client.on(name, (packet) => {
+    const seed = (packet.worldState || packet).hashedSeed
+    worldSeed = seed == null ? '' : String(seed)
+  })
+}
+// mineflayer emits game again when spawn_position arrives, which re-keys through enterSeenWorld.
+bot.on('game', enterSeenWorld)
 let seenDirty = 0
 setInterval(() => {
-  try { if (SEEN.size !== seenDirty) { fs.writeFileSync(SEEN_FILE, seenJson()); seenDirty = SEEN.size } } catch (e) {}
+  try { if (SEEN.size + surfaceEdits + stationEdits !== seenDirty) { fs.writeFileSync(SEEN_FILE, seenJson()); seenDirty = SEEN.size + surfaceEdits + stationEdits } } catch (e) {}
 }, 120000)
 bot.on('end', () => { try { fs.writeFileSync(SEEN_FILE, seenJson()) } catch (e) {} })
 

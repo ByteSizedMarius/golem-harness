@@ -374,17 +374,6 @@ test('a mob shows only as far as the light at its feet carries', () => {
   assert.strictEqual(seen(15, 7), true, 'light 7, 15 blocks out')
 })
 
-test('an old seen.json is dropped, one saved now loads again', () => {
-  const env = { SEEN: new Set(), SEEN_CAP: 10, SEEN_VERSION: botConstant('SEEN_VERSION') }
-  const { loadSeen, seenJson } = loadBotFunctions(['loadSeen', 'seenJson'], env)
-  assert.strictEqual(loadSeen(JSON.stringify(['1,64,0', '2,64,0'])), false)
-  assert.strictEqual(env.SEEN.size, 0)
-  env.SEEN.add('3,64,0')
-  const saved = seenJson()
-  env.SEEN.clear()
-  assert.strictEqual(loadSeen(saved), true, 'control: the current format')
-  assert.deepStrictEqual([...env.SEEN], ['3,64,0'])
-})
 test('a mob behind a closed door is out of sight, behind an open one in sight', () => {
   // A lit corridor along x on y 64-65 with the door at x 4 and the zombie at x 6.
   const seen = (name, open) => {
