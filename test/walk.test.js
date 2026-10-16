@@ -458,7 +458,7 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     crumbCentre,
     entityPerceptible: () => true,
     nametagVisible: () => false,
-    airFlood: () => ({}),
+    reflexes: [{ name: 'combat', fairFill: () => ({}) }],
     nearestVisible: () => null,
     resolveBlockIds: () => [1],
     cellKnown: () => true,
@@ -856,7 +856,7 @@ test('an invisible player in plain sight is not seen', () => {
 const steve = (position) => ({ id: 7, type: 'player', username: 'Steve', position })
 
 // recordCrumbs over bot.entities, with bot.players empty.
-const crumbEnv = (over) => ({ bot: { username: 'Claude', players: {}, entities: {} }, playerCrumbs: {}, playersAround, staleEntities: new Set(), airFlood: () => ({}), crumbCentre, ...over })
+const crumbEnv = (over) => ({ bot: { username: 'Claude', players: {}, entities: {} }, playerCrumbs: {}, playersAround, staleEntities: new Set(), reflexes: [{ name: 'combat', fairFill: () => ({}) }], crumbCentre, ...over })
 
 test('a crumb records whether the player was in sight or known only by the nametag', () => {
   const env = {
@@ -864,7 +864,7 @@ test('a crumb records whether the player was in sight or known only by the namet
     playerCrumbs: {},
     playersAround,
     staleEntities: new Set(),
-    airFlood: () => ({}),
+    reflexes: [{ name: 'combat', fairFill: () => ({}) }],
     entityPerceptible: () => true,
     nametagVisible: () => true,
     crumbCentre

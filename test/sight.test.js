@@ -344,6 +344,75 @@ test('an old seen.json is dropped, one saved now loads again', () => {
   assert.strictEqual(loadSeen(saved), true, 'control: the current format')
   assert.deepStrictEqual([...env.SEEN], ['3,64,0'])
 })
+test('a mob behind a closed door is out of sight, behind an open one in sight', () => {
+  // A lit corridor along x on y 64-65 with the door at x 4 and the zombie at x 6.
+  const seen = (name, open) => {
+    const door = { name, boundingBox: 'block', light: LIT, getProperties: () => ({ open }) }
+    const corridor = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 8, light: () => LIT })
+    const env = withCells(corridor, { '4,64,0': door, '4,65,0': door })
+    const { airFlood, entityPerceptible } = loadBotFunctions(['airFlood', 'entityPerceptible'], env)
+    return entityPerceptible({ type: 'mob', name: 'zombie', position: new Vec3(6.5, 64, 0.5), metadata: [0] }, airFlood({ radius: 28, cap: 15000 }))
+  }
+  for (const name of ['oak_door', 'oak_fence_gate']) {
+    assert.strictEqual(seen(name, true), true, `control: an open ${name}`)
+    assert.strictEqual(seen(name, false), false, name)
+  }
+})
+
+// A lit tunnel from the body east to x 4, south to z 6, east to x 10 and north back to its end at 10,64,0:
+// 22 cells by the walk, 10 by the eye with rock between.
+const windingOpen = (x, y, z) => (y === 64 || y === 65) &&
+  ((z === 0 && x >= 0 && x <= 4) || (x === 4 && z >= 0 && z <= 6) || (z === 6 && x >= 4 && x <= 10) || (x === 10 && z >= 0 && z <= 6))
+
+test('entities name a lit mob down a winding tunnel only once the bot has seen the tunnel', () => {
+  const listed = (seen) => {
+    const env = world({ open: windingOpen, light: () => LIT })
+    if (seen) for (let x = 0; x <= 10; x++) for (let z = 0; z <= 6; z++) for (const y of [64, 65]) if (windingOpen(x, y, z)) env.SEEN.add(ck(x, y, z))
+    env.bot.entities = { 1: { id: 1, type: 'hostile', name: 'zombie', position: new Vec3(10.5, 64, 0.5), metadata: [0] } }
+    Object.assign(env, { staleEntities: new Set(), round: (v) => v, reflexes: [] })
+    loadBotFunctions(['airFlood', 'knownCell'], env)
+    env.reflexes.push(combatReflexIn(env))
+    return runRoute('/entities', {}, env)
+  }
+  assert.deepStrictEqual(listed(true).entities.map((e) => e.name), ['zombie'], 'control: the tunnel seen')
+  const unseen = listed(false)
+  assert.strictEqual(unseen.count, 0)
+  assert.doesNotMatch(JSON.stringify(unseen), /zombie|10\.5/)
+})
+
+test('a mob is heard through shared known air within 20 blocks, beyond only on a clear eye ray', () => {
+  // A seen lit tunnel east to x 4, south to z 6, east to x far and north back to the zombie at far,64,0,
+  // far blocks from the body with rock between, or a straight seen lit corridor to it.
+  const perceptible = (far, straight) => {
+    const open = straight
+      ? (x, y, z) => (y === 64 || y === 65) && z === 0 && x >= 0 && x <= far
+      : (x, y, z) => (y === 64 || y === 65) &&
+        ((z === 0 && x >= 0 && x <= 4) || (x === 4 && z >= 0 && z <= 6) || (z === 6 && x >= 4 && x <= far) || (x === far && z >= 0 && z <= 6))
+    const env = world({ open, light: () => LIT })
+    for (let x = 0; x <= far; x++) for (let z = 0; z <= 6; z++) for (const y of [64, 65]) if (open(x, y, z)) env.SEEN.add(ck(x, y, z))
+    env.reflexes = []
+    loadBotFunctions(['airFlood', 'knownCell', 'entityPerceptible'], env)
+    const combat = combatReflexIn(env)
+    return env.entityPerceptible({ type: 'mob', name: 'zombie', position: new Vec3(far + 0.5, 64, 0.5), metadata: [0] }, combat.fairFill(env.bot))
+  }
+  assert.strictEqual(perceptible(18, false), true, 'control: 18 blocks through the tunnel')
+  assert.strictEqual(perceptible(25, false), false, '25 blocks through the tunnel')
+  assert.strictEqual(perceptible(25, true), true, '25 blocks down a straight corridor')
+})
+
+test('collect finds a drop in sight in a lit room, never one around the corner', () => {
+  // A lit room east along z 0 to x 4 that turns south at x 4 to z 4.
+  const drop = (x, y, z) => {
+    const env = world({ open: (cx, cy, cz) => (cy === 64 || cy === 65) && ((cz === 0 && cx >= 0 && cx <= 4) || (cx === 4 && cz >= 0 && cz <= 4)), light: () => LIT })
+    const item = { id: 1, name: 'item', position: new Vec3(x, y, z) }
+    env.bot.entities = { 1: item }
+    env.staleEntities = new Set()
+    return loadBotFunctions(['nearestDrop'], env).nearestDrop(8, new Set()) === item
+  }
+  assert.strictEqual(drop(3.5, 64, 0.5), true, 'control: in sight')
+  assert.strictEqual(drop(3.5, 63.85, 0.5), true, 'in sight, sunk into the floor')
+  assert.strictEqual(drop(4.5, 64, 3.5), false)
+})
 
 test('the veins of scene name ore in lit sight, never ore around a corner or in the dark', () => {
   const veins = (light, at) => {
@@ -599,6 +668,13 @@ test('a line through the seam where two blocks meet at an edge sees nothing behi
 const LADDER = { name: 'ladder', boundingBox: 'block', light: LIT }
 const doorAt = (open) => ({ name: 'oak_door', boundingBox: 'block', light: LIT, getProperties: () => ({ open }) })
 
+test('a block shows through an open door or a ladder, never through a closed door', () => {
+  const through = (cell) => findsCoal(withCells(tunnel(4, LIT), { '2,64,0': cell, '2,65,0': cell }))
+  assert.strictEqual(through(doorAt(true)), true, 'open door')
+  assert.strictEqual(through(LADDER), true, 'ladder')
+  assert.strictEqual(findsCoal(withCells(tunnel(4, LIT), { '0,64,0': LADDER, '0,65,0': LADDER })), true, 'a ladder the body stands on')
+  assert.strictEqual(through(doorAt(false)), false)
+})
 
 test('an unloaded cell between the body and a block hides the block', () => {
   const env = tunnel(5, LIT)
@@ -606,6 +682,35 @@ test('an unloaded cell between the body and a block hides the block', () => {
   const base = env.bot.blockAt
   env.bot.blockAt = (p) => (p.x === 2 ? null : base(p))
   assert.strictEqual(findsCoal(env), false)
+})
+
+// A lit room at x 0..3, z 0 and a pocket at x 0..2, z -2 that one cell of stone seals off from it.
+const besidePocket = (ores = {}) => world({ open: (x, y, z) => (y === 64 || y === 65) && ((z === 0 && x >= 0 && x <= 3) || (z === -2 && x >= 0 && x <= 2)), ores, light: () => LIT })
+
+// The narrator's console lines and the pulse reply after a zombie at cell x, 64, z joins the scene of env.
+function pulseWithZombie (env, x, z) {
+  const lines = []
+  Object.assign(env.bot, { entities: {}, health: 20, food: 20 })
+  Object.assign(env, {
+    reflexes: [],
+    staleEntities: new Set(),
+    HOSTILE_NAMES: botConstant('HOSTILE_NAMES'),
+    pulseLog: [],
+    pulseSeq: 0,
+    console: { log: (line) => lines.push(line) }
+  })
+  loadBotFunctions(['airFlood', 'knownCell'], env)
+  env.reflexes.push(combatReflexIn(env))
+  const narrator = reflexIn('narrator', env)
+  assert.strictEqual(narrator.check(env.bot), false, 'control: the first pulse seeds the baseline')
+  env.bot.entities[1] = { id: 1, type: 'hostile', name: 'zombie', position: new Vec3(x + 0.5, 64, z + 0.5), metadata: [0] }
+  if (narrator.check(env.bot)) narrator.act()
+  return [...lines, JSON.stringify(runRoute('/pulse', {}, env))].join('\n')
+}
+
+test('the narrator and pulse name a hostile in shared air, never one sealed behind rock', () => {
+  assert.match(pulseWithZombie(besidePocket(), 3, 0), /hostile zombie E ~3/, 'control: in the room')
+  assert.doesNotMatch(pulseWithZombie(besidePocket(), 1, -2), /zombie/)
 })
 
 // The verbose scene reply as JSON and the boot summary over env, the senses besides the lay of the land and the sky stubbed.
@@ -686,3 +791,22 @@ test('a cell a block change walls off reads unseen at once, not once its kept si
   assert.strictEqual(cellKnown(beyond), false)
 })
 
+test('a mob that a door just closed seals off leaves the entity list at once', () => {
+  let now = 1000
+  let open = true
+  const door = { name: 'oak_door', boundingBox: 'block', light: LIT, getProperties: () => ({ open }) }
+  const corridor = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 8, light: () => LIT })
+  const env = withCells(corridor, { '4,64,0': door, '4,65,0': door })
+  env.bot.entities = { 1: { id: 1, type: 'hostile', name: 'zombie', position: new Vec3(6.5, 64, 0.5), metadata: [0] } }
+  Object.assign(env, { Date: { now: () => now }, staleEntities: new Set(), round: (v) => v, reflexes: [] })
+  wireBlockUpdate(env, '_fill', ['airFlood', 'knownCell', 'touchesFill'])
+  env.reflexes.push(combatReflexIn(env))
+  const listed = () => runRoute('/entities', {}, env).count
+  assert.strictEqual(listed(), 1, 'control: the door open')
+  open = false
+  now += 100
+  assert.strictEqual(listed(), 1, 'control: the door closed with no block update')
+  const closed = block('oak_door', 3, 'block')([4, 64, 0])
+  env.bot.emit('blockUpdate', closed, closed)
+  assert.strictEqual(listed(), 0)
+})

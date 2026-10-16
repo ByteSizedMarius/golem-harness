@@ -79,6 +79,7 @@ async function stareCycles (moving) {
     entityPerceptible: () => true,
     entityEngageable: () => true,
     airFlood: () => ({ cells: new Set() }),
+    knownCell: () => true,
     losClear: () => true,
     nearHostiles: () => [],
     meleeReach: () => 3.2,

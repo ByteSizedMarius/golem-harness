@@ -38,7 +38,7 @@ test('the hostile alarm says nothing of a mob of the dimension before until the 
     HOSTILE: new Set(['zombie']),
     warnedMobs: new Set(),
     nightFired: false,
-    airFlood: () => ({}),
+    reflexes: [{ name: 'combat', fairFill: () => ({}) }],
     entityPerceptible: () => true,
     round: (p) => p,
     emitEvent: (kind, msg) => events.push(kind)
@@ -52,6 +52,27 @@ test('the hostile alarm says nothing of a mob of the dimension before until the 
   assert.deepStrictEqual(events, ['hostile'], 'updated since')
 })
 
+test('the hostile alarm says nothing when the perception flood throws', () => {
+  const src = botSource()
+  const consider = balanced(src, src.indexOf('const considerMob = '))
+  assert.ok(consider, 'the hostile alarm not found in bot.js')
+  const events = []
+  const env = {
+    bot: { entity: { position: ME }, entities: {} },
+    HOSTILE: new Set(['zombie']),
+    warnedMobs: new Set(),
+    reflexes: [{ name: 'combat', fairFill: () => { throw new Error('flood failed') } }],
+    entityPerceptible: () => true,
+    round: (p) => p,
+    emitEvent: (kind) => events.push(kind)
+  }
+  const ctx = loadBotFunctions(['liveEntities'], env)
+  const considerMob = vm.runInContext(`(en) => ${consider}`, ctx)
+  considerMob(zombie(1))
+  assert.deepStrictEqual(events, [])
+  assert.strictEqual(env.warnedMobs.has(1), false, 'not marked warned, so the alarm can still fire later')
+})
+
 test('the narrator says nothing of a mob of the dimension before until the server updates it', () => {
   const src = botSource()
   const at = src.search(/\bname\s*:\s*['"]narrator['"]/)
@@ -63,7 +84,9 @@ test('the narrator says nothing of a mob of the dimension before until the serve
     staleEntities: new Set([1]),
     HOSTILE_NAMES: new Set(['zombie']),
     dayPhase: () => 'day',
-    compass: () => 'E'
+    compass: () => 'E',
+    reflexes: [{ name: 'combat', fairFill: () => ({ cells: new Set() }) }],
+    entityPerceptible: () => true
   }
   const ctx = loadBotFunctions(['liveEntities'], env)
   const narrator = vm.runInContext(`(${literal})`, ctx)

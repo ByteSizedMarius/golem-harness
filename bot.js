@@ -413,7 +413,7 @@ bot.once('spawn', () => {
           // as the combat watcher's). A distance-quoting alarm is SIGHT-class perception: shared
           // air required (sealed hostiles may still be HEARD — ears are server-fair). NOT marked
           // warned when gated, so the alarm still fires the moment the wall opens.
-          try { if (!entityPerceptible(en, airFlood({ radius: 20, cap: 8000 }))) return } catch (e) {}
+          try { if (!entityPerceptible(en, reflexes.find(r => r.name === 'combat').fairFill(bot))) return } catch (e) { return }
           warnedMobs.add(en.id)
           emitEvent('hostile', `${nm} within ${d.toFixed(1)} blocks`, { mob: nm, id: en.id, pos: round(en.position), dist: +d.toFixed(1) })
         }
@@ -968,7 +968,7 @@ reflexes.push({
 })
 
 // narrator: the ambient-awareness pulse. check() diffs a salient snapshot against the last pulse; when
-// something meaningful shifts (day-phase, HP/food swing, a new hostile within 16, a >14-block move) it
+// something meaningful shifts (day-phase, HP/food swing, a new perceptible hostile within 16, a >14-block move) it
 // logPulse()s a lean line. Change-gated + rate-capped (>=2.5s) so it's holistic, not spammy — and it's
 // PULL (I read /pulse when I look), never a push interrupt. Toggle off via /reflexes if I want silence.
 reflexes.push({
@@ -983,14 +983,15 @@ reflexes.push({
         health: Math.round(bot.health), food: Math.round(bot.food),
         pos: pos.clone(), hostiles: new Set()
       }
-      let nearest = null
+      let nearest = null, fill = null
       try {
         for (const e of liveEntities()) {
           if (!e.position) continue
           const nm = String(e.name || e.displayName || '').toLowerCase()
           if (!HOSTILE_NAMES.has(nm)) continue
           const d = e.position.distanceTo(pos)
-          if (d <= 16) { snap.hostiles.add(e.id); if (!nearest || d < nearest.d) nearest = { e, d, nm } }
+          if (d > 16 || !entityPerceptible(e, fill ??= reflexes.find(r => r.name === 'combat').fairFill(bot))) continue
+          snap.hostiles.add(e.id); if (!nearest || d < nearest.d) nearest = { e, d, nm }
         }
       } catch (e) {}
       if (!this._last) { this._last = snap; return false }        // seed baseline on first tick
@@ -1725,48 +1726,60 @@ function skyPhrase(oh) {
 }
 
 // ---- air flood-fill: the volume of air my body is CONNECTED to (BFS from my feet, 6-way).
-// The fill travels only through open cells my pocket already connects to. Doors/gates count as
-// passable (the walker can open them); lava does not (nothing passes lava). Water passes (I swim).
+// The fill travels only through open cells my pocket already connects to. Lava stops it.
+// A perception fill crosses at most 3 water cells on the way to a cell, a body fill swims any number.
 // Bounded by a Chebyshev radius around the seed and a hard cell cap, so cost stays ~milliseconds.
 const ck = (x, y, z) => x + ',' + y + ',' + z
-function floodPassable(b) {
+// An open door, gate or trapdoor passes. With body, so does a closed door or gate the walker opens.
+function floodPassable(b, body = false) {
   if (!b) return false                                        // unloaded/unknown = wall, stay honest
   if (b.name.includes('lava')) return false
-  if (b.name.includes('door') || b.name.includes('gate')) return true
+  if (b.name.includes('door') || b.name.includes('gate')) {
+    return !!b.getProperties?.().open || (body && !b.name.includes('iron') && !b.name.includes('trapdoor'))
+  }
   // A body passes climbables, though mc-data boxes ladders as solid.
   if (b.name === 'ladder' || b.name === 'scaffolding' || b.name === 'vine' || b.name.includes('vines')) return true
   return blockTransparent(b)
 }
-// keepWalls returns the cells that stopped the flood as walls, a Map by ck key.
-function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known = null, knownOnly = false, keepWalls = false } = {}) {
+function airFlood({ seed = null, radius = 24, cap = 15000, targets = null, known = null, knownOnly = false, keepWalls = false, body = false } = {}) {
   const o = (seed || bot.entity.position).floored()
   let s = o
-  if (!floodPassable(bot.blockAt(s))) s = o.offset(0, 1, 0)   // feet cell solid (slab etc.) -> try head
+  if (!floodPassable(bot.blockAt(s), body)) s = o.offset(0, 1, 0)   // feet cell solid (slab etc.) -> try head
   const cells = new Set()
   const liquid = new Set()
-  const queue = [[s.x, s.y, s.z]]
+  const queue = [[s.x, s.y, s.z, 0]]
   cells.add(ck(s.x, s.y, s.z))
+  // The water cells on the driest path found to each cell. A drier path found later floods on again.
+  const wet = new Map([[ck(s.x, s.y, s.z), 0]])
   let capped = false, reached = null, qi = 0, unknown = false, cut = false
   // The cells that stopped the flood.
   const walls = known || keepWalls ? new Map() : null
   while (qi < queue.length) {
-    const [x, y, z] = queue[qi++]                               // index pointer, not shift() — O(1)
+    const [x, y, z, w] = queue[qi++]
+    if (w > wet.get(ck(x, y, z))) continue
     if (targets && targets.has(ck(x, y, z))) { reached = new Vec3(x, y, z); break }
     for (const [dx, dy, dz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]) {
       const nx = x + dx, ny = y + dy, nz = z + dz
       const k = ck(nx, ny, nz)
-      if (cells.has(k)) continue
+      const was = wet.get(k)
+      if (was <= w) continue
       const p = new Vec3(nx, ny, nz)
       const b = bot.blockAt(p)
-      if (!floodPassable(b) || (knownOnly && !known(p))) {
+      if (!floodPassable(b, body) || (knownOnly && !known(p))) {
         if (walls) walls.set(k, p)
         continue
       }
       if (Math.max(Math.abs(nx - o.x), Math.abs(ny - o.y), Math.abs(nz - o.z)) > radius) { cut = true; continue }
-      cells.add(k)
-      if (b.name.includes('water')) liquid.add(k)
-      if (cells.size >= cap) { capped = true; break }
-      queue.push([nx, ny, nz])
+      const water = holdsWater(b)
+      const nw = water && !body ? w + 1 : w
+      if (nw > 3 || was <= nw) continue
+      wet.set(k, nw)
+      if (was === undefined) {
+        cells.add(k)
+        if (water) liquid.add(k)
+        if (cells.size >= cap) { capped = true; break }
+      }
+      queue.push([nx, ny, nz, nw])
     }
     if (capped) break
   }
@@ -1788,11 +1801,11 @@ function airPrecheck(dest, range = 1) {
     for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) for (let dz = -r; dz <= r; dz++) {
       const p = d0.offset(dx, dy, dz)
       if (!knownCell(p)) return { verdict: 'inconclusive', why: 'cells around the goal are unknown' }
-      if (floodPassable(bot.blockAt(p))) targets.add(ck(p.x, p.y, p.z))
+      if (floodPassable(bot.blockAt(p), true)) targets.add(ck(p.x, p.y, p.z))
     }
     if (!targets.size) return { verdict: 'sealed', ms: Date.now() - t0 }
     const span = Math.ceil(bot.entity.position.distanceTo(d0)) + 24
-    const fill = airFlood({ radius: Math.min(span, 64), cap: 15000, targets, known: knownCell, knownOnly: true, keepWalls: true })
+    const fill = airFlood({ radius: Math.min(span, 64), cap: 15000, targets, known: knownCell, knownOnly: true, keepWalls: true, body: true })
     if (fill.reached) return { verdict: 'connected', cells: fill.cells.size, ms: Date.now() - t0 }
     if (fill.capped || fill.cut) return { verdict: 'inconclusive', cells: fill.cells.size, ms: Date.now() - t0 }
     if (fill.unknown) {
@@ -2629,6 +2642,13 @@ function nearHostiles (fill, radius) {
     return entityEngageable(e)   // the mansion lesson: the pack counts only what can reach me
   })
 }
+// A block change in or beside the shared perception flood drops it, and so does a loaded column.
+bot.on('blockUpdate', (oldB, newB) => {
+  const combat = reflexes.find(r => r.name === 'combat')
+  const p = (newB || oldB)?.position
+  if (combat._fill && p && (combat._fill.cells.has(ck(p.x, p.y, p.z)) || touchesFill(p, combat._fill))) combat._fill = null
+})
+bot.on('chunkColumnLoad', () => { reflexes.find(r => r.name === 'combat')._fill = null })
 
 // the watcher+responder reflex — priority ABOVE unstuck (unshift), toggle via /reflexes name=combat
 reflexes.unshift({
@@ -2721,11 +2741,13 @@ reflexes.unshift({
   // honestly hid. Same law as ore and eyes now: sealed behind rock = imperceptible; it may be
   // HEARD (ears are server-fair) but never tracked, scored, or engaged. Lazy + cached ~2s so the
   // 300ms loop only pays for the flood when a candidate actually needs judging.
+  // Every entity sense shares this flood. It holds while the body stays within 3 blocks of its
+  // seed and no block in or beside it changes.
   fairFill (bot) {
     const now = Date.now()
     const seed = bot.entity.position.floored()
-    if (this._fill && now - this._fillT < 2000 && this._fillSeed && seed.distanceTo(this._fillSeed) < 3) return this._fill
-    this._fill = airFlood({ radius: 28, cap: 15000 })
+    if (this._fill && now - this._fillT < 2000 && seed.distanceTo(this._fillSeed) < 3) return this._fill
+    this._fill = airFlood({ radius: 20, cap: 15000, known: knownCell, knownOnly: true })
     this._fillT = now; this._fillSeed = seed
     return this._fill
   },
@@ -3182,7 +3204,7 @@ function hasLegalMove() {
       return false
     }
     const at = (x, y, z) => (known(x, y, z) ? bot.blockAt(new Vec3(x, y, z)) : null)
-    const open = (x, y, z) => { const b = at(x, y, z); return b && floodPassable(b) }
+    const open = (x, y, z) => { const b = at(x, y, z); return b && floodPassable(b, true) }
     const solid = (x, y, z) => { const b = at(x, y, z); return b && b.boundingBox === 'block' }
     const wet = (x, y, z) => { const b = at(x, y, z); return b && b.name.includes('water') }
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -3243,7 +3265,7 @@ app.get('/tick', (req, res) => {
     const evSince = parseInt(req.query.ev || '0')
     const e = bot.entity
     const w = waterState(bot)
-    const fill = airFlood({ radius: 28, cap: 15000 })
+    const fill = reflexes.find(r => r.name === 'combat').fairFill(bot)
     const threats = []
     for (const en of liveEntities()) {
       if (!en.position) continue
@@ -3367,33 +3389,35 @@ app.get('/find', (req, res) => {
 
 // fairness (07-12): an entity sealed behind rock — not sharing my connected air — is imperceptible,
 // same rule as ore. ?all=1 is the debug bypass (like /find xray).
-// EYE-RAY (07-17, the entity-sense extension the helmsman asked for): the air-flood caps at
-// ~34 for cost, but a big cavern, a chasm, or open terrain gives TRUE line of sight far beyond
-// it — and the server honestly tracks monsters to ~128. A straight unobstructed ray from my eyes
-// is the strictest perception there is: fair by construction, no flood needed. Every cell between
-// the end cells counts; glass/leaves count as walls (honest: pixel sight, not entity-ESP).
-function losClear(from, to) {
+// A clear eye-ray between the end cells, glass and leaves counting as walls.
+function losClear(from, to, liquids = false) {
   try {
     if (to.distanceTo(from) > 160) return false   // past honest server tracking — nothing to see
     const end = to.floored()
+    let water = 0
     return !gridWalk(from, to, (c) => {
       if (c.equals(end)) return false
       const b = bot.blockAt(c)
       if (!b) return true                     // unloaded chunk in the way — can't claim sight
       if (b.boundingBox === 'block') return true
-      return false
+      if (!liquids) return false
+      return b.name.includes('lava') || (holdsWater(b) && ++water > 3)
     })
   } catch (e) { return false }
 }
+// fill is a flood over knownCell cells. A dropped item shows only in a clear line, never through fill.
 function entityPerceptible(en, fill) {
   try {
     // An invisible player shows neither body nor nametag.
     if (en.type === 'player' && isInvisible(en)) return false
-    const p = en.position.floored()
+    const item = en.name === 'item'
+    // A drop rests up to 0.3 below the floor surface.
+    const top = en.position.offset(0, item ? 0.5 : 0, 0)
+    const p = top.floored()
     if (eyeDist(p, 2) > lightRange(p)) return false
-    if (touchesFill(p, fill) || fill.cells.has(ck(p.x, p.y, p.z)) || fill.cells.has(ck(p.x, p.y + 1, p.z))) return true
+    if (!item && (touchesFill(p, fill) || fill.cells.has(ck(p.x, p.y, p.z)) || fill.cells.has(ck(p.x, p.y + 1, p.z)))) return true
     // last resort: the eye-ray — sight across caverns/chasms the flood can't afford to fill
-    return losClear(bot.entity.position.offset(0, 1.62, 0), en.position.offset(0, 1.0, 0))
+    return losClear(bot.entity.position.offset(0, 1.62, 0), item ? top : en.position.offset(0, 1.0, 0), true)
   } catch (e) { return false }
 }
 // The shared entity flag 0x20 an invisibility potion sets.
@@ -3448,7 +3472,7 @@ function recordCrumbs () {
     let fill = null
     for (const en of trackedPlayers()) {
       const name = en.username
-      const seen = entityPerceptible(en, fill ??= airFlood({ radius: 34, cap: 15000 }))
+      const seen = entityPerceptible(en, fill ??= reflexes.find(r => r.name === 'combat').fairFill(bot))
       if (!seen && !nametagVisible(en)) continue
       const prev = playerCrumbs[name]
       const pos = seen ? en.position.clone() : crumbCentre(en.position)
@@ -3484,7 +3508,7 @@ function presenceTick () {
     let fill = null
     const sightings = []
     for (const en of around) {
-      const s = playerSighting(en, fill ??= airFlood({ radius: 34, cap: 15000 }))
+      const s = playerSighting(en, fill ??= reflexes.find(r => r.name === 'combat').fairFill(bot))
       if (s) sightings.push({ name: en.username, ...s })
     }
     const quiet = new Set(followState ? [followState.name] : [])
@@ -3681,7 +3705,7 @@ app.get('/shoot', async (req, res) => {
 function whereIs (name) {
   const me = bot.entity.position
   const en = playerEntity(name)
-  const s = en && playerSighting(en, airFlood({ radius: 34, cap: 15000 }))
+  const s = en && playerSighting(en, reflexes.find(r => r.name === 'combat').fairFill(bot))
   if (s && s.tier === 'seen') {
     const p = en.position
     return { name, live: true, pos: { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) }, dist: s.dist, bearing: s.bearing }
@@ -3710,7 +3734,7 @@ app.get('/entities', (req, res) => {
     if (!ready) return err(res, new Error('not ready'))
     const radius = parseInt(req.query.radius || '24')
     const here = bot.entity.position
-    const fill = req.query.all === '1' ? null : airFlood({ radius: Math.min(radius + 4, 34), cap: 15000 })
+    const fill = req.query.all === '1' ? null : reflexes.find(r => r.name === 'combat').fairFill(bot)
     const list = liveEntities()
       .filter(en => en.position && en.position.distanceTo(here) <= radius)
       .filter(en => !fill || entityPerceptible(en, fill))
@@ -3857,7 +3881,7 @@ function walkSources () {
       const c = playerCrumbs[name]
       return c ? { pos: c.pos, nametag: c.nametag, agoSec: Math.round((Date.now() - c.t) / 1000) } : null
     },
-    known: (en) => entityPerceptible(en, fill ??= airFlood({ radius: 34, cap: 15000 })),
+    known: (en) => entityPerceptible(en, fill ??= reflexes.find(r => r.name === 'combat').fairFill(bot)),
     nametag: nametagVisible,
     visibleBlock: (name) => nearestVisible(resolveBlockIds(name), 64),
     cellKnown
@@ -4192,9 +4216,8 @@ const { enclosedDrop } = require('./lib/drops')
 
 function nearestDrop (radius, skip) {
   const here = bot.entity.position
-  const fill = airFlood({ radius: Math.min(radius + 4, 34), cap: 15000 })
   return liveEntities()
-    .filter(e => e.name === 'item' && e.position && !skip.has(e.id) && e.position.distanceTo(here) <= radius && entityPerceptible(e, fill))
+    .filter(e => e.name === 'item' && e.position && !skip.has(e.id) && e.position.distanceTo(here) <= radius && entityPerceptible(e, null))
     .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0] || null
 }
 
@@ -5436,7 +5459,7 @@ app.get('/scene', (req, res) => {
     } catch (e) {}
 
     // one flood-fill shared by the entity fairness gates in this call
-    const sceneFill = airFlood({ radius: 32, cap: 15000 })
+    const sceneFill = reflexes.find(r => r.name === 'combat').fairFill(bot)
 
     // grouped entity summary + hostiles
     let threats = []
@@ -5785,7 +5808,7 @@ app.get('/section', (req, res) => {
       return knowledge.get(k)
     }
     const at = (x, y, z) => bot.blockAt(new Vec3(x, y, z))
-    const open = (x, y, z) => seen(x, y, z) && floodPassable(at(x, y, z))
+    const open = (x, y, z) => seen(x, y, z) && floodPassable(at(x, y, z), true)
     const wet = (x, y, z) => at(x, y, z).name.includes('water')
 
     const secGlyph = (n) => n.endsWith('_ore') ? '*' : n.includes('water') ? '~' : n.includes('lava') ? '!' : (glyphFor(n) === ' ' ? '#' : glyphFor(n))
@@ -5861,7 +5884,7 @@ app.get('/passages', (req, res) => {
   try {
     const radius = Math.min(32, Math.max(8, parseInt(req.query.radius || '20')))
     const o = bot.entity.position.floored()
-    const fill = airFlood({ radius, cap: 15000, known: cellKnown, knownOnly: true })
+    const fill = airFlood({ radius, cap: 15000, known: cellKnown, knownOnly: true, body: true })
     const dirs = {}
     let contUp = false, contDown = false, leaves = false
     for (const k of fill.cells) {

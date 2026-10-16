@@ -91,6 +91,7 @@ function fleeIn (w, threat, ally = null) {
     reflexes: [{ name: 'flee_to_player', on: true, ally: () => ally }],
     nearHostiles: () => [],
     airFlood: () => ({}),
+    knownCell: () => true,
     mobClass: () => 'creeper',
     laneBlocks: () => false,
     laneNarrate () {},
@@ -182,6 +183,7 @@ function creeperCheck (w, at) {
     mobClass: () => 'creeper',
     airFlood: () => ({}),
     entityPerceptible: () => true,
+    knownCell: () => true,
     entityEngageable: () => true,
     emitEvent () {}
   }
