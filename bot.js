@@ -2762,13 +2762,7 @@ bot.once('spawn', () => {
     console.log('[bot] damage attribution wired')
   } catch (e) { console.log('[bot] damage attribution wire failed: ' + e.message) }
 })
-// ---- PILOT LANE (07-21, the debrief's cut: "your legs literally carried you out the door
-// while your head was thinking" — the helmsman, having watched exactly that). The spine acts
-// every 300ms; the pilot every 1-3s — ten to thirty free reflex moves between any two pilot
-// decisions, so orders kept landing on a body that had already left. Movement verbs claim a
-// SOFT lane: discretionary reflex goals (withdrawal, stance-berth kiting, chase) defer, but
-// interrupts (heavy-kite) and emergencies (a creeper flee, HP-critical) still pass. /brace
-// claims the HARD lane: only emergencies pass. The legs get ONE owner, and the pilot knows which.
+// ---- PILOT LANE: a soft lane defers discretionary reflex goals, a hard one (/brace, /hold) passes only emergencies.
 // token is the claim releaseLane may clear.
 const pilotLane = { until: 0, why: null, hard: false, narrated: 0, token: null }
 // on while /hold runs. The combat reflex leaves every threat but a creeper to it.
@@ -3182,13 +3176,7 @@ reflexes.unshift({
     this._coverUntil = 0                                 // no cover found — hand it to the flee latch
     this.fleeFrom(bot, threat, `ranged chip from ${from} — no cover within 3, FLEEING the sightline`, 'interrupt')
   },
-  // FAIRNESS GATE fill (07-16, the confessed leak from the first Normal cave crawl): the watcher
-  // read raw bot.entities — server x-ray — and tracked a zombie through solid rock that /entities
-  // honestly hid. Same law as ore and eyes now: sealed behind rock = imperceptible; it may be
-  // HEARD (ears are server-fair) but never tracked, scored, or engaged. Lazy + cached ~2s so the
-  // 300ms loop only pays for the flood when a candidate actually needs judging.
-  // Every entity sense shares this flood. It holds while the body stays within 3 blocks of its
-  // seed and no block in or beside it changes.
+  // The flood every entity sense shares, reused for 2 s while the body stays within 3 blocks of its seed.
   fairFill (bot) {
     const now = Date.now()
     const seed = bot.entity.position.floored()
@@ -3292,11 +3280,7 @@ reflexes.unshift({
     }
     if (t.cls === 'player') return                          // NEVER weapons on players — narrate only
     const s = STANCES[stance]
-    // melee hostile: SHIELD POSTURE while it closes (the shield is a posture, not a parry —
-    // settled with the helmsman 07-15: nobody blocks the arrow, you stand shield-up while threatened;
-    // posture decisions are slow decisions, so the 300ms reflex holds it, not the pilot),
-    // then a swing about every 850 ms, the shield dropped for each (Java can't do both).
-    // On 1.7.10 a sword block is the posture, held through swings LEGACY_HIT_MS apart.
+    // The standoff guard goes up while a melee hostile closes and drops for each swing.
     const sword = bot.inventory.items().find(i => /_sword$/.test(i.name))
     const canGuard = () => {
       if (LEGACY_1710) return !!bot.heldItem && /_sword$/.test(bot.heldItem.name) && !legsMoving()
@@ -5224,11 +5208,7 @@ app.get('/chatlog', (req, res) => {
 })
 app.get('/stop', (req, res) => { bunker.stop = 'stopped by the pilot'; legs.take(null); try { stopFollow() } catch {} ; stopPath(); try { bot.clearControlStates() } catch {} ; clearLane(); const jobsCancelled = jobs.stopAll(); ok(res, { stopped: true, jobsCancelled }) })
 
-// GET /brace?sec=N : the PILOT-HOLD (07-21 debrief — the bounded version of switching the
-// combat reflex off to cross a room). For N seconds (cap 30) the legs answer no discretionary
-// reflex and no interrupt either: only true survival (a creeper flee, the HP disengage, lava,
-// drowning, the unexplained-hit freeze, the bunker) may move the body. Use it for deliberate moments — a careful shot, a ceremony,
-// standing ground beside a partner — then let it lapse. An armed brace is a debt like any mode.
+// GET /brace?sec=N: for N seconds (cap 30) only survival reflexes may move the body.
 app.get('/brace', (req, res) => {
   try {
     const sec = Math.min(30, Math.max(1, parseInt(req.query.sec || '8')))
@@ -5738,9 +5718,7 @@ app.get('/withdraw', async (req, res) => {
     ok(res, { withdrew: item.name, count: take })
   } catch (e) { err(res, e) }
 })
-// deposit items FROM inventory INTO the nearest chest. name is fuzzy (e.g. "log" ->
-// every *_log stack); count omitted = deposit ALL matching. Returns how many moved and
-// the running total of that item now in the chest (handy for "gather to N in the chest").
+// GET /deposit?name=&count=: moves count (default all) of the carried items whose name contains name into the target chest and replies with their total in it.
 app.get('/deposit', async (req, res) => {
   try {
     const name = req.query.name
@@ -5886,10 +5864,7 @@ app.get('/digat', async (req, res) => {
     const b = bot.blockAt(p)
     if (!b || b.name === 'air') return ok(res, { already: 'air', at: round(p) })
     if (far()) await bot.pathfinder.goto(new goals.GoalNear(p.x, p.y, p.z, 3))
-    // TOOL GUARD (07-18, the bow-dug diamond): holdDigTool's equip can fail SILENTLY — the
-    // combat reflex was holding the bow, the swap lost the race, and the dig went ahead anyway.
-    // For ore that needs a tier, verify a sufficient pick is actually IN HAND or refuse the dig;
-    // a refused dig is recoverable, a destroyed drop is not.
+    // holdDigTool swallows a failed equip.
     await holdDigTool(b)
     const needTier = neededPickTier(b.name)
     const heldTier = bot.heldItem ? PICK_TIER[bot.heldItem.name] : undefined
