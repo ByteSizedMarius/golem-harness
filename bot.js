@@ -3415,6 +3415,14 @@ app.get('/toss', async (req, res) => {
   } catch (e) { err(res, e) }
 })
 
+// The age of a crop block and whether it reached its last age, null for any other block.
+function cropAge (b) {
+  if (!b || !/^(wheat|carrots|potatoes|beetroots|nether_wart|melon_stem|pumpkin_stem|cocoa)$/.test(b.name)) return null
+  const age = Number(b.getProperties().age)
+  const ages = mcData.blocks[b.type].states.find(s => s.name === 'age').num_values
+  return { age, mature: age === ages - 1 }
+}
+
 app.get('/find', (req, res) => {
   try {
     if (!ready) return err(res, new Error('not ready'))
@@ -3432,7 +3440,10 @@ app.get('/find', (req, res) => {
       return ok(res, { count: results.length, blocks: results, xray: true })
     }
     const vis = findVisible(ids, radius, count)
-    const results = vis.map(v => ({ pos: { x: v.pos.x, y: v.pos.y, z: v.pos.z }, name: bot.blockAt(v.pos)?.name, dist: +v.dist.toFixed(1) }))
+    const results = vis.map(v => {
+      const b = bot.blockAt(v.pos)
+      return Object.assign({ pos: { x: v.pos.x, y: v.pos.y, z: v.pos.z }, name: b?.name, dist: +v.dist.toFixed(1) }, cropAge(b))
+    })
     ok(res, { count: results.length, blocks: results, visibleOnly: true })
   } catch (e) { err(res, e) }
 })

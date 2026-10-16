@@ -28,11 +28,11 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     .filter((p) => matching.includes(IDS[ores[ck(p.x, p.y, p.z)]]) && p.distanceTo(position) <= maxDistance)
     .sort((a, b) => a.distanceTo(position) - b.distanceTo(position))
     .slice(0, count)
-  const blocks = [{ id: 1, name: 'coal_ore' }, { id: 2, name: 'iron_ore' }, { id: 4, name: 'diamond_ore' }]
+  const blocks = [{ id: 1, name: 'coal_ore' }, { id: 2, name: 'iron_ore' }, { id: 4, name: 'diamond_ore' }, { id: 5, name: 'wheat', states: [{ name: 'age', num_values: 8 }] }]
   return {
     ready: true,
     bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay }, game: { minY: -64, height: 384 } },
-    mcData: { blocksArray: blocks, blocksByName: Object.fromEntries(blocks.map((b) => [b.name, b])) },
+    mcData: { blocksArray: blocks, blocksByName: Object.fromEntries(blocks.map((b) => [b.name, b])), blocks: Object.fromEntries(blocks.map((b) => [b.id, b])) },
     ck,
     Vec3,
     SEEN: new Set(),
@@ -67,6 +67,15 @@ test('find names ore in lit sight, never ore around a corner or in the dark', ()
   assert.strictEqual(iron.count, 0)
   hidden(iron)
   assert.strictEqual(find(cave(DARK, FAR_END), 'coal').count, 0, 'in sight, in total darkness')
+})
+
+test('find gives each crop in sight its age and whether it is fully grown', () => {
+  const env = world({ open: (x, y) => y >= 64, ores: { '2,64,0': 'wheat', '4,64,0': 'wheat' }, light: () => LIT, skyLight: () => 15 })
+  const ages = { '2,64,0': 7, '4,64,0': 3 }
+  const base = env.bot.blockAt
+  env.bot.blockAt = (p) => ({ ...base(p), getProperties: () => ({ age: String(ages[ck(p.x, p.y, p.z)]) }) })
+  const found = runRoute('/find', { name: 'wheat' }, env).blocks.map((b) => [b.pos.x, b.age, b.mature])
+  assert.deepStrictEqual(found, [[2, 7, true], [4, 3, false]])
 })
 
 const LAVA = { name: 'lava', boundingBox: 'empty', light: 15, metadata: 0 }
