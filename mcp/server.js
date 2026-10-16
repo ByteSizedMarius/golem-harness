@@ -25,6 +25,11 @@ const PRIMED_BY = new Map([
   ...['smelt', 'furnace'].map((name) => [name, { topic: 'jobs' }]),
   ['grave', { topic: 'death' }]
 ])
+// A topic's key rules go out once, with the first reply of any tool that passes when.
+const PRIMED_BY_REPLY = [
+  // A takenBy, the reply's own or a listed job's, that names a creeper.
+  { topic: 'combat', when: (body) => [body, ...(Array.isArray(body.jobs) ? body.jobs : [])].some((x) => x !== null && typeof x === 'object' && typeof x.takenBy === 'string' && /\bcreeper\b/.test(x.takenBy)) }
+]
 const WAIT_DEFAULT_S = 60
 const WAIT_GAP_MS = 5000
 const POLL_MS = 1000
@@ -127,7 +132,7 @@ function keyRules (topic, text) {
 
 function loadPrimers (manual) {
   const primers = new Map()
-  for (const topic of new Set([...PRIMED_BY.values()].map((p) => p.topic))) {
+  for (const topic of new Set([...PRIMED_BY.values(), ...PRIMED_BY_REPLY].map((p) => p.topic))) {
     if (!manual.has(topic)) continue
     const rules = keyRules(topic, manual.get(topic))
     if (rules === null) throw new TypeError(`manual topic ${topic} has no key rules below its title`)
@@ -487,6 +492,12 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
     if (primer && primers.has(primer.topic) && !primed.has(primer.topic) && (!primer.when || primer.when(values))) {
       primed.add(primer.topic)
       tails.push(primers.get(primer.topic))
+    }
+    for (const p of PRIMED_BY_REPLY) {
+      if (body !== null && typeof body === 'object' && primers.has(p.topic) && !primed.has(p.topic) && p.when(body)) {
+        primed.add(p.topic)
+        tails.push(primers.get(p.topic))
+      }
     }
     if (last !== null) tails.push(last)
     const shown = redact(trimLists(body, tool.lists), tool.structural)

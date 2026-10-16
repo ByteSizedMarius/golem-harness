@@ -30,6 +30,19 @@ test('the first chest call carries the building key rules, and later calls of th
   assert.strictEqual(primerOf(await call(srv, 'walls', { x: 0, z: 0 })), null, 'another tool of the same topic')
 })
 
+test('the first reply whose takenBy names a creeper carries the combat key rules, and a later one does not', async () => {
+  const combat = `${keyRulesBlock('combat')}\nMore: manual('combat')`
+  const unseen = { arrived: false, reason: 'stopped', takenBy: 'the combat reflex took the legs to flee' }
+  const creeper = { ...unseen, takenBy: 'the combat reflex took the legs to flee: creeper E ~6, 2 above' }
+  const replies = [unseen, creeper, creeper]
+  const { srv } = mcpServer({ reply: () => replies.shift() })
+  assert.strictEqual(primerOf(await call(srv, 'goto', { x: 1, z: 1 })), null, 'a flee that names no mob')
+  assert.strictEqual(primerOf(await call(srv, 'goto', { x: 1, z: 1 })), combat)
+  assert.strictEqual(primerOf(await call(srv, 'goto', { x: 1, z: 1 })), null, 'the second creeper take')
+  const jobs = mcpServer({ reply: () => ({ ok: true, jobs: [{ id: 1, status: 'cancelled', takenBy: creeper.takenBy }] }) }).srv
+  assert.strictEqual(primerOf(await call(jobs, 'jobs', {})), combat, 'a job the creeper flee ended')
+})
+
 test('a fresh server brings up the key rules again', async () => {
   for (const run of [1, 2]) {
     assert.match(primerOf(await call(okBot(), 'deposit', { name: 'cobblestone' })) ?? '', /manual\('building'\)$/, `server ${run}`)

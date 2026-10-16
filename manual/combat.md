@@ -1,5 +1,10 @@
 # Combat
 
+## Key rules
+
+- A creeper flee in `takenBy` or a combat event says where the creeper stood. Walk around it, not back toward it.
+- A creeper swells within 3, explodes 1.5 s later, and its blast reaches 6. `shoot` it from beyond 8.
+
 You are the strategist, the combat reflex is the trigger finger. It runs in the body every 300 ms, and by the time you read an event the fight is often over. Read the narration, decide to retreat, press or reposition, and override with `stop`, `shoot` or `strike`.
 
 ## How the reflex decides
