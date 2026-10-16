@@ -1424,14 +1424,23 @@ function sightCell(p, maxDist, lit = () => true) {
 }
 // Estimated light of the cells changed since their column's light arrived, by column, then by cell.
 const ESTIMATED_LIGHT = new Map()
-// The light the client holds for cell p, or the estimate for a cell changed since.
-// Sky light 15 for a clear overworld cell above its column's ground top, whatever the chunk data says.
+// The light the client holds or estimates for cell p.
 function heldLight (p, b) {
   const column = ESTIMATED_LIGHT.get((p.x >> 4) + ',' + (p.z >> 4))
   const held = (column && column.get(ck(p.x, p.y, p.z))) || b
-  if (!(held.skyLight < 15) || bot.game.dimension !== 'overworld' || !lightClear(b)) return held
+  if (!(held.skyLight < 15) || bot.game.dimension !== 'overworld' || !skyCrosses(b)) return held
   const top = groundTop(p.x, p.z)
-  return top !== null && p.y > top ? { light: held.light, skyLight: 15 } : held
+  if (top === null) return held
+  // A cell above a stale top that is not clear keeps its held light.
+  if (p.y > top) return lightClear(b) ? { light: held.light, skyLight: 15 } : held
+  let sky = 15
+  for (let y = top; y >= p.y; y--) {
+    const c = y === p.y ? b : bot.blockAt(new Vec3(p.x, y, p.z))
+    if (!skyCrosses(c)) return held
+    sky -= skyFilter(c)
+    if (sky <= held.skyLight) return held
+  }
+  return { light: held.light, skyLight: sky }
 }
 function estimateLight (p, levels) {
   const key = (p.x >> 4) + ',' + (p.z >> 4)
@@ -1450,6 +1459,14 @@ function emission (b, litOnly) {
 // A cell light crosses undimmed on 1.21 and on 1.7.10.
 function lightClear (b) {
   return !!b && (b.boundingBox === 'empty' || b.transparent === true) && bot.registry.blocks[b.type].filterLight === 0
+}
+// A cell sky light crosses, dimmed by its filter: a clear one, or one with no collision box such as water.
+function skyCrosses (b) {
+  return lightClear(b) || (!!b && b.boundingBox === 'empty')
+}
+// The sky light a cell sky light crosses takes away.
+function skyFilter (b) {
+  return bot.registry.blocks[b.type].filterLight
 }
 // Every cell above p up to the dimension's build ceiling is loaded and clear.
 function openSky (p) {
@@ -1490,12 +1507,18 @@ function flickers (b) {
   if (b.name === 'fire' || b.name === 'soul_fire') return true
   return (b.name === 'lava' || b.name === 'water') && Number(b.getProperties().level) > 0
 }
-// A roof laid at p: p and the cells below it holding sky light 15 take 14, the most a covered cell holds.
+// A roof at p drops sky 15 to 14 at p and below, less the filters down to each cell under open overworld sky.
 function roofOver (p) {
+  let sky = bot.game.dimension === 'overworld' && openSky(p) ? 14 : null
   for (let q = p; ; q = new Vec3(q.x, q.y - 1, q.z)) {
     const b = bot.blockAt(q)
     if (!b) return
-    if (heldLight(q, b).skyLight === 15) estimateLight(q, { skyLight: 14 })
+    if (sky !== null && q !== p) {
+      if (!skyCrosses(b)) return
+      sky -= skyFilter(b)
+      estimateLight(q, { skyLight: Math.max(0, sky) })
+      if (sky <= 0) return
+    } else if (heldLight(q, b).skyLight === 15) estimateLight(q, { skyLight: 14 })
     else if (q !== p) return
   }
 }

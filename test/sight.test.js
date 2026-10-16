@@ -150,8 +150,9 @@ test('ore facing the bot from behind a wall stays hidden in every reply', async 
   }
 })
 
-// The light data of the block types in world, a torch as type 5, an end_rod as type 6, fire as type 7 and lava as type 8.
-const REGISTRY = { blocks: { 0: { emitLight: 0, filterLight: 0 }, 1: { emitLight: 0, filterLight: 15 }, 2: { emitLight: 0, filterLight: 15 }, 3: { emitLight: 0, filterLight: 15 }, 4: { emitLight: 0, filterLight: 15 }, 5: { emitLight: 14, filterLight: 0 }, 6: { emitLight: 14, filterLight: 0 }, 7: { emitLight: 15, filterLight: 0 }, 8: { emitLight: 15, filterLight: 1 } } }
+// The light data of the block types in world, a torch as type 5, an end_rod as type 6, fire as type 7, lava as type 8 and
+// water as type 9.
+const REGISTRY = { blocks: { 0: { emitLight: 0, filterLight: 0 }, 1: { emitLight: 0, filterLight: 15 }, 2: { emitLight: 0, filterLight: 15 }, 3: { emitLight: 0, filterLight: 15 }, 4: { emitLight: 0, filterLight: 15 }, 5: { emitLight: 14, filterLight: 0 }, 6: { emitLight: 14, filterLight: 0 }, 7: { emitLight: 15, filterLight: 0 }, 8: { emitLight: 15, filterLight: 1 }, 9: { emitLight: 0, filterLight: 1 } } }
 const block = (name, type, boundingBox) => (p) => ({ name, type, stateId: type, boundingBox, position: new Vec3(...p), getProperties: () => ({}) })
 const stoneAt = block('stone', 3, 'block')
 const airAt = block('air', 0, 'empty')
@@ -257,6 +258,38 @@ test('a roof laid over a room takes away the open sky its held light still shows
   const skyInside = (roofs) => loadBotFunctions(['skyInSight'], roomUnder(11, roofs)).skyInSight()
   assert.strictEqual(skyInside(0), true, 'control: open to the sky')
   assert.strictEqual(skyInside(1), false)
+})
+
+test('a roof laid high over open ground on a modern server leaves the cells below it the sky light of a covered cell', () => {
+  // A modern server sends sky light for this column only up to y 79.
+  const roof = new Set()
+  const env = wireLight(world({ open: (x, y, z) => y >= 64 && !roof.has(ck(x, y, z)), light: () => 0 }))
+  env.bot.game.dimension = 'overworld'
+  const sent = env.bot.blockAt
+  env.bot.blockAt = (p) => {
+    const b = sent(p)
+    return { ...b, skyLight: b.name === 'air' && p.y < 80 ? 15 : 0 }
+  }
+  roof.add(ck(0, 100, 0))
+  env.bot.emit('blockUpdate', airAt([0, 100, 0]), stoneAt([0, 100, 0]))
+  const sky = (y) => env.heldLight(new Vec3(0, y, 0), env.bot.blockAt(new Vec3(0, y, 0))).skyLight
+  assert.deepStrictEqual([sky(99), sky(70)], [14, 14])
+})
+
+test('water high over open ground on a modern server holds the sky light that reaches it through the water above', () => {
+  // A stone basin at y 97 to 100 holds water three deep, above y 79, the highest a modern server sent sky light for.
+  const basin = (x, y, z) => Math.abs(x) <= 1 && Math.abs(z) <= 1 && y >= 97 && y <= 100
+  const pool = (x, y, z) => x === 0 && z === 0 && y >= 98 && y <= 100
+  const env = wireLight(world({ open: (x, y, z) => y >= 64 && !basin(x, y, z), light: () => 0 }))
+  env.bot.game.dimension = 'overworld'
+  const sent = env.bot.blockAt
+  env.bot.blockAt = (pos) => {
+    const p = pos.floored()
+    const b = pool(p.x, p.y, p.z) ? block('water', 9, 'empty')([p.x, p.y, p.z]) : sent(p)
+    return { ...b, light: 0, skyLight: b.name === 'air' && p.y < 80 ? 15 : 0 }
+  }
+  const sky = (y) => env.heldLight(new Vec3(0, y, 0), env.bot.blockAt(new Vec3(0, y, 0))).skyLight
+  assert.deepStrictEqual([sky(101), sky(100), sky(99), sky(98)], [15, 14, 13, 12])
 })
 
 // Open sky over ground at y 63, cut by a ravine at x 3..12 with its floor block at y floor, the body at x = at.
@@ -953,7 +986,7 @@ const shaftToSky = (sky, timeOfDay = NOON) => world({ open: (x, y, z) => x === 0
 test('state and scene tell the time only while the sky shows', () => {
   const told = (env) => {
     Object.assign(env.bot.entity, { pitch: 0, onGround: true })
-    Object.assign(env.bot, { oxygenLevel: 20, game: { dimension: 'overworld' }, registry: REGISTRY, blockAtCursor: () => null })
+    Object.assign(env.bot, { oxygenLevel: 20, game: { ...env.bot.game, dimension: 'overworld' }, registry: REGISTRY, blockAtCursor: () => null })
     const [scene] = summaries(env)
     const state = runRoute('/state', {}, { ...env, waterState: () => null, heldInfo: () => null, round: (v) => v, ready: true })
     return [state.timeOfDay, /"time"|day|t=6000/.test(scene)]

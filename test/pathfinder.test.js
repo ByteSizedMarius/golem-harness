@@ -258,8 +258,8 @@ test('the pathfinder never plans along a sky-lit ravine floor 20 under the groun
   assert.strictEqual(await statusOf(43), 'noPath')
 })
 
-// A one-wide corridor along z 40 from x -36, walled 10 above its floor at y0, with stairs, a slab, gaps and a ladder,
-// built in the air over stone up to y top, as cells 'x,y,z' -> [name, properties] in build order.
+// A one-wide corridor at z 40 from x -36 with stairs, a slab, gaps, a ladder and roofed water, floored at y0, over stone
+// up to y top, as cells in build order.
 function course (y0, top) {
   const x0 = -36
   const z = 40
@@ -281,6 +281,8 @@ function course (y0, top) {
   }
   build.push([`${x0 + 18},${y0 + 1},${z}`, ['stone_slab', { type: 'bottom', waterlogged: 'false' }]])
   for (let height = 2; height <= 5; height++) build.push([`${x0 + 40},${y0 + height},${z}`, ['ladder', { facing: 'west', waterlogged: 'false' }]])
+  box(x0 + 46, y0 + 5, z, x0 + 49, y0 + 5, z, ['water', { level: '0' }])
+  box(x0 + 45, y0 + 8, z, x0 + 50, y0 + 8, z, STONE)
   const ground = (c) => [c.y <= top ? 'stone' : 'air', {}]
   return { build, ground }
 }
@@ -337,6 +339,17 @@ test('a corridor built in the air on a modern server, which sends no sky light t
   for (const [key, block] of build) place(key, block)
   const result = plan(new goals.GoalBlock(-27, 204, 40))
   assert.strictEqual(result.status, 'success', `${result.path.length} nodes`)
+})
+
+test('a corridor built in the air on a modern server walks from its ladder top through the roofed water past it', async () => {
+  const statusOf = async (sky) => {
+    const { build, ground } = course(200, 120)
+    const { plan, place } = await lit(new Vec3(8.5, 206, 40.5), new Map(), ground, sky)
+    for (const [key, block] of build) place(key, block)
+    return plan(new goals.GoalBlock(17, 206, 40)).status
+  }
+  assert.strictEqual(await statusOf(() => 15), 'success', 'control: sky light held at every height')
+  assert.strictEqual(await statusOf((p) => (p.y < 144 ? 15 : 0)), 'success')
 })
 
 test('a corridor built in the air on a 1.7.10 server walks to the foot of its ladder', async () => {
