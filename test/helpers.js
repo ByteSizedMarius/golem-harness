@@ -16,6 +16,7 @@ const { Vec3 } = require('vec3')
 const shelter = require('../lib/shelter')
 const { legLedger } = require('../lib/legs')
 const { installSecurity } = require('../lib/install')
+const { countVerbs } = require('../lib/verbs')
 const { createServer } = require('../mcp/server')
 const { TOOLS } = require('../mcp/tools')
 
@@ -611,6 +612,17 @@ async function awaitRoute (route, query, env) {
   return replyOf(res)
 }
 
+// awaitRoute through countVerbs and ledger.watch, returning the reply as the client receives it.
+async function hookedRoute (route, query, env, ledger) {
+  const { handle, res } = routeHandler(route, { ...env, ok: (r, body) => r.json({ ok: true, ...body }) })
+  res.json = (body) => { res.body = body }
+  const app = { get: (path, h) => { app.handler = h } }
+  countVerbs(app, ledger.watch)
+  app.get(route, handle)
+  await app.handler({ query }, res, () => {})
+  return replyOf(res)
+}
+
 // The bot.js reflex named name, evaluated over env with the bot.js functions it reaches.
 function reflexIn (name, env) {
   const src = botSource()
@@ -871,7 +883,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, functionSource, balanced, botConstant, loadBotFunctions, routeHandler, runRoute, awaitRoute, reflexIn, bunkerReflexIn, combatReflexIn,
+  botSource, functionSource, balanced, botConstant, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild
 }

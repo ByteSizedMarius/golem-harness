@@ -459,6 +459,7 @@ function serverMessage (msg, position) {
     serverLine ??= serverLines(bot.registry.language || {})
     const line = serverLine(msg)
     if (!line) return
+    if (line.kind === 'death' && line.text.startsWith(bot.username + ' ')) deaths.heard(line.text)
     if (WAKE_KINDS.includes(line.kind) && serverWakes.take(Date.now())) return emitEvent('server', line.text, { kind: line.kind })
     while (quietServer.length && quietServer[0].ev.id <= eventsServed) quietServer.shift()
     const folded = foldQuiet(quietServer, line.text)
@@ -996,7 +997,9 @@ reflexes.push({
 // ---- async jobs registry (long actions run in background; driver keeps reacting) ----
 const { createJobs } = require('./lib/jobs')
 const { legLedger, takenText, laneBlocks: legsLaneBlocks } = require('./lib/legs')
-const jobs = createJobs({ stop: () => { safeStop(); stopCollect() }, emit: (name, msg) => emitEvent('job', name + ': ' + msg) })
+const { deathLedger } = require('./lib/deaths')
+const deaths = deathLedger()
+const jobs = createJobs({ stop: () => { safeStop(); stopCollect() }, emit: (name, msg) => emitEvent('job', name + ': ' + msg), deaths })
 // Each take of the legs ends every walk route begun before it.
 const legs = legLedger()
 // Ends the running job and its walk for a reflex that needs the body, naming the reflex in the job's takenBy.
@@ -2033,7 +2036,9 @@ bot.on('death', () => {
     const at = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }
     try { waypoints.set('lastdeath', at, GRAVES ? { note: 'your items are in a gravestone here' } : {}) } catch (e) {}
     const items = GRAVES ? 'your items are in a gravestone there, take them with grave' : 'drops despawn in ~5 min'
-    emitEvent('death', `DIED near (${at.x},${at.y},${at.z}) — waypoint 'lastdeath' set; ${items}`)
+    const msg = `DIED near (${at.x},${at.y},${at.z}) — waypoint 'lastdeath' set; ${items}`
+    deaths.died(msg)
+    emitEvent('death', msg)
   } catch (e) {}
 })
 
@@ -2965,8 +2970,8 @@ function hasLegalMove() {
 // ---- HTTP control layer ----
 const app = express()
 installSecurity(app, { token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text), maxLen: chatMaxLen(process.env.GOLEM_CHAT_MAX) } })
-// The pilot routes in flight, which follow waits out.
-const verbs = countVerbs(app)
+// The pilot routes in flight, which follow waits out. A reply says when the body died while its route ran.
+const verbs = countVerbs(app, deaths.watch)
 // ?brief=1 on ANY endpoint strips null/undefined fields from the reply — LLM pilots pay
 // by the token and "reason":null earns nothing. Empty ARRAYS survive on purpose: law 2
 // makes [] a statement ("looked, found none") and silence a different one ("didn't look").
@@ -4977,14 +4982,15 @@ app.get('/job', (req, res) => {
     const j = jobs.get(id)
     if (!j) return err(res, new Error(`no job ${id}`))
     const takenBy = j.takenBy ? takenText(j.takenBy) : undefined
+    const died = j.died || undefined
     if (req.query.verbose) {
       return ok(res, { job: {
-        id: j.id, name: j.name, status: j.status, note: j.note, takenBy,
+        id: j.id, name: j.name, status: j.status, note: j.note, takenBy, died,
         result: j.result, error: j.error, started: j.started, finished: j.finished || null
       } })
     }
     ok(res, { job: {
-      id: j.id, name: j.name, status: j.status, note: j.note, takenBy,
+      id: j.id, name: j.name, status: j.status, note: j.note, takenBy, died,
       error: j.error, result: (j.status === 'done' ? j.result : null)
     } })
   } catch (e) { err(res, e) }

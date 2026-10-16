@@ -2,13 +2,15 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { createJobs } = require('../lib/jobs')
+const { deathLedger } = require('../lib/deaths')
 const { waitFor, loadBotFunctions } = require('./helpers')
 
 function registry () {
   const emitted = []
   let stops = 0
-  const jobs = createJobs({ stop: () => { stops++ }, emit: (name, msg) => emitted.push(`${name}: ${msg}`) })
-  return { jobs, emitted, stops: () => stops }
+  const deaths = deathLedger()
+  const jobs = createJobs({ stop: () => { stops++ }, emit: (name, msg) => emitted.push(`${name}: ${msg}`), deaths })
+  return { jobs, emitted, deaths, stops: () => stops }
 }
 
 // A job that runs until it sees its cancel flag.
@@ -84,4 +86,14 @@ test('an erroring job reports its error, and one done reports done', async () =>
   assert.ok(await waitFor(() => jobs.get(good).status !== 'running', 2000))
   assert.deepStrictEqual(emitted, ['build cabin: error out of planks', 'fish: done'])
   assert.deepStrictEqual(jobs.get(good).result, { caught: 1 })
+})
+
+test('a job the body died during ends with the death message, the next job without it', async () => {
+  const { jobs, emitted, deaths } = registry()
+  const fatal = jobs.start('dig_tunnel e x12', async () => { deaths.died('DIED near (1,60,4)') }).id
+  assert.ok(await waitFor(() => jobs.get(fatal).status !== 'running', 2000))
+  const next = jobs.start('fish', async () => ({ caught: 1 })).id
+  assert.ok(await waitFor(() => jobs.get(next).status !== 'running', 2000))
+  assert.deepStrictEqual(emitted, ['dig_tunnel e x12: done, died: DIED near (1,60,4)', 'fish: done'])
+  assert.deepStrictEqual([jobs.get(fatal).died, jobs.get(next).died], ['DIED near (1,60,4)', null])
 })
