@@ -98,17 +98,18 @@ test('scene lists each door in sight once, and none behind a wall', () => {
   assert.deepStrictEqual(listed(true), [{ name: 'oak_door', dir: 'E', dist: 3, open: false }])
 })
 
-test('a failed walk names the door beside it by its lower half, never one the bot does not know', () => {
+test('a failed walk names the door beside it by its lower half, never one the bot does not see now, remembered or not', () => {
   const env = doorScene()
   env.bot.blockAt = world({ '2,65,0': door('oak_door', 'upper'), '2,64,0': door('oak_door', 'lower'), '-1,64,1': door('iron_door', 'lower') })
-  env.cellKnown = (p) => !(p.x === -1 && p.z === 1)
+  env.cellKnown = () => true
+  env.seenNow = (p) => !(p.x === -1 && p.z === 1)
   const { doorBeside } = loadBotFunctions(['doorBeside'], env)
   assert.deepStrictEqual(JSON.parse(JSON.stringify(doorBeside())), { name: 'oak_door', x: 2, y: 64, z: 0, open: false })
-  env.cellKnown = () => true
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(doorBeside())), { name: 'iron_door', x: -1, y: 64, z: 1, open: false }, 'control: the nearer iron door once known')
+  env.seenNow = () => true
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(doorBeside())), { name: 'iron_door', x: -1, y: 64, z: 1, open: false }, 'control: the nearer iron door once in sight')
 })
 
-test('the doorway drill picks no door the bot cannot see', async () => {
+test('the doorway drill picks no door the bot cannot see now, a remembered one included', async () => {
   for (const seen of [true, false]) {
     const env = doorScene()
     env.bot.entity.position = new Vec3(0.5, 64, 6.5)
@@ -116,7 +117,8 @@ test('the doorway drill picks no door the bot cannot see', async () => {
     env.bot.blockAt = world({ '2,64,6': door('oak_door', 'lower'), '2,65,6': door('oak_door', 'upper') })
     let walks = 0
     Object.assign(env, {
-      cellKnown: () => seen,
+      cellKnown: () => true,
+      seenNow: () => seen,
       routeEnd: () => null,
       walkOnce: async () => { walks++; return 'changed' },
       goals: require('mineflayer-pathfinder').goals,
@@ -194,6 +196,7 @@ function farmDoor (feet, state = { facing: 'west', hinge: 'left', open: true }) 
     bot,
     mcData: { blocksByName: { oak_door: { id: 1, name: 'oak_door' } } },
     cellKnown: () => true,
+    seenNow: () => true,
     routeEnd: () => null,
     walkOnce: async (g) => { walks.push([g.x, g.y, g.z]); bot.entity.position = new Vec3(g.x + 0.5, g.y, g.z + 0.5); return 'done' },
     nudgeInto: async (cell) => { nudges.push([cell.x, cell.y, cell.z]); return false },

@@ -5,7 +5,7 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const vm = require('node:vm')
 const { Vec3 } = require('vec3')
-const { sameVein } = require('../lib/wake')
+const { ambientChange, sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const { balanced, botConstant, botSource, groundMemory, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn } = require('./helpers')
@@ -540,6 +540,37 @@ test('activate presses a block in lit sight and gives its state only while it st
   assert.deepStrictEqual(away.body, { activated: 'coal_ore', at: { x: -1, y: 65, z: 0 } }, 'the walk went round the corner')
 })
 
+test('blockat answers the cells the body fills and touches in the dark, never a cell two away or diagonal', () => {
+  const blockat = (env, [x, y, z]) => {
+    const { handle, res } = routeHandler('/blockat', env)
+    handle({ query: { x: String(x), y: String(y), z: String(z) } }, res)
+    return { body: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error }
+  }
+  // A passage north through stone that ends at the feet, coal beside the feet, iron in the floor two cells
+  // ahead, diamond diagonal to the feet and open only to a pocket east of it.
+  const passage = (light, cells = {}) => withHands(withCells(world({
+    open: (x, y, z) => (x === 0 && z >= -3 && z <= 0 && (y === 64 || y === 65)) || (x === 2 && y === 64 && z === 1),
+    ores: { '1,64,0': 'coal_ore', '0,63,-2': 'iron_ore', '1,64,1': 'diamond_ore' },
+    light: () => light
+  }), cells))
+  const DOOR = { name: 'oak_door', boundingBox: 'block', light: 0 }
+  const doorway = (light) => passage(light, { '0,64,0': DOOR, '0,65,0': DOOR })
+  for (const cell of [[0, 63, 0], [0, 64, 0], [0, 66, 0], [1, 64, 0], [1, 65, 0]]) {
+    const r = blockat(doorway(DARK), cell)
+    assert.strictEqual(r.error, undefined, `${cell}: ${r.error && r.error.message}`)
+    assert.deepStrictEqual(r.body.at, { x: cell[0], y: cell[1], z: cell[2] })
+  }
+  assert.strictEqual(blockat(doorway(DARK), [0, 64, 0]).body.name, 'oak_door', 'the door the feet stand in')
+  assert.strictEqual(blockat(doorway(DARK), [1, 64, 0]).body.name, 'coal_ore', 'the wall beside the feet')
+  assert.strictEqual(blockat(passage(LIT), [0, 63, -2]).body.name, 'iron_ore', 'control: two away in the light')
+  for (const cell of [[0, 63, -2], [1, 64, 1]]) {
+    const r = blockat(passage(DARK), cell)
+    assert.match(r.error.message, UNSEEN, String(cell))
+    assert.strictEqual(r.body, undefined, String(cell))
+    assert.doesNotMatch(r.error.message, /iron|diamond|ore/, String(cell))
+  }
+})
+
 // env with the blocks at the 'x,y,z' keys of cells in place of its own.
 function withCells (env, cells) {
   const base = env.bot.blockAt
@@ -711,6 +742,48 @@ function pulseWithZombie (env, x, z) {
 test('the narrator and pulse name a hostile in shared air, never one sealed behind rock', () => {
   assert.match(pulseWithZombie(besidePocket(), 3, 0), /hostile zombie E ~3/, 'control: in the room')
   assert.doesNotMatch(pulseWithZombie(besidePocket(), 1, -2), /zombie/)
+})
+
+// The world events after the cells at [x, y, z] in env turn from the from block (dirt) to the to block (farmland).
+function tilled (env, cells, from = block('dirt', 3, 'block'), to = block('farmland', 3, 'block')) {
+  const events = []
+  Object.assign(env, { recentOwnEdits: new Map(), changeBuf: [], lastChangeEmit: 0, ambientChange, emitEvent: (kind, msg) => events.push(msg) })
+  const { noteWorldChange, worldChangeEvent } = loadBotFunctions(['noteWorldChange', 'worldChangeEvent'], env)
+  for (const p of cells) noteWorldChange(from(p), to(p))
+  worldChangeEvent()
+  return events
+}
+
+test('a block change in a sealed room beside the bot raises no world event, the same change in sight does', () => {
+  const room = [2, 63, 0]
+  const pocket = [1, 63, -2]
+  assert.deepStrictEqual(tilled(besidePocket(), [room]), ['changed near me: dirt→farmland E ~2'], 'control: the room floor')
+  assert.deepStrictEqual(tilled(besidePocket(), [pocket]), [])
+  assert.deepStrictEqual(tilled(besidePocket(), [room, pocket]), ['changed near me: dirt→farmland E ~2'], 'both at once')
+  assert.match(tilled(besidePocket(), [[2, 64, 1]], stoneAt, airAt).join(), /stone→air/, 'control: the room wall broken in sight')
+  const seenEarlier = besidePocket()
+  seenEarlier.SEEN.add(ck(1, 64, -3))
+  assert.deepStrictEqual(tilled(seenEarlier, [[1, 64, -3]], stoneAt, airAt), [], 'a wall seen earlier and out of sight now')
+})
+
+test('digat at a cell seen before and out of sight now walks there before it says the cell is air', async () => {
+  // A lit room at x 0..3, z 0 and a lit pocket at x 0..6, z -2 that one cell of stone seals off from it.
+  const pocket = () => world({ open: (x, y, z) => (y === 64 || y === 65) && ((z === 0 && x >= 0 && x <= 3) || (z === -2 && x >= 0 && x <= 6)), light: () => LIT })
+  const digat = async (arrive) => {
+    const env = pocket()
+    env.SEEN.add(ck(6, 64, -2))
+    const acts = []
+    env.bot.pathfinder = { goto: async () => { acts.push('walk'); if (arrive) env.bot.entity.position = new Vec3(4.5, 64, -1.5) } }
+    Object.assign(env, { bunker: { building: false }, require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals: { GoalNear: function () {} } })
+    const { handle, res } = routeHandler('/digat', env)
+    await handle({ query: { x: '6', y: '64', z: '-2' } }, res)
+    return { body: res.body, error: res.error, acts }
+  }
+  const there = await digat(true)
+  assert.deepStrictEqual(JSON.parse(JSON.stringify([there.body, there.acts])), [{ already: 'air', at: { x: 6, y: 64, z: -2 } }, ['walk']])
+  const short = await digat(false)
+  assert.match(short.error.message, UNSEEN)
+  assert.deepStrictEqual([short.body, short.acts], [undefined, ['walk']])
 })
 
 // The verbose scene reply as JSON and the boot summary over env, the senses besides the lay of the land and the sky stubbed.

@@ -194,7 +194,7 @@ function stallText () {
   const ahead = (dy) => new Vec3(Math.floor(p.x - Math.sin(bot.entity.yaw)), feet.y + dy, Math.floor(p.z - Math.cos(bot.entity.yaw)))
   for (const c of [ahead(0), ahead(1)]) {
     const b = bot.blockAt(c)
-    if (b && b.boundingBox === 'block' && cellKnown(c)) return `${at} against ${b.name} at ${c.x},${c.y},${c.z}`
+    if (b && b.boundingBox === 'block' && seenNow(c)) return `${at} against ${b.name} at ${c.x},${c.y},${c.z}`
   }
   return at
 }
@@ -1687,6 +1687,10 @@ function bodyTouches (p) {
   const dy = p.y - o.y
   return side === 0 ? dy >= -1 && dy <= 2 : side === 1 && (dy === 0 || dy === 1)
 }
+// A cell whose current block the bot perceives: touched by the body or in lit sight within r.
+function seenNow (p, r = 64) {
+  return bodyTouches(p) || seesLit(p, r)
+}
 
 // ==== VISION 2 (2026-07-11): the vertical sense, the air flood-fill, and the ray-sweep retina ====
 // Two tiers of knowing, everywhere: seen (SEEN, or lit sight now) / unknown (silence means "didn't
@@ -2124,7 +2128,7 @@ function closeDoorsBehind () {
 }
 let changeBuf = []
 let lastChangeEmit = 0
-bot.on('blockUpdate', (oldB, newB) => {
+function noteWorldChange (oldB, newB) {
   try {
     if (!oldB || !newB || oldB.name === newB.name) return
     const p = newB.position || (oldB && oldB.position)
@@ -2133,10 +2137,12 @@ bot.on('blockUpdate', (oldB, newB) => {
     if (d > 16) return
     const own = recentOwnEdits.get(ck(p.x, p.y, p.z))
     if (own && Date.now() - own < 8000) return
+    if (!seenNow(p)) return
     changeBuf.push({ from: oldB.name, to: newB.name, dir: compass(p.x - bot.entity.position.x, p.z - bot.entity.position.z), d: Math.round(d), t: Date.now() })
     if (changeBuf.length > 200) changeBuf.splice(0, changeBuf.length - 200)
   } catch (e) {}
-})
+}
+bot.on('blockUpdate', noteWorldChange)
 function worldChangeEvent () {
   try {
     if (!changeBuf.length || Date.now() - lastChangeEmit < 6000) return
@@ -4138,14 +4144,14 @@ function gotoQuery (query) {
   return q
 }
 
-// The nearest door or gate the bot knows within 2 of its feet, or null.
+// The nearest door or gate the bot sees now within 2 of its feet, or null.
 function doorBeside () {
   const feet = bot.entity.position.floored()
   let best = null
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (const dy of [0, 1]) {
     const p = feet.offset(dx, dy, dz)
     const b = bot.blockAt(p)
-    if (!b || !isDoor(b.name) || !cellKnown(p)) continue
+    if (!b || !isDoor(b.name) || !seenNow(p)) continue
     const d = Math.hypot(dx, dz)
     if (best && best.d <= d) continue
     const props = b.getProperties() || {}
@@ -4827,12 +4833,16 @@ app.get('/digat', async (req, res) => {
     if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const Vec3 = require('vec3').Vec3
     const p = new Vec3(Math.floor(parseFloat(req.query.x)), Math.floor(parseFloat(req.query.y)), Math.floor(parseFloat(req.query.z)))
-    const b = bot.blockAt(p)
-    if (!b || b.name === 'air') return ok(res, { already: 'air', at: round(p) })
+    if (!cellKnown(p) && !bodyTouches(p)) return err(res, outOfSight())
     // only WALK if out of arm's reach — a deliberately positioned pilot digs from where they stand
     // (the old unconditional goto failed on ore embedded in rock with no walkable cell within 3)
-    const eyeDist = bot.entity.position.offset(0, 1.62, 0).distanceTo(p.offset(0.5, 0.5, 0.5))
-    if (eyeDist > 4.2) await bot.pathfinder.goto(new goals.GoalNear(p.x, p.y, p.z, 3))
+    const far = () => bot.entity.position.offset(0, 1.62, 0).distanceTo(p.offset(0.5, 0.5, 0.5)) > 4.2
+    // A cell only remembered is judged once the walk there ends.
+    if (!seenNow(p) && far()) await bot.pathfinder.goto(new goals.GoalNear(p.x, p.y, p.z, 3))
+    if (!seenNow(p)) return err(res, outOfSight())
+    const b = bot.blockAt(p)
+    if (!b || b.name === 'air') return ok(res, { already: 'air', at: round(p) })
+    if (far()) await bot.pathfinder.goto(new goals.GoalNear(p.x, p.y, p.z, 3))
     // TOOL GUARD (07-18, the bow-dug diamond): equipPickFor's equip can fail SILENTLY — the
     // combat reflex was holding the bow, the swap lost the race, and the dig went ahead anyway.
     // For ore that needs a tier, verify a sufficient pick is actually IN HAND or refuse the dig;
@@ -4859,14 +4869,14 @@ app.get('/digat', async (req, res) => {
 // /blockat?x=&y=&z= — identity + block STATE (facing/half/open/lit...) of one block. The
 // self-sufficiency verb for orientation questions (stairs, doors, furnaces): no more asking
 // the co-pilot which way a thing points. Fairness: same LOS gate as all sight — a block I
-// can't honestly see returns an error, not an answer.
+// can't honestly see returns an error, not an answer. A cell the body touches is known by touch.
 app.get('/blockat', (req, res) => {
   try {
     const Vec3 = require('vec3').Vec3
     const x = Math.floor(parseFloat(req.query.x)), y = Math.floor(parseFloat(req.query.y)), z = Math.floor(parseFloat(req.query.z))
     const b = bot.blockAt(new Vec3(x, y, z))
     if (!b) return err(res, new Error('unloaded chunk'))
-    if (!seesLit({ x, y, z }, 20)) return err(res, new Error('not in my sight, blocked or unlit: walk closer, clear the view or light it'))
+    if (!bodyTouches({ x, y, z }) && !seesLit({ x, y, z }, 20)) return err(res, outOfSight())
     const out = { name: b.name, at: { x, y, z }, properties: b.getProperties() }
     if (b.name.includes('sign')) {
       try {
@@ -6659,7 +6669,7 @@ async function doorwayCommit (route = null) {
   const found = bot.findBlocks({ matching: ids, maxDistance: 4, count: 8 })
     .map(p => bot.blockAt(p)).filter(Boolean)
     .filter(b => { const h = (b.getProperties() || {}).half; return h !== 'upper' })  // feet cell only
-    .filter(b => cellKnown(b.position))
+    .filter(b => seenNow(b.position))
     .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0]
   if (!found) return null
   const D = found.position

@@ -12,11 +12,12 @@ const { awaitRoute, botConstant, fakeClock, loadBotFunctions, reflexIn, timed, w
 const AIR = { name: 'air', boundingBox: 'empty' }
 const solid = (name) => ({ name, boundingBox: 'block' })
 
-// The body faces oak planks to the west and never moves, and its pathfinder resets as stuck every third tick.
-function stuckBot ({ known = true } = {}) {
+// The body faces oak planks (to the west by default) and never moves, and its pathfinder resets as stuck every third tick.
+// known is cellKnown, lit is seesLit.
+function stuckBot ({ known = true, lit = known, yaw = Math.PI / 2, planks = new Vec3(-1, 64, 0) } = {}) {
   const bot = new EventEmitter()
-  bot.entity = { position: new Vec3(0.5, 64, 0.5), yaw: Math.PI / 2 }
-  bot.blockAt = (p) => (p.y < 64 ? solid('stone') : p.x === -1 && p.y === 64 && p.z === 0 ? solid('oak_planks') : AIR)
+  bot.entity = { position: new Vec3(0.5, 64, 0.5), yaw, width: 0.6, height: 1.8 }
+  bot.blockAt = (p) => ({ ...(p.y < 64 ? solid('stone') : p.equals(planks) ? solid('oak_planks') : AIR), position: p })
   const placed = []
   bot.placeBlock = async (ref, face) => { placed.push(ref.position.plus(face)) }
   bot.inventory = { items: () => [{ name: 'cobblestone', count: 64 }, { name: 'oak_planks', count: 64 }] }
@@ -63,6 +64,7 @@ function stuckBot ({ known = true } = {}) {
     guardWork: (work, o) => guardWork(work, { ...o, clock }),
     watchScope: new AsyncLocalStorage(),
     cellKnown: () => known,
+    seesLit: () => lit,
     console: { log: (line) => seen.logs.push(line) }
   }
   const { watchGoto } = loadBotFunctions(['watchGoto', 'stopPath'], env)
@@ -88,12 +90,16 @@ test('a goto stuck in a replan loop rejects as stalled, naming where the body st
   assert.deepStrictEqual(s.seen.logs, [`[path] ${stall}`])
 })
 
-test('the stall names no block the bot does not know', async (t) => {
-  const s = stuckBot({ known: false })
-  t.after(s.stop)
-  const walk = outcome(s.bot.pathfinder.goto(new goals.GoalNear(-5, 64, 0, 1)))
-  await stallOut(s)
-  assert.deepStrictEqual((await timed(walk, 2000)).out, { reason: 'stalled', message: 'stalled at 0,64,0' })
+test('the stall names no block the body neither touches nor sees now, a remembered one included', async (t) => {
+  for (const lit of [true, false]) {
+    // Facing north-west, the cell ahead touches the body only at a corner.
+    const s = stuckBot({ known: true, lit, yaw: Math.PI / 4, planks: new Vec3(-1, 64, -1) })
+    t.after(s.stop)
+    const walk = outcome(s.bot.pathfinder.goto(new goals.GoalNear(-5, 64, -5, 1)))
+    await stallOut(s)
+    const message = lit ? 'stalled at 0,64,0 against oak_planks at -1,64,-1' : 'stalled at 0,64,0'
+    assert.deepStrictEqual((await timed(walk, 2000)).out, { reason: 'stalled', message }, `lit ${lit}`)
+  }
 })
 
 test('walls stops at a stalled walk and says so instead of placing as if it arrived', async (t) => {
