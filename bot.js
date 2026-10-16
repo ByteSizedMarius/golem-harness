@@ -1554,8 +1554,9 @@ function eyeDist (p, h = 1) {
   const gap = (v, lo, size) => Math.max(lo - v, 0, v - lo - size)
   return Math.hypot(gap(e.x, p.x, 1), gap(e.y, p.y, h), gap(e.z, p.z, 1))
 }
-// Block p in line of sight, within the reach of the light on its open face.
+// Block p, any {x, y, z}, in line of sight, within the reach of the light on its open face.
 function seesLit(p, maxDist) {
+  if (!p.floored) p = new Vec3(p.x, p.y, p.z)
   const dist = eyeDist(p)
   if (dist > lightReach(p)) return false
   return sightCell(p, maxDist, (c) => dist <= lightRange(c)) !== null
@@ -1660,8 +1661,9 @@ function onSurface (p, b) {
   }
   return true
 }
-// A loaded cell that is cellKnown or on the surface, which shows from anywhere.
+// p may be any {x, y, z}, not only a Vec3.
 function knownCell (p) {
+  if (!p.floored) p = new Vec3(p.x, p.y, p.z)
   const b = bot.blockAt(p)
   return !!b && (onSurface(p, b) || cellKnown(p))
 }

@@ -16,8 +16,10 @@ const NOON = 6000
 const MIDNIGHT = 18000
 
 // Stone opened where open(x, y, z), ores keyed 'x,y,z', light by (x, z), the body at x = at, z = 0.
+// blockAt takes a Vec3 and floors it, as prismarine-world does.
 function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay = NOON }) {
-  const blockAt = (p) => {
+  const blockAt = (pos) => {
+    const p = pos.floored()
     const name = ores[ck(p.x, p.y, p.z)] || (open(p.x, p.y, p.z) ? 'air' : 'stone')
     const air = name === 'air'
     return { name, type: IDS[name], boundingBox: air ? 'empty' : 'block', position: new Vec3(p.x, p.y, p.z), light: air ? light(p.x, p.z) : 0, skyLight: air ? skyLight(p.x, p.z) : 0 }
