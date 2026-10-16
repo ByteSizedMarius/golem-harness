@@ -912,6 +912,45 @@ function buildVerbEnv (bot, over = {}) {
   }
 }
 
+// ---- dig fakes ----
+
+// Runs a dig job route for a body at (0, 64, 0) in dark stone and returns its result with the cells it dug and filled.
+async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, known = [] } = {}) {
+  const key = (p) => `${p.x},${p.y},${p.z}`
+  const open = new Set(air)
+  const nameAt = (p) => (open.has(key(p)) ? 'air' : blocks[key(p)] || 'stone')
+  const dug = []
+  const fills = []
+  const bot = {
+    entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 },
+    inventory: { emptySlotCount: () => 30 },
+    blockAt: (p) => {
+      const name = nameAt(p)
+      return { name, boundingBox: ['air', 'lava', 'water'].includes(name) ? 'empty' : 'block', position: p, skyLight: 0 }
+    },
+    async dig (b) { dug.push(key(b.position)); open.add(key(b.position)) }
+  }
+  const NEIGHBOURS = botConstant('NEIGHBOURS')
+  let job = null
+  await awaitRoute(route, query, {
+    bot,
+    require,
+    bunker: { building: false },
+    jobs: { start: (name, fn) => { job = fn({ cancelled: false, progress () {} }); return { id: 1 } } },
+    emitEvent () {},
+    refuseWhileBuilding () {},
+    equipPickFor: async () => {},
+    fillFrom: async (cell) => { fills.push(key(cell)); return null },
+    macroPlaceAt: async () => ({}),
+    nudgeInto: async (cell) => { bot.entity.position = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5); return true },
+    NEIGHBOURS,
+    cellKnown: (p) => known.includes(key(p)),
+    knownCell: (p) => known.includes(key(p)),
+    seesLit: (p) => NEIGHBOURS.some(([dx, dy, dz]) => open.has(key(p.offset(dx, dy, dz))))
+  })
+  return { ...(await job), dug, fills }
+}
+
 module.exports = {
   ROOT, ALLOW, UNAUTHORIZED, UNAUTHORIZED_BODY, ILLEGAL, LONE_SURROGATE, HUNG, PORT, MCP_TOKEN,
   hmac, sha256, newNonce, otherKey, delay, waitFor, fakeClock, timed, proofOver,
@@ -924,5 +963,5 @@ module.exports = {
   botSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild,
-  buildVerbEnv
+  buildVerbEnv, digJob
 }

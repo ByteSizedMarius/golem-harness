@@ -5,6 +5,7 @@
 - Never dig the block under your own feet. It drops you into whatever is below: a cave, lava, a long fall. Dig into a face ahead of you or above. `gather` refuses targets more than about 2 below your feet, and with `digat` the rule is yours to keep.
 - `mine` gives up on a block it makes no progress toward for about 5 s, or after a minute, and its `reason` says `stalled` or `budget`. `tidy` stops the same way and keeps the rest queued.
 - A blocked route is your call: `dig_stair` or `dig_tunnel` on purpose, or another point.
+- `dig_tunnel` and `dig_stair` stop at lava or water they see ahead or a dig lays bare, and plug a hole onto lava with a filler block from your pockets. `dig_stair` also stops at gravel or sand in or over its passage.
 - A walk wedged for about 10 s gets the unstuck reflex: it replans, steps back, opens a door or jumps a step, and breaks the block in the way only when the same block is in your pockets to put back. When none of that frees you, it stops the walk and its event names where you are stuck, against what, and what it tried. Dig out yourself from there.
 - When something else holds the hand, `digat` puts a carried tool that harvests the block back in it, or refuses the dig.
 - A nearly broken tool raises a wear event.

@@ -7109,6 +7109,22 @@ async function fillFrom (cell) {
   return r.error ? `the block did not place (${r.error})` : 'nothing solid beside it to place against'
 }
 
+// Why a dig job stops after digging p (bared lava or water, or with falls a gravel or sand cap), or null.
+async function struckHazard (p, falls) {
+  for (const [dx, dy, dz] of NEIGHBOURS) {
+    const n = p.offset(dx, dy, dz)
+    const b = bot.blockAt(n)
+    const falling = falls && dy === 1 && !!b && /^(gravel|sand|red_sand)$/.test(b.name)
+    if (!b || !(falling || /lava|water/.test(b.name)) || !(bodyTouches(n) || seesLit(n, 8))) continue
+    const at = `${n.x},${n.y},${n.z}`
+    if (falling) return `${b.name} falling from ${at}, stopping`
+    if (!b.name.includes('lava')) return `struck ${b.name} at ${at}, stopping`
+    const why = await fillFrom(p)
+    return `struck ${b.name} at ${at}, ${why ? `the hole stays open, ${why}` : 'filled the hole back'}`
+  }
+  return null
+}
+
 // GET /dig_tunnel?dir=&length=&torch= : EXPLORE-TO-FIND mining. Drives a 1-wide x 2-high
 // corridor from where the bot stands — digs the wall directly AHEAD, steps in, repeats. This
 // is the HONEST way to mine into rock: it discovers ore by exposing it, and never routes to a
@@ -7144,9 +7160,9 @@ app.get('/dig_tunnel', async (req, res) => {
         if (job.cancelled) { stop = 'cancelled'; break }
         const base = bot.entity.position.floored()
         const ahead = base.offset(dx, 0, dz), aheadHead = ahead.offset(0, 1, 0), aheadFloor = ahead.offset(0, -1, 0)
-        // SAFETY: refuse to breach lava/water — scan what digging ahead would expose
+        // Known lava or water that digging ahead would lay bare.
         for (const p of [ahead.offset(dx, 0, dz), aheadHead.offset(dx, 0, dz), aheadFloor, aheadHead.offset(0, 1, 0)]) {
-          const hb = bot.blockAt(p); if (isHazard(hb)) { stop = `${hb.name} ahead — stopping short of it`; break }
+          const hb = bot.blockAt(p); if (isHazard(hb) && knownCell(p)) { stop = `${hb.name} ahead — stopping short of it`; break }
         }
         if (stop) break
         await equipPick()
@@ -7157,11 +7173,12 @@ app.get('/dig_tunnel', async (req, res) => {
           if (b.name.includes('ore')) note(b.name, p)
           await equipPick(b)
           try { await bot.dig(b); dug++ } catch (e) { stop = 'dig failed: ' + e.message.slice(0, 30); break }
+          stop = await struckHazard(p, false)
+          if (stop) break
         }
         if (stop) break
         const fb = bot.blockAt(aheadFloor)                    // keep a solid floor so we don't fall / breach a drop
         if (!fb || fb.boundingBox !== 'block') {
-          if (isHazard(fb)) { stop = `${fb.name} below — stopping`; break }
           const why = await fillFrom(aheadFloor)
           if (why) { stop = `gap in floor, ${why}`; break }
           await equipPick()
@@ -7170,8 +7187,9 @@ app.get('/dig_tunnel', async (req, res) => {
         const here = bot.entity.position.floored()            // grab ore now exposed in the corridor walls (adjacent, fair)
         for (const [ox, oz] of perp) for (const oy of [0, 1]) {
           const wb = bot.blockAt(here.offset(ox, oy, oz))
-          if (wb && wb.name.includes('ore')) { note(wb.name, here.offset(ox, oy, oz)); await equipPick(wb); try { await bot.dig(wb); dug++ } catch (e) {} }
+          if (!stop && wb && wb.name.includes('ore')) { note(wb.name, here.offset(ox, oy, oz)); await equipPick(wb); try { await bot.dig(wb); dug++ } catch (e) {} stop = await struckHazard(here.offset(ox, oy, oz), false) }
         }
+        if (stop) break
         if (torchEvery > 0 && step % torchEvery === 0) { await macroPlaceAt(Vec3, here.x - dx, here.y, here.z - dz, ['torch'], false); await equipPick() }
         if (bot.inventory.emptySlotCount() === 0) { stop = 'inventory full'; break }
         job.progress(`step ${step + 1}/${length}, dug ${dug}, ores ${JSON.stringify(found)}`)
@@ -7187,8 +7205,8 @@ app.get('/dig_tunnel', async (req, res) => {
 // GET /dig_stair?dir=&up=&steps=&torch= : mine an ASCENDING (up=1, default) or descending (up=-1)
 // staircase — the fair way to climb out of a deep cave without swimming a water elevator. Each
 // step digs the 2-high (3 for headroom going up) passage at the next diagonal position and steps
-// onto it. STOPS on any water/lava it would expose (never breach a flood) or gravel/sand (would
-// bury me); places a tread from andesite/cobble/dirt if the step is missing; torches the climb.
+// onto it. STOPS on water/lava it knows of or a dig lays bare, or gravel/sand falling into the
+// passage; places a tread from andesite/cobble/dirt if the step is missing; torches the climb.
 app.get('/dig_stair', async (req, res) => {
   try {
     if (bunker.building) return err(res, new Error(BUNKER_WALK))
@@ -7219,9 +7237,10 @@ app.get('/dig_stair', async (req, res) => {
         // block above my own head must be open or the jump hits it and the nudge stalls (the 07-11
         // "cannot climb: nudge stalled under a low ceiling" bug).
         const launch = up > 0 ? [new Vec3(b0.x, b0.y + 2, b0.z)] : []
-        // SAFETY: refuse to breach lava/water or dig under fall-blocks — scan what we'd expose
+        // Known lava, water or fall-blocks that this step would dig or lay bare.
         for (const p of [...launch, feet, head, above, new Vec3(nx + dx, ny, nz + dz), new Vec3(nx + dx, ny + 1, nz + dz)]) {
           const hb = bot.blockAt(p)
+          if (!knownCell(p) && !bodyTouches(p)) continue
           if (isHazard(hb)) { stop = `${hb.name} ahead — stopping short`; break }
           if (fally(hb)) { stop = `${hb.name} overhead — stopping (would bury me)`; break }
         }
@@ -7236,11 +7255,12 @@ app.get('/dig_stair', async (req, res) => {
           if (bb.name === 'bedrock') { stop = 'hit bedrock'; break }
           await equipPick(bb)
           try { await bot.dig(bb); dug++ } catch (e) { stop = 'dig failed: ' + e.message.slice(0, 26); break }
+          stop = await struckHazard(p, true)
+          if (stop) break
         }
         if (stop) break
         const tb = bot.blockAt(tread)                                      // need a tread to stand on
         if (!tb || tb.boundingBox !== 'block') {
-          if (isHazard(tb)) { stop = `${tb.name} at the step — stopping`; break }
           const why = await fillFrom(tread)
           if (why) { stop = `no step to stand on, ${why}`; break }
           await equipPick()
