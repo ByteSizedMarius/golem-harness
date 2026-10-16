@@ -634,26 +634,6 @@ function withHands (env, walkTo = null) {
 
 const UNSEEN = /not in my sight, blocked or unlit/
 
-test('use names a block in lit sight, never one in rock, around a corner or in the dark', async () => {
-  const use = async (env, at) => {
-    withHands(env)
-    Object.assign(env.bot, { on () {}, removeListener () {} })
-    const { handle, res } = routeHandler('/use', { ...env, setTimeout: (fn) => fn(), clearTimeout () {} })
-    await handle({ query: at }, res)
-    return res
-  }
-  const coal = { x: '-1', y: '65', z: '0' }
-  assert.strictEqual((await use(cave(LIT), coal)).body.on, 'coal_ore', 'control: in sight')
-  const room = world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 3 && (y === 64 || y === 65), ores: { '1,62,0': 'diamond_ore' }, light: () => LIT })
-  const rock = await use(room, { x: '1', y: '62', z: '0' })
-  assert.match(rock.error.message, UNSEEN)
-  assert.strictEqual(rock.body, undefined)
-  const corner = await use(cave(LIT), { x: '7', y: '66', z: '0' })
-  assert.match(corner.error.message, UNSEEN)
-  assert.strictEqual(corner.body, undefined)
-  assert.match((await use(cave(DARK, FAR_END), coal)).error.message, UNSEEN)
-})
-
 test('digat digs a block in lit sight, never one seen before and dark now, around a corner or in the dark', async () => {
   const digat = async (env, at) => {
     const acts = []

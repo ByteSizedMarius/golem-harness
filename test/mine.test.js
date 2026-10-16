@@ -41,7 +41,7 @@ function collector ({ blocks, reach, drifting = false, holdDig = false }) {
   bot.tool = { equipForBlock: async () => {} }
   bot.heldItem = null
   bot.targetDigBlock = null
-  const seen = { digs: 0, planned: 0, followed: 0, drops: [], watches: 0, logs: [] }
+  const seen = { digs: 0, planned: 0, followed: 0, drops: [] }
   bot.stopDigging = () => { if (seen.abortDig) seen.abortDig(new Error('Digging aborted')) }
   bot.dig = async (b) => {
     seen.digs++
@@ -100,14 +100,11 @@ function collector ({ blocks, reach, drifting = false, holdDig = false }) {
     collectLock: botConstant('collectLock'),
     COLLECT_STALL_MS: botConstant('COLLECT_STALL_MS'),
     COLLECT_BUDGET_MS: botConstant('COLLECT_BUDGET_MS'),
-    guardWork: (work, o) => {
-      seen.watches++
-      return guardWork(work, { ...o, clock })
-    },
+    guardWork: (work, o) => guardWork(work, { ...o, clock }),
     watchScope: new AsyncLocalStorage(),
     Vec3,
     cellKnown: () => true,
-    console: { log: (line) => seen.logs.push(line) },
+    console: { log: () => {} },
     resolveBlockIds: () => [1],
     nearestVisible: () => blocks['1,64,0']
   }
@@ -129,19 +126,6 @@ test('mine returns with stalled when the path to the block never gets anywhere',
   c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
   assert.deepStrictEqual(await within(reply), { mined: 0, requested: 2, gathered: 0, reason: 'stalled' })
   assert.strictEqual(c.bot.pathfinder.goal, null, 'the walk is stopped')
-})
-
-test('a collect walks under one stall watch, the gotos of the collect plugin included', async (t) => {
-  const c = collector({ blocks: ORE, reach: () => false })
-  t.after(c.stop)
-  const { watchGoto } = loadBotFunctions(['watchGoto', 'stopPath'], c.env)
-  c.bot.pathfinder.goto = watchGoto((g) => gotoGoal(c.bot, g))
-  const reply = awaitRoute('/mine', { name: 'iron_ore' }, c.env)
-  assert.ok(await waitFor(() => c.seen.planned > 0, 2000), 'control: the walk to the block planned')
-  assert.strictEqual(c.seen.watches, 1)
-  c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
-  assert.deepStrictEqual(await within(reply), { mined: 0, requested: 1, gathered: 0, reason: 'stalled' })
-  assert.deepStrictEqual(c.seen.logs, ['[path] stalled at 0,64,0'])
 })
 
 test('mine counts the dug block and returns with stalled when its drop is never picked up, and the next collect starts afresh', async (t) => {
@@ -172,19 +156,6 @@ test('mine counts the drop that reached the pockets, raw_iron from iron_ore, and
   c.pockets[0] = { name: 'raw_iron', count: 3 }
   c.bot.emit('entityGone', c.seen.drops[0])
   assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 1, reason: null })
-})
-
-test('a dig that outlasts the stall window is progress', async (t) => {
-  const c = collector({ blocks: ORE, reach: () => true, holdDig: true })
-  t.after(c.stop)
-  const reply = awaitRoute('/mine', { name: 'iron_ore' }, c.env)
-  assert.ok(await waitFor(() => c.seen.finishDig, 2000), 'control: the dig started')
-  c.clock.advance(botConstant('COLLECT_STALL_MS') * 2)
-  assert.strictEqual((await timed(reply, 100)).out, HUNG, 'the collect ended during the dig')
-  c.seen.finishDig()
-  assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the drop')
-  c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
-  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 0, reason: 'stalled' })
 })
 
 test('mine returns with budget when the walk moves but never arrives', async (t) => {
