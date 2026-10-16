@@ -6412,12 +6412,22 @@ async function jumpPlace (below, item, own = false) {
 
 app.get('/pillar', async (req, res) => {
   try {
-    const height = Math.min(16, Math.max(1, parseInt(req.query.height || '3')))
+    const asked = Math.min(16, Math.max(1, parseInt(req.query.height || '3')))
+    const up = pillarHeight(asked)
+    const carried = fillers().reduce((n, i) => n + i.count, 0)
+    // A pit's rim would read as ground the pillar has to clear.
+    const head = bot.entity.position.floored().offset(0, 1, 0)
+    const inPit = [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => {
+      const p = head.offset(dx, 0, dz)
+      const b = bot.blockAt(p)
+      return !!b && b.boundingBox === 'block' && knownCell(p)
+    })
+    const height = inPit ? asked : Math.max(asked, Math.min(up.height, BUNKER_MAX_HEIGHT, carried))
     let placed = 0
     const y0 = Math.floor(bot.entity.position.y)
     const done = (body) => {
       if (placed) perch.cell = bot.entity.position.floored()
-      ok(res, body)
+      ok(res, height > asked ? { ...body, raised: `from ${asked} to ${height}, ${up.why}` } : body)
     }
     for (let i = 0; i < height; i++) {
       if (bunker.building) return err(res, new Error(BUNKER_WALK))
@@ -6438,6 +6448,7 @@ app.get('/pillar', async (req, res) => {
 // a shell on top: a ledge ring under the body, two rings of wall beside it and a roof. The body
 // stays inside until the pilot digs out.
 const BUNKER_HEIGHT = 3
+const BUNKER_MAX_HEIGHT = 6
 // The health below which the bunker reflex fires, and the health at which it re-arms.
 const BUNKER_HP = 8
 const BUNKER_REARM_HP = 12
@@ -6507,18 +6518,24 @@ function digInProblem () {
       if (!side || /water|lava/.test(side.name)) return `${side ? side.name : 'an unloaded block'} beside the body`
     }
   }
+  // Unknown cells are left to digIn, which judges each one once the body stands on it.
+  const known = (p) => knownCell(p) || bodyTouches(p)
   for (let dy = -1; dy >= -3; dy--) {
-    const b = bot.blockAt(o.offset(0, dy, 0))
-    if (!b || !BUNKER_GROUND.test(b.name)) return `${b ? b.name : 'unloaded ground'} ${-dy} below is not natural ground`
-    if (digMs(b) > BUNKER_DIG_MS) return `${b.name} ${-dy} below digs too slowly`
+    const p = o.offset(0, dy, 0)
+    const b = bot.blockAt(p)
+    if (known(p) && !BUNKER_GROUND.test(b.name)) return `${b.name} ${-dy} below is not natural ground`
+    if (known(p) && digMs(b) > BUNKER_DIG_MS) return `${b.name} ${-dy} below digs too slowly`
     for (const [dx, dz] of SIDES) {
       const side = bot.blockAt(o.offset(dx, dy, dz))
-      if (!side || /water|lava/.test(side.name)) return `${side ? side.name : 'unloaded ground'} beside the shaft`
+      if (!side) return 'unloaded ground beside the shaft'
+      if (!known(side.position)) continue
+      if (/water|lava/.test(side.name)) return `${side.name} beside the shaft`
       if (dy < -1 && !solidAt(side.position)) return `an opening beside the shaft ${-dy} below`
     }
   }
-  if (!solidAt(o.offset(0, -4, 0))) return 'no solid floor 4 below'
-  if (!SIDES.some(([dx, dz]) => solidAt(o.offset(dx, -1, dz)))) return 'nothing beside the shaft to hold a cap'
+  const floor = o.offset(0, -4, 0)
+  if (known(floor) && !solidAt(floor)) return 'no solid floor 4 below'
+  if (!SIDES.some(([dx, dz]) => known(o.offset(dx, -1, dz)) && solidAt(o.offset(dx, -1, dz)))) return 'nothing beside the shaft to hold a cap'
   if (!fillers().length) return 'no blocks for the cap'
   return null
 }
@@ -6533,28 +6550,48 @@ function buildStop () {
   return bunker.stop === 'hit while building' && outOfReach() ? null : bunker.stop
 }
 
-// Digs the three cells under the feet, dropping into each, and caps the shaft over the head.
+// Digs up to three cells down, judging each one only once the body stands on it.
 async function digIn () {
   const o = bot.entity.position.floored()
-  const cap = o.offset(0, -1, 0)
+  const ground = (b) => /water|lava/.test(b.name) ? `${b.name} under the feet`
+    : !solidAt(b.position) ? 'an opening under the feet'
+      : !BUNKER_GROUND.test(b.name) ? `${b.name} under the feet is not natural ground`
+        : digMs(b) > BUNKER_DIG_MS ? `${b.name} under the feet digs too slowly` : null
   let dug = 0
+  let placed = 0
+  let ended = null
   for (let dy = -1; dy >= -3; dy--) {
-    if (buildStop()) return { at: bot.entity.position.floored(), dug, placed: 0, stopped: buildStop() }
+    if (buildStop()) return { at: bot.entity.position.floored(), dug, placed, stopped: buildStop() }
     const b = bot.blockAt(o.offset(0, dy, 0))
+    ended = ground(b)
+    if (ended) break
     await equipPickFor(b.name)
     await bot.dig(b)
     dug++
     const landed = () => bot.entity.onGround && Math.floor(bot.entity.position.y + 0.01) <= o.y + dy
     for (let i = 0; i < 20 && !landed(); i++) await bot.waitForTicks(1)
-    if (!landed()) return { at: bot.entity.position.floored(), dug, placed: 0, stopped: 'the body did not drop into the shaft' }
+    if (!landed()) return { at: bot.entity.position.floored(), dug, placed, stopped: 'the body did not drop into the shaft' }
+    if (Math.floor(bot.entity.position.y + 0.01) < o.y + dy) return { at: bot.entity.position.floored(), dug, placed, stopped: 'the body fell through an opening under the shaft' }
     bunker.reached = dug
+    const wet = SIDES.flatMap(([dx, dz]) => [0, 1].map((h) => bot.blockAt(o.offset(dx, dy + h, dz)))).filter((s) => s && /water|lava/.test(s.name))
+    for (const s of wet) if ((await placeFiller(s.position)) === 'placed') placed++
+    if (wet.length) { ended = `${wet[0].name} beside the body`; break }
   }
-  const at = o.offset(0, -3, 0)
-  if (buildStop()) return { at, dug, placed: 0, stopped: buildStop() }
+  const at = o.offset(0, -dug, 0)
+  if (buildStop()) return { at, dug, placed, stopped: buildStop() }
+  if (dug < SHELTER.SAFE_DEPTH) return { at, dug, placed, stopped: ended }
   bunker.cell = at
-  const placed = (await placeFiller(cap)) === 'placed' ? 1 : 0
-  const shell = [cap, o.offset(0, -4, 0), ...SIDES.flatMap(([dx, dz]) => [o.offset(dx, -2, dz), o.offset(dx, -3, dz)])]
-  return { at, dug, placed, gaps: shell.filter(c => !solidAt(c)), exit: [cap].filter(solidAt) }
+  const walls = SIDES.flatMap(([dx, dz]) => [at.offset(dx, 0, dz), at.offset(dx, 1, dz)])
+  for (const c of walls) if (!solidAt(c) && (await placeFiller(c)) === 'placed') placed++
+  const cap = at.offset(0, 2, 0)
+  let capped = await placeFiller(cap)
+  // A cap with nothing solid beside it goes against a prop set on the shaft's rim.
+  if (capped === null) {
+    const prop = SIDES.map(([dx, dz]) => cap.offset(dx, 0, dz)).find((c) => solidAt(c.offset(0, -1, 0)))
+    if (prop && (await placeFiller(prop)) === 'placed') { placed++; capped = await placeFiller(cap) }
+  }
+  if (capped === 'placed') placed++
+  return { at, dug, placed, gaps: [cap, at.offset(0, -1, 0), ...walls].filter(c => !solidAt(c)), exit: [cap].filter(solidAt), ...(ended && { ended }) }
 }
 
 // Why "up" cannot pillar height blocks where the body stands, or null.
@@ -6577,6 +6614,27 @@ function pillarProblem (height) {
   const blocks = fillers().reduce((n, i) => n + i.count, 0)
   if (blocks < height) return `${blocks} blocks carried, the pillar takes ${height}`
   return null
+}
+
+const PILLAR_SCAN_UP = 16
+// The bunker's pillar height { height, safe, why }, safe clearing the highest seen standable ground within 3 blocks.
+function pillarHeight (minHeight) {
+  const o = bot.entity.position.floored()
+  const clear = (p) => { const b = bot.blockAt(p); return !!b && b.boundingBox === 'empty' }
+  let top = 0
+  for (let dx = -3; dx <= 3; dx++) {
+    for (let dz = -3; dz <= 3; dz++) {
+      if ((!dx && !dz) || Math.hypot(dx, dz) > 3) continue
+      for (let dy = PILLAR_SCAN_UP; dy > top; dy--) {
+        const feet = o.offset(dx, dy, dz)
+        const floor = feet.offset(0, -1, 0)
+        if (solidAt(floor) && clear(feet) && clear(feet.offset(0, 1, 0)) && knownCell(floor) && knownCell(feet)) { top = dy; break }
+      }
+    }
+  }
+  const safe = top + SHELTER.SAFE_HEIGHT
+  const ground = top ? `seen ground ${top} above the feet within 3 blocks` : 'no seen ground above the feet within 3 blocks'
+  return { height: Math.max(minHeight, safe), safe, why: `${ground}, out of reach from ${safe} up` }
 }
 
 // Pillars height blocks and builds the shell around the body on top.
@@ -6651,11 +6709,15 @@ function shelterInputs (requested, height = BUNKER_HEIGHT) {
   }
   threats.sort((a, b) => a.dist - b.dist)
   const liquid = liquidProblem()
-  const problems = { down: liquid || digInProblem(), up: liquid || pillarProblem(height) }
+  const up = pillarHeight(height)
+  const tall = up.height > BUNKER_MAX_HEIGHT && `the pillar takes ${up.height}, more than ${BUNKER_MAX_HEIGHT}`
+  const problems = { down: liquid || digInProblem(), up: liquid || tall || pillarProblem(up.height) }
+  if (problems.up && !liquid && up.height > height) problems.up += ` (${up.why})`
   const shaft = []
   for (let dy = 1; dy <= SHELTER.SAFE_DEPTH; dy++) shaft.push(bot.blockAt(here.floored().offset(0, -dy, 0)))
-  const buildMs = { down: problems.down === null ? downBuildMs(shaft.map(digMs)) : Infinity, up: upBuildMs() }
-  return { requested, threats, problems, buildMs }
+  const cellMs = (b) => (bodyTouches(b.position) || knownCell(b.position) ? digMs(b) : BUNKER_DIG_MS)
+  const buildMs = { down: problems.down === null ? downBuildMs(shaft.map(cellMs)) : Infinity, up: upBuildMs(up.safe) }
+  return { requested, threats, problems, buildMs, up }
 }
 
 // A mob's hit after the pick and before the body is out of reach stops the build. An arrow does not
@@ -6741,14 +6803,18 @@ async function buildBunker (mode, height) {
     for (let i = 0; i < 60 && combat.active; i++) await bot.waitForTicks(1)
     // A down pick centres the body and picks again. Nothing waits between the last pick and the build.
     let pick = null
+    let input = null
     for (const centre of [false, true]) {
       const centred = !centre || await centerOnCell()
       if (BUNKER_HALTS.includes(bunker.stop)) return halted()
-      const input = shelterInputs(mode, height)
+      input = shelterInputs(mode, height)
       if (!centred) input.problems.down = 'cannot stand in the middle of the cell'
       pick = chooseShelter(input)
       if (pick.mode !== 'down') break
     }
+    height = input.up.height
+    const { down, up } = input.problems
+    console.log(`[bunker] ${pick.mode ? `mode ${pick.mode}` : `refused: ${pick.refuse}`}, pillar height ${height}, ${input.up.why}, down ${down || 'buildable'}, up ${up || 'buildable'}`)
     if (pick.refuse) return { error: `no bunker possible here (${pick.refuse})` }
     bunker.mode = pick.mode
     r = pick.mode === 'down' ? await digIn() : await pillarShell(height)
@@ -6762,7 +6828,8 @@ async function buildBunker (mode, height) {
       ...(pick.mode === 'up' && { height }),
       gaps: (r.gaps || []).map(xyz),
       exit: (r.exit || []).map(xyz),
-      stopped: r.stopped
+      stopped: r.stopped,
+      ...(r.ended && { ended: r.ended })
     }
   } catch (e) {
     if (BUNKER_HALTS.includes(bunker.stop)) return halted()

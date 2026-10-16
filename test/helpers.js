@@ -683,6 +683,7 @@ function shelterEnv (entities, confirmed, ages = {}) {
     CONFIRMED_HORIZON: botConstant('CONFIRMED_HORIZON'),
     CONFIRMED_MS: botConstant('CONFIRMED_MS'),
     BUNKER_HEIGHT: 3,
+    BUNKER_MAX_HEIGHT: botConstant('BUNKER_MAX_HEIGHT'),
     mobClass: (e) => e.cls,
     mcData: null,
     losClear: () => false,
@@ -691,7 +692,10 @@ function shelterEnv (entities, confirmed, ages = {}) {
     liquidProblem: () => null,
     digInProblem: () => null,
     pillarProblem: () => null,
+    pillarHeight: (height) => ({ height, safe: shelter.SHELTER.SAFE_HEIGHT, why: 'flat ground' }),
     digMs: () => 800,
+    knownCell: () => true,
+    BUNKER_DIG_MS: botConstant('BUNKER_DIG_MS'),
     downBuildMs: shelter.downBuildMs,
     upBuildMs: shelter.upBuildMs
   }
@@ -725,6 +729,7 @@ const threat = (name, dist) => ({ name, baby: false, dist })
 // scenes answer shelterInputs in call order, the last one repeating.
 function buildHarness ({ scenes = [{}], centred = true } = {}) {
   const log = []
+  const lines = []
   const combat = { name: 'combat', active: false, _fleeUntil: 0, _coverUntil: 0 }
   const bunker = { building: false, stop: null, cell: null, mode: null, reached: 0 }
   let asked = 0
@@ -737,6 +742,7 @@ function buildHarness ({ scenes = [{}], centred = true } = {}) {
     BUNKER_HALTS: botConstant('BUNKER_HALTS'),
     bunkerSummary: shelter.bunkerSummary,
     mobClass,
+    console: { log: (line) => lines.push(line) },
     bot: Object.assign(new EventEmitter(), {
       pathfinder: { setGoal () {}, goto: async () => {}, setMovements () {} },
       clearControlStates () {},
@@ -750,11 +756,12 @@ function buildHarness ({ scenes = [{}], centred = true } = {}) {
     digInProblem: () => (scene().problems && scene().problems.down) || null,
     xyz: (v) => ({ x: v.x, y: v.y, z: v.z }),
     async centerOnCell () { log.push('centerOnCell'); return centred },
-    shelterInputs (requested) {
+    shelterInputs (requested, height) {
       log.push('shelterInputs')
       const s = scene()
       asked++
-      return { requested, threats: s.threats || [], problems: { down: null, up: null, ...s.problems }, buildMs: { down: 2930, up: 1300 } }
+      const up = { height, safe: shelter.SHELTER.SAFE_HEIGHT, why: 'flat ground' }
+      return { requested, threats: s.threats || [], problems: { down: null, up: null, ...s.problems }, buildMs: { down: 2930, up: 1300 }, up }
     },
     chooseShelter (input) {
       const r = shelter.chooseShelter(input)
@@ -775,7 +782,7 @@ function buildHarness ({ scenes = [{}], centred = true } = {}) {
     }
   }
   const ctx = loadBotFunctions(['buildBunker', 'onBuildHit', 'bunkerHolds'], env)
-  return { ctx, env, log, combat, bunker }
+  return { ctx, env, log, lines, combat, bunker }
 }
 
 // Each halt as it arrives: the pilot's stop through /stop, a death through the death event.
@@ -786,17 +793,22 @@ const halt = {
 const HALT_REASONS = Object.keys(halt)
 
 // When during[k] returns false, the body does not drop into the k-th dug cell (0-based).
-function digHarness (during = {}, bunker = { building: true, stop: null, cell: null, mode: 'down', reached: 0 }) {
+function digHarness (during = {}, bunker = { building: true, stop: null, cell: null, mode: 'down', reached: 0 }, open = []) {
   const entity = { position: new Vec3(0.5, 64, 0.5), onGround: true }
+  const air = new Set(open)
+  const isOpen = (p) => air.has(`${p.x},${p.y},${p.z}`)
   let digs = 0
   const env = {
     bunker,
     SHELTER: shelter.SHELTER,
     SIDES,
+    BUNKER_GROUND: botConstant('BUNKER_GROUND'),
+    BUNKER_DIG_MS: botConstant('BUNKER_DIG_MS'),
+    digMs: () => 750,
     mobClass,
     bot: {
       entity,
-      blockAt: (p) => ({ name: 'dirt', position: p }),
+      blockAt: (p) => ({ name: isOpen(p) ? 'air' : 'dirt', position: p }),
       async dig (b) {
         const k = digs++
         if (during[k] && during[k](ctx) === false) return
@@ -806,7 +818,7 @@ function digHarness (during = {}, bunker = { building: true, stop: null, cell: n
     },
     equipPickFor: async () => {},
     placeFiller: async () => 'placed',
-    solidAt: () => true
+    solidAt: (p) => !isOpen(p)
   }
   const ctx = loadBotFunctions(['digIn', 'onBuildHit'], env)
   return { ctx, bunker }
@@ -914,6 +926,26 @@ function buildVerbEnv (bot, over = {}) {
 
 // ---- dig fakes ----
 
+// digInProblem for a body on the ground at (0, 64, 0), with air from y 64 up and in caves, dirt elsewhere.
+function digInProblemWith ({ caves = [], known = (p) => p.y >= 63 } = {}) {
+  const open = new Set(caves)
+  const isOpen = (p) => p.y >= 64 || open.has(`${p.x},${p.y},${p.z}`)
+  const env = {
+    bot: {
+      entity: { position: new Vec3(0.5, 64, 0.5), onGround: true },
+      blockAt: (p) => ({ name: isOpen(p) ? 'air' : 'dirt', boundingBox: isOpen(p) ? 'empty' : 'block', position: p })
+    },
+    SIDES,
+    BUNKER_GROUND: botConstant('BUNKER_GROUND'),
+    BUNKER_DIG_MS: botConstant('BUNKER_DIG_MS'),
+    solidAt: (p) => !isOpen(p),
+    digMs: () => 750,
+    knownCell: known,
+    fillers: () => [{ name: 'dirt', count: 64 }]
+  }
+  return loadBotFunctions(['digInProblem'], env).digInProblem()
+}
+
 // Runs a dig job route for a body at (0, 64, 0) in dark stone and returns its result with the cells it dug and filled.
 async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, known = [] } = {}) {
   const key = (p) => `${p.x},${p.y},${p.z}`
@@ -963,5 +995,5 @@ module.exports = {
   botSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild,
-  buildVerbEnv, digJob
+  buildVerbEnv, digInProblemWith, digJob
 }

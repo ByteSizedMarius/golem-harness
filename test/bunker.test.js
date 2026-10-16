@@ -5,8 +5,9 @@ const { Vec3 } = require('vec3')
 const shelter = require('../lib/shelter')
 const { QUIET_MS } = require('../lib/legs')
 const {
-  botConstant, loadBotFunctions, HERE, shelterInputsAmong, pillarProblemWith, column,
-  BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild
+  botConstant, loadBotFunctions, HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
+  BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, digInProblemWith,
+  awaitRoute
 } = require('./helpers')
 
 const mobClass = (e) => e.cls
@@ -275,6 +276,24 @@ test('a hit once the pillar reaches safe height does not stop the shell, a stop 
   assert.strictEqual(r.placed, SAFE_HEIGHT + 1, 'placed')
 })
 
+test('a dig that opens onto a cave caps the shaft from 2 deep naming only the cell under the feet, and stops shallower', async () => {
+  // The body digs from y 64. The cave starts 3 below the feet, under the second dug cell.
+  let h = buildHarness()
+  h.env.digIn = digHarness({}, h.bunker, ['0,61,0', '0,60,0', '1,61,0', '1,60,0', '-1,61,0']).ctx.digIn
+  let r = await h.ctx.buildBunker('auto', 3)
+  assert.strictEqual(r.stopped, undefined, `control: the 2-deep shaft stands, got ${JSON.stringify(r)}`)
+  assert.ok(h.bunker.cell, 'the 2-deep shaft set no cell')
+  assert.deepStrictEqual(JSON.parse(JSON.stringify({ dug: r.dug, at: r.at, exit: r.exit, gaps: r.gaps })), { dug: 2, at: { x: 0, y: 62, z: 0 }, exit: [{ x: 0, y: 64, z: 0 }], gaps: [{ x: 0, y: 61, z: 0 }] })
+  assert.strictEqual(shelter.bunkerSummary(r), 'dug in 2 below ground at (0,62,0), dig stopped (an opening under the feet), 1 gap in the shell. To leave, dig (0,64,0), then pillar up 2.')
+
+  h = buildHarness()
+  h.env.digIn = digHarness({}, h.bunker, ['0,62,0', '0,61,0']).ctx.digIn
+  r = await h.ctx.buildBunker('auto', 3)
+  assert.strictEqual(shelter.bunkerSummary(r), 'dug 1 of 3 cells at (0,63,0), an opening under the feet')
+  assert.strictEqual(h.bunker.cell, null, 'a 1-deep stop kept its cell')
+  assert.strictEqual((await actAfter(r)).length, 1, 'the body stays in a 1-deep hole')
+})
+
 // ---- shelterInputs ----
 
 test('a mob out of sight counts as a bunker threat only after it hit the body', () => {
@@ -293,6 +312,7 @@ test('a mob out of sight counts as a bunker threat only after it hit the body', 
   const pick = shelter.chooseShelter(input)
   assert.strictEqual(pick.mode, 'up', `the pick refused: ${pick.refuse}`)
 })
+
 
 test('a mob that hit the body counts as a bunker threat out to a farther horizon than one that did not', () => {
   const near = shelter.SHELTER.HORIZON
@@ -346,6 +366,55 @@ test('the bunker reflex waits 15 s after fleeing a player', () => {
   assert.strictEqual(bunkerDecider('player', 16000), 'build', 'a flee from a player 16 s ago')
 })
 
+// ---- digInProblem ----
+
+test('a dig-in over unseen ground holds against a spider, counts the slowest dig there and names no unseen cave', () => {
+  const cave = ['1,62,0', '1,61,0', '0,60,0']
+  assert.match(String(digInProblemWith({ caves: cave, known: () => true })), /opening/, 'control: a cave the bot has seen')
+  const unseen = digInProblemWith({ caves: cave })
+  assert.strictEqual(unseen, null, `refused over unseen ground: ${unseen}`)
+
+  // The bot knows the surface, y 63 and up. Stone digs slower than dirt.
+  const downMs = (deep) => {
+    const { env } = shelterEnv({}, [])
+    Object.assign(env, {
+      bot: { ...env.bot, blockAt: (p) => ({ name: p.y < 63 ? deep : 'dirt', position: p }) },
+      knownCell: (p) => p.y >= 63,
+      digMs: (b) => (b.name === 'stone' ? 1200 : 750)
+    })
+    return loadBotFunctions(['shelterInputs'], env).shelterInputs('auto').buildMs.down
+  }
+  assert.strictEqual(downMs('stone'), downMs('dirt'), 'the dig time tells unseen stone from dirt')
+  const pick = shelter.chooseShelter({ requested: 'auto', threats: [spider(30)], problems: { down: unseen, up: null }, buildMs: { down: downMs('dirt'), up: 1300 } })
+  assert.strictEqual(pick.mode, 'down', `no dig-in against a spider: ${JSON.stringify(pick)}`)
+})
+
+// digInProblem for a body on dirt at (0, 64, 0) with liquid at cell, which the bot knows only when known.
+function digInBeside (cell, liquid, known) {
+  const key = (p) => `${p.x},${p.y},${p.z}`
+  const isOpen = (p) => p.y >= 64 || key(p) === cell
+  const env = {
+    bot: {
+      entity: { position: new Vec3(0.5, 64, 0.5), onGround: true },
+      blockAt: (p) => ({ name: key(p) === cell ? liquid : isOpen(p) ? 'air' : 'dirt', boundingBox: isOpen(p) ? 'empty' : 'block', position: p })
+    },
+    SIDES: botConstant('SIDES'),
+    BUNKER_GROUND: botConstant('BUNKER_GROUND'),
+    BUNKER_DIG_MS: botConstant('BUNKER_DIG_MS'),
+    solidAt: (p) => !isOpen(p),
+    digMs: () => 750,
+    knownCell: (p) => key(p) === cell ? known : p.y >= 63,
+    fillers: () => [{ name: 'dirt', count: 64 }]
+  }
+  return loadBotFunctions(['digInProblem'], env).digInProblem()
+}
+
+test('a dig-in refuses water or lava beside the body or in seen ground beside the shaft, never for liquid it has not seen', () => {
+  assert.strictEqual(digInBeside('1,64,0', 'water', false), 'water beside the body')
+  assert.strictEqual(digInBeside('1,62,0', 'lava', true), 'lava beside the shaft')
+  assert.strictEqual(digInBeside('1,62,0', 'lava', false), null)
+})
+
 // ---- pillarProblem ----
 
 // On a 3-block pillar from y 64 the body's feet are at 67 and its head at 68.
@@ -354,6 +423,90 @@ test('a pillar is refused beside a ledge from which a mob reaches the body on to
   assert.strictEqual(pillarProblemWith(column(2, 0, 64, 65)), null, 'control: a ledge two columns away')
   assert.strictEqual(pillarProblemWith(column(1, 0, 64, 65)), 'a step beside the pillar', 'a 2-high ledge beside the pillar')
   assert.strictEqual(pillarProblemWith(column(0, -1, 64, 68)), 'a step beside the pillar', 'a mob one block over the head of the body on a 3-block pillar')
+})
+
+// ---- pillar height ----
+
+// Ground at y 63 and a hill 3 high over x 2 to 6, beside a body at (0, 64, 0).
+const hill = (p) => p.y < 64 || (p.x >= 2 && p.x <= 6 && Math.abs(p.z) <= 3 && p.y < 67)
+const dirtWhere = (solid) => (p) => ({ name: solid(p) ? 'dirt' : 'air', boundingBox: solid(p) ? 'block' : 'empty', position: p })
+
+function hillBuild (blocks) {
+  const { env } = shelterEnv({ 1: { id: 1, name: 'zombie', cls: 'hostile', position: HERE.offset(-30, 0, 0), seen: true } }, [])
+  delete env.pillarProblem
+  delete env.pillarHeight
+  Object.assign(env, {
+    bot: { ...env.bot, blockAt: dirtWhere(hill) },
+    solidAt: hill,
+    isSoftCover: () => false,
+    knownCell: () => true,
+    PILLAR_SCAN_UP: botConstant('PILLAR_SCAN_UP'),
+    fillers: () => [{ name: 'dirt', count: blocks }]
+  })
+  const { shelterInputs } = loadBotFunctions(['shelterInputs'], env)
+  const h = buildHarness()
+  h.env.shelterInputs = (requested, height) => { h.log.push('shelterInputs'); return shelterInputs(requested, height) }
+  return h
+}
+
+test('a pillar beside a hill rises at least 2 over the hilltop', async () => {
+  const h = hillBuild(64)
+  const r = await h.ctx.buildBunker('auto', 3)
+  assert.strictEqual(r.mode, 'up', `control: the zombie makes it a pillar, got ${JSON.stringify(r)}`)
+  assert.ok(64 + r.height >= 67 + 2, `the pillar top at ${64 + r.height} is in reach from the hilltop at 67`)
+  assert.strictEqual(h.lines.filter((l) => /^\[bunker\] mode up, pillar height 5\b/.test(l)).length, 1, `${h.lines}`)
+})
+
+test('the pillar verb beside a hill rises at least 2 over the hilltop and says why', async () => {
+  const climb = async (ground) => {
+    const entity = { position: new Vec3(0.5, 64, 0.5) }
+    const solid = (p) => ground(p) || (p.x === 0 && p.z === 0 && p.y < entity.position.y)
+    return awaitRoute('/pillar', { height: '3' }, {
+      bot: { entity, blockAt: dirtWhere(solid) },
+      bunker: { building: false },
+      perch: { cell: null },
+      fillers: () => [{ name: 'dirt', count: 64 }],
+      jumpPlace: async () => { entity.position = entity.position.offset(0, 1, 0); return true },
+      solidAt: solid,
+      knownCell: () => true,
+      SHELTER: shelter.SHELTER,
+      PILLAR_SCAN_UP: botConstant('PILLAR_SCAN_UP'),
+      BUNKER_MAX_HEIGHT: botConstant('BUNKER_MAX_HEIGHT')
+    })
+  }
+  const flat = await climb((p) => p.y < 64)
+  assert.deepStrictEqual(flat, { placed: 3, rose: 3, y: 67 }, 'control: flat ground')
+  const r = await climb(hill)
+  assert.ok(r.y >= 67 + 2, `the pillar top at ${r.y} is in reach from the hilltop at 67`)
+  assert.match(String(r.raised), /^from 3 to 5, seen ground 3 above the feet\b/)
+})
+
+test('the pillar verb at the bottom of a shaft climbs out level instead of rising over the rim', async () => {
+  // Ground to y 63 with a 2-deep shaft at x 0, z 0, the body at its bottom.
+  const entity = { position: new Vec3(0.5, 62, 0.5) }
+  const ground = (p) => p.y < 62 || (p.y < 64 && (p.x !== 0 || p.z !== 0))
+  const solid = (p) => ground(p) || (p.x === 0 && p.z === 0 && p.y < entity.position.y)
+  const r = await awaitRoute('/pillar', { height: '2' }, {
+    bot: { entity, blockAt: dirtWhere(solid) },
+    bunker: { building: false },
+    perch: { cell: null },
+    fillers: () => [{ name: 'dirt', count: 64 }],
+    jumpPlace: async () => { entity.position = entity.position.offset(0, 1, 0); return true },
+    solidAt: solid,
+    knownCell: () => true,
+    SHELTER: shelter.SHELTER,
+    PILLAR_SCAN_UP: botConstant('PILLAR_SCAN_UP'),
+    BUNKER_MAX_HEIGHT: botConstant('BUNKER_MAX_HEIGHT')
+  })
+  assert.deepStrictEqual(r, { placed: 2, rose: 2, y: 64 })
+})
+
+test('with too few blocks for the height a hill needs the bunker refuses the pillar', async () => {
+  const h = hillBuild(4)
+  const r = await h.ctx.buildBunker('auto', 3)
+  assert.match(String(r.error), /4 blocks carried, the pillar takes 5 \(seen ground 3 above/, `got ${JSON.stringify(r)}`)
+  assert.ok(!h.log.includes('pillarShell'), `built a pillar: ${h.log}`)
+  assert.strictEqual((await actAfter(r)).length, 1, 'the body does not flee')
 })
 
 test('the bunker reflex flees after a failed build, naming what ended it, but not after a finished one', async () => {

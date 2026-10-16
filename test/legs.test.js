@@ -68,6 +68,9 @@ test('a pillar top holds the legs from every flee but an emergency at disengage 
     BUNKER_WALK: 'refused while a bunker is being built',
     perch: { cell: null },
     fillers: () => [{ name: 'dirt', count: 64 }],
+    pillarHeight: (height) => ({ height, safe: 2, why: 'flat ground' }),
+    BUNKER_MAX_HEIGHT: 6,
+    knownCell: () => false,
     jumpPlace: async () => {
       entity.position = entity.position.offset(0, 1, 0)
       return true
