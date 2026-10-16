@@ -277,7 +277,7 @@ this project is unaffiliated fan tooling in the long mineflayer tradition.
 
 4. **Give the model `DRIVING.md`** and let it call `boot`.
 
-The pilot sees 75 tools: 70 for perceiving and acting, each named after the bot route it calls
+The pilot sees 77 tools: 72 for perceiving and acting, each named after the bot route it calls
 (`goto` is `/goto`), plus `wait_events` (new chat, whispers and bot events), `papercut` (a note
 for the owner about what made playing harder, appended to the file `GOLEM_PAPERCUTS` names),
 `lesson` (something a future player should know, for the owner to fold into the manual, appended

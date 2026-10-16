@@ -212,6 +212,60 @@ test('a bow with no line of sight to its target leaves the sword block up', asyn
   assert.deepStrictEqual(await run(wall), { raises: 0, lowers: 0, swings: 0, fled: [], lines: [] })
 })
 
+test('a body 2 above a zombie strikes it at disengage health and never flees', async () => {
+  const perch = { perch: { cell: null }, perchStrike: undefined, ...REACH_RULE, PERCH_MELEE: botConstant('PERCH_MELEE'), PERCH_DROP: botConstant('PERCH_DROP') }
+  const ground = await standoff(open, zombie(2.5), { bot: { health: 6 }, env: perch })
+  assert.deepStrictEqual({ swings: ground.swings, fled: ground.fled }, { swings: 0, fled: ['emergency'] }, 'control: on the ground it flees')
+  const pillar = (p) => p.x === 0 && p.z === 0 && p.y < 66 ? 'stone' : null
+  const top = { entity: { position: new Vec3(0.5, 66, 0.5), onGround: true }, health: 6 }
+  const r = await standoff(pillar, zombie(1.5), { bot: top, env: perch })
+  assert.ok(r.swings > 0, 'no swing from the pillar top')
+  assert.deepStrictEqual(r.fled, [])
+})
+
+test('a body on its pillar top at disengage health strikes a zombie out of sight only where it last saw it below', async () => {
+  const perch = { perch: { cell: null }, perchStrike: undefined, ...REACH_RULE, PERCH_MELEE: botConstant('PERCH_MELEE'), PERCH_DROP: botConstant('PERCH_DROP'), entityPerceptible: () => false }
+  const pillar = (p) => p.x === 0 && p.z === 0 && p.y < 66 ? 'stone' : null
+  const top = () => ({ entity: { position: new Vec3(0.5, 66, 0.5), onGround: true }, health: 6 })
+  const never = await standoff(pillar, zombie(1.5), { bot: top(), env: perch })
+  assert.deepStrictEqual(never.fled, ['emergency'], 'a zombie never seen')
+  const below = await standoff(pillar, zombie(1.5), { bot: top(), env: perch, seenAt: new Vec3(1.5, 64, 0.5) })
+  assert.deepStrictEqual(below.fled, [], 'control: last seen below the pillar')
+})
+
+test('a body on its pillar top over a pack of three swings without a jump and keeps the perch', async () => {
+  const cell = new Vec3(0, 66, 0)
+  const perch = { cell }
+  const pack = [zombie(1.5), { ...zombie(-0.5), id: 8 }, { ...zombie(2.5), id: 9 }]
+  // A 1.7.10 jump off the pillar top at y 66.
+  const entity = { position: new Vec3(0.5, 66, 0.5), onGround: true }
+  let vy = 0
+  let jumps = 0
+  const top = {
+    entity,
+    health: 20,
+    setControlState (c, s) {
+      if (c !== 'jump' || !s || !entity.onGround) return
+      jumps++
+      vy = 0.42
+      entity.onGround = false
+    },
+    waitForTicks: async (n) => {
+      for (let i = 0; i < n && !entity.onGround; i++) {
+        const y = Math.max(66, entity.position.y + vy)
+        vy = (vy - 0.08) * 0.98
+        entity.position = new Vec3(0.5, y, 0.5)
+        entity.onGround = y === 66
+      }
+    }
+  }
+  const pillar = (p) => p.x === 0 && p.z === 0 && p.y < 66 ? 'stone' : null
+  const env = { perch, perchStrike: undefined, ...IN_REACH, PERCH_MELEE: botConstant('PERCH_MELEE'), PERCH_DROP: botConstant('PERCH_DROP'), nearHostiles: () => pack.map((e) => ({ e, at: e.position })), liveEntities: () => [] }
+  const r = await standoff(pillar, pack[0], { bot: top, env })
+  assert.ok(r.swings > 0, 'no swing from the pillar top')
+  assert.deepStrictEqual({ fled: r.fled, jumps, cell: perch.cell }, { fled: [], jumps: 0, cell })
+})
+
 test('the combat reflex swings at a zombie only once its look ray meets the hitbox within 3 of the eye', async () => {
   // The look ray from the eye at 65.62 to 1.2 above the zombie's feet meets the box 2.5 and 3.6 out.
   const near = await standoff(open, zombie(3.37), { env: REACH_RULE })
@@ -254,4 +308,52 @@ test('a creeper the body perceives behind a zombie in reach ends the melee and i
   const walled = await fight(false)
   assert.ok(walled.swings > 0, 'no swing at the zombie with the creeper behind a wall')
   assert.deepStrictEqual({ fled: walled.fled, picked: walled.picked }, { fled: [], picked: [] })
+})
+
+test('the vanguard reflex neither chases nor swings at a zombie that hit the body from behind a wall', async () => {
+  const wall = (p) => p.x === 2 && p.y >= 64 && p.y < 67 ? 'stone' : null
+  // The swings, chase goals, sprints and leg takings against a confirmed zombie x off, in sight or behind the wall.
+  const fight = async (seen, x, env = {}) => {
+    const chases = []
+    const legs = []
+    let sprints = 0
+    const z = zombie(x)
+    const entities = { 7: z }
+    const r = await standoff(seen ? open : wall, z, {
+      bot: {
+        entities,
+        pathfinder: { goal: null, isMoving: () => false, setGoal (g) { this.goal = g; if (g) chases.push(g) } },
+        // The zombie leaves after the first sprint opener, which waits on no timer.
+        setControlState (c, s) {
+          if (c !== 'sprint' || !s) return
+          sprints++
+          delete entities[7]
+        }
+      },
+      env: {
+        AGGRO_CONFIRMED: new Map([[7, { name: 'zombie', t: Date.now(), ranged: false }]]),
+        STANCES: { vanguard: { fleeDist: 12, bowBand: [7, 24], chase: true, engage: 'closers' } },
+        stance: 'vanguard',
+        entityPerceptible: () => seen,
+        takeLegs (reflex, why) { legs.push(why) },
+        runCells: pace.runCells,
+        RUN_COAST: pace.RUN_COAST,
+        RUN_TICKS: pace.RUN_TICKS,
+        ...env
+      }
+    })
+    return { swings: r.swings, chases: chases.length, sprints, legs }
+  }
+  const NONE = { swings: 0, chases: 0, sprints: 0, legs: [] }
+  // A walk to the zombie, then a 1.7.10 sprint opener.
+  for (const sprintBlock of [() => 'beyond 8', () => null]) {
+    const chased = await fight(true, 5.5, { sprintBlock })
+    assert.ok(chased.chases + chased.sprints > 0 && chased.legs.includes('chase'), `control: no chase in sight, ${JSON.stringify(chased)}`)
+    assert.deepStrictEqual(await fight(false, 5.5, { sprintBlock }), NONE, `a chase behind the wall, run ${sprintBlock()}`)
+  }
+  for (const legacy of [true, false]) {
+    const reach = { ...IN_REACH, LEGACY_1710: legacy, meleeAim: undefined, HITBOX_1710: pace.HITBOX_1710 }
+    assert.ok((await fight(true, 3.5, reach)).swings > 0, `control: no swing in sight, 1.7.10 ${legacy}`)
+    assert.deepStrictEqual(await fight(false, 3.5, reach), NONE, `a swing behind the wall, 1.7.10 ${legacy}`)
+  }
 })

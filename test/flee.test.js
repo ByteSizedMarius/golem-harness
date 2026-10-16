@@ -438,6 +438,7 @@ function creeperPass (w, at, hidden = null) {
     knownCell: () => true,
     entityPerceptible: (en) => en.seen,
     entityEngageable: () => true,
+    holdRun: { on: false },
     emitEvent () {}
   }
   loadBotFunctions(['creeperRoute'], env)
@@ -594,6 +595,8 @@ async function meleePass ({ seen = true, pack = [], players = [] } = {}) {
     mobClass: () => 'hostile',
     disengageHp: () => 0,
     inMeleeReach: () => false,
+    perchStrike: () => false,
+    holdRun: { on: false },
     strikeRun: { lane: null },
     headFree: () => { delete bot.entities[4]; return false },
     setTimeout: (fn) => fn(),
@@ -665,8 +668,10 @@ function coverFrom ({ moved = null, known = () => true, kelp = () => false }) {
     threatDebugUntil: 0,
     AGGRO_CONFIRMED: new Map([[5, { name: 'skeleton', t: Date.now(), ranged: true }]]),
     bunker: { building: false },
+    holdRun: { on: false },
     liveEntities: () => [skeleton],
     mobClass: () => 'hostile',
+    perchStrike: () => false,
     inMeleeReach: () => false,
     airFlood: () => ({}),
     knownCell: (p) => known(p),

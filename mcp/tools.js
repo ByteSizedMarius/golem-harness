@@ -6,7 +6,7 @@
 // waits added up, at most LONGEST.
 // body marks a route that moves or uses the body.
 
-const { strikeBudgetMs, STRIKE_SWING_MS } = require('../lib/pace')
+const { strikeBudgetMs, STRIKE_SWING_MS, HOLD_MAX_S } = require('../lib/pace')
 
 const required = (spec) => ({ ...spec, required: true })
 
@@ -123,6 +123,8 @@ const TOOLS = [
   { name: 'shoot', route: '/shoot', body: true, description: 'Up to max full-charge bow shots at a creature in sight within 25, without approaching. Ends on a kill, the target gone or unseen, no clear line, no arrows, or two arrows at unchanged range (a wall). Never players.', params: { name: required(NAME), max: { type: 'int', min: 1, max: 8 } }, timeoutMs: 8 * (1550 + 2000) + EVENT },
   { name: 'guard', route: '/guard', body: true, description: 'Raise (1) or lower (0) your shield, or a 1.7.10 sword block. A walk or swing lowers it. The block returns after a fight until on is 0, a death or a non-sword in hand.', params: { on: ON } },
   { name: 'brace', route: '/brace', description: 'Hold the legs against reflexes for sec seconds, except creepers, low health, lava, drowning, the bunker and unexplained hits. stop releases it early.', params: { sec: { type: 'int', min: 1, max: 30 } } },
+  // The longest hold, a swing still running at its end and the sword's equip.
+  { name: 'hold', route: '/hold', body: true, description: 'Stand sec seconds in a 1-wide doorway or corridor, or on a perch, striking every hostile in reach. anywhere holds any spot. Ends on a creeper or low health.', params: { sec: { type: 'int', min: 1, max: HOLD_MAX_S }, anywhere: FLAG }, timeoutMs: HOLD_MAX_S * 1000 + STRIKE_SWING_MS + EVENT },
   { name: 'stance', route: '/stance', description: 'Get or set the combat posture: guard (default, melee closers, bow standoffs), skirmish (bow first, shoots creepers from 8 out), vanguard (chase and melee, room clearing), sentinel (fight only what hits you).', params: { set: { type: 'enum', values: ['guard', 'skirmish', 'vanguard', 'sentinel'] } } },
   { name: 'reflexes', route: '/reflexes', description: 'List the reflexes, or switch the named one on (1) or off (0).', params: { name: { type: 'enum', values: REFLEXES }, on: ON } },
   // The 3 s combat wait, two centrings of 1.6 s, 3 digs of 1.5 s with a 1 s drop each, 6 pillar levels of

@@ -244,6 +244,63 @@ test('a 1.7.10 strike with headroom swings on the way down from a jump, and unde
 // The /hold reply on query and the actions and hits of a body with a sword, on 1.7.10 when legacy is true. walls(p)
 // marks the stone cells above the floor, and a zombie that the body sees when seen is true steps from 6 off to 2 off
 // after 1 s.
+async function holdAt (query, walls, seen = true, legacy = true) {
+  const world = verbWorld([zombie(0.5, seen)], { legacy })
+  const { bot, env, clock } = world
+  const z = bot.entities[7]
+  z.position = new Vec3(0.5, 64, 6.5)
+  clock.setTimeout(() => { z.position = new Vec3(0.5, 64, 2.5) }, 1000)
+  const floor = bot.blockAt
+  bot.blockAt = (p) => (walls(p) ? { name: 'stone', boundingBox: 'block', position: p } : floor(p))
+  Object.assign(bot, { health: 20, quickBarSlot: 0, controlState: {}, activateItem () {}, deactivateItem () {} })
+  Object.assign(env, {
+    MOVES: botConstant('MOVES'),
+    holdRun: { on: false },
+    pilotLane: { token: null },
+    claimLane: () => (env.pilotLane.token = {}),
+    perch: { cell: null },
+    guardState: { up: false, slot: -1, pilot: false },
+    STANCES: { guard: { fleeDist: 16 } },
+    stance: 'guard',
+    nearHostiles: () => [],
+    mobClass: (e) => (e.name === 'zombie' ? 'hostile' : 'passive'),
+    disengageHp: () => 8,
+    SWING_REACH: pace.SWING_REACH,
+    HOLD_MAX_S: pace.HOLD_MAX_S,
+    OPENABLE: botConstant('OPENABLE'),
+    isDoor
+  })
+  const res = await drive('/hold', query, world)
+  return { res, did: world.did, hits: world.hits }
+}
+
+test('hold strikes a zombie it sees step into reach in a 1-wide doorway, and refuses in the open without anywhere', async () => {
+  const doorway = (p) => p.z === 0 && Math.abs(p.x) === 1 && (p.y === 64 || p.y === 65)
+  const held = await holdAt({ sec: '3' }, doorway)
+  assert.strictEqual(held.res.error, undefined, held.res.error && held.res.error.message)
+  assert.strictEqual(held.res.body.spot, 'doorway')
+  assert.strictEqual(held.res.body.ended, 'time')
+  assert.ok(held.res.body.swings > 0 && held.did.includes('swing'), `swings ${held.res.body.swings}`)
+  const unseen = await holdAt({ sec: '3' }, doorway, false)
+  assert.deepStrictEqual([unseen.res.body.swings, unseen.did], [0, []], 'a zombie it does not see')
+  const field = await holdAt({ sec: '3' }, () => false)
+  assert.ok(field.res.error, 'held in the open')
+  assert.deepStrictEqual(field.did, [])
+  const anywhere = await holdAt({ sec: '3', anywhere: '1' }, () => false)
+  assert.strictEqual(anywhere.res.body && anywhere.res.body.spot, 'anywhere')
+})
+
+test('hold on a server with an attack cooldown swings without a jump, a full sword charge apart', async () => {
+  const doorway = (p) => p.z === 0 && Math.abs(p.x) === 1 && (p.y === 64 || p.y === 65)
+  const held = await holdAt({ sec: '5' }, doorway, true, false)
+  assert.ok(held.hits.length >= 2, `control: ${held.hits.length} swings`)
+  assert.ok(!held.did.includes('jump'), `did ${held.did.join(', ')}`)
+  // A sword recharges in 12.5 ticks.
+  for (let i = 1; i < held.hits.length; i++) assert.ok(held.hits[i].t - held.hits[i - 1].t >= 625, `swings ${held.hits[i].t - held.hits[i - 1].t} ms apart`)
+})
+
+// The reply and the cells (as "x,z") a 1.7.10 strike crosses on a sprint opener at a zombie 6 off, plus the ticks
+// it ran. The body sprints 0.29 blocks a tick toward where it last looked, and step(zombie, tick) runs on each tick.
 async function sprintOpener (step) {
   const world = verbWorld([zombie(6.5)], { legacy: true })
   const { bot, clock } = world

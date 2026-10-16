@@ -172,6 +172,8 @@ async function meleeSwing ({ chase, goal }) {
     laneBlocks: () => false,
     laneNarrate () {},
     drawAndLoose: async () => false,
+    perchStrike: () => false,
+    holdRun: { on: false },
     strikeRun: { lane: null },
     // The zombie dies after the first swing.
     setTimeout: (fn) => {

@@ -17,7 +17,7 @@ const { POINT_RANGE, deictic, lookedAt } = require('./lib/deixis')
 const { WAKE_KINDS, serverLines, rateLimit, foldQuiet, quietText } = require('./lib/server-msg')
 const { ambientChange, sameVein } = require('./lib/wake')
 const { headFree, smoothLook } = require('./lib/head')
-const { pacePlacements, STRIKE_SWING_MS, STRIKE_APPROACH_MS, strikeBudgetMs, hurtWindows, noCritReason, runCells, noRunReason, JUMP_FALL_TICKS, JUMP_TICKS, RUN_MAX, RUN_TICKS, RUN_COAST, SWING_REACH, HITBOX_1710 } = require('./lib/pace')
+const { pacePlacements, STRIKE_SWING_MS, STRIKE_APPROACH_MS, strikeBudgetMs, hurtWindows, noCritReason, runCells, noRunReason, JUMP_FALL_TICKS, JUMP_TICKS, RUN_MAX, RUN_TICKS, RUN_COAST, SWING_REACH, HITBOX_1710, HOLD_MAX_S } = require('./lib/pace')
 const { noJumpReason, passedNodes, step: nodeStep } = require('./lib/sprint')
 const { summarizePlan, planRisk } = require('./lib/plan')
 const { isDoor, doorStep, panelAcross, doorCrossing } = require('./lib/doors')
@@ -2733,6 +2733,8 @@ bot.once('spawn', () => {
 // claims the HARD lane: only emergencies pass. The legs get ONE owner, and the pilot knows which.
 // token is the claim releaseLane may clear.
 const pilotLane = { until: 0, why: null, hard: false, narrated: 0, token: null }
+// on while /hold runs. The combat reflex leaves every threat but a creeper to it.
+const holdRun = { on: false }
 // The lane token of the running /strike, null when none runs. The combat reflex only flees while it runs.
 const strikeRun = { lane: null }
 // Returns the token of this claim.
@@ -2801,6 +2803,26 @@ function perched () {
     }
   }
   return true
+}
+// Melee mobs that cannot climb, besides the zombie family.
+const PERCH_MELEE = new Set(['silverfish', 'endermite'])
+// A zombie this far below the feet stays out of its reach.
+const PERCH_DROP = 1.9
+// True when the body stands perched at least PERCH_DROP above e standing at `at`, a melee mob that cannot climb.
+function perchStrike (e, at = e.position) {
+  if (mobFamily(e.name) !== 'zombie' && !PERCH_MELEE.has(e.name)) return false
+  return bot.entity.position.y - at.y >= PERCH_DROP && perched()
+}
+// True when known blocks or closed doors flank feet and head on both sides along one axis.
+function inChokepoint () {
+  const feet = bot.entity.position.floored()
+  const shut = (p) => {
+    const b = bot.blockAt(p)
+    if (!b || !knownCell(p)) return false
+    if (isDoor(b.name)) return !b.getProperties().open
+    return b.boundingBox === 'block' && !OPENABLE.test(b.name)
+  }
+  return [[1, 0], [0, 1]].some(([dx, dz]) => [0, 1].every(up => shut(feet.offset(dx, up, dz)) && shut(feet.offset(-dx, up, -dz))))
 }
 function hpMelee () {
   return meleeThreat() && bot.health < disengageHp(reflexes.find(r => r.name === 'combat')._threat.cls)
@@ -3195,7 +3217,9 @@ reflexes.unshift({
         // sentinel stance: posturing doesn't count — only confirmed attackers score (creeper
         // proximity still does: fleeing a lit fuse is survival, not engagement)
         const closerAggro = STANCES[stance].engage === 'confirmed' ? false : h.closes >= 3
-        const aggro = !!confirmed || closerAggro || (cls === 'creeper' && dist < 8)
+        // A melee mob below a perch is a free target in reach.
+        const perchAggro = cls === 'hostile' && STANCES[stance].engage !== 'confirmed' && perchStrike(e) && inMeleeReach(e)
+        const aggro = !!confirmed || closerAggro || perchAggro || (cls === 'creeper' && dist < 8)
         // A creeper from 8 out drives the legs only along a walk of at most the stance's fleeDist.
         if (aggro && cls === 'creeper' && at && dist >= 8) {
           const routeKey = `${stance} ${at.floored()} ${here.floored()}`
@@ -3210,7 +3234,7 @@ reflexes.unshift({
         if (aggro && (!best || urgent > best.urgent || (urgent === best.urgent && dist < best.dist))) best = { e, cls, dist, confirmed: !!confirmed, urgent }
       }
       this._threat = best
-      return !!best
+      return !!best && !(holdRun.on && best.cls !== 'creeper')
     } catch (e) { return false }
   },
   async act (bot) {
@@ -3298,7 +3322,7 @@ reflexes.unshift({
     }
     const t0 = Date.now()
     try {
-      while (this.on && !bunker.building && bot.entities[t.e.id] && Date.now() - t0 < 10000) {
+      while (this.on && !bunker.building && !holdRun.on && bot.entities[t.e.id] && Date.now() - t0 < 10000) {
         // An urgent creeper ends the melee, and the fought threat goes back into this._threat for meleeThreat().
         const fought = this._threat
         const creeperFirst = this.check(bot) && this._threat.urgent
@@ -3306,8 +3330,9 @@ reflexes.unshift({
         if (creeperFirst) return
         const seenNow = entityPerceptible(t.e, this.fairFill(bot))
         const at = this.perceivedAt(t.e, seenNow)
+        const perchHit = t.cls === 'hostile' && !!at && perchStrike(t.e, at)
         // A flee with no safe cell holds the ground and fights on.
-        if (bot.health < disengageHp(t.cls)) {
+        if (bot.health < disengageHp(t.cls) && !perchHit) {
           if (this.fleeFrom(bot, t.e, `HP ${Math.round(bot.health * 10) / 10} — disengaging from ${label}, sprinting`, 'emergency') !== 'held') return
         }
         // OUTNUMBERED (07-18, death #4 autopsy + the helmsman's diagnosis: the close-in never
@@ -3315,7 +3340,7 @@ reflexes.unshift({
         // engage-nearest while the rest converge.
         const packList = nearHostiles(this.fairFill(bot), 16, this._seenAt)
         const pack = packList.length
-        if (pack >= 3) {
+        if (pack >= 3 && !perchHit) {
           // VANGUARD COMMITS (07-21, death #8: four zombies at 0.7 a bite outlasted a reflex
           // that kept choosing withdrawals it couldn't execute in a corridor. A light-only pack
           // in room-clearing stance is sword work, not a rout — stand and swing. A heavy or a
@@ -3361,7 +3386,7 @@ reflexes.unshift({
             guardDown()                                       // both hands on the bow
             try { if (await drawAndLoose(t.e)) { await new Promise(r => setTimeout(r, 200)); continue } } catch (e) {}
           }
-          if (s.chase && entityPerceptible(t.e, this.fairFill(bot))) {   // vanguard: run down a mob in sight
+          if (s.chase && !perchHit && entityPerceptible(t.e, this.fairFill(bot))) {   // vanguard: run down a mob in sight
             if (laneBlocks('discretionary')) { laneNarrate('chase'); await new Promise(r => setTimeout(r, 500)); continue }
             takeLegs('combat', threatWhy('chase', t.e, this.fairFill(bot)))
             if (LEGACY_1710 && !sprintBlock(t.e)) {
@@ -3425,7 +3450,7 @@ reflexes.unshift({
     // POST-COMBAT REFUEL (07-21, the mill's slow-bleed autopsy: /eat fails silently while
     // combat owns the hand, so food ratchets down across engagements and regen quits at 17.
     // The moment the hand is free is the moment to eat — before the next wave claims it.)
-    if (bot.food <= 14 && !bunker.building) {
+    if (bot.food <= 14 && !bunker.building && !holdRun.on && !strikeRun.lane) {
       try { await refuelAfterFight() } catch (e) {}
       await pilotGuard()                                      // the food in hand ended the pilot's block
     }
@@ -5170,6 +5195,91 @@ app.get('/brace', (req, res) => {
     emitEvent('brace', `braced ${sec}s — legs answer the pilot; survival reflexes only may override`)
     ok(res, { braced: sec, hardLane: true, note: 'release early with /stop' })
   } catch (e) { err(res, e) }
+})
+// GET /hold?sec=N[&anywhere=1] : brace's hard lane for N seconds in a doorway, a corridor or on a perch,
+// striking every hostile the body sees within reach. It ends early on /stop, a creeper the stance flees,
+// health under the disengage tripwire or a death.
+app.get('/hold', async (req, res) => {
+  const struck = new Set()
+  let kills = 0
+  let damage = 0
+  let dead = false
+  let hp = bot.health
+  const onDead = (en) => { if (struck.has(en.id) && targetSeen(en)) kills++ }
+  const onHealth = () => {
+    if (bot.health < hp) damage += hp - bot.health
+    hp = bot.health
+  }
+  const onDeath = () => { dead = true }
+  let lane = null
+  let guard = null
+  try {
+    if (!ready) return err(res, new Error('not ready'))
+    const sec = Math.min(HOLD_MAX_S, Math.max(1, parseInt(req.query.sec || '10')))
+    const spot = perched() ? 'perch' : inChokepoint() ? 'doorway' : req.query.anywhere === '1' ? 'anywhere' : null
+    if (!spot) return err(res, new Error('refused: not in a 1-wide doorway or corridor with seen walls or closed doors on both sides, nor on a perch. anywhere=1 holds here anyway'))
+    stopPath()
+    lane = claimLane('hold', sec * 1000, true)
+    holdRun.on = true
+    bot.on('entityDead', onDead)
+    bot.on('health', onHealth)
+    bot.on('death', onDeath)
+    const sword = bot.inventory.items().find(i => /_sword$/.test(i.name))
+    if (sword && (!bot.heldItem || bot.heldItem.name !== sword.name)) {
+      await bot.equip(sword, 'hand')
+      guardState.up = false
+      if (!LEGACY_1710) await bot.waitForTicks(13)    // a sword's full attack charge after the equip
+    }
+    // The 1.7.10 sword block, raised between swings and while nothing is in reach.
+    if (LEGACY_1710) {
+      guard = {
+        up: () => {
+          if (guardState.up || legsMoving() || !bot.heldItem || !/_sword$/.test(bot.heldItem.name)) return
+          bot.activateItem()
+          Object.assign(guardState, { up: true, slot: bot.quickBarSlot })
+        },
+        down: () => {
+          if (!guardState.up) return
+          bot.deactivateItem()
+          guardState.up = false
+        }
+      }
+    }
+    const t0 = Date.now()
+    let swings = 0
+    let ended = 'time'
+    while (Date.now() - t0 < sec * 1000) {
+      if (dead) { ended = 'died'; break }
+      if (pilotLane.token !== lane) { ended = 'stopped'; break }
+      const here = bot.entity.position
+      const fleeDist = STANCES[stance].fleeDist
+      const combat = reflexes.find(r => r.name === 'combat')
+      const near = nearHostiles(combat.fairFill(bot), fleeDist, combat._seenAt)
+      if (near.some(h => mobClass(h.e) === 'creeper' && (h.at.distanceTo(here) < 8 || creeperRoute(h.at, fleeDist)))) { ended = 'creeper'; break }
+      const target = liveEntities()
+        .filter(e => e.position && ['hostile', 'heavy'].includes(mobClass(e)) && inMeleeReach(e) && targetSeen(e))
+        .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0]
+      if (bot.health < disengageHp(target ? mobClass(target) : 'hostile')) { ended = 'low health'; break }
+      if (!target) {
+        if (guard) guard.up()
+        await new Promise(r => setTimeout(r, 100))
+        continue
+      }
+      const seen = () => targetSeen(target)
+      if (LEGACY_1710 ? await meleeSwing(target, { guard, seen }) : await chargedSwing(target, sword, { seen })) {
+        swings++
+        struck.add(target.id)
+      }
+    }
+    ok(res, { held: Math.round((Date.now() - t0) / 100) / 10, spot, swings, kills, damage: Math.round(damage * 10) / 10, ended })
+  } catch (e) { err(res, e) } finally {
+    if (lane) holdRun.on = false
+    releaseLane(lane)
+    if (guard && !guardState.pilot) guard.down()
+    bot.removeListener('entityDead', onDead)
+    bot.removeListener('health', onHealth)
+    bot.removeListener('death', onDeath)
+  }
 })
 // GET /tidy — reclaim scaffolding the pathfinder left behind. Mines back every still-standing
 // scaffold block the bot placed while navigating (tracked in navPlaced), collecting the material,

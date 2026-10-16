@@ -86,6 +86,8 @@ async function stareCycles (moving) {
     disengageHp: () => 8,
     yieldJob () {},
     drawAndLoose: async () => false,
+    perchStrike: () => false,
+    holdRun: { on: false },
     strikeRun: { lane: null },
     laneBlocks: () => false,
     laneNarrate () {},
