@@ -561,6 +561,70 @@ async function hitNarration (seen) {
   return { acted, covered: events }
 }
 
+// One melee pass against a zombie 6 out that hit the body and dies mid-pass. seen sets whether the body
+// perceives the zombie, a player's seen whether it perceives that player.
+async function meleePass ({ seen = true, pack = [], players = [] } = {}) {
+  const events = []
+  const fled = []
+  const zombie = { id: 4, name: 'zombie', position: new Vec3(6.5, 64, 0.5) }
+  const bot = {
+    username: 'Claude',
+    entity: { position: new Vec3(0.5, 64, 0.5) },
+    entities: { 4: zombie, ...Object.fromEntries(players.map((p) => [p.id, p])) },
+    health: 20,
+    food: 20,
+    inventory: { items: () => [], slots: [] },
+    lookAt: async () => {}
+  }
+  const env = {
+    bot,
+    Vec3,
+    goals,
+    stance: 'guard',
+    STANCES: { guard: { fleeDist: 16, bowBand: [7, 24], chase: false, engage: 'closers' } },
+    LEGACY_1710: false,
+    guardState: { up: false, slot: -1, pilot: false },
+    bunker: { building: false },
+    AGGRO_CONFIRMED: new Map(),
+    airFlood: () => ({}),
+    knownCell: () => true,
+    entityPerceptible: (e) => (e === zombie ? seen : e.seen),
+    liveEntities: () => Object.values(bot.entities),
+    nearHostiles: () => pack,
+    mobClass: () => 'hostile',
+    disengageHp: () => 0,
+    inMeleeReach: () => false,
+    strikeRun: { lane: null },
+    headFree: () => { delete bot.entities[4]; return false },
+    setTimeout: (fn) => fn(),
+    emitEvent: (kind, msg) => { if (kind === 'combat') events.push(msg) }
+  }
+  loadBotFunctions(['compass'], env)
+  const combat = combatReflexIn(env)
+  combat.fleeFrom = (b, e, why) => { fled.push(why) }
+  combat._threat = { e: zombie, cls: 'hostile', dist: 6, confirmed: true }
+  await combat.act(bot)
+  return { events, fled }
+}
+
+test('an outnumbered body holds the line only beside a player it sees, and a hidden one changes nothing', async () => {
+  const pack = [1, 2, 3].map((id) => ({ e: { id, name: 'zombie' }, at: new Vec3(id, 64, 0) }))
+  const steve = (seen) => ({ id: 8, type: 'player', username: 'Steve', seen, position: new Vec3(3.5, 64, 0.5) })
+  const beside = await meleePass({ pack, players: [steve(true)] })
+  assert.deepStrictEqual(beside.fled, [], 'control: no withdrawal beside a player in sight')
+  assert.ok(beside.events.some((m) => /HOLDING/.test(m)), `control: ${beside.events}`)
+  const alone = await meleePass({ pack })
+  const hidden = await meleePass({ pack, players: [steve(false)] })
+  assert.deepStrictEqual(hidden, alone)
+  assert.strictEqual(hidden.fled.length, 1)
+  assert.doesNotMatch(JSON.stringify(hidden), /ally|HOLDING|Steve/)
+})
+
+test('a zombie that dies out of sight raises no DOWN line, one that dies in sight does', async () => {
+  assert.deepStrictEqual((await meleePass({ seen: true })).events, ['zombie is DOWN'], 'control: in sight')
+  assert.deepStrictEqual((await meleePass({ seen: false })).events, [])
+})
+
 test('a hit by a zombie out of sight is narrated without its name, bearing or distance', async () => {
   const seen = await hitNarration(true)
   assert.ok(seen.acted.length === 1 && seen.acted[0].includes('zombie'), `control: ${seen.acted}`)
@@ -603,6 +667,7 @@ function coverFrom ({ moved = null, known = () => true, kelp = () => false }) {
     bunker: { building: false },
     liveEntities: () => [skeleton],
     mobClass: () => 'hostile',
+    inMeleeReach: () => false,
     airFlood: () => ({}),
     knownCell: (p) => known(p),
     entityPerceptible: (e) => e !== skeleton || inSight,

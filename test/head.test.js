@@ -82,7 +82,7 @@ async function stareCycles (moving) {
     knownCell: () => true,
     losClear: () => true,
     nearHostiles: () => [],
-    meleeReach: () => 3.2,
+    inMeleeReach: () => false,
     disengageHp: () => 8,
     yieldJob () {},
     drawAndLoose: async () => false,

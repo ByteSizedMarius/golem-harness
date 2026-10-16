@@ -6,6 +6,8 @@
 // waits added up, at most LONGEST.
 // body marks a route that moves or uses the body.
 
+const { strikeBudgetMs, STRIKE_SWING_MS } = require('../lib/pace')
+
 const required = (spec) => ({ ...spec, required: true })
 
 // One walk to a nearby target, about 250 blocks at walking speed.
@@ -115,8 +117,8 @@ const TOOLS = [
   { name: 'roof', route: '/roof', body: true, description: 'Fill a solid slab at height y, outer ring first. Runs at once.', params: { x: required(X), y: required(Y), z: required(X), w: SIZE, d: SIZE, name: NAME }, timeoutMs: LONGEST },
 
   // Fighting
-  // Five swings of about 2.3 s each, with room for short approaches.
-  { name: 'strike', route: '/strike', body: true, description: 'Up to max melee swings at a creature, approaching it, with item (iron_sword by default). Refused when that item is not in your pockets: name the weapon you carry.', params: { name: required(NAME), item: NAME, max: { type: 'int', min: 1, max: 5 } }, timeoutMs: 20000 },
+  // The route's own budget for 5 swings, and one equip wait it cannot cut short.
+  { name: 'strike', route: '/strike', body: true, description: 'Up to max melee swings at a creature in sight within 16, approaching it, with item from your pockets (iron_sword by default). Ends early on lost sight. Never players or creepers.', params: { name: required(NAME), item: NAME, max: { type: 'int', min: 1, max: 5 } }, timeoutMs: strikeBudgetMs(5) + EVENT },
   // 8 shots, each a 1.55 s draw and a 2 s watch for the kill, and the bow's equip.
   { name: 'shoot', route: '/shoot', body: true, description: 'Up to max full-charge bow shots at a creature in sight within 25, without approaching. Ends on a kill, the target gone or unseen, no clear line, no arrows, or two arrows at unchanged range (a wall). Never players.', params: { name: required(NAME), max: { type: 'int', min: 1, max: 8 } }, timeoutMs: 8 * (1550 + 2000) + EVENT },
   { name: 'guard', route: '/guard', body: true, description: 'Raise (1) or lower (0) your shield, or a 1.7.10 sword block. A walk or swing lowers it. The block returns after a fight until on is 0, a death or a non-sword in hand.', params: { on: ON } },

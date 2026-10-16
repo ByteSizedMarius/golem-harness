@@ -39,6 +39,13 @@ How 1.7.10 mobs notice, move and attack. Distances are in blocks, feet to feet.
 
 - Zombies and skeletons catch fire in daylight under open sky. A helmet takes the damage instead. Water and rain put the fire out, and baby zombies do not burn.
 
+## Your hits
+
+- A hit while you fall (on the way down from a jump, not on a ladder or in water) is a critical hit for 1.5x.
+- A sprint hit knocks back further and ends the sprint. It can be a critical hit too.
+- A mob takes a full hit at most once per 0.5 s. A faster hit deals only the damage above the last one and knocks nothing back.
+- `strike` jumps before each swing where it has headroom, sprints into the first hit over clear ground and never swings faster than the mob takes hits. The combat reflex swings the same way and blocks in between.
+
 ## Tactics
 
 - The flee from a swelling creeper you see heads for a cell within 4 steps that hides you from it, at least 3 from it. Without one it runs 8 to 16 blocks.

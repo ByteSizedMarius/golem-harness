@@ -1,0 +1,257 @@
+'use strict'
+const test = require('node:test')
+const assert = require('node:assert')
+const { Vec3 } = require('vec3')
+const { goals } = require('mineflayer-pathfinder')
+const { routeWithin } = require('../lib/flee')
+const { mobFamily, expireConfirmed } = require('../lib/shelter')
+const pace = require('../lib/pace')
+const { loadBotFunctions, combatReflexIn, botConstant } = require('./helpers')
+
+const ck = (x, y, z) => x + ',' + y + ',' + z
+const HERE = new Vec3(0.5, 64, 0.5)
+const FULL = [[0, 0, 0, 1, 1, 1]]
+const FENCE = [[0, 0, 0.375, 1, 1.5, 0.625]]
+
+// Ground at y 63 everywhere. extra(p) names the block placed at p: 'stone', 'fence' or nothing.
+function blockAt (extra) {
+  return (p) => {
+    const kind = p.y < 64 ? 'stone' : extra(p)
+    return { name: kind === 'fence' ? 'oak_fence' : kind || 'air', boundingBox: kind ? 'block' : 'empty', shapes: kind === 'fence' ? FENCE : kind ? FULL : [], position: p }
+  }
+}
+const ring = (kind, height) => (p) => Math.max(Math.abs(p.x), Math.abs(p.z)) === 4 && p.y >= 64 && p.y < 64 + height ? kind : null
+const open = () => null
+
+// The sword-block raises and lowerings, the swings, the flee classes and the [combat] guard lines of three 1.7.10
+// fight cycles against mob, which closed 1 block in the last second and stands out of melee reach. The body
+// carries only a sword. over.bot and over.env replace entries of the bot and the env, and an undefined env entry
+// loads the bot.js function of that name. over.seenAt is where the body last perceived mob. over.next(combat, bot)
+// runs after the act.
+async function standoff (extra, mob, over = {}) {
+  const lines = []
+  const fled = []
+  let raises = 0
+  let lowers = 0
+  let swings = 0
+  let cycles = 0
+  const sword = { name: 'iron_sword' }
+  const bot = {
+    entity: { position: HERE, onGround: true },
+    entities: { [mob.id]: mob },
+    health: 20,
+    food: 20,
+    inventory: { items: () => [sword], slots: [] },
+    heldItem: sword,
+    quickBarSlot: 0,
+    pathfinder: { goal: null, isMoving: () => false, setGoal (g) { this.goal = g } },
+    blockAt: blockAt(extra),
+    lookAt: async () => {},
+    waitForTicks: async () => {},
+    setControlState () {},
+    attack () { swings++ },
+    activateItem () { raises++ },
+    deactivateItem () { lowers++ },
+    controlState: {},
+    ...over.bot
+  }
+  const dist = mob.position.distanceTo(bot.entity.position)
+  const env = {
+    bot,
+    Vec3,
+    goals,
+    ck,
+    routeWithin,
+    mobFamily,
+    console: { log: (line) => lines.push(line) },
+    STANCES: { guard: { fleeDist: 16, bowBand: [7, 24], chase: false, engage: 'closers' } },
+    stance: 'guard',
+    LEGACY_1710: true,
+    MOVES: botConstant('MOVES'),
+    guardState: { up: false, slot: -1, pilot: false },
+    lastHit: { dmg: 0, t: 0 },
+    lastAttackT: 0,
+    LEGACY_HIT_MS: botConstant('LEGACY_HIT_MS'),
+    mobHurt: { wait: () => 0 },
+    noCritReason: pace.noCritReason,
+    JUMP_FALL_TICKS: pace.JUMP_FALL_TICKS,
+    JUMP_TICKS: pace.JUMP_TICKS,
+    AGGRO_CONFIRMED: new Map(),
+    bunker: { building: false },
+    mcData: null,
+    HITBOX_1710: pace.HITBOX_1710,
+    GUARD_REACH: botConstant('GUARD_REACH'),
+    GUARD_STEPS: botConstant('GUARD_STEPS'),
+    CREEPER_DROP: botConstant('CREEPER_DROP'),
+    cellKnown: () => true,
+    knownCell: () => true,
+    headFree: () => true,
+    compass: () => 'E',
+    emitEvent () {},
+    mobClass: () => 'hostile',
+    airFlood: () => ({}),
+    entityPerceptible: () => true,
+    nearHostiles: () => [],
+    inMeleeReach: () => false,
+    disengageHp: () => 8,
+    yieldJob () {},
+    takeLegs () {},
+    threatWhy: (what) => what,
+    laneBlocks: () => false,
+    laneNarrate () {},
+    drawAndLoose: async () => false,
+    perch: { cell: null },
+    perchStrike: () => false,
+    holdRun: { on: false },
+    strikeRun: { lane: null },
+    setTimeout: (fn) => {
+      if (++cycles === 3) delete bot.entities[mob.id]
+      setImmediate(fn)
+    }
+  }
+  for (const [k, v] of Object.entries(over.env || {})) {
+    if (v === undefined) delete env[k]
+    else env[k] = v
+  }
+  const load = Object.entries(over.env || {}).filter(([, v]) => v === undefined).map(([k]) => k)
+  loadBotFunctions(['standoffGuard', 'fleeWorld', 'creeperRoute', 'meleeSwing', 'chargedSwing', 'legsMoving', ...load], env)
+  const combat = combatReflexIn(env)
+  combat.fleeFrom = (b, e, why, klass) => { fled.push(klass) }
+  combat._hist.set(mob.id, { d: dist + 1, t: Date.now() - 1000, closes: 3, logT: 0 })
+  combat._threat = { e: mob, cls: 'hostile', dist, confirmed: env.AGGRO_CONFIRMED.has(mob.id) }
+  if (over.seenAt) combat._seenAt.set(mob.id, over.seenAt)
+  await combat.act(bot)
+  if (over.next) await over.next(combat, bot)
+  return { raises, lowers, swings, fled, lines: lines.filter((l) => l.startsWith('[combat] guard')) }
+}
+
+const zombie = (x) => ({ id: 7, name: 'zombie', width: 0.6, height: 1.95, position: new Vec3(x, 64, 0.5) })
+const IN_REACH = { inMeleeReach: () => true }
+// The bot.js melee reach rule in place of the stub.
+const REACH_RULE = { inMeleeReach: undefined, SWING_REACH: pace.SWING_REACH }
+const skeleton = (x) => ({ id: 8, name: 'skeleton', position: new Vec3(x, 64, 0.5) })
+
+test('a closing zombie raises the sword block only when it can walk to the body over seen cells', async () => {
+  const inside = await standoff(ring('stone', 3), zombie(3.5))
+  assert.ok(inside.raises > 0, 'control: a zombie in the same room')
+  assert.match(inside.lines[0], /^\[combat\] guard up vs zombie ~3: closing\b/)
+  assert.match(inside.lines[inside.lines.length - 1], /^\[combat\] guard down vs zombie\b/)
+  for (const [wall, extra] of [['a closed stone wall', ring('stone', 3)], ['a fence', ring('fence', 1)]]) {
+    const outside = await standoff(extra, zombie(5.5))
+    assert.strictEqual(outside.raises, 0, `a zombie behind ${wall} raised the guard`)
+    assert.deepStrictEqual(outside.lines, [], `a zombie behind ${wall}`)
+  }
+})
+
+test('a skeleton raises the sword block only in line of sight within 15, and holds it steady with no bow', async () => {
+  const seen = await standoff(open, skeleton(10.5))
+  assert.deepStrictEqual({ raises: seen.raises, lowers: seen.lowers }, { raises: 1, lowers: 1 }, 'a skeleton in sight 10 off over three cycles')
+  assert.match(seen.lines[0], /^\[combat\] guard up vs skeleton ~10: a skeleton in sight within 15$/)
+  const wall = (p) => p.x === 5 && p.y >= 64 && p.y < 67 ? 'stone' : null
+  assert.strictEqual((await standoff(wall, skeleton(10.5))).raises, 0, 'a skeleton behind a wall')
+  assert.strictEqual((await standoff(open, skeleton(20.5))).raises, 0, 'a skeleton 20 off')
+})
+
+test('a body on a walk raises no shield or sword block against a skeleton in sight', async () => {
+  const shield = (controlState) => standoff(open, skeleton(10.5), {
+    bot: { controlState, inventory: { items: () => [{ name: 'iron_sword' }], slots: { 45: { name: 'shield' } } } },
+    env: { LEGACY_1710: false }
+  })
+  assert.ok((await shield({})).raises > 0, 'control: a 1.21 body standing still')
+  assert.strictEqual((await shield({ forward: true })).raises, 0, '1.21 shield')
+  const sword = await standoff(open, skeleton(10.5), { bot: { controlState: { forward: true } } })
+  assert.strictEqual(sword.raises, 0, '1.7.10 sword block')
+})
+
+test('a zombie in melee reach raises the sword block only in sight or with a walk to the body', async () => {
+  assert.ok((await standoff(open, zombie(3.5), { env: IN_REACH })).raises > 0, 'control: a zombie in sight 3 off')
+  const wall = (p) => p.x === 2 && p.y >= 64 && p.y < 67 ? 'stone' : null
+  assert.strictEqual((await standoff(wall, zombie(3.5), { env: IN_REACH })).raises, 0, 'a zombie behind a wall 3 off')
+})
+
+test('a zombie in melee reach out of sight holds the sword block by where the body last saw it', async () => {
+  const wall = (p) => p.x === 2 && p.y >= 64 && p.y < 67 ? 'stone' : null
+  const env = { ...IN_REACH, entityPerceptible: () => false }
+  const beside = await standoff(wall, zombie(3.5), { env, seenAt: new Vec3(-1.5, 64, 0.5) })
+  assert.ok(beside.raises > 0, 'last seen on the body side of the wall, now behind it')
+  const behind = await standoff(wall, zombie(-1.5), { env, seenAt: new Vec3(3.5, 64, 0.5) })
+  assert.strictEqual(behind.raises, 0, 'last seen behind the wall, now on the body side')
+  assert.strictEqual((await standoff(open, zombie(-1.5), { env })).raises, 0, 'never seen')
+})
+
+test('the standoff looks at a zombie out of sight only where the body last saw it', async () => {
+  const looks = []
+  const bot = { lookAt: async (p) => { looks.push(p.x) } }
+  const env = { entityPerceptible: () => false }
+  await standoff(open, zombie(5.5), { bot, env })
+  assert.deepStrictEqual(looks, [], 'a look at a zombie never seen')
+  await standoff(open, zombie(5.5), { bot, env, seenAt: new Vec3(-4.5, 64, 0.5) })
+  assert.ok(looks.length > 0 && looks.every((x) => x === -4.5), `looks at x ${looks}`)
+})
+
+test('the bow never draws on a zombie out of sight', async () => {
+  const items = [{ name: 'iron_sword' }, { name: 'bow' }, { name: 'arrow' }]
+  const run = (seen) => standoff(open, zombie(8.5), {
+    bot: { inventory: { items: () => items, slots: [] } },
+    env: { guardState: { up: true, slot: 0, pilot: true }, drawAndLoose: undefined, entityPerceptible: () => seen },
+    seenAt: new Vec3(8.5, 64, 0.5)
+  })
+  assert.ok((await run(true)).lowers > 0, 'control: the block comes down for the bow in sight')
+  assert.strictEqual((await run(false)).lowers, 0)
+})
+
+test('a bow with no line of sight to its target leaves the sword block up', async () => {
+  const items = [{ name: 'iron_sword' }, { name: 'bow' }, { name: 'arrow' }]
+  const raised = { up: true, slot: 0, pilot: true }
+  const wall = (p) => p.x === 5 && p.y >= 64 && p.y < 67 ? 'stone' : null
+  const run = (extra) => standoff(extra, zombie(8.5), {
+    bot: { inventory: { items: () => items, slots: [] } },
+    env: { guardState: { ...raised }, drawAndLoose: undefined }
+  })
+  assert.ok((await run(open)).lowers > 0, 'control: a clear line lowers the block for the bow')
+  assert.deepStrictEqual(await run(wall), { raises: 0, lowers: 0, swings: 0, fled: [], lines: [] })
+})
+
+test('the combat reflex swings at a zombie only once its look ray meets the hitbox within 3 of the eye', async () => {
+  // The look ray from the eye at 65.62 to 1.2 above the zombie's feet meets the box 2.5 and 3.6 out.
+  const near = await standoff(open, zombie(3.37), { env: REACH_RULE })
+  assert.ok(near.swings > 0, 'control: no swing at a hitbox 2.5 from the eye')
+  const far = await standoff(open, zombie(4.48), { env: REACH_RULE })
+  assert.strictEqual(far.swings, 0, 'a swing at a hitbox 3.6 from the eye')
+  assert.ok(far.raises > 0, 'no standoff guard against a hitbox 3.6 from the eye')
+})
+
+test('a creeper the body perceives behind a zombie in reach ends the melee and is fled, one behind a wall is not', async () => {
+  // The zombie in reach, the creeper 5 out behind it. The reflex picked the zombie before the creeper came.
+  const fight = async (seen) => {
+    const z = zombie(2.5)
+    const creeper = { id: 9, name: 'creeper', seen, position: new Vec3(5.5, 64, 0.5) }
+    const entities = { 7: z, 9: creeper }
+    const picked = []
+    const r = await standoff(open, z, {
+      bot: { entities },
+      env: {
+        ...IN_REACH,
+        expireConfirmed,
+        CONFIRMED_MS: botConstant('CONFIRMED_MS'),
+        CONFIRMED_HORIZON: botConstant('CONFIRMED_HORIZON'),
+        threatDebugUntil: 0,
+        liveEntities: () => Object.values(entities),
+        mobClass: (e) => (e.name === 'creeper' ? 'creeper' : 'hostile'),
+        entityPerceptible: (e) => e.seen !== false,
+        entityEngageable: () => true
+      },
+      // The next reflex pass.
+      next: async (combat, bot) => {
+        if (!combat.check(bot)) return
+        picked.push(combat._threat.e.name)
+        await combat.act(bot)
+      }
+    })
+    return { swings: r.swings, fled: r.fled, picked }
+  }
+  assert.deepStrictEqual(await fight(true), { swings: 0, fled: ['emergency'], picked: ['creeper'] })
+  const walled = await fight(false)
+  assert.ok(walled.swings > 0, 'no swing at the zombie with the creeper behind a wall')
+  assert.deepStrictEqual({ fled: walled.fled, picked: walled.picked }, { fled: [], picked: [] })
+})

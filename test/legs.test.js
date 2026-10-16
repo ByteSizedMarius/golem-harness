@@ -82,8 +82,11 @@ test('a pillar top holds the legs from every flee but an emergency at disengage 
   for (const klass of KLASSES) assert.strictEqual(onTop({ klass }), true, `${klass} on the pillar top`)
   assert.strictEqual(onTop({ klass: 'interrupt', hpMelee: true }), true, 'an interrupt at disengage health')
   assert.strictEqual(onTop({ klass: 'emergency', hpMelee: true }), false, 'an emergency at disengage health')
-  entity.position = new Vec3(1.5, 67, 0.5)
-  assert.strictEqual(onTop({ klass: 'discretionary' }), false, 'once the body stepped off')
+  Object.assign(entity, { position: new Vec3(0.5, 68.18, 0.5), onGround: false })
+  assert.strictEqual(onTop({ klass: 'discretionary' }), true, 'a jump on the pillar top')
+  entity.position = new Vec3(1.5, 67.5, 0.5)
+  assert.strictEqual(onTop({ klass: 'discretionary' }), false, 'once the body stepped off into the air beside it')
+  assert.strictEqual(env.perch.cell, null)
 })
 
 test('a stopped walk names the reflex that took the legs during it, nothing else does', () => {
@@ -147,6 +150,7 @@ async function meleeSwing ({ chase, goal }) {
     guardState: { up: false, slot: -1, pilot: false },
     lastHit: { dmg: 0, t: 0 },
     lastAttackT: 0,
+    mobHurt: { wait: () => 0 },
     AGGRO_CONFIRMED: new Map(),
     bunker: { building: false },
     mcData: null,
@@ -159,7 +163,8 @@ async function meleeSwing ({ chase, goal }) {
     knownCell: () => true,
     entityPerceptible: () => true,
     nearHostiles: () => [],
-    meleeReach: () => 3.2,
+    inMeleeReach: () => true,
+    meleeAim: (e, y) => e.position.offset(0, y, 0),
     disengageHp: () => 8,
     yieldJob: (reflex, why) => takes.push(['job', reflex, why]),
     takeLegs: (reflex, why) => takes.push(['legs', reflex, why]),
@@ -174,6 +179,7 @@ async function meleeSwing ({ chase, goal }) {
       setImmediate(fn)
     }
   }
+  loadBotFunctions(['chargedSwing'], env)
   const combat = combatReflexIn(env)
   combat._threat = { e: zombie, cls: 'hostile', dist: 2, confirmed: false }
   await combat.act(bot)

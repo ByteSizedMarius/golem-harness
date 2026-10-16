@@ -17,7 +17,7 @@ const { POINT_RANGE, deictic, lookedAt } = require('./lib/deixis')
 const { WAKE_KINDS, serverLines, rateLimit, foldQuiet, quietText } = require('./lib/server-msg')
 const { ambientChange, sameVein } = require('./lib/wake')
 const { headFree, smoothLook } = require('./lib/head')
-const { pacePlacements } = require('./lib/pace')
+const { pacePlacements, STRIKE_SWING_MS, STRIKE_APPROACH_MS, strikeBudgetMs, hurtWindows, noCritReason, runCells, noRunReason, JUMP_FALL_TICKS, JUMP_TICKS, RUN_MAX, RUN_TICKS, RUN_COAST, SWING_REACH, HITBOX_1710 } = require('./lib/pace')
 const { noJumpReason, passedNodes, step: nodeStep } = require('./lib/sprint')
 const { summarizePlan, planRisk } = require('./lib/plan')
 const { isDoor, doorStep, panelAcross, doorCrossing } = require('./lib/doors')
@@ -2733,6 +2733,8 @@ bot.once('spawn', () => {
 // claims the HARD lane: only emergencies pass. The legs get ONE owner, and the pilot knows which.
 // token is the claim releaseLane may clear.
 const pilotLane = { until: 0, why: null, hard: false, narrated: 0, token: null }
+// The lane token of the running /strike, null when none runs. The combat reflex only flees while it runs.
+const strikeRun = { lane: null }
 // Returns the token of this claim.
 function claimLane (why, ms, hard = false) {
   pilotLane.until = Date.now() + ms
@@ -2774,9 +2776,31 @@ function bunkerHolds () {
 const perch = { cell: null }
 function perchHolds () {
   if (!perch.cell) return false
-  if (bot.entity && bot.entity.position.floored().equals(perch.cell)) return true
+  const at = bot.entity && bot.entity.position.floored()
+  // A jump or a knock-up leaves the pillar top straight up.
+  if (at && at.x === perch.cell.x && at.z === perch.cell.z && (at.y === perch.cell.y || (!bot.entity.onGround && at.y > perch.cell.y))) return true
   perch.cell = null
   return false
+}
+// True on a pillar top, or on ground whose 8 neighbours each drop 3 known cells or wall off feet and head.
+function perched () {
+  if (perchHolds()) return true
+  if (!bot.entity.onGround) return false
+  const feet = bot.entity.position.floored()
+  const at = (dx, dy, dz) => {
+    const p = feet.offset(dx, dy, dz)
+    const b = bot.blockAt(p)
+    return b && knownCell(p) ? b : null
+  }
+  const open = (b) => !!b && b.boundingBox === 'empty' && !/ladder|vine/.test(b.name)
+  const wall = (b) => !!b && b.boundingBox === 'block'
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      if (!dx && !dz) continue
+      if (![0, -1, -2].every(dy => open(at(dx, dy, dz))) && ![0, 1].every(dy => wall(at(dx, dy, dz)))) return false
+    }
+  }
+  return true
 }
 function hpMelee () {
   return meleeThreat() && bot.health < disengageHp(reflexes.find(r => r.name === 'combat')._threat.cls)
@@ -2798,16 +2822,43 @@ const laneNarrate = (what) => {
   if (Date.now() >= pilotLane.until && jobs.running()) emitEvent('combat', `${what} deferred, the running job keeps the legs`)
   else emitEvent('combat', `${what} deferred — pilot lane held (${pilotLane.why})`)
 }
-// 1.7.10 takes a hit from 6 blocks with a clear eye-line and from 3 without.
-function meleeReach (en) {
-  return LEGACY_1710 ? (losClear(bot.entity.position.offset(0, 1.62, 0), en.position.offset(0, 1.0, 0)) ? 4.0 : 3.0) : 3.2
+// The [width, height] of en's hitbox on the server, half size for a baby, times its size for a slime or magma cube.
+function hitbox (en) {
+  const data = mcData && mcData.entitiesByName[en.name]
+  const keys = data && data.metadataKeys
+  const s = Array.isArray(keys) && keys.some(k => k === 'baby' || k === 'is_baby') && babyFlag(en.metadata, keys) ? 0.5 : 1
+  // Size 1 until the metadata arrives.
+  const size = (['slime', 'magma_cube'].includes(en.name) && Array.isArray(keys) && en.metadata && en.metadata[keys.indexOf('size')]) || 1
+  const [w, h] = (LEGACY_1710 && HITBOX_1710[en.name]) || [en.width, en.height]
+  return [w * s * size, h * s * size]
+}
+// The point a melee swing at en aims at: aimY above its feet, or half its height when aimY clears its top.
+function meleeAim (en, aimY) {
+  const h = hitbox(en)[1]
+  return en.position.offset(0, aimY < h ? aimY : h / 2, 0)
+}
+// True when the look ray to meleeAim(en, aimY) enters en's hitbox, grown 0.1, within SWING_REACH and unblocked.
+function inMeleeReach (en, aimY = 1.2) {
+  const [w, h] = hitbox(en)
+  const r = w / 2 + 0.1
+  const lo = en.position.offset(-r, -0.1, -r)
+  const hi = en.position.offset(r, h + 0.1, r)
+  // A 1.7.10 sneak lowers the eye by 0.08, a 1.21.11 one to 1.27.
+  const eye = bot.entity.position.offset(0, !bot.entity.crouching ? 1.62 : LEGACY_1710 ? 1.54 : 1.27, 0)
+  const dir = meleeAim(en, aimY).minus(eye)
+  // With the aim point inside the box, the ray enters at its last near-face crossing.
+  let enter = 0
+  for (const k of ['x', 'y', 'z']) {
+    if (dir[k]) enter = Math.max(enter, ((dir[k] > 0 ? lo : hi)[k] - eye[k]) / dir[k])
+  }
+  return enter * dir.norm() <= SWING_REACH && !!lineCell(eye, eye.plus(dir.scaled(enter)), en.position.floored())
 }
 // True while the combat reflex's threat stands in melee reach.
 function meleeThreat () {
   const combat = reflexes.find(r => r.name === 'combat')
   const t = combat && combat.on && combat._threat
   if (!t || !t.e || !bot.entities[t.e.id] || !bot.entity) return false
-  return t.e.position.distanceTo(bot.entity.position) <= meleeReach(t.e)
+  return inMeleeReach(t.e)
 }
 // ADAPTIVE disengage (death #2 lesson): the tripwire scales to the last hit taken while
 // it's FRESH (20s) — after a 1.4 drowned it sits at the old 8; after an 8.6 vindicator it
@@ -3232,13 +3283,14 @@ reflexes.unshift({
       // is an INTERRUPT (passes the soft lane, defers to /brace's hard one).
       const fk = t.cls === 'creeper' ? 'emergency' : 'interrupt'
       const flee = () => {
-        if (this.fleeFrom(bot, t.e, null, fk) === 'held') guardUp()
+        const held = this.fleeFrom(bot, t.e, null, fk) === 'held'
+        if (held && !strikeRun.lane) guardUp()
         else if (!guardState.pilot) guardDown()
       }
       if (t.dist <= s.fleeDist) { flee(); return }
       const [lo, hi] = s.bowBand
       const bandLo = t.cls === 'heavy' ? Math.max(lo, 10) : lo   // heavies close FAST — bigger floor
-      if (seen && t.dist >= bandLo && t.dist <= hi) {
+      if (seen && t.dist >= bandLo && t.dist <= hi && !strikeRun.lane) {
         try { if (await drawAndLoose(t.e)) return } catch (e) {}
       }
       flee()
@@ -3291,21 +3343,35 @@ reflexes.unshift({
             }
           }
         }
+        if (strikeRun.lane) {                                 // the flees above still run during a /strike
+          if (!guardState.pilot) guardDown()
+          await new Promise(r => setTimeout(r, 250))
+          continue
+        }
         const d = at ? at.distanceTo(bot.entity.position) : Infinity
-        const reach = meleeReach(t.e)
-        if (d <= reach) yieldJob('combat', 'fight in melee range')
-        if (d > reach) {
+        const inReach = inMeleeReach(t.e)
+        if (inReach) yieldJob('combat', threatWhy('fight in melee range', t.e, this.fairFill(bot)))
+        if (!inReach) {
           // Standoff band (the helmsman's 07-16 complaint: the reflex used to stand here sword-in-
           // hand, staring at skeletons that plink from 10). Stance decides: bow it, chase it, or
           // hold shield-up as before.
           const [lo, hi] = s.bowBand
-          if (d >= lo && d <= hi) {
+          const pockets = bot.inventory.items()
+          if (seenNow && d >= lo && d <= hi && pockets.some(i => i.name === 'bow') && pockets.some(i => i.name === 'arrow') && bowLine(t.e)) {
             guardDown()                                       // both hands on the bow
             try { if (await drawAndLoose(t.e)) { await new Promise(r => setTimeout(r, 200)); continue } } catch (e) {}
           }
           if (s.chase && entityPerceptible(t.e, this.fairFill(bot))) {   // vanguard: run down a mob in sight
             if (laneBlocks('discretionary')) { laneNarrate('chase'); await new Promise(r => setTimeout(r, 500)); continue }
             takeLegs('combat', threatWhy('chase', t.e, this.fairFill(bot)))
+            if (LEGACY_1710 && !sprintBlock(t.e)) {
+              try {
+                bot.pathfinder.setGoal(null)
+                await swordInHand()
+                await meleeSwing(t.e, { run: true, seen: () => entityPerceptible(t.e, this.fairFill(bot)) })
+              } catch (e) { console.log('[combat] sprint opener failed: ' + e.message) }
+              continue
+            }
             try { bot.pathfinder.setGoal(new goals.GoalNear(t.e.position.x, t.e.position.y, t.e.position.z, 2)) } catch (e) {}
             await new Promise(r => setTimeout(r, 500))
             continue
@@ -3327,29 +3393,29 @@ reflexes.unshift({
         }
         try {
           if (LEGACY_1710) {
-            // No equip wait and no guard beats: the block stays up, and a swing goes out once it is due.
+            // The sword block holds while the hit waits, against a mob in sight or one that can walk to the body.
             await swordInHand()
-            guardUp()
+            const reachable = !!at && (losClear(bot.entity.position.offset(0, 1.62, 0), at.offset(0, 1.62, 0)) || creeperRoute(at, GUARD_STEPS))
+            if (!reachable && !guardState.pilot) guardDown()
+            const inSight = () => entityPerceptible(t.e, this.fairFill(bot))
+            if (!inSight()) {
+              if (reachable || guardState.pilot) guardUp()
+              await new Promise(r => setTimeout(r, 250))
+              continue
+            }
             await bot.lookAt(t.e.position.offset(0, 1.2, 0), true)
-            const due = lastAttackT + LEGACY_HIT_MS - Date.now()
-            if (due > 0) { await new Promise(r => setTimeout(r, due)); continue }
-            bot.attack(t.e)
-            lastAttackT = Date.now()
+            await meleeSwing(t.e, { guard: reachable || guardState.pilot ? { up: guardUp, down: guardDown } : null, seen: inSight })
             continue
           }
-          if (sword && (!bot.heldItem || bot.heldItem.name !== sword.name)) { await bot.equip(sword, 'hand'); await bot.waitForTicks(13) }
-          guardDown()                                         // the swing window — shield drops...
-          await bot.waitForTicks(2)
-          await bot.lookAt(t.e.position.offset(0, 1.2, 0), true)
-          await bot.waitForTicks(2)
-          bot.attack(t.e)
-          await new Promise(r => setTimeout(r, 400))
-          guardUp()                                           // ...and comes right back up
+          await chargedSwing(t.e, sword, { guard: { up: guardUp, down: guardDown }, seen: () => entityPerceptible(t.e, this.fairFill(bot)) })
+          continue
         } catch (e) {}
-        await new Promise(r => setTimeout(r, 250))            // about 850 ms per swing w/ the guard beats, 1.5 s after an equip
+        await new Promise(r => setTimeout(r, 250))
       }
     } finally {                                               // the pilot's block stays up, the reflex's comes down
-      if (!(await pilotGuard())) {
+      if (strikeRun.lane) {
+        if (!guardState.pilot) guardDown()                    // a /strike holds the hand
+      } else if (!(await pilotGuard())) {
         if (guardCall && guardCall.up && guardState.up) console.log(`[combat] guard down vs ${label}: the fight ended`)
         guardDown()
       }
@@ -4030,10 +4096,125 @@ app.get('/useon', async (req, res) => {
     await bot.lookAt(target.position.offset(0, 0.6, 0), true)
     await bot.waitForTicks(2)
     if (!liveEntities().includes(target) || !targetSeen(target)) return ok(res, { used: null, on: ename, reason: 'lost sight', note: 'lost sight of it' })
+    if (!inMeleeReach(target, 0.6)) return ok(res, { used: null, on: ename, note: 'target left reach' })
     await bot.useOn(target)
     ok(res, { used: iname, on: ename, at: round(target.position) })
   } catch (e) { err(res, e) }
 })
+// The hurt windows of the mobs around the body.
+const mobHurt = hurtWindows(bot)
+// Why the body cannot open on e with a sprint hit, or null.
+function sprintBlock (e) {
+  const d = e.position.distanceTo(bot.entity.position)
+  if (inMeleeReach(e)) return 'in reach'
+  if (d > RUN_MAX) return `beyond ${RUN_MAX}`
+  return noRunReason({ from: bot.entity.position, to: e.position, food: bot.food, blockAt: (p) => bot.blockAt(p), known: knownCell })
+}
+// One 1.7.10 melee hit at e, true when it swung, false out of sight, null out of reach.
+async function meleeSwing (e, { run = false, aimY = 1.2, guard = null, seen = () => true } = {}) {
+  const wait = () => Math.max(0, lastAttackT + LEGACY_HIT_MS - Date.now(), mobHurt.wait(e))
+  const sleep = (ms) => ms > 0 ? new Promise(r => setTimeout(r, ms)) : null
+  const aim = () => bot.lookAt(meleeAim(e, aimY), true)
+  const swing = async (note) => {
+    if (guard) guard.down()
+    await aim()
+    if (!seen()) return false
+    if (!inMeleeReach(e, aimY)) return null
+    bot.attack(e)
+    lastAttackT = Date.now()
+    console.log(`[combat] swing ${e.name || '?'} ~${e.position.distanceTo(bot.entity.position).toFixed(1)}: ${note}`)
+    return true
+  }
+  const blocked = run && sprintBlock(e)
+  let why = blocked ? `no run, ${blocked}` : null
+  if (run && !blocked) {
+    const from = bot.entity.position.clone()
+    const line = runCells(from, e.position)
+    const length = Math.hypot(e.position.x - from.x, e.position.z - from.z) - RUN_COAST
+    const onLine = () => line.some(c => c.x === Math.floor(e.position.x) && c.z === Math.floor(e.position.z))
+    const ran = () => Math.hypot(bot.entity.position.x - from.x, bot.entity.position.z - from.z)
+    let hit = null
+    bot.setControlState('sprint', true)
+    bot.setControlState('forward', true)
+    try {
+      for (let i = 0; i < RUN_TICKS && bot.entities[e.id] && !inMeleeReach(e, aimY) && seen() && onLine() && ran() < length; i++) {
+        await aim()
+        await bot.waitForTicks(1)
+      }
+      if (inMeleeReach(e, aimY) && wait() === 0) hit = await swing('sprint hit, crit no, sprinting on the ground')
+    } finally {
+      bot.setControlState('forward', false)
+      bot.setControlState('sprint', false)
+    }
+    if (hit !== null) return hit
+    if (!seen()) return false
+    why = 'the run ended out of reach or inside the hurt window'
+  }
+  // The last jump may still be in the air while the hit waits.
+  for (let i = 0; i < JUMP_TICKS && !bot.entity.onGround && wait() > 0; i++) await bot.waitForTicks(1)
+  const feet = bot.entity.position.floored()
+  const open = (up) => {
+    const p = feet.offset(0, up, 0)
+    const b = bot.blockAt(p)
+    return !!b && b.boundingBox === 'empty' && knownCell(p)
+  }
+  const ground = bot.blockAt(feet)
+  why = why || noCritReason({
+    riding: !!bot.vehicle,
+    inWater: !!bot.entity.isInWater,
+    onLadder: !!ground && /ladder|vine/.test(ground.name),
+    onGround: !!bot.entity.onGround,
+    walking: bot.pathfinder.isMoving(),
+    perched: perched(),
+    headroom: open(2) && open(3)
+  })
+  if (guard && (wait() > 0 || !why)) guard.up()
+  if (!why) {
+    // Server-side the fall distance grows only while a position packet sinks off the ground.
+    await sleep(wait() - JUMP_FALL_TICKS * 50)
+    let y = bot.entity.position.y
+    let fall = 0
+    let left = false
+    bot.setControlState('jump', true)
+    try {
+      for (let i = 0; i < JUMP_TICKS; i++) {
+        await bot.waitForTicks(1)
+        bot.setControlState('jump', false)
+        const p = bot.entity.position.y
+        if (bot.entity.onGround) {
+          if (left || i >= 2) break
+        } else {
+          left = true
+          if (p < y) fall += y - p
+        }
+        y = p
+        if (fall > 0 && wait() === 0) break
+      }
+    } finally {
+      bot.setControlState('jump', false)
+    }
+    if (!(fall > 0 && !bot.entity.onGround)) why = left ? 'landed before the hit was due' : 'the jump never left the ground'
+  }
+  // A hit from another attacker reopens the window, which the swing waits out at most twice.
+  for (let k = 0; k < 3 && wait() > 0; k++) await sleep(wait())
+  return swing(why ? `crit no, ${why}` : 'crit yes')
+}
+// One melee hit at e on a server with an attack cooldown, true when it swung.
+async function chargedSwing (e, sword, { guard = null, seen = () => true } = {}) {
+  if (sword && (!bot.heldItem || bot.heldItem.name !== sword.name)) { await bot.equip(sword, 'hand'); await bot.waitForTicks(13) }
+  const hurt = mobHurt.wait(e)
+  if (hurt > 0) await new Promise(r => setTimeout(r, hurt))
+  if (guard) guard.down()
+  await bot.waitForTicks(2)
+  await bot.lookAt(meleeAim(e, 1.2), true)
+  await bot.waitForTicks(2)
+  const hit = inMeleeReach(e) && seen()
+  if (hit) bot.attack(e)
+  await new Promise(r => setTimeout(r, 400))
+  if (guard) guard.up()
+  await new Promise(r => setTimeout(r, 250))
+  return hit
+}
 // ---- /strike (07-15): the deliberate single swing — /useon's left-click twin, and THE livestock
 // cull verb (first target: a chicken, the helmsman's arrow pipeline). Tier-2 by design: one approach, one
 // aimed swing, report what happened. The /fight engage-loop and the combat reflex build on this.
@@ -4060,54 +4241,79 @@ app.get('/strike', async (req, res) => {
     if (/creeper/.test(String(target.name))) {
       return err(res, new Error('refusing: never melee a creeper — flee is the law'))
     }
-    lane = claimLane('strike', 20000)              // soft lane: the approach + swings are MINE (07-21)
     // ?max=N (07-21 latency session): bounded swing SEQUENCE in one round trip — re-acquire,
-    // approach, swing, dead-watch, repeat. Exits honestly: dead / target gone / max.
+    // approach, swing, dead-watch, repeat. Exits honestly: dead / target gone / max / out of time.
     const max = Math.min(5, Math.max(1, parseInt(req.query.max || '1')))
-    let struckAt = null, dead = false, swings = 0
+    const deadline = Date.now() + strikeBudgetMs(max)
+    lane = claimLane('strike', strikeBudgetMs(max))   // soft lane: the approach + swings are MINE (07-21)
+    strikeRun.lane = lane
+    // Walks within range of p. Gives up after STRIKE_APPROACH_MS, or once only reserve ms are left.
+    const approach = (p, range, reserve) => {
+      const ms = Math.max(0, Math.min(STRIKE_APPROACH_MS, deadline - reserve - Date.now()))
+      let timer
+      const late = new Promise((resolve, reject) => {
+        timer = setTimeout(() => { stopPath(); reject(Object.assign(new Error(`not there after ${ms / 1000} s`), { reason: 'budget' })) }, ms)
+      })
+      return Promise.race([bot.pathfinder.goto(new goals.GoalNear(p.x, p.y, p.z, range)), late]).finally(() => clearTimeout(timer))
+    }
+    let struckAt = null, dead = false, swings = 0, stop = null, tgt = null
     bot.on('entityDead', onDead)
-    for (let i = 0; i < max && !dead; i++) {
-      const p0 = bot.entity.position
-      const tgt = i === 0 ? target : liveEntities()
-        .filter(en => en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(p0) <= 16)
-        .sort((a, b) => a.position.distanceTo(p0) - b.position.distanceTo(p0))[0]
-      if (!tgt) break
-      if (tgt.position.distanceTo(p0) > 3) {
-        await bot.pathfinder.goto(new goals.GoalNear(tgt.position.x, tgt.position.y, tgt.position.z, 2))
+    for (let i = 0; i < max && !dead && deadline - Date.now() >= STRIKE_SWING_MS; i++) {
+      const last = tgt
+      tgt = i === 0 ? target : nearestSeen(ename, 16)
+      if (!tgt) {
+        if (last && bot.entities[last.id] && !targetSeen(last)) stop = { reason: 'lost sight' }
+        break
+      }
+      // On 1.7.10 a straight run over known ground replaces the walk and ends in a sprint hit.
+      const run = LEGACY_1710 && !sprintBlock(tgt)
+      if (!run && !inMeleeReach(tgt, 0.6)) {
+        try { await approach(tgt.position, 2, STRIKE_SWING_MS) } catch (e) {
+          if (e.reason !== 'budget') throw e
+          stop = walkGaveUp(e)
+          break
+        }
       }
       const alreadyHeld = bot.heldItem && bot.heldItem.name === iname
       await bot.equip(it, 'hand')
       if (LEGACY_1710) {
-        // 1.7.10 has no attack charge, and a swing goes out LEGACY_HIT_MS after the last attack.
-        const due = lastAttackT + LEGACY_HIT_MS - Date.now()
-        if (due > 0) await new Promise(r => setTimeout(r, due))
-        await bot.lookAt(tgt.position.offset(0, 0.6, 0), true)
+        const hit = await meleeSwing(tgt, { run, aimY: 0.6, seen: () => targetSeen(tgt) })
+        if (hit === false) { stop = { reason: 'lost sight' }; break }
+        if (hit === null) continue
+        struckAt = tgt.position.clone()
       } else {
         // 13 ticks after an equip cover a sword's full attack charge, and 11 more wait between swings.
         if (!alreadyHeld) await bot.waitForTicks(13)
         else if (i > 0) await bot.waitForTicks(11)
-        await bot.lookAt(tgt.position.offset(0, 0.6, 0), true)
+        const hurt = mobHurt.wait(tgt)
+        if (hurt > 0) await new Promise(r => setTimeout(r, hurt))
+        await bot.lookAt(meleeAim(tgt, 0.6), true)
         await bot.waitForTicks(2)                    // the tick race: aim packet lands NEXT tick
+        if (!targetSeen(tgt)) { stop = { reason: 'lost sight' }; break }
+        if (!inMeleeReach(tgt, 0.6)) continue
+        struckAt = tgt.position.clone()
+        bot.attack(tgt)
+        lastAttackT = Date.now()
       }
-      struckAt = tgt.position.clone()
-      bot.attack(tgt)
-      lastAttackT = Date.now()
       swings++
       // watch for the death or the despawn instead of guessing a delay (the 700ms check called a real kill a miss)
       for (let w = 0; w < 15 && !dead; w++) {
-        // On 1.7.10 the watch ends before the next swing is due.
-        if (LEGACY_1710 && i < max - 1 && Date.now() + 100 > lastAttackT + LEGACY_HIT_MS) break
+        // On 1.7.10 the watch ends when the jump before the next swing is due.
+        if (LEGACY_1710 && i < max - 1 && Date.now() + 100 > lastAttackT + LEGACY_HIT_MS - JUMP_FALL_TICKS * 50) break
         await new Promise(r => setTimeout(r, 100))
         dead = died.has(tgt.id) || !bot.entities[tgt.id]
       }
     }
-    let stop = null
     if (dead && struckAt) {
-      try { await bot.pathfinder.goto(new goals.GoalNear(struckAt.x, struckAt.y, struckAt.z, 1)) } catch (e) { stop = walkGaveUp(e) }  // hoover the drops
+      try { await approach(struckAt, 1, 0) } catch (e) { stop = walkGaveUp(e) }  // hoover the drops
     }
-    const note = dead ? (stop ? 'the walk to the drops gave up' : 'walked to drops') : swings ? 'still standing — swing again deliberately' : 'target left reach'
+    const note = dead ? (stop ? 'the walk to the drops gave up' : 'walked to drops') : stop ? (stop.reason === 'lost sight' ? 'lost sight of it' : 'out of time, still standing') : swings ? 'still standing — swing again deliberately' : 'target left reach'
     ok(res, { struck: ename, with: iname, swings, at: struckAt ? round(struckAt) : null, killed: dead, note, ...stop })
-  } catch (e) { err(res, e) } finally { releaseLane(lane); bot.removeListener('entityDead', onDead) }
+  } catch (e) { err(res, e) } finally {
+    if (strikeRun.lane === lane) strikeRun.lane = null
+    releaseLane(lane)
+    bot.removeListener('entityDead', onDead)
+  }
 })
 
 // ---- /shoot (07-15, built the day the helmsman handed me a bow): the ranged verb — draw, hold a full
