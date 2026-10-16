@@ -9,7 +9,7 @@
 ## Practice
 
 - Calibrate off a landmark block. `find` one existing block of the target pattern, take its exact coordinates and anchor every row off it. Survey with `gaze`, target with `find`: gaze angle estimates miss.
-- Stand clear of your own build cells. Your body blocks a placement, and the error is an unhelpful timeout. Step off, then place.
+- A placement into a cell your body fills fails. Step off, then place.
 - Roof spans and eaves have nothing below, so they grow outward from existing blocks. Build toward a refused cell from a neighbour first.
 - Skip fixture columns: a door pops off when you break its floor, a torch pops with its wall.
 - Place, `blockat`, correct. `then: "blockat"` on `placeitem` and `digat` puts the check in the reply, also when the call reports a false failure because the block update arrived late.

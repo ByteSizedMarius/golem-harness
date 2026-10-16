@@ -7,7 +7,7 @@ const { Vec3 } = require('vec3')
 const gotoGoal = require('mineflayer-pathfinder/lib/goto')
 const { goals } = require('mineflayer-pathfinder')
 const { guardWork } = require('../lib/walk')
-const { awaitRoute, botConstant, fakeClock, loadBotFunctions, reflexIn, timed, waitFor } = require('./helpers')
+const { awaitRoute, botConstant, buildVerbEnv, fakeClock, loadBotFunctions, reflexIn, timed, waitFor } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty' }
 const solid = (name) => ({ name, boundingBox: 'block' })
@@ -20,6 +20,8 @@ function stuckBot ({ known = true, lit = known, yaw = Math.PI / 2, planks = new 
   bot.blockAt = (p) => ({ ...(p.y < 64 ? solid('stone') : p.equals(planks) ? solid('oak_planks') : AIR), position: p })
   const placed = []
   bot.placeBlock = async (ref, face) => { placed.push(ref.position.plus(face)) }
+  bot.equip = async () => {}
+  bot.lookAt = async () => {}
   bot.inventory = { items: () => [{ name: 'cobblestone', count: 64 }, { name: 'oak_planks', count: 64 }] }
   let path = []
   let ticks = 0
@@ -102,16 +104,16 @@ test('the stall names no block the body neither touches nor sees now, a remember
   }
 })
 
-test('walls stops at a stalled walk and says so instead of placing as if it arrived', async (t) => {
+test('a stalled walk ends that wall cell as path stalled without placing it, and the walls go on', async (t) => {
   const s = stuckBot()
   t.after(s.stop)
-  const reply = awaitRoute('/walls', { x: '-4', z: '-1', w: '3', d: '3', h: '1', base: '64' }, s.env)
+  // A row at x 1 from z -4 to 1 with its doorway at z -1. Only the first cell lies out of reach.
+  const reply = awaitRoute('/walls', { x: '1', z: '-4', w: '1', d: '6', h: '1', base: '64' }, buildVerbEnv(s.bot, { cellKnown: s.env.cellKnown }))
   await stallOut(s)
   assert.deepStrictEqual((await timed(reply, 2000)).out, {
-    placed: 0, skipped: 0, failed: 0, size: '3x3', height: 1, door: 'west',
-    reason: 'stalled', hint: 'stalled at 0,64,0 against oak_planks at -1,64,0'
+    placed: 4, skipped: 0, failed: 1, failures: ['1,64,-4: path stalled'], size: '1x6', height: 1, door: 'west'
   })
-  assert.deepStrictEqual(s.seen.placed, [])
+  assert.deepStrictEqual(s.seen.placed.map((p) => `${p.x},${p.y},${p.z}`), ['1,64,-3', '1,64,-2', '1,64,0', '1,64,1'])
 })
 
 // Returns the first t in ms at which the unstuck reflex fires on a still body, or null if it never does by 40 s.

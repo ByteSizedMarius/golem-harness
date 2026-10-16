@@ -66,7 +66,7 @@ const TOOLS = [
   { name: 'goto', route: '/goto', body: true, description: 'Walk to x,z (y optional: without it the surface, with it the floor nearest y), a waypoint, a player you can see or last saw, or the nearest block type in sight (stops adjacent). range N stops within N, 0 on the cell. It drops at most 3 and shuts doors it opened. It says why it gave up. A plan ending over 2 (or range) off your y or dropping over 3 needs accept. preview only plans.', params: { ...AT, waypoint: WAYPOINT, player: PLAYER, block: NAME, range: { type: 'int', min: 0, max: 32 }, preview: FLAG, accept: FLAG }, timeoutMs: LONGEST },
   { name: 'follow', route: '/follow', body: true, description: 'Keep following a player you see or whose nametag shows, repathing as they move, until unfollow or stop. It waits out fights, jobs, your other calls, reflex moves and lost sight, stays put in a bunker, and runs the doorway drill when wedged.', params: { name: required(PLAYER), range: RANGE } },
   { name: 'unfollow', route: '/unfollow', description: 'Stop following.', params: {} },
-  { name: 'stop', route: '/stop', description: 'Cancel the path, clear movement, stop all jobs, end a bunker build.', params: {} },
+  { name: 'stop', route: '/stop', description: 'Cancel the path, clear movement, stop all jobs, end a build or bunker.', params: {} },
   { name: 'lookat', route: '/lookat', body: true, description: 'Aim the head at a point. Turns instantly.', params: XYZ },
   // A 3 s step into the ladder column, the 15 s climb loop and the step-off.
   { name: 'climb', route: '/climb', body: true, description: 'Climb an adjacent ladder to its top.', params: {}, timeoutMs: 20000 },

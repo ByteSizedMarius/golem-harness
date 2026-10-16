@@ -13,8 +13,9 @@ const vm = require('node:vm')
 const { performance } = require('node:perf_hooks')
 const express = require('express')
 const { Vec3 } = require('vec3')
+const { goals } = require('mineflayer-pathfinder')
 const shelter = require('../lib/shelter')
-const { legLedger } = require('../lib/legs')
+const { legLedger, takenText } = require('../lib/legs')
 const { installSecurity } = require('../lib/install')
 const { countVerbs } = require('../lib/verbs')
 const { createServer } = require('../mcp/server')
@@ -879,6 +880,38 @@ async function actAfter (built) {
 
 const stoppedBuild = (why) => ({ mode: 'up', at: { x: 0, y: 65, z: 0 }, sealed: false, dug: 0, placed: 1, height: 3, gaps: [], exit: [], stopped: why })
 
+// ---- build verb fakes ----
+
+// The build routes' env: no threat, every cell known, and seenNow following over.cellKnown unless over sets its own.
+function buildVerbEnv (bot, over = {}) {
+  const registry = { cobblestone: { id: 1, name: 'cobblestone' }, oak_planks: { id: 2, name: 'oak_planks' } }
+  return {
+    bot,
+    Vec3,
+    goals,
+    ready: true,
+    mcData: { blocksByName: registry, itemsByName: registry },
+    SERVER_OVERRIDES: null,
+    legs: legLedger(),
+    takenText,
+    bunker: { building: false },
+    lastHit: { dmg: 0, t: 0 },
+    meleeThreat: () => false,
+    claimLane: () => ({}),
+    releaseLane () {},
+    cellKnown: () => true,
+    seenNow: over.cellKnown || (() => true),
+    isSoftCover: () => false,
+    entityInCell: shelter.entityInCell,
+    blockers: () => [],
+    OPENABLE: botConstant('OPENABLE'),
+    BUILD_FAIL_LIST: botConstant('BUILD_FAIL_LIST'),
+    BUILD_REACH: botConstant('BUILD_REACH'),
+    BUILD_WALK_CURES: botConstant('BUILD_WALK_CURES'),
+    ...over
+  }
+}
+
 module.exports = {
   ROOT, ALLOW, UNAUTHORIZED, UNAUTHORIZED_BODY, ILLEGAL, LONE_SURROGATE, HUNG, PORT, MCP_TOKEN,
   hmac, sha256, newNonce, otherKey, delay, waitFor, fakeClock, timed, proofOver,
@@ -890,5 +923,6 @@ module.exports = {
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
   botSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
-  BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild
+  BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild,
+  buildVerbEnv
 }

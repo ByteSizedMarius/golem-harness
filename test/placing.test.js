@@ -1,10 +1,12 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const shelter = require('../lib/shelter')
 const { overrideRecipes } = require('../lib/server-overrides')
-const { loadBotFunctions, botConstant, awaitRoute, routeHandler } = require('./helpers')
+const { deathLedger } = require('../lib/deaths')
+const { loadBotFunctions, botConstant, awaitRoute, hookedRoute, routeHandler, buildVerbEnv } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty' }
 const STONE = { name: 'stone', boundingBox: 'block' }
@@ -166,6 +168,104 @@ test('a dig step that cannot be filled says why', async () => {
   assert.strictEqual(await run({ items: [{ name: 'torch', count: 8 }] }, new Vec3(1, 64, 0)), 'no filler blocks carried')
   assert.strictEqual(await run({ items: [{ name: 'dirt', count: 8 }], bot: { async placeBlock () { throw new Error('timeout') } } }, new Vec3(1, 64, 0)), 'the block did not place (timeout)')
   assert.strictEqual(await run({ items: [{ name: 'dirt', count: 8 }] }, new Vec3(1, 70, 0)), 'nothing solid beside it to place against')
+})
+
+// A 3x3 ring of walls at x 1..3, z -1..1, one row high at y 64, doorway at 1,64,0. All seven cells lie in reach.
+const RING = { x: '1', z: '-1', w: '3', d: '3', h: '1', base: '64' }
+
+// A body at (0.5, 64, 0.5) on the floor, carrying items. afterPlace(n, bot) runs after the n-th placing.
+function wallsRig ({ items = [{ name: 'cobblestone', count: 64 }], extra = {}, afterPlace = () => {}, env = {} } = {}) {
+  const log = []
+  const stock = items.map((i) => ({ ...i }))
+  const bot = Object.assign(new EventEmitter(), {
+    entity: body(0.5, 64, 0.5),
+    entities: {},
+    blockAt: ground(extra),
+    inventory: { items: () => stock.filter((i) => i.count > 0) },
+    pathfinder: { goto: async () => { log.push('goto') } },
+    async equip (item) { log.push(`equip ${item.name}`); this.heldItem = item },
+    async lookAt () {},
+    async dig () {},
+    async placeBlock (ref, face) {
+      this.heldItem.count--
+      log.push(`place ${key(ref.position.plus(face))}`)
+      afterPlace(log.filter((l) => l.startsWith('place')).length, bot)
+    }
+  })
+  const placed = () => log.filter((l) => l.startsWith('place')).map((l) => l.slice(6))
+  return { bot, log, placed, env: buildVerbEnv(bot, env) }
+}
+
+test('walls lists the cell its pockets ran out on, with the reason', async () => {
+  const rig = wallsRig({ items: [{ name: 'cobblestone', count: 6 }] })
+  assert.deepStrictEqual(await awaitRoute('/walls', RING, rig.env), {
+    placed: 6, skipped: 0, failed: 1, failures: ['3,64,1: no block in pockets'], size: '3x3', height: 1, door: 'west'
+  })
+  assert.strictEqual(rig.bot.listenerCount('death'), 0, 'the run left its death listener behind')
+})
+
+test('walls refuses a block name the registry lacks before anything moves, and takes a server alias', async () => {
+  const items = [{ name: 'oak_planks', count: 64 }]
+  const alias = { SERVER_OVERRIDES: { items: new Map([['planks', 'oak_planks']]) } }
+  const named = wallsRig({ items, env: alias })
+  await awaitRoute('/walls', { ...RING, name: 'planks', base_name: 'planks' }, named.env)
+  assert.ok(named.log.includes('equip oak_planks'), 'control: the alias builds')
+
+  const misspelt = wallsRig({ items, env: alias })
+  const { handle, res } = routeHandler('/walls', misspelt.env)
+  await handle({ query: { ...RING, name: 'oak_plankz', base_name: 'planks' } }, res)
+  assert.strictEqual(res.error && res.error.message, 'unknown block: oak_plankz')
+  assert.deepStrictEqual(misspelt.log, [])
+})
+
+test('walls leaves a door in its line standing and names it, and a hidden one only as unknown', async () => {
+  const door = { '3,64,0': { name: 'oak_door', boundingBox: 'block' } }
+  const seen = wallsRig({ extra: door })
+  const r = await awaitRoute('/walls', RING, seen.env)
+  assert.deepStrictEqual([r.placed, r.failures], [6, ['3,64,0: door']])
+  assert.ok(!seen.placed().includes('3,64,0'))
+
+  const hidden = wallsRig({ extra: door, env: { cellKnown: (p) => key(p) !== '3,64,0' } })
+  const h = await awaitRoute('/walls', RING, hidden.env)
+  assert.deepStrictEqual([h.placed, h.failures], [6, ['3,64,0: cell not known to the bot']])
+})
+
+// Every cell known, and all but the one at k seen now.
+const unseenNow = (k) => ({ seenNow: (p) => key(p) !== k })
+
+test('walls answers a remembered cell out of sight the same whether a door stands in it now', async () => {
+  const door = wallsRig({ extra: { '3,64,0': { name: 'oak_door', boundingBox: 'block' } }, env: unseenNow('3,64,0') })
+  const empty = wallsRig({ env: unseenNow('3,64,0') })
+  assert.deepStrictEqual(await awaitRoute('/walls', RING, door.env), await awaitRoute('/walls', RING, empty.env))
+})
+
+test('a build block goes against no remembered face out of sight, whatever holds that cell now', () => {
+  const verdict = (extra) => loadBotFunctions(['supportFace'], wallsRig({ extra, env: unseenNow('2,63,0') }).env).supportFace(new Vec3(2, 64, 0))
+  assert.strictEqual(verdict({}), 'no line of sight to a face')
+  assert.strictEqual(verdict({ '2,63,0': AIR }), 'no line of sight to a face')
+})
+
+test('outline builds on no remembered ground out of sight, whatever holds that cell now', async () => {
+  for (const extra of [{}, { '2,63,0': AIR }]) {
+    const rig = wallsRig({ extra, env: unseenNow('2,63,0') })
+    const r = await awaitRoute('/outline', { x: '2', z: '0', w: '1', d: '1', y: '64' }, rig.env)
+    assert.deepStrictEqual([r.placed, r.failures], [0, ['2,64,0: cell not known to the bot']], extra['2,63,0'] ? 'dug out' : 'stone')
+    assert.deepStrictEqual(rig.placed(), [])
+  }
+})
+
+test('a death mid-build ends walls with the reason, what it placed and the death message', async () => {
+  const deaths = deathLedger()
+  const die = (bot) => {
+    deaths.heard('Claude was slain by Zombie')
+    deaths.died('DIED near (0,64,0)')
+    bot.emit('death')
+  }
+  const rig = wallsRig({ afterPlace: (n, bot) => { if (n === 3) die(bot) } })
+  assert.deepStrictEqual(await hookedRoute('/walls', RING, rig.env, deaths), {
+    died: 'Claude was slain by Zombie', ok: true, placed: 3, skipped: 0, failed: 0, stopped: 'the body died', size: '3x3', height: 1, door: 'west'
+  })
+  assert.strictEqual(rig.placed().length, 3)
 })
 
 // placeitem by a body at (-1.5, 64, 0.5) carrying name over the floor plus extra, blind to the cells in hidden,
