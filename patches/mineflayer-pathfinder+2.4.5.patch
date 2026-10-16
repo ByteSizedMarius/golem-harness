@@ -149,10 +149,27 @@ index b38bd30..752cecc 100644
        bot.setControlState('sprint', false)
      } else if (stateMovements.allowSprinting && physics.canStraightLine(path, true)) {
 diff --git a/node_modules/mineflayer-pathfinder/lib/movements.js b/node_modules/mineflayer-pathfinder/lib/movements.js
-index a7e3505..72aaf26 100644
+index a7e3505..369b6b2 100644
 --- a/node_modules/mineflayer-pathfinder/lib/movements.js
 +++ b/node_modules/mineflayer-pathfinder/lib/movements.js
-@@ -384,8 +384,15 @@ class Movements {
+@@ -1,6 +1,8 @@
+ const { Vec3 } = require('vec3')
+ const nbt = require('prismarine-nbt')
+ const Move = require('./move')
++// LOCAL PATCH (Golem 10-16): a fall of more than 0.5 onto farmland can trample it.
++const tramples = (floor) => floor.name === 'farmland'
+ 
+ const cardinalDirections = [
+   { x: -1, z: 0 }, // West
+@@ -25,6 +27,7 @@ class Movements {
+     this.placeCost = 1
+     this.liquidCost = 1
+     this.entityCost = 1
++    this.farmlandCost = 50 // LOCAL PATCH (Golem 10-16): added to a move whose fall can trample farmland
+ 
+     this.dontCreateFlow = true
+     this.dontMineUnderFallingBlock = true
+@@ -384,8 +387,15 @@ class Movements {
        cost += this.placeCost // additional cost for placing a block
      }
  
@@ -170,3 +187,66 @@ index a7e3505..72aaf26 100644
  
      // Open fence gates
      if (this.canOpenDoors && blockC.openable && blockC.shapes && blockC.shapes.length !== 0) {
+@@ -454,6 +464,7 @@ class Movements {
+       neighbors.push(new Move(blockC.position.x, blockC.position.y, blockC.position.z, node.remainingBlocks, cost, toBreak))
+     } else if (this.getBlock(node, dir.x, -2, dir.z).physical || blockD.liquid) {
+       if (!blockD.safe) return // don't self-immolate
++      cost += this.landingCost(blockD) // LOCAL PATCH (Golem 10-16)
+       cost += this.getNumEntitiesAt(blockC.position, 0, -1, 0) * this.entityCost
+       neighbors.push(new Move(blockC.position.x, blockC.position.y - 1, blockC.position.z, node.remainingBlocks, cost, toBreak))
+     }
+@@ -473,6 +484,11 @@ class Movements {
+     return null
+   }
+ 
++  // LOCAL PATCH (Golem 10-16): the farmland cost of a fall that ends in blockLand.
++  landingCost (blockLand) {
++    return !blockLand.liquid && tramples(this.getBlock(blockLand.position, 0, -1, 0)) ? this.farmlandCost : 0
++  }
++
+   getMoveDropDown (node, dir, neighbors) {
+     const blockB = this.getBlock(node, dir.x, 1, dir.z)
+     const blockC = this.getBlock(node, dir.x, 0, dir.z)
+@@ -495,6 +511,7 @@ class Movements {
+ 
+     if (blockC.liquid) return // dont go underwater
+ 
++    cost += this.landingCost(blockLand) // LOCAL PATCH (Golem 10-16)
+     cost += this.getNumEntitiesAt(blockLand.position, 0, 0, 0) * this.entityCost // add cost for entities
+ 
+     neighbors.push(new Move(blockLand.position.x, blockLand.position.y, blockLand.position.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
+@@ -515,6 +532,7 @@ class Movements {
+ 
+     if (this.getBlock(node, 0, 0, 0).liquid) return // dont go underwater
+ 
++    cost += this.landingCost(blockLand) // LOCAL PATCH (Golem 10-16)
+     cost += this.getNumEntitiesAt(blockLand.position, 0, 0, 0) * this.entityCost // add cost for entities
+ 
+     neighbors.push(new Move(blockLand.position.x, blockLand.position.y, blockLand.position.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
+@@ -564,6 +582,8 @@ class Movements {
+     if (this.getBlock(node, 0, 0, 0).liquid) return // cant jump from water
+ 
+     let cost = 1
++    // LOCAL PATCH (Golem 10-16): a short jump lands on the floor it jumps over.
++    if (tramples(block1)) cost += this.farmlandCost
+ 
+     // Leaving entities at the ceiling level (along path) out for now because there are few cases where that will be important
+     cost += this.getNumEntitiesAt(node, dir.x, 0, dir.z) * this.entityCost
+@@ -588,6 +608,7 @@ class Movements {
+ 
+       if (ceilingClear && blockB.safe && blockC.safe && blockD.physical) {
+         cost += this.exclusionStep(blockB)
++        if (tramples(blockD)) cost += this.farmlandCost // LOCAL PATCH (Golem 10-16)
+         // Forward
+         neighbors.push(new Move(blockC.position.x, blockC.position.y, blockC.position.z, node.remainingBlocks, cost, [], [], true))
+         break
+@@ -606,7 +627,8 @@ class Movements {
+         if (blockE.physical) {
+           cost += this.exclusionStep(blockD)
+           cost += this.getNumEntitiesAt(blockD.position, 0, 0, 0) * this.entityCost
+-          neighbors.push(new Move(blockD.position.x, blockD.position.y, blockD.position.z, node.remainingBlocks, cost, [], [], true))
++          // LOCAL PATCH (Golem 10-16)
++          neighbors.push(new Move(blockD.position.x, blockD.position.y, blockD.position.z, node.remainingBlocks, cost + (tramples(blockE) ? this.farmlandCost : 0), [], [], true))
+         }
+         floorCleared = floorCleared && !blockE.physical
+       } else if (!blockB.safe || !blockC.safe) {

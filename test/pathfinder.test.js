@@ -39,7 +39,11 @@ async function body (pos, cells) {
   bot.registry.blocksArray.forEach((b) => { if (b.name.endsWith('_door') && !b.name.includes('iron')) moves.openable.add(b.id) })
   moves.canOpenDoors = true
   moves.canDig = false
-  const plan = (goal) => bot.pathfinder.getPathFromTo(moves, bot.entity.position, goal).next().value.result
+  // One call finishes the search, so a loaded machine cannot cut the first tick short into 'partial'.
+  const plan = (goal) => {
+    bot.pathfinder.tickTimeout = bot.pathfinder.thinkTimeout
+    return bot.pathfinder.getPathFromTo(moves, bot.entity.position, goal).next().value.result
+  }
   return { bot, plan, moves }
 }
 
@@ -100,36 +104,85 @@ async function firstTick (cells) {
   return controls
 }
 
-// A trench at x 1 and 2, then floor at x 3 to 6.
-function trench (floor) {
+const STONE = ['stone', {}]
+const FARMLAND = ['farmland', { moisture: 7 }]
+const WHEAT = ['wheat', { age: 7 }]
+
+function step (top) {
   const cells = {}
-  for (let z = -8; z <= 8; z++) {
-    for (let y = 50; y <= 63; y++) cells[`1,${y},${z}`] = cells[`2,${y},${z}`] = ['air', {}]
-    for (let x = 3; x <= 6; x++) cells[`${x},63,${z}`] = floor
-  }
+  for (let z = -8; z <= 8; z++) cells[`1,64,${z}`] = top
   return cells
 }
 
-// A one-block step up at x 1, then floor at x 2 to 6.
-function step (floor) {
-  const cells = {}
-  for (let z = -8; z <= 8; z++) {
-    cells[`1,64,${z}`] = ['stone', {}]
-    for (let x = 2; x <= 6; x++) cells[`${x},63,${z}`] = floor
-  }
-  return cells
-}
+const START = new Vec3(0.5, 64, 0.5)
+// The nodes of path the body jumps to: jump landings and steps up.
+const jumps = (path) => path.filter((n, i) => n.parkour || n.y - (i ? path[i - 1] : START).y > 0.5)
+const rounds = (path) => path.some((n) => Math.abs(Math.floor(n.z)) > 8)
 
-test('the pathfinder sprint jumps a gap that lands on a field', async () => {
-  const stone = await firstTick(trench(['stone', {}]))
-  assert.deepStrictEqual([stone.forward, stone.sprint, stone.jump], [true, true, true], 'control: a sprint jump onto stone')
-  const field = await firstTick(trench(['farmland', { moisture: 7 }]))
-  assert.deepStrictEqual([field.forward, field.sprint, field.jump], [true, true, true])
+test('the pathfinder jumps up a step of farmland like one of stone', async () => {
+  for (const [label, top] of [['stone', STONE], ['farmland', FARMLAND]]) {
+    const { plan } = await body(START, step(top))
+    const result = plan(new goals.GoalBlock(6, 64, 0))
+    assert.ok(jumps(result.path)[0] === result.path[0] && !rounds(result.path), `${label}: a jump straight up the step`)
+    assert.strictEqual((await firstTick(step(top))).jump, true, `${label}: the body jumps`)
+  }
 })
 
-test('the pathfinder sprint jumps a step up beside a field', async () => {
-  const stone = await firstTick(step(['stone', {}]))
-  assert.deepStrictEqual([stone.forward, stone.sprint, stone.jump], [true, true, true], 'control: a sprint jump up beside stone')
-  const field = await firstTick(step(['farmland', { moisture: 7 }]))
-  assert.deepStrictEqual([field.forward, field.sprint, field.jump], [true, true, true])
+// A field at x 1 to 6 across z -8 to 8, a block below the start's floor, with a stone strip at its level along z 9.
+function ledge (floor) {
+  const cells = {}
+  for (let x = 1; x <= 6; x++) {
+    for (let z = -8; z <= 9; z++) {
+      cells[`${x},63,${z}`] = ['air', {}]
+      cells[`${x},62,${z}`] = z <= 8 ? floor : STONE
+    }
+  }
+  return cells
+}
+
+// The nodes of path the body falls to, and the name of the floor under a node.
+const drops = (path) => path.filter((n, i) => (i ? path[i - 1] : START).y - n.y > 0.5)
+const floorAt = (cells, n) => {
+  const y = Math.ceil(n.y) - 1
+  return (cells[`${Math.floor(n.x)},${y},${Math.floor(n.z)}`] || [y <= 63 ? 'stone' : 'air'])[0]
+}
+
+test('the pathfinder walks round to drop onto stone rather than onto a field, and walks onto the field from its level', async () => {
+  const stone = await body(START, ledge(STONE))
+  const drop = stone.plan(new goals.GoalBlock(6, 63, 0))
+  assert.ok(drops(drop.path)[0] === drop.path[0] && !rounds(drop.path), 'control: a drop straight onto the stone')
+  const cells = ledge(FARMLAND)
+  const { plan } = await body(START, cells)
+  const result = plan(new goals.GoalBlock(6, 63, 0))
+  assert.strictEqual(result.status, 'success')
+  assert.deepStrictEqual(drops(result.path).map((n) => floorAt(cells, n)), ['stone'])
+  assert.ok(rounds(result.path), 'the path rounds the field to the strip')
+})
+
+test('a body that can dig digs down beside a field rather than onto it', async () => {
+  // Dirt round the start keeps the search for a dig short.
+  const dirt = {}
+  for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++) dirt[`${x},63,${z}`] = ['dirt', {}]
+  const stone = await body(START, dirt)
+  stone.moves.canDig = true
+  const down = stone.plan(new goals.GoalBlock(0, 63, 0))
+  assert.deepStrictEqual(down.path.map((n) => [n.x, n.y, n.z, n.toBreak.length]), [[0, 63, 0, 1]], 'control: a dig straight down')
+  const cells = { ...dirt, '0,62,0': FARMLAND }
+  const { plan, moves } = await body(START, cells)
+  moves.canDig = true
+  const result = plan(new goals.GoalBlock(0, 63, 0))
+  assert.strictEqual(result.status, 'success')
+  assert.ok(result.path.length > 1 && drops(result.path).every((n) => floorAt(cells, n) !== 'farmland'))
+})
+
+test('the pathfinder walks straight across a field', async () => {
+  const cells = {}
+  for (const x of [1, 2, 4]) cells[`${x},63,0`] = FARMLAND
+  cells['2,64,0'] = cells['4,64,0'] = WHEAT
+  const { plan } = await body(START, cells)
+  const result = plan(new goals.GoalBlock(6, 64, 0))
+  assert.deepStrictEqual(result.path.map((n) => [Math.floor(n.x), Math.floor(n.z), !!n.parkour]),
+    [1, 2, 3, 4, 5, 6].map((x) => [x, 0, false]))
+  const controls = await firstTick(cells)
+  assert.deepStrictEqual([controls.forward, controls.jump], [true, false])
 })
