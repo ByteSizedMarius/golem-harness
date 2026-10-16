@@ -109,7 +109,15 @@ let forestryMoves = null       // lumberjack profile: may break ONLY leaves+logs
 // hard-returns false otherwise), so it can't just wear the considerate profile: hand it
 // disposable legs that may break ONLY the target's block type (+ leaves, for canopy
 // approaches), and ALWAYS give the pathfinder back the legs it was wearing before.
-async function collectSafely (block) {
+// A second collect throws busy, or with wait queues behind the running one until it ends or stopCollect refuses it.
+async function collectSafely (block, what, { wait = false } = {}) {
+  const stops = collectLock.stops
+  const stopped = () => Object.assign(new Error('stopped'), { reason: 'stopped' })
+  while (collectLock.done) {
+    if (!wait) throw collectBusy()
+    await collectLock.done
+    if (collectLock.stops !== stops) throw stopped()
+  }
   const prev = bot.pathfinder.movements   // considerate normally; forestry mid-/gather
   const cage = new Movements(bot)
   cage.canDig = true
@@ -128,12 +136,30 @@ async function collectSafely (block) {
   mcData.blocksArray.forEach(b => { if (b.name.endsWith('_door') && !b.name.includes('iron')) cage.openable.add(b.id) })
   cage.canOpenDoors = true
   bot.collectBlock.movements = cage
+  let release
+  collectLock.what = what
+  collectLock.done = new Promise((resolve) => { release = resolve })
   try {
-    return await watchedWork(() => bot.collectBlock.collect(block), abandonCollect)
+    const r = await watchedWork(() => bot.collectBlock.collect(block), abandonCollect)
+      .catch((e) => { if (collectLock.stops === stops) throw e })
+    if (collectLock.stops !== stops) throw stopped()
+    return r
   } finally {
     bot.collectBlock.movements = null   // no stale cage lingering inside the plugin
     if (prev) bot.pathfinder.setMovements(prev)
+    collectLock.what = collectLock.done = null
+    release()
   }
+}
+// The running collect (who runs it and a promise that settles when it ends) and the count of stopCollect calls.
+const collectLock = { what: null, done: null, stops: 0 }
+function collectBusy () {
+  return Object.assign(new Error(`busy: ${collectLock.what} is collecting`), { reason: 'busy' })
+}
+// Ends the running collect and refuses the ones waiting for it.
+function stopCollect () {
+  collectLock.stops++
+  if (collectLock.done) abandonCollect()
 }
 // How long one collect or approach may stand without progress, and how long it may take at most.
 const COLLECT_STALL_MS = 4500
@@ -970,7 +996,7 @@ reflexes.push({
 // ---- async jobs registry (long actions run in background; driver keeps reacting) ----
 const { createJobs } = require('./lib/jobs')
 const { legLedger, takenText, laneBlocks: legsLaneBlocks } = require('./lib/legs')
-const jobs = createJobs({ stop: () => safeStop(), emit: (name, msg) => emitEvent('job', name + ': ' + msg) })
+const jobs = createJobs({ stop: () => { safeStop(); stopCollect() }, emit: (name, msg) => emitEvent('job', name + ': ' + msg) })
 // Each take of the legs ends every walk route begun before it.
 const legs = legLedger()
 // Ends the running job and its walk for a reflex that needs the body, naming the reflex in the job's takenBy.
@@ -3897,14 +3923,15 @@ app.get('/mine', async (req, res) => {
     const radius = parseInt(req.query.radius || '64')
     const ids = resolveBlockIds(name)
     if (!ids.length) return err(res, new Error(`unknown block: ${name}`))
+    if (collectLock.done) return err(res, collectBusy())
     let mined = 0
-    // Why the collect stopped short: stalled or budget.
+    // Why the collect stopped short: stalled, budget, busy or stopped.
     let reason = null
     for (let i = 0; i < count; i++) {
       const b = nearestVisible(ids, radius)
       if (!b) break
       try {
-        await collectSafely(b)
+        await collectSafely(b, `mine ${name}`)
       } catch (e) {
         if (!e.reason) throw e
         reason = e.reason
@@ -4147,16 +4174,17 @@ app.get('/tidy', async (req, res) => {
     const Vec3 = require('vec3').Vec3
     const scaffold = new Set(['cobblestone', 'dirt'])
     if (req.query.dry === '1') return ok(res, { pending: navPlaced.length, blocks: navPlaced.slice(0, 20) })
+    if (collectLock.done) return err(res, collectBusy())
     const todo = navPlaced.splice(0)                       // take & clear the queue
     const here = bot.entity.position
     todo.sort((a, b) => here.distanceTo(new Vec3(a.x, a.y, a.z)) - here.distanceTo(new Vec3(b.x, b.y, b.z)))
     let reclaimed = 0, alreadyGone = 0, failed = 0
-    // Why the reclaim stopped short: stalled or budget.
+    // Why the reclaim stopped short: stalled, budget, busy or stopped.
     let reason = null
     for (const [i, p] of todo.entries()) {
       const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
       if (!b || !scaffold.has(b.name)) { alreadyGone++; continue }  // already gone / not scaffold
-      try { await collectSafely(b); reclaimed++ }
+      try { await collectSafely(b, 'tidy'); reclaimed++ }
       catch (e) {
         failed++
         navPlaced.push(p)                                           // unreachable now — requeue
@@ -6278,7 +6306,7 @@ app.get('/gather', (req, res) => {
             continue
           }
           try {
-            await collectSafely(b)
+            await collectSafely(b, job.name, { wait: true })
             mined++
             progressed = true
             job.progress(`mined ${resource} ${mined}/${amount} @ ${p.x},${p.y},${p.z}`)

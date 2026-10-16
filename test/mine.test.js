@@ -36,14 +36,17 @@ function collector ({ blocks, reach, drifting = false, holdDig = false }) {
   bot.tool = { equipForBlock: async () => {} }
   bot.heldItem = null
   bot.targetDigBlock = null
-  bot.stopDigging = () => {}
   const seen = { digs: 0, planned: 0, followed: 0, drops: [], watches: 0, logs: [] }
+  bot.stopDigging = () => { if (seen.abortDig) seen.abortDig(new Error('Digging aborted')) }
   bot.dig = async (b) => {
     seen.digs++
     if (holdDig) {
       bot.targetDigBlock = b
-      await new Promise((resolve) => { seen.finishDig = resolve })
-      bot.targetDigBlock = null
+      try {
+        await new Promise((resolve, reject) => { Object.assign(seen, { finishDig: resolve, abortDig: reject }) })
+      } finally {
+        bot.targetDigBlock = null
+      }
     }
     blocks[`${b.position.x},${b.position.y},${b.position.z}`] = new Block('air', b.position, 0)
     seen.drops.push(new Entity(b.position.offset(0.5, 0.5, 0.5)))
@@ -89,6 +92,7 @@ function collector ({ blocks, reach, drifting = false, holdDig = false }) {
     mcData: { blocksArray: [] },
     Movements,
     navPlaced: [],
+    collectLock: botConstant('collectLock'),
     COLLECT_STALL_MS: botConstant('COLLECT_STALL_MS'),
     COLLECT_BUDGET_MS: botConstant('COLLECT_BUDGET_MS'),
     guardWork: (work, o) => {
