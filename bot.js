@@ -5173,8 +5173,11 @@ async function refuelAfterFight () {
   }
 }
 // GET /eat?food=<name>: equips the named food, or the most filling safeFood, eats it and puts the held item back.
+// A running job equips its tool again mid-meal, which ends the meal without an error.
 app.get('/eat', async (req, res) => {
   try {
+    const job = jobs.list().find(j => j.status === 'running' && !j.cancelled)
+    if (job) return err(res, Object.assign(new Error(`busy: job ${job.id} ${job.name} holds the hand`), { reason: 'busy' }))
     const want = req.query.food || req.query.name   // accept both (the salmon/porkchop mystery: name= was ignored)
     const items = bot.inventory.items()
     let food = null

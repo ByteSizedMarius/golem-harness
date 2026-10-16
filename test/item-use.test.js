@@ -71,6 +71,7 @@ function body () {
     AGGRO_CONFIRMED: new Map(),
     bunker: { building: false, cell: null },
     lastHit: null,
+    jobs: { list: () => [] },
     setTimeout,
     clearTimeout
   }

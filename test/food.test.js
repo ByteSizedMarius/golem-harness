@@ -4,6 +4,8 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const registry = require('prismarine-registry')('1.21.11')
 const Item = require('prismarine-item')(registry)
+const { createJobs } = require('../lib/jobs')
+const { deathLedger } = require('../lib/deaths')
 const { loadBotFunctions, botConstant, routeHandler, awaitRoute, fakeClock, delay } = require('./helpers')
 
 const FOOD_UPDATE_MS = botConstant('FOOD_UPDATE_MS')
@@ -30,6 +32,7 @@ const env = (bot, extra = {}) => ({
   mcData: { foods: registry.foods },
   RISKY_FOODS: botConstant('RISKY_FOODS'),
   FOOD_UPDATE_MS,
+  jobs: createJobs({ stop () {}, emit () {}, deaths: deathLedger() }),
   setTimeout,
   clearTimeout,
   ...extra
@@ -73,6 +76,26 @@ test('eat says the food level is unconfirmed when no update arrives', async () =
   await done
   assert.strictEqual(res.body.foodNow, 10)
   assert.match(res.body.unconfirmed, /no food update/)
+})
+
+test('eat refuses while a job holds the hand, naming the job', async () => {
+  const clock = fakeClock()
+  const bot = body(['iron_pickaxe', 'bread'])
+  const pick = bot.inventory.items()[0]
+  bot.heldItem = pick
+  // The job equips its pick again mid-meal, and mineflayer ends the consume on a held-item change.
+  bot.consume = async () => { bot.heldItem = pick }
+  const e = env(bot, { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout })
+  e.jobs.start('dig_tunnel e x12', () => new Promise(() => {}))
+  const { handle, res } = routeHandler('/eat', e)
+  const done = handle({ query: {} }, res)
+  await delay(10)
+  clock.advance(FOOD_UPDATE_MS)
+  await done
+  assert.ok(res.error, `eat answered ${JSON.stringify(res.body)}`)
+  assert.strictEqual(res.error.message, 'busy: job 1 dig_tunnel e x12 holds the hand')
+  assert.strictEqual(res.error.reason, 'busy')
+  assert.strictEqual(bot.heldItem, pick)
 })
 
 // refuelAfterFight over bot, with the event texts it emits.
