@@ -3626,6 +3626,12 @@ function walkReply (r, reason) {
   const me = bot.entity.position
   const reply = { arrived: !reason, kind: r.kind, target: r.target, pos: round(me), dist: null, reason: reason || null, hint: (reason && WALK_HINTS[reason]) || null }
   if (r.agoSec !== undefined) reply.agoSec = r.agoSec
+  // Adjacent: the feet end outside the goal cell, within 1.5 of its floor centre.
+  if (r.cell && !r.nametag) {
+    const c = r.cell
+    const near = Math.hypot(c.x + 0.5 - me.x, c.y - me.y, c.z + 0.5 - me.z) <= 1.5
+    if (near && !arrivedAt(new goals.GoalBlock(c.x, c.y, c.z), me)) reply.adjacent = true
+  }
   // A nametag target is aimed at from the centre of its 5-block cube.
   const aim = r.nametag ? crumbCentre(r.cell) : r.cell ? { x: r.cell.x + 0.5, z: r.cell.z + 0.5 } : r.toward
   if (!aim) return reply
@@ -3687,10 +3693,32 @@ function pause (route, ms) {
   return new Promise(resolve => setTimeout(resolve, Math.min(ms, route.left())))
 }
 
+// Resolves once quietMs pass without a position packet from the server, at the latest after maxMs.
+function serverSettled (quietMs = 250, maxMs = 1000) {
+  return new Promise((resolve) => {
+    let quiet = null
+    const done = () => {
+      clearTimeout(quiet)
+      clearTimeout(cap)
+      bot.removeListener('forcedMove', rearm)
+      resolve()
+    }
+    const rearm = () => {
+      clearTimeout(quiet)
+      quiet = setTimeout(done, quietMs)
+    }
+    const cap = setTimeout(done, maxMs)
+    bot.on('forcedMove', rearm)
+    rearm()
+  })
+}
+
+// An arrival counts where the server puts the body, after its corrections.
 async function walkOnce (goal, route, stallMs) {
   if (routeEnd(route)) return routeEnd(route)
   route.goal = goal
   const how = await walkAttempt(bot, goal, { stallMs, thinkTimeout: bot.pathfinder.thinkTimeout })
+  if (how === 'done') await serverSettled()
   if (how === 'changed') route.taken = true
   if (routeEnd(route)) return routeEnd(route)
   if (['stalled', 'timeout', 'no-path', 'emptied'].includes(how)) releaseGoal(route)
@@ -3857,7 +3885,8 @@ app.get('/goto', async (req, res) => {
       lastWaypoint = q.waypoint
       journal('goto', 'went to ' + q.waypoint)
     }
-    ok(res, namedStop(r, route.mark))
+    const { x, y, z } = bot.entity.position.floored()
+    ok(res, namedStop({ ...r, cell: { x, y, z } }, route.mark))
   } catch (e) { err(res, e) } finally { releaseLane(lane) }
 })
 

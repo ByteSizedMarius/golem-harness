@@ -415,6 +415,7 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     bunker: { building: false },
     console,
     setTimeout: (fn) => setImmediate(fn),
+    clearTimeout: (h) => clearImmediate(h),
     goals,
     UNLOADED,
     standCell,
@@ -479,6 +480,29 @@ test('the /goto walk replies arrived on the stand cell, or how the walk gave up'
     ['not-reached', { answer: update('success') }],
     ['stopped', { answer: (bot) => bot.emit('path_stop') }]
   ])
+})
+
+test('a /goto that ends beside a goal cell a mob stands on replies adjacent, not arrived', async () => {
+  // The mob on the goal cell keeps the body one block west of it.
+  const pushed = (bot, g) => {
+    bot.entity.position = new Vec3(g.x - 0.5, g.y, g.z + 0.5)
+    bot.emit('goal_reached', g)
+  }
+  const r = await goto({ x: 5, z: 5 }, { answer: pushed })
+  assert.deepStrictEqual([r.arrived, r.reason, r.adjacent, r.target], [false, 'not-reached', true, { x: 5, y: 64, z: 5 }])
+  assert.strictEqual((await goto({ x: 5, z: 5 }, { answer: arrive })).adjacent, undefined, 'control: on the goal cell')
+})
+
+test('the /goto walk replies the position the server corrects the body to after arrival', async () => {
+  const corrected = (bot, g) => {
+    arrive(bot, g)
+    setImmediate(() => {
+      bot.entity.position = new Vec3(g.x + 0.2, g.y, g.z + 0.8)
+      bot.emit('forcedMove')
+    })
+  }
+  const r = await goto({ x: 5, z: 5 }, { answer: corrected })
+  assert.deepStrictEqual([r.arrived, r.target, r.pos], [true, { x: 5, y: 64, z: 5 }, { x: 5.2, y: 64, z: 5.8 }])
 })
 
 test('the /goto walk replies the reason it did not start', async () => {
