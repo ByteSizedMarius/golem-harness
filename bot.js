@@ -1924,6 +1924,8 @@ setInterval(worldChangeEvent, 3000)
 let lastHp = 20
 let lastPosSafe = null
 let lastHurtEmit = 0
+// The damage in one hit at or above which a hurt event skips the throttle.
+const BIG_HIT = 4
 let lowFoodWarned = false
 // pocket-fullness sense (07-16, the helmsman's ask after the museum purge found ZERO free slots —
 // full pockets make pickups fail SILENTLY and stopped a dig mid-escape on 07-15). Same one-warning-
@@ -1957,6 +1959,7 @@ bot.on('health', async () => {
   try {
     if (bot.health < lastHp - 0.5) {
       const dmg = +(lastHp - bot.health).toFixed(1)
+      const hurtDue = (ms) => dmg >= BIG_HIT || Date.now() - lastHurtEmit > ms
       // A sourceless hit beside a player gets its attribution once the swing window has closed.
       if (swingWait) {
         lastHp = bot.health                               // a health update during the wait counts from here
@@ -1985,7 +1988,7 @@ bot.on('health', async () => {
         } else if (!cr || !cr.on) {
           action = 'combat reflex is OFF — PILOT must act'
         }
-        if (Date.now() - lastHurtEmit > 2000) {
+        if (hurtDue(2000)) {
           lastHurtEmit = Date.now()
           emitEvent('hurt', `took ${dmg} — ${attrib.desc} — HP ${bot.health}/20 — ${action}`)
         }
@@ -1994,18 +1997,18 @@ bot.on('health', async () => {
       // Every hit during a bunker build lands here, attributed or not.
       if (bunker.building) {
         onBuildHit(attrib)
-        if (Date.now() - lastHurtEmit > 3000) {
+        if (hurtDue(3000)) {
           lastHurtEmit = Date.now()
           emitEvent('hurt', `took ${dmg} damage while building the bunker${attrib ? `, ${attrib.desc}` : ''}, HP ${bot.health}/20`)
         }
       } else if (!attrib) {
         freezeBody()
         const cause = ws && ws.buried ? 'SUFFOCATING inside a block' : ws && ws.inLava ? 'LAVA' : ws && ws.submerged ? 'drowning' : 'unknown — look around'
-        if (Date.now() - lastHurtEmit > 3000) {
+        if (hurtDue(3000)) {
           lastHurtEmit = Date.now()
           emitEvent('hurt', `took ${dmg} damage (${cause}) — HP ${bot.health}/20 — FROZE all action; assess before moving`)
         }
-      } else if (attrib.env && Date.now() - lastHurtEmit > 3000) {
+      } else if (attrib.env && hurtDue(3000)) {
         // An environmental hit, or a sourceless one with no hostile near, never freezes the body.
         lastHurtEmit = Date.now()
         emitEvent('hurt', `took ${dmg} damage (${attrib.desc}), HP ${bot.health}/20`)
