@@ -157,6 +157,7 @@ async function meleeSwing ({ chase, goal }) {
     mobClass: () => 'hostile',
     airFlood: () => ({}),
     knownCell: () => true,
+    entityPerceptible: () => true,
     nearHostiles: () => [],
     meleeReach: () => 3.2,
     disengageHp: () => 8,

@@ -2408,8 +2408,7 @@ const STANCES = {
   sentinel: { fleeDist: 16, bowBand: [7, 24],  chase: false, engage: 'confirmed', note: 'work detail: ignore posturing, fight only what actually hits me' }
 }
 let stance = 'guard'
-// One full bow cycle at a live target: equip, chest+holdover aim, full 1150ms draw, re-aim, loose.
-// Factored from /shoot so the reflex and the verb fire the same arrow. Returns false if no bow/arrows.
+// One full bow cycle at target, false when nothing was loosed.
 async function drawAndLoose (target) {
   const bow = bot.inventory.items().find(i => i.name === 'bow')
   if (!bow || !bot.inventory.items().some(i => i.name === 'arrow')) return false
@@ -2809,6 +2808,8 @@ reflexes.unshift({
     if (now < this._coverUntil || now < this._fleeUntil) return
     if (laneBlocks('interrupt')) { laneNarrate('take-cover'); return }
     this._coverUntil = now + 4000
+    const seen = entityPerceptible(threat, this.fairFill(bot))
+    const from = seen ? who || '?' : 'something'
     try {
       const here = bot.entity.position.floored()
       const eye = threat.position.offset(0, 1.62, 0)
@@ -2833,12 +2834,12 @@ reflexes.unshift({
         takeLegs('combat', 'take cover')
         stopPath()
         bot.pathfinder.setGoal(new goals.GoalBlock(bestCell.x, bestCell.y, bestCell.z))
-        emitEvent('combat', `ranged chip from ${who || '?'} — BREAKING EYE-LINE: cover ${compass(bestCell.x - here.x, bestCell.z - here.z)} at (${bestCell.x},${bestCell.y},${bestCell.z})`)
+        emitEvent('combat', `ranged chip from ${from} — BREAKING EYE-LINE: cover ${compass(bestCell.x - here.x, bestCell.z - here.z)} at (${bestCell.x},${bestCell.y},${bestCell.z})`)
         return
       }
     } catch (e) {}
     this._coverUntil = 0                                 // no cover found — hand it to the flee latch
-    this.fleeFrom(bot, threat, `ranged chip from ${who || '?'} — no cover within 3, FLEEING the sightline`, 'interrupt')
+    this.fleeFrom(bot, threat, `ranged chip from ${from} — no cover within 3, FLEEING the sightline`, 'interrupt')
   },
   // FAIRNESS GATE fill (07-16, the confessed leak from the first Normal cave crawl): the watcher
   // read raw bot.entities — server x-ray — and tracked a zombie through solid rock that /entities
@@ -2863,7 +2864,7 @@ reflexes.unshift({
       let best = null
       const watch = (e, cls, dist) => {
         const wk = 'w' + e.id
-        if (cls !== 'player' && now - (this._lastNarrate.get(wk) || 0) > 20000) {
+        if (cls !== 'player' && now - (this._lastNarrate.get(wk) || 0) > 20000 && entityPerceptible(e, this.fairFill(bot))) {
           this._lastNarrate.set(wk, now)
           const rel = e.position.y > here.y + 1 ? 'above' : (e.position.y < here.y - 1 ? 'below' : 'beyond')
           emitEvent('threat', `watched: ${e.name || '?'} ${rel} ~${Math.round(dist)} — separated, not driving`, null, { quiet: true })
@@ -2930,11 +2931,13 @@ reflexes.unshift({
     const now = Date.now()
     const here = bot.entity.position
     const dir = compass(t.e.position.x - here.x, t.e.position.z - here.z)
-    const label = t.e.username || t.e.name || '?'
+    const seen = entityPerceptible(t.e, this.fairFill(bot))
+    const label = seen ? t.e.username || t.e.name || '?' : 'something'
     const narKey = t.e.id
-    if (now - (this._lastNarrate.get(narKey) || 0) > 8000) {
+    if (now - (this._lastNarrate.get(narKey) || 0) > 8000 && (seen || t.confirmed)) {
       this._lastNarrate.set(narKey, now)
-      emitEvent('threat', `${label} ${dir} ~${Math.round(t.dist)} ${t.confirmed ? 'CONFIRMED (it hit me)' : 'closing fast'} — ${t.cls === 'creeper' ? 'creeper doctrine' : t.cls === 'heavy' ? 'heavy doctrine (no trades)' : t.cls === 'player' ? 'debug: scoring only' : 'engaging'} [${stance}]`)
+      if (!seen) emitEvent('threat', `something hit me [${stance}]`)
+      else emitEvent('threat', `${label} ${dir} ~${Math.round(t.dist)} ${t.confirmed ? 'CONFIRMED (it hit me)' : 'closing fast'} — ${t.cls === 'creeper' ? 'creeper doctrine' : t.cls === 'heavy' ? 'heavy doctrine (no trades)' : t.cls === 'player' ? 'debug: scoring only' : 'engaging'} [${stance}]`)
     }
     if (t.cls === 'player') return                          // NEVER weapons on players — narrate only
     const s = STANCES[stance]
@@ -3004,11 +3007,11 @@ reflexes.unshift({
           const lightCommit = stance === 'vanguard' && !packHasHeavy && bot.health >= 12
           if (!lightCommit) {
             // ALLY SUPPRESSION (the helmsman's design, 07-20, en route to the dungeon reaping):
-            // a pack is only a rout if I'm ALONE in it. A partner within 10 turns the math — two
+            // a pack is only a rout if I'm ALONE in it. A partner in sight within 10 turns the math — two
             // blades hold a hallway three zombies can't. Withdrawal stays armed for the solo case.
             const allyNear = liveEntities().some(e2 =>
               e2.type === 'player' && e2.username && e2.username !== bot.username &&
-              e2.position && e2.position.distanceTo(bot.entity.position) <= 10)
+              e2.position && e2.position.distanceTo(bot.entity.position) <= 10 && entityPerceptible(e2, this.fairFill(bot)))
             // HP FLOOR (07-21, the mill's lesson: the hold rule pinned me at 9 hearts twice on
             // 07-20 — an ally makes a pack survivable, not a wound. Below 12 the hold yields.)
             if (!allyNear || bot.health < 12) {
@@ -3017,7 +3020,7 @@ reflexes.unshift({
                 : `OUTNUMBERED ${pack} — fighting withdrawal, not a duel`) === 'held'
               if (!held) return
             }
-            if (!this._lastHoldEmit || Date.now() - this._lastHoldEmit > 10000) {
+            if (allyNear && (!this._lastHoldEmit || Date.now() - this._lastHoldEmit > 10000)) {
               this._lastHoldEmit = Date.now()
               emitEvent('combat', `outnumbered ${pack} but an ally stands within 10 — HOLDING the line`)
             }
@@ -3035,7 +3038,7 @@ reflexes.unshift({
             guardDown()                                       // both hands on the bow
             try { if (await drawAndLoose(t.e)) { await new Promise(r => setTimeout(r, 200)); continue } } catch (e) {}
           }
-          if (s.chase) {                                      // vanguard: run it down
+          if (s.chase && entityPerceptible(t.e, this.fairFill(bot))) {   // vanguard: run down a mob in sight
             if (laneBlocks('discretionary')) { laneNarrate('chase'); await new Promise(r => setTimeout(r, 500)); continue }
             takeLegs('combat', 'chase')
             try { bot.pathfinder.setGoal(new goals.GoalNear(t.e.position.x, t.e.position.y, t.e.position.z, 2)) } catch (e) {}
@@ -3081,7 +3084,8 @@ reflexes.unshift({
         await new Promise(r => setTimeout(r, 250))            // about 850 ms per swing w/ the guard beats, 1.5 s after an equip
       }
     } finally { if (!(await pilotGuard())) guardDown() }      // the pilot's block stays up, the reflex's comes down
-    if (!bot.entities[t.e.id]) emitEvent('combat', `${label} is DOWN`)
+    // Out of sight, a vanished target may have despawned instead of died.
+    if (!bot.entities[t.e.id] && entityPerceptible(t.e, this.fairFill(bot))) emitEvent('combat', `${t.e.username || t.e.name || '?'} is DOWN`)
     // POST-COMBAT REFUEL (07-21, the mill's slow-bleed autopsy: /eat fails silently while
     // combat owns the hand, so food ratchets down across engagements and regen quits at 17.
     // The moment the hand is free is the moment to eat — before the next wave claims it.)
@@ -3724,9 +3728,21 @@ app.get('/pathdebug', (req, res) => {
   } catch (e) { err(res, e) }
 })
 
+// The nearest entity named name within radius that the body perceives, or undefined.
+function nearestSeen (name, radius) {
+  const here = bot.entity.position
+  const fill = reflexes.find(r => r.name === 'combat').fairFill(bot)
+  return liveEntities()
+    .filter(en => en.position && (en.name === name || en.displayName === name) && en.position.distanceTo(here) <= radius && entityPerceptible(en, fill))
+    .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0]
+}
+function targetSeen (en) {
+  return entityPerceptible(en, reflexes.find(r => r.name === 'combat').fairFill(bot))
+}
+
 // /useon?name=<entity>&item=<item> — right-click a creature with a held item: shears on
 // sheep, bucket on cow, saddle on horse. The husbandry verb (07-14, built pen-side with the
-// first flock waiting). Walks into reach if needed; nearest matching entity within 16.
+// first flock waiting). Walks into reach if needed; nearest matching entity in sight within 16.
 app.get('/useon', async (req, res) => {
   try {
     if (!ready) return err(res, new Error('not ready'))
@@ -3735,16 +3751,15 @@ app.get('/useon', async (req, res) => {
     const it = bot.inventory.items().find(i => i.name === iname)
     if (!it) return err(res, new Error(`no ${iname} in inventory`))
     const here = bot.entity.position
-    const target = liveEntities()
-      .filter(en => en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(here) <= 16)
-      .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0]
-    if (!target) return err(res, new Error(`no ${ename} within 16`))
+    const target = nearestSeen(ename, 16)
+    if (!target) return err(res, new Error(`no ${ename} in sight within 16`))
     if (target.position.distanceTo(here) > 3) {
       await bot.pathfinder.goto(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2))
     }
     await bot.equip(it, 'hand')
     await bot.lookAt(target.position.offset(0, 0.6, 0), true)
     await bot.waitForTicks(2)
+    if (!liveEntities().includes(target) || !targetSeen(target)) return ok(res, { used: null, on: ename, reason: 'lost sight', note: 'lost sight of it' })
     await bot.useOn(target)
     ok(res, { used: iname, on: ename, at: round(target.position) })
   } catch (e) { err(res, e) }
@@ -3767,11 +3782,8 @@ app.get('/strike', async (req, res) => {
     const iname = req.query.item || 'iron_sword'
     const it = bot.inventory.items().find(i => i.name === iname)
     if (!it) return err(res, new Error(`no ${iname} in inventory — refusing to punch with bare hands/wrong tool`))
-    const here = bot.entity.position
-    const target = liveEntities()
-      .filter(en => en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(here) <= 16)
-      .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0]
-    if (!target) return err(res, new Error(`no ${ename} within 16`))
+    const target = nearestSeen(ename, 16)
+    if (!target) return err(res, new Error(`no ${ename} in sight within 16`))
     if (target.type === 'player' || (bot.players && Object.values(bot.players).some(p => p.entity === target))) {
       return err(res, new Error('refusing: never strike players (friendly-fire tests wait for damage attribution)'))
     }
@@ -3849,28 +3861,33 @@ app.get('/shoot', async (req, res) => {
     // shooting a wall; the pilot burned ~8 arrows learning this rule, now the verb knows it).
     const max = Math.min(8, Math.max(1, parseInt(req.query.max || '1')))
     const shots = []
-    let outcome = 'max'
+    let outcome = 'max', aimed = null
     bot.on('entityDead', onDead)
     for (let i = 0; i < max; i++) {
       if (!bot.inventory.items().find(x => x.name === 'bow')) { outcome = 'no-bow'; break }
       if (!bot.inventory.items().some(x => x.name === 'arrow')) { outcome = 'no-arrows'; break }
       const here = bot.entity.position
-      const target = liveEntities()
-        .filter(en => en.position && (en.name === ename || en.displayName === ename) && en.position.distanceTo(here) <= 25)
-        .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0]
-      if (!target) { outcome = shots.length ? 'no-target' : null; if (!shots.length) return err(res, new Error(`no ${ename} within 25`)); break }
+      const target = nearestSeen(ename, 25)
+      if (!target) {
+        if (!aimed) return err(res, new Error(`no ${ename} in sight within 25`))
+        outcome = bot.entities[aimed.id] && !targetSeen(aimed) ? 'lost sight' : 'no-target'
+        break
+      }
       if (target.type === 'player' || (bot.players && Object.values(bot.players).some(p => p.entity === target))) {
         return err(res, new Error('refusing: never shoot players'))
       }
       const dist = target.position.distanceTo(here)
-      await drawAndLoose(target)                    // the same arrow the combat reflex fires
+      aimed = target
+      if (!(await drawAndLoose(target))) { outcome = 'no-line'; break }
       let dead = false
       for (let w = 0; w < 20 && !dead; w++) {
         await new Promise(r => setTimeout(r, 100))
         dead = died.has(target.id) || !bot.entities[target.id]
       }
-      shots.push({ dist: +dist.toFixed(1), killed: dead })
-      if (dead) { outcome = 'dead'; break }
+      // A target gone out of sight may have died or only despawned.
+      const killed = dead && targetSeen(target)
+      shots.push({ dist: +dist.toFixed(1), killed })
+      if (dead) { outcome = killed ? 'dead' : 'lost sight'; break }
       const prev = shots[shots.length - 2]
       if (prev && Math.abs(prev.dist - dist) < 0.6) { outcome = 'no-progress'; break }
     }
@@ -3881,6 +3898,8 @@ app.get('/shoot', async (req, res) => {
       note: outcome === 'dead' ? 'down'
         : outcome === 'no-progress' ? 'range never changed — something between us; reposition, do not loose again'
         : outcome === 'no-arrows' ? 'quiver empty'
+        : outcome === 'lost sight' ? 'lost sight of it'
+        : outcome === 'no-line' ? 'no clear line to it, nothing loosed'
         : 'still up — check where the arrow went (/gaze) and loose again'
     })
   } catch (e) { err(res, e) } finally { bot.removeListener('entityDead', onDead) }

@@ -67,7 +67,11 @@ produce more interesting minds. Concretely:
 
 - **No x-ray.** Ore and structures are only reported if they are exposed to air and in lit sight from
   the bot's eyes, the darker the closer.
-- **No sensing through walls.** Mobs and players sealed behind rock are simply absent from perception.
+- **No sensing through walls.** A mob, player or drop counts only when it is lit enough to see from
+  where the bot stands, and either sits on a clear line of sight or, within about 20 blocks, is joined
+  to the bot by air the bot has seen or by open surface (a drop needs the line of sight). Sealed behind
+  rock, it is absent from every reply, and `/strike`, `/shoot` and `/useon` pick their targets the
+  same way.
 - **Only what a player could know.** Every reply, event, error and tool description passes the same
   test. A block's current state shows only while it is in sight or touched by the body. Otherwise a
   reply gives what the bot last saw there, or nothing. Chests, furnaces, crafting tables, anvils and
@@ -315,8 +319,7 @@ CustomSkinLoader folder. `make_skin.py` and `make_cape.py` rebuild them.
 - **The combat layer now obeys the same fairness gate as the eyes** — the threat watcher and the
   proximity alarm both require shared connected air (sealed hostiles may be *heard*, never tracked),
   with one honest exception: an attacker that has landed a hit on the bot announced itself through
-  the server's own damage packet and is tracked while that aggro is fresh. `/strike`/`/shoot` still
-  target from an ungated list — pilot discipline is the gate there (verify with `/entities` first).
+  the server's own damage packet and is tracked while that aggro is fresh.
   The watcher also only scores threats converging on the *bot* — defending a nearby human partner is
   designed but not yet built.
 - **The reflex survives losing, by design.** It kites what it cannot trade with (creepers and
