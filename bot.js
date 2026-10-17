@@ -26,7 +26,7 @@ const { createLegs, bindLegs, wirePlanKnownReset, wireGateManners, wireLivePath,
 const { createJobBoard, bindJobBoard } = require('./lib/bot/jobs')
 const { createFollow, bindFollow } = require('./lib/bot/follow')
 const { createAwareness, bindAwareness, wireStaleEntities, wireCrumbRecording, wireCrumbForget, wirePresenceTick } = require('./lib/bot/awareness')
-const { createUnstuck, bindUnstuck } = require('./lib/bot/unstuck')
+const { createUnstuck, bindUnstuck, wireUnstuckHeartbeat } = require('./lib/bot/unstuck')
 const { createPlacing, bindPlacing } = require('./lib/bot/placing')
 const { createWatchReflexes, bindWatchReflexes } = require('./lib/bot/watch-reflexes')
 const { createBunkerCells, bindBunkerCells } = require('./lib/bot/bunker-cells')
@@ -257,6 +257,7 @@ function wireRuntime () {
   wireLivePath()
   wirePathfinderTicks()
   wirePathLog()
+  wireUnstuckHeartbeat()
 }
 // Priority order: lava_watch, bunker, combat, unstuck, current_watch, narrator, trek, flee_to_player.
 function installReflexes () {

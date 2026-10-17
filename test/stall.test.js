@@ -124,6 +124,7 @@ function unstuckFiresAt (events) {
   bot.entity = { position: new Vec3(0.5, 64, 0.5) }
   bot.pathfinder = { goal: {}, isMoving: () => path.length > 0 }
   const r = reflexIn('unstuck', { Date: { now: () => t } })
+  loadBotFunctions(['wireUnstuckHeartbeat'], { bot, unstuckReflex: r, Date: { now: () => t } }).wireUnstuckHeartbeat()
   const gap = (p) => {
     path = p
     return r.check(bot)

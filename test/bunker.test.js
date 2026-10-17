@@ -549,6 +549,15 @@ test('a pillar is refused beside a ledge from which a mob reaches the body on to
   assert.strictEqual(pillarProblemWith(column(0, -1, 64, 68)), 'a step beside the pillar', 'a mob one block over the head of the body on a 3-block pillar')
 })
 
+test('a pillar is refused only for blocks the body has seen', () => {
+  const ceiling = ['0,67,0']
+  assert.strictEqual(pillarProblemWith(ceiling), 'no headroom 3 above the feet', 'control: a seen block over the pillar')
+  assert.strictEqual(pillarProblemWith(ceiling, 3, ceiling), null, 'an unseen block over the pillar')
+  const ledge = column(1, 1, 64, 65)
+  assert.strictEqual(pillarProblemWith(ledge), 'a step beside the pillar', 'control: a seen ledge beside the pillar')
+  assert.strictEqual(pillarProblemWith(ledge, 3, ledge), null, 'an unseen ledge beside the pillar')
+})
+
 // ---- pillar height ----
 
 // Ground at y 63 and a hill 3 high over x 2 to 6, beside a body at (0, 64, 0).

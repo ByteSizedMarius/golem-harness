@@ -886,16 +886,19 @@ function shelterEnv (entities, confirmed, ages = {}) {
 }
 
 // pillarProblem(height) for a body at (0, 64, 0) on a 5x5 floor at y 63, plus the solid cells in extra.
-function pillarProblemWith (extra, height = 3) {
+// The body has never seen the cells in unseen.
+function pillarProblemWith (extra, height = 3, unseen = []) {
   const solid = new Set(extra)
   for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) solid.add(`${x},63,${z}`)
   const isSolid = (p) => solid.has(`${p.x},${p.y},${p.z}`)
+  const hidden = new Set(unseen)
   const env = {
     bot: {
       entity: { position: new Vec3(0.5, 64, 0.5) },
       blockAt: (p) => ({ name: isSolid(p) ? 'stone' : 'air', boundingBox: isSolid(p) ? 'block' : 'empty', position: p })
     },
     solidAt: isSolid,
+    knownCell: (p) => !hidden.has(`${p.x},${p.y},${p.z}`),
     isSoftCover: () => false,
     fillers: () => [{ name: 'dirt', count: 64 }]
   }
