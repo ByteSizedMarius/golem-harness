@@ -119,7 +119,6 @@ function fleeIn (w, threat, ally = null, over = {}) {
     ck,
     planFlee,
     creeperCover,
-    fleeHeading,
     mcData: MC_DATA,
     console: { log: (line) => logs.push(line) },
     setTimeout () {},

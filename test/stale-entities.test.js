@@ -145,7 +145,7 @@ test('a new mob the next dimension gives the id of a mob that hit the body is no
   assert.deepStrictEqual(names(), [])
 })
 
-test('no scan of bot.js reads the raw entity table besides the live one and the dimension change', () => {
+test('no scan of the bot sources reads the raw entity table besides the live one and the dimension change', () => {
   const scans = botSource().split('\n').filter((l) => /Object\.(values|entries|keys)\(bot\.entities\)|for \(const \w+ in bot\.entities\)/.test(l))
   assert.strictEqual(scans.length, 2, scans.join('\n'))
 })

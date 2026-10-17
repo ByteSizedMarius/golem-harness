@@ -441,7 +441,6 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     setTimeout: (fn) => setImmediate(fn),
     clearTimeout: (h) => clearImmediate(h),
     goals,
-    UNLOADED,
     standCell,
     resolveTarget,
     arrivedAt,

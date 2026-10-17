@@ -518,7 +518,137 @@ async function assertEntryRefuses (t, args, env) {
 // ---- bot.js source ----
 
 let botSrc
-const botSource = () => (botSrc ??= fs.readFileSync(path.join(ROOT, 'bot.js'), 'utf8'))
+function botSource () {
+  if (botSrc !== undefined) return botSrc
+  const files = [path.join(ROOT, 'bot.js')]
+  for (const dir of ['lib/bot', 'lib/routes'].map((d) => path.join(ROOT, d))) {
+    if (!fs.existsSync(dir)) continue
+    files.push(...fs.readdirSync(dir, { recursive: true }).filter((f) => f.endsWith('.js')).sort().map((f) => path.join(dir, f)))
+  }
+  botSrc = files.map((f) => fs.readFileSync(f, 'utf8')).join('\n')
+  return botSrc
+}
+
+const NOT_CALLEES = new Set(['if', 'for', 'while', 'switch', 'catch', 'with', 'function', 'return', 'typeof', 'void',
+  'delete', 'await', 'async', 'new', 'in', 'of', 'instanceof', 'throw', 'case', 'yield', 'super', 'import', 'else', 'do',
+  'require'])
+const REGEX_AFTER = new Set(['return', 'typeof', 'case', 'in', 'of', 'void', 'delete', 'throw', 'new', 'else', 'do',
+  'yield', 'await', 'instanceof'])
+
+// src with comments, string and regex literals and template text blanked to spaces, newlines and offsets kept.
+function codeOnly (src) {
+  const out = src.split('')
+  const blank = (from, to) => { for (let k = from; k < to; k++) if (out[k] !== '\n') out[k] = ' ' }
+  const regexAt = (i) => {
+    let k = i - 1
+    while (k >= 0 && /\s/.test(out[k])) k--
+    if (k < 0) return true
+    if (!/[\w$]/.test(out[k])) return !/[)\]'"`]/.test(out[k])
+    const word = /[\w$]+$/.exec(out.slice(Math.max(0, k - 11), k + 1).join(''))[0]
+    return REGEX_AFTER.has(word)
+  }
+  const holes = []
+  let depth = 0
+  let i = 0
+  const template = () => {
+    const from = i
+    while (i < src.length && src[i] !== '`' && !(src[i] === '$' && src[i + 1] === '{')) i += src[i] === '\\' ? 2 : 1
+    blank(from, Math.min(i, src.length))
+    if (src[i] === '$') {
+      holes.push(depth++)
+      i += 2
+    } else i++
+  }
+  while (i < src.length) {
+    const c = src[i]
+    if (c === '/' && (src[i + 1] === '/' || src[i + 1] === '*')) {
+      const end = src[i + 1] === '/' ? src.indexOf('\n', i) : src.indexOf('*/', i + 2) + 2
+      const to = end < 2 ? src.length : end
+      blank(i, to)
+      i = to
+    } else if (c === "'" || c === '"' || (c === '/' && regexAt(i))) {
+      let j = i + 1
+      let cls = false
+      while (j < src.length && src[j] !== '\n' && (cls || src[j] !== c)) {
+        if (src[j] === '\\') j++
+        else if (c === '/' && src[j] === '[') cls = true
+        else if (src[j] === ']') cls = false
+        j++
+      }
+      blank(i + 1, Math.min(j, src.length))
+      i = j + 1
+    } else if (c === '`') {
+      i++
+      template()
+    } else if (c === '}' && holes.length && holes[holes.length - 1] === depth - 1) {
+      holes.pop()
+      depth--
+      i++
+      template()
+    } else {
+      if (c === '{') depth++
+      else if (c === '}') depth--
+      i++
+    }
+  }
+  return out.join('')
+}
+
+// Every identifier in a parameter list or destructuring pattern, keys and default-value references included.
+function patternNames (text) {
+  return [...text.matchAll(/[A-Za-z_$][\w$]*/g)].map((m) => m[0])
+}
+
+// Every `name (` in code with its parenthesised group, and whether a body follows the group.
+function* parenNames (code) {
+  for (const m of code.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const open = m.index + m[0].length - 1
+    const group = balanced(code, open, '(')
+    yield { name: m[1], params: group, definition: /^\s*(?:\{|=>)/.test(code.slice(open + group.length)) }
+  }
+}
+
+let topNames
+// Every name a bot source declares in column 0.
+function topLevelNames () {
+  if (topNames) return topNames
+  const src = codeOnly(botSource())
+  topNames = new Set()
+  for (const m of src.matchAll(/^(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)|^class\s+([A-Za-z_$][\w$]*)/gm)) topNames.add(m[1] || m[2])
+  for (const m of src.matchAll(/^(?:const|let|var)\s*([{[])/gm)) {
+    const pattern = balanced(src, m.index, m[1]).slice(1, -1)
+    // Keys of a { key: name } pattern count as declared too.
+    for (const n of patternNames(pattern)) topNames.add(n)
+  }
+  for (const m of src.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)(.*)$/gm)) {
+    topNames.add(m[1])
+    let depth = 0
+    for (const [k, c] of [...m[2]].entries()) {
+      if ('([{'.includes(c)) depth++
+      else if (')]}'.includes(c)) depth--
+      else if (c === ',' && depth === 0) {
+        const next = /^\s*([A-Za-z_$][\w$]*)/.exec(m[2].slice(k + 1))
+        if (next) topNames.add(next[1])
+      }
+    }
+  }
+  return topNames
+}
+
+// Names code binds itself: declarations, parameters, catch bindings, assignment targets and its own functions and methods.
+function localNames (code) {
+  const names = new Set()
+  for (const m of code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) names.add(m[1])
+  for (const m of code.matchAll(/\b(?:const|let|var)\s*([{[])/g)) patternNames(balanced(code, m.index, m[1])).forEach((n) => names.add(n))
+  for (const m of code.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*(?:=(?![=>])|=>)/g)) names.add(m[1])
+  for (const m of code.matchAll(/\(([^()]*)\)\s*=>/g)) patternNames(m[1]).forEach((n) => names.add(n))
+  for (const p of parenNames(code)) {
+    if (!p.definition || ['if', 'for', 'while', 'switch', 'with'].includes(p.name)) continue
+    if (!NOT_CALLEES.has(p.name)) names.add(p.name)
+    patternNames(p.params).forEach((n) => names.add(n))
+  }
+  return names
+}
 
 // The source of the top-level bot.js function `name`, up to the first `}` in column 0.
 function functionSource (name) {
@@ -564,23 +694,41 @@ function groundMemory () {
   return { GROUND_TOP: new Map(), GROUND_SPAN: botConstant('GROUND_SPAN'), SURFACE_DEPTH: botConstant('SURFACE_DEPTH') }
 }
 
-// Also loads every bot.js function declaration they reach that env does not provide.
-function loadBotFunctions (names, env) {
+let freeNames
+function sourceNames () {
+  freeNames ??= new Set([...codeOnly(botSource()).matchAll(/(?<![.\w$])[A-Za-z_$][\w$]*/g)].map((m) => m[0]))
+  return freeNames
+}
+
+// Loads names and every bot.js function they or code (run later in the returned context) reach over env, failing on
+// unknown callees and unused env keys.
+function loadBotFunctions (names, env, code = '') {
+  for (const key of Object.keys(env)) assert.ok(sourceNames().has(key), `env key ${key} occurs in no bot source`)
   const ctx = vm.createContext(env)
+  const declared = topLevelNames()
   const loaded = new Set()
   const sources = []
+  const reach = (body, caller) => {
+    const text = codeOnly(body)
+    const locals = localNames(text)
+    for (const { name, definition } of parenNames(text)) {
+      if (declared.has(name)) visit(name)
+      else if (!(definition || name in env || locals.has(name) || NOT_CALLEES.has(name) || name in globalThis)) assert.fail(`${caller} calls ${name}, which no bot source declares`)
+    }
+  }
   const visit = (name) => {
     if (loaded.has(name) || name in env) return
     loaded.add(name)
     const body = functionSource(name)
     if (!/^(?:async\s+)?function\b/.test(body)) return
     sources.push(body)
-    for (const m of body.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) visit(m[1])
+    reach(body, name)
   }
   for (const name of names) {
     assert.ok(functionSource(name), `${name} not found in bot.js`)
     visit(name)
   }
+  reach(code, 'the caller')
   vm.runInContext(sources.join('\n'), ctx)
   return ctx
 }
@@ -592,11 +740,10 @@ function routeHandler (route, env) {
   const arrow = src.indexOf('=>', at)
   const handler = at < 0 ? '' : balanced(src, arrow)
   assert.ok(handler, `the ${route} handler not found in bot.js`)
-  const called = [...handler.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[1])
-  const names = [...new Set(called)].filter((n) => /^(?:async\s+)?function\b/.test(functionSource(n)))
-  const ctx = loadBotFunctions(names, { ok: (res, body) => { res.body = body }, err: (res, e) => { res.error = e }, ...env })
   const async = /\basync\b/.test(src.slice(at, arrow)) ? 'async ' : ''
-  return { handle: vm.runInContext(`(${async}(req, res) => ${handler})`, ctx), res: {} }
+  const code = `(${async}(req, res) => ${handler})`
+  const ctx = loadBotFunctions([], { ok: (res, body) => { res.body = body }, err: (res, e) => { res.error = e }, ...env }, code)
+  return { handle: vm.runInContext(code, ctx), res: {} }
 }
 
 function replyOf (res) {
@@ -635,9 +782,8 @@ function reflexIn (name, env) {
   const at = src.search(new RegExp(`\\bname\\s*:\\s*['"]${name}['"]`))
   const literal = at < 0 ? '' : balanced(src, src.lastIndexOf('{', at))
   assert.ok(literal, `the ${name} reflex not found in bot.js`)
-  const called = [...literal.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[1])
-  const names = [...new Set(called)].filter((n) => /^(?:async\s+)?function\b/.test(functionSource(n)))
-  return vm.runInContext(`(${literal})`, loadBotFunctions(names, env))
+  const code = `(${literal})`
+  return vm.runInContext(code, loadBotFunctions([], env, code))
 }
 
 function bunkerReflexIn (env) {
@@ -660,7 +806,9 @@ function combatReflexIn (env) {
 // Runs bot.js's top-level bot.on and bot.once lines for event over env.
 function wireListeners (env, event) {
   const lines = [...botSource().matchAll(new RegExp(`^bot\\.(?:on|once)\\('${event}', ([A-Za-z_$][\\w$]*)\\)$`, 'gm'))]
-  vm.runInContext(lines.map((m) => m[0]).join('\n'), loadBotFunctions(lines.map((m) => m[1]), env))
+  assert.ok(lines.length, `no top-level ${event} listener in bot.js`)
+  const code = lines.map((m) => m[0]).join('\n')
+  vm.runInContext(code, loadBotFunctions(lines.map((m) => m[1]), env, code))
 }
 
 // ---- bunker fakes over sliced bot.js functions ----
