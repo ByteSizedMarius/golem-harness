@@ -456,7 +456,7 @@ test('ore under lava or more than three cells of water is not named', () => {
   assert.strictEqual(findsCoal(flooded(4)), false)
 })
 
-test('a mob shows only as far as the light at its feet carries', () => {
+test('a mob shows only as far as the light on its body carries', () => {
   const seen = (x, light) => {
     const env = tunnel(20, light)
     const fill = { cells: new Set(Array.from({ length: 20 }, (_, i) => ck(i, 64, 0))) }
@@ -466,6 +466,18 @@ test('a mob shows only as far as the light at its feet carries', () => {
   assert.strictEqual(seen(4, 1), true, 'light 1, 4 blocks out')
   assert.strictEqual(seen(5, 1), false, 'light 1, 5 blocks out')
   assert.strictEqual(seen(15, 7), true, 'light 7, 15 blocks out')
+})
+
+test('a mob standing on soul sand in the noon sun shows 10 blocks out', () => {
+  // Open ground at y 64 under the sky, the zombie 10 out with its feet inside the soul sand cell, which holds no light.
+  const seen = (floor) => {
+    const plain = world({ open: (x, y) => y >= 64, light: () => 0, skyLight: () => 15 })
+    const env = floor ? withCells(plain, { '10,64,0': { name: 'soul_sand', boundingBox: 'block', light: 0 } }) : plain
+    const { entityPerceptible } = loadBotFunctions(['entityPerceptible'], env)
+    return entityPerceptible({ type: 'mob', name: 'zombie', position: new Vec3(10.5, floor ? 64.875 : 64, 0.5), metadata: [0] }, { cells: new Set() })
+  }
+  assert.strictEqual(seen(false), true, 'control: on open ground')
+  assert.strictEqual(seen(true), true)
 })
 
 test('a mob behind a closed door is out of sight, behind an open one in sight', () => {
@@ -1032,6 +1044,7 @@ test('a chest seen and then broken out of sight stays listed until the bot sees 
   Object.assign(env, {
     require,
     SEEN_CAP: 1000,
+    seenEdits: 0,
     SURFACE: new Map(),
     SURFACE_CAP: 1000,
     surfaceEdits: 0,
@@ -1133,7 +1146,7 @@ test('map draws a floor changed out of sight as last seen, and the new block onc
   const base = env.bot.blockAt
   env.bot.blockAt = (p) => (planked.has(ck(p.x, p.y, p.z)) ? { ...base(p), name: 'oak_planks', type: 9 } : base(p))
   env.bot.registry = { blocks: { 3: { name: 'stone' }, 9: { name: 'oak_planks' } } }
-  Object.assign(env, { require, SEEN_CAP: 1000, SURFACE: new Map(), SURFACE_CAP: 1000, surfaceEdits: 0, ...stationMemory(), indoors: () => false })
+  Object.assign(env, { require, SEEN_CAP: 1000, seenEdits: 0, SURFACE: new Map(), SURFACE_CAP: 1000, surfaceEdits: 0, ...stationMemory(), indoors: () => false })
   loadBotFunctions(['markTrail'], env).markTrail(new Vec3(0, 64, 0))
   // The glyph of column x 3, z 0.
   const glyph = () => runRoute('/map', { radius: '4' }, env).grid.split('\n')[4][7]

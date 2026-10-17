@@ -43,6 +43,7 @@ function session ({ host = 'example.net', port = 25565, dimension = 'overworld',
   vm.runInContext(handlers.map((m) => m[0]).join('\n'), ctx)
   bot.emit('game')
   return {
+    env,
     loaded,
     known: () => ctx.cellKnown(CELL),
     see: () => env.SEEN.add(ck(CELL.x, CELL.y, CELL.z)),
@@ -107,6 +108,50 @@ test('the top block seen in a column comes back from seen.json in the same world
   assert.strictEqual(s.top(), undefined)
   s.respawn('overworld')
   assert.deepStrictEqual(s.top(), [1, CELL.y])
+})
+
+// The keys of SEEN, SURFACE and STATIONS in recording order.
+const stored = (env) => ({ seen: [...env.SEEN], surface: [...env.SURFACE.keys()], stations: [...env.STATIONS.keys()] })
+
+test('a full memory drops the least recently seen cell, column top and station for a new one', () => {
+  const env = {
+    bot: { entity: { position: { y: 64 } } },
+    ck,
+    SEEN: new Set(),
+    SEEN_CAP: 3,
+    seenEdits: 0,
+    OLDEST: new WeakMap(),
+    SURFACE: new Map(),
+    SURFACE_CAP: 3,
+    surfaceEdits: 0,
+    STATIONS: new Map(),
+    STATION_CAP: 3,
+    STATION_RE: botConstant('STATION_RE'),
+    stationEdits: 0
+  }
+  const { markSeen } = loadBotFunctions(['markSeen'], env)
+  const chest = { name: 'chest', type: 6, boundingBox: 'block' }
+  for (const x of [0, 1, 2, 0, 3]) markSeen(x, 64, 0, chest)
+  assert.deepStrictEqual(stored(env), {
+    seen: ['2,64,0', '0,64,0', '3,64,0'],
+    surface: ['2,0', '0,0', '3,0'],
+    stations: ['2,64,0', '0,64,0', '3,64,0']
+  })
+})
+
+test('a seen.json holding more than the caps loads the most recently seen entries', () => {
+  const first = session()
+  for (let x = 0; x < 12; x++) {
+    first.env.SEEN.add(ck(x, 64, 0))
+    first.env.SURFACE.set(x + ',0', [1, 64])
+    first.env.STATIONS.set(ck(x, 64, 0), 6)
+  }
+  const newest = Array.from({ length: 10 }, (_, i) => i + 2)
+  assert.deepStrictEqual(stored(session({ saved: first.save() }).env), {
+    seen: newest.map((x) => ck(x, 64, 0)),
+    surface: newest.map((x) => x + ',0'),
+    stations: newest.map((x) => ck(x, 64, 0))
+  })
 })
 
 test('a seen.json saved before per-world memory is dropped', () => {
