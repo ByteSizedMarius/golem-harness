@@ -1,7 +1,7 @@
 // Golem — a Mineflayer body for language-model pilots
 // Doing-layer: structured perception + actions over a tiny HTTP API (drive with curl).
 const mineflayer = require('mineflayer')
-const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
+const { pathfinder, goals } = require('mineflayer-pathfinder')
 const { plugin: collectBlock } = require('mineflayer-collectblock')
 const armorManager = require('mineflayer-armor-manager')
 const express = require('express')
@@ -9,12 +9,11 @@ const fs = require('fs')
 const { Vec3 } = require('vec3')
 const { installSecurity, chatMaxLen, BUNKER_MODES } = require('./lib/install')
 const { entityInCell, bunkerSummary } = require('./lib/shelter')
-const { smoothLook } = require('./lib/head')
-const { pacePlacements, STRIKE_SWING_MS, STRIKE_APPROACH_MS, strikeBudgetMs, JUMP_FALL_TICKS, HOLD_MAX_S } = require('./lib/pace')
+const { STRIKE_SWING_MS, STRIKE_APPROACH_MS, strikeBudgetMs, JUMP_FALL_TICKS, HOLD_MAX_S } = require('./lib/pace')
 const { isDoor } = require('./lib/doors')
 const { stepView } = require('./lib/steps')
 const { countVerbs } = require('./lib/verbs')
-const { GRAVESTONE, renameBlocks, overrideRecipes, craftable } = require('./lib/server-overrides')
+const { GRAVESTONE, overrideRecipes, craftable } = require('./lib/server-overrides')
 const { smeltYield, burnItems, COOK_PROBE_TICKS } = require('./lib/furnace')
 const { takenText } = require('./lib/legs')
 
@@ -24,7 +23,7 @@ if (GOLEM_TOKEN.length < 32) {
   console.error('[bot] GOLEM_TOKEN is missing or shorter than 32 characters, refusing to start')
   process.exit(1)
 }
-const { HOST, PORT, VERSION, USERNAME, CTRL_PORT, VIEW_PORT, LEGACY_1710, LEGACY_HIT_MS, SERVER_OVERRIDES, SERVER_RECIPES } = require('./lib/bot/config')
+const { HOST, PORT, VERSION, USERNAME, CTRL_PORT, LEGACY_1710, LEGACY_HIT_MS, SERVER_RECIPES } = require('./lib/bot/config')
 const { createContext } = require('./lib/context')
 const { createStreams, bindStreams, wireChatCapture, wireServerMessages } = require('./lib/bot/streams')
 const { createItems, bindItems } = require('./lib/bot/items')
@@ -46,6 +45,8 @@ const { createCombat, bindCombat, wireGuardDrop, wireItemUseCosts, wireArmSwings
 const { createBunker, bindBunker, wireThreatReset } = require('./lib/bot/bunker')
 const { createSenses, bindSenses, wireSoundTablePin, wireHearing, wireOwnEditStamps, wireWorldChangeNotes, wireWorldChangeEvents, wireOreCallout } = require('./lib/bot/senses')
 const { createAlarms, bindAlarms, wireWearAlarm, wirePocketAlarm, wireTrailMarks, wireBodyAlarms } = require('./lib/bot/alarms')
+const { createConnection, bindConnection, wireConnectionSpawn, wireConnectionEvents, wireLookPaceGoto } = require('./lib/bot/connection')
+const { createViewer, bindViewer } = require('./lib/bot/viewer')
 
 const bot = mineflayer.createBot({
   // MC_VERSION=auto lets mineflayer detect the server's version from the handshake
@@ -104,237 +105,24 @@ ctx.shared = shared
 shared.mcData = null
 shared.ready = false
 createLegs(ctx)
-const { navPlaced, collectSafely, collectLock, collectBusy, watchedWork, watchGoto, walkGaveUp, knownMoves, legs, takeLegs, safeStop, stopPath, swimUp, walkRoute, namedStop, routeEnd, stagedGoto, gotoQuery, doorBeside, nudgeInto } = ctx
+const { navPlaced, collectSafely, collectLock, collectBusy, watchedWork, walkGaveUp, legs, safeStop, stopPath, walkRoute, namedStop, routeEnd, stagedGoto, gotoQuery, doorBeside, nudgeInto } = ctx
 shared.considerateMoves = null    // default no-dig profile (protects builds + terrain)
 shared.forestryMoves = null       // lumberjack profile: may break ONLY leaves+logs (built at spawn)
 
-function wireConnectionSpawn () {
-  bot.once('spawn', () => {
-    shared.mcData = require('minecraft-data')(bot.version)
-    // bot.registry shares these block entries.
-    if (SERVER_OVERRIDES) renameBlocks(shared.mcData, SERVER_OVERRIDES.blocks)
-    const moves = knownMoves(new Movements(bot))
-    // ---- CONSIDERATE PLAYER: don't vandalize builds/terrain, don't litter ----
-    moves.canDig = false            // NEVER break blocks to travel — protects your house AND the
-                                    // landscape (no tunneling shortcuts). NB: collectBlock swaps in
-                                    // its own dig-legs — collectSafely() cages that (07-20).
-    moves.maxDropDown = 3           // don't fling off tall ledges en route
-    moves.liquidCost = 15           // (07-14, after drowning in a decorative POND mid-sheep-drive:
-                                    // dry detours beat swims whenever one exists; swimming stays
-                                    // legal for genuine crossings — the helmsman's water-suite design)
-    moves.allow1by1towers = false  // no gratuitous pillar/shaft moves
-    moves.allowParkour = true      // jump small gaps instead of scaffolding them (less litter)
-    moves.scafoldingBlocks = []    // DEFAULT: no bridging → swim / walk / parkour, ZERO litter, no matter
-                                   // what I'm carrying. Bridging is a deliberate CHOICE: flip it on with
-                                   // /bridging?on=1 when a chasm/lava/gap genuinely needs a bridge, do the
-                                   // crossing, flip it off; every block it places is tracked for /tidy.
-    // DOORS (07-14): upstream ships canOpenDoors=false and only ever puts fence GATES in
-    // `openable`, so every door — even one standing open — reads as a wall (an open door's
-    // swung panel still has a collision shape). The walker couldn't leave its own house.
-    // Wooden doors join the openable set; the executor right-clicks them in passing
-    // (guarded in index.js so it never toggles an already-open door shut in my face).
-    // Iron doors stay walls — they want redstone, that's the game's rule, keep it.
-    const addDoors = (m) => { shared.mcData.blocksArray.forEach(b => { if (b.name.endsWith('_door') && !b.name.includes('iron')) m.openable.add(b.id) }); m.canOpenDoors = true }
-    addDoors(moves)
-    moves.infiniteLiquidDropdownDistance = false   // a drop into water is held to maxDropDown too
-    bot.pathfinder.setMovements(moves)
-    bot.pathfinder.thinkTimeout = 10000
-    shared.considerateMoves = moves       // remember the default so /gather can restore it after forestry
-
-    // ---- FORESTRY profile: a lumberjack's legs. Same considerate base, but permitted to break
-    // ONLY leaves and logs to travel — so it clears canopy to reach trunks and can always chew a
-    // leaf to free itself from a foliage wedge. Every other block (stone, dirt, ore, sand, and
-    // every plank/door/block of your builds) stays UNbreakable, so the no-tunnel / no-x-ray
-    // fairness floor is exactly as before. Swapped in only while /gather is harvesting wood.
-    shared.forestryMoves = knownMoves(new Movements(bot))
-    shared.forestryMoves.canDig = true
-    shared.forestryMoves.maxDropDown = 2          // gentler drops off trunk tops → avoid fall damage
-    shared.forestryMoves.infiniteLiquidDropdownDistance = false
-    shared.forestryMoves.allow1by1towers = false
-    shared.forestryMoves.allowParkour = true
-    shared.forestryMoves.scafoldingBlocks = []          // still zero litter — never places blocks to travel
-    const cantBreak = new Set()
-    for (const blk of shared.mcData.blocksArray) {
-      if (/(_log|_wood|_leaves)$/.test(blk.name)) continue   // leaves + logs are the ONLY breakables
-      cantBreak.add(blk.id)
-    }
-    shared.forestryMoves.blocksCantBreak = cantBreak
-    addDoors(shared.forestryMoves)                      // lumberjack legs get the same door manners
-
-    // ---- litter tracking: record blocks the PATHFINDER places (scaffolding) so /tidy can reclaim
-    // them. Only placements made mid-navigation (pathfinder.isMoving) are tracked; deliberate builds
-    // via /place, /build, … happen while the pathfinder is idle and are left untouched. ----
-    const _placeBlock = bot.placeBlock.bind(bot)
-    bot.placeBlock = async function (refBlock, faceVec) {
-      let navigating = false
-      try { navigating = bot.pathfinder.isMoving() } catch (e) {}
-      const result = await _placeBlock(refBlock, faceVec)
-      try {
-        if (navigating && refBlock && faceVec) {
-          const p = refBlock.position.plus(faceVec)
-          navPlaced.push({ x: p.x, y: p.y, z: p.z })
-        }
-      } catch (e) {}
-      return result
-    }
-
-    shared.ready = true
-    startReflexes()                     // start the always-on reflex loop (unstuck, +survival reflexes later)
-    console.log(`[bot] spawned as ${USERNAME} on ${bot.version} at`, vecStr(bot.entity.position))
-    // Seeing-layer (optional; never let it crash the bot)
-    try {
-      const { mineflayer: viewer } = require('prismarine-viewer')
-      // 07-14: the viewer's browser bundles were REBUILT with modern minecraft-data + a synthesized
-      // 1.21.11 atlas (1.21.8 models — newest published assets; every block in this world predates
-      // them). The client now resolves bot.version natively — no fallback, no shifted block ids.
-      // NOTE: the old `version: '1.21.4'` "pin" here was a NO-OP (mineflayer.js never read that
-      // option); the client was silently falling back to the 1.21.4 atlas on its own, which is why
-      // most-but-not-all blocks rendered right. Rebuild recipe + rollback: backups/viewer-1.21.11-rebuild/.
-      // prismarine-viewer keeps its http server to itself and listens with no error listener.
-      const http = require('http')
-      const createServer = http.createServer
-      const viewServers = []
-      http.createServer = (...args) => { const s = createServer(...args); viewServers.push(s); return s }
-      try {
-        viewer(bot, { port: VIEW_PORT, firstPerson: true })
-      } finally {
-        http.createServer = createServer
-      }
-      for (const s of viewServers) s.on('error', (e) => console.log('[bot] viewer failed (non-fatal):', e.message))
-      console.log(`[bot] viewer on http://localhost:${VIEW_PORT}`)
-    } catch (e) { console.log('[bot] viewer failed (non-fatal):', e.message) }
-
-    // ---- event listeners: fire emitEvent for driver-interrupting conditions, each deduped ----
-    try {
-      const HOSTILE = new Set(['zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'enderman', 'witch', 'husk', 'stray', 'drowned', 'pillager', 'vindicator', 'zombie_villager', 'phantom'])
-      let lastHealth = (typeof bot.health === 'number') ? bot.health : 20
-      let lastDmg = 0                // throttle damage events so sustained damage doesn't flood the driver
-      const warnedMobs = new Set()   // entity ids already warned about, so a lingering mob isn't re-fired
-      let nightFired = false
-      let lowFoodFired = false
-      let critHealthFired = false
-      let lastDrownEvt = 0           // throttle timestamp for the drowning alarm (fire once per 3s)
-
-      // health event fires on any health/food change: covers damage-taken, health-critical, low-food
-      bot.on('health', () => {
-        try {
-          const h = bot.health
-          if (typeof h === 'number') {
-            if (h < lastHealth && Date.now() - lastDmg > 1500) {
-              lastDmg = Date.now()
-              // damage reporting lives in the SECOND-SENSES hurt listener now (freeze + cause guess);
-              // this older path keeps only the critical-health alarm below
-            }
-            if (h <= 6 && !critHealthFired) {
-              critHealthFired = true
-              emitEvent('health_critical', `health critical: ${h.toFixed(1)}`, { health: h })
-            } else if (h > 6) {
-              critHealthFired = false   // re-arm once recovered
-            }
-            lastHealth = h
-          }
-          const f = bot.food
-          if (typeof f === 'number') {
-            if (f <= 6 && !lowFoodFired) {
-              lowFoodFired = true
-              emitEvent('low_food', `hunger low: ${f}`, { food: f })
-            } else if (f > 6) {
-              lowFoodFired = false   // re-arm once fed
-            }
-          }
-        } catch (e) {}
-      })
-
-      // breath event: fires when oxygen changes. Alarm ONLY on REAL drowning — a VALID low reading
-      // (0..12; bot.oxygenLevel returns junk like -1 sometimes) AND actually SUBMERGED (head in water).
-      // The old version fired on the junk reading alone, screaming at a bone-dry Claude; the submersion
-      // gate kills that. Time-throttled (3s) so a real drowning warns ONCE, not forty times.
-      bot.on('breath', () => {
-        try {
-          const o2 = bot.oxygenLevel
-          if (typeof o2 !== 'number' || o2 < 0 || o2 > 12) return    // ignore junk (-1) + healthy readings
-          const ws = waterState(bot)
-          if (!ws || !ws.submerged) return                           // not actually underwater → no alarm
-          if (Date.now() - lastDrownEvt < 3000) return               // throttle the spam
-          lastDrownEvt = Date.now()
-          emitEvent('drowning', `DROWNING — oxygen ${o2}/20, get to air NOW`, { oxygen: o2, health: bot.health })
-          // SURVIVAL REFLEX (07-17, drowned to 2HP mid-dig): an active dig pins the body underwater
-          // and nothing else lets go. Abort the dig and swim — air first, apologies after.
-          if (o2 <= 8) {
-            try { bot.stopDigging() } catch (e) {}
-            takeLegs('drown', 'swim up')
-            try { bot.pathfinder.setGoal(null) } catch (e) {}
-            try { swimUp(4000) } catch (e) {}
-            emitEvent('drowning', 'drown reflex: dig aborted, swimming up', {})
-          }
-        } catch (e) {}
-      })
-
-      bot.on('death', () => {
-        try { emitEvent('death', 'bot died', { pos: (bot.entity ? round(bot.entity.position) : null) }) } catch (e) {}
-      })
-
-      // warn once when a hostile mob is within ~16 blocks (via spawn event AND the slow scan below)
-      const considerMob = (en) => {
-        try {
-          if (!en || en === bot.entity || !en.position || !bot.entity) return
-          const nm = (en.name || '').toLowerCase()
-          if (!HOSTILE.has(nm)) return
-          if (warnedMobs.has(en.id)) return
-          const d = en.position.distanceTo(bot.entity.position)
-          if (d <= 16) {
-            // FAIRNESS (07-16, caught from inside a sealed night shelter: this alarm quoted live
-            // distances to skeletons through the dirt wall — raw-entity x-ray, the same leak-class
-            // as the combat watcher's). A distance-quoting alarm is SIGHT-class perception: shared
-            // air required (sealed hostiles may still be HEARD — ears are server-fair). NOT marked
-            // warned when gated, so the alarm still fires the moment the wall opens.
-            try { if (!entityPerceptible(en, reflexes.find(r => r.name === 'combat').fairFill(bot))) return } catch (e) { return }
-            warnedMobs.add(en.id)
-            emitEvent('hostile', `${nm} within ${d.toFixed(1)} blocks`, { mob: nm, id: en.id, pos: round(en.position), dist: +d.toFixed(1) })
-          }
-        } catch (e) {}
-      }
-      bot.on('entitySpawn', considerMob)
-
-      // slow ~2s scan: catch mobs that were already loaded, expire stale warnings, and poll nightfall
-      setInterval(() => {
-        try {
-          if (!bot.entity) return
-          for (const en of liveEntities()) considerMob(en)
-          // let a mob re-warn once it has left (>24) or despawned, so a fresh approach re-fires
-          for (const id of Array.from(warnedMobs)) {
-            const en = bot.entities && bot.entities[id]
-            if (!en || (en.position && en.position.distanceTo(bot.entity.position) > 24)) warnedMobs.delete(id)
-          }
-          nightFired = nightfall(nightFired)
-        } catch (e) {}
-      }, 2000)
-    } catch (e) { console.log('[bot] event listeners failed (non-fatal):', e.message) }
-  })
-}
-
-function wireConnectionEvents () {
-  bot.on('kicked', (r) => console.log('[bot] kicked:', r))
-  bot.on('error', (e) => console.log('[bot] error:', e.message))
-  // The connection dying MUST kill the process: the watchdog only relaunches on process death,
-  // and a live control API over a dead socket serves stale world state with ok:true (ghost mode).
-  bot.on('end', (r) => {
-    console.log('[bot] disconnected:', r, '— exiting so the watchdog can relaunch')
-    setTimeout(() => process.exit(1), 500)
-  })
-}
+createViewer(ctx)
+createConnection(ctx)
 
 createStreams(ctx)
 const { chatLog, streams, eventLog, emitEvent, pulseLog } = ctx
 
 createDescribe(ctx)
-const { vecStr, round, HOSTILE_NAMES, OPENABLE, cellText, compass, yawToCompass, spatial3D, veinScan, waterState, glyphFor, overheadCover, skyPhrase, indoors, coverPhrase, nightfall, terrainClass } = ctx
+const { round, HOSTILE_NAMES, OPENABLE, cellText, compass, yawToCompass, spatial3D, veinScan, waterState, glyphFor, overheadCover, skyPhrase, indoors, coverPhrase, terrainClass } = ctx
 
 createItems(ctx)
 const { resolveBlockIds, resolveItem, heldInfo, PICK_TIER, neededPickTier, equipPickFor, holdDigTool, FOOD_UPDATE_MS, safeFood, foodUpdate, holdHarvester } = ctx
 
 createReflexes(ctx)
-const { reflexes, startReflexes } = ctx
+const { reflexes } = ctx
 
 createUnstuck(ctx)
 const { unstuckReflex, unstuckKnows, passable } = ctx
@@ -376,15 +164,6 @@ createAlarms(ctx)
 
 createSenses(ctx)
 const { HEARD, hearSummary, stampOwnEdit } = ctx
-
-function wireLookPaceGoto () {
-  bot.once('spawn', () => {
-    const combat = reflexes.find(r => r.name === 'combat')
-    bot.look = smoothLook(bot, bot.look, () => combat.active)
-    bot._genericPlace = pacePlacements(bot._genericPlace)
-    bot.pathfinder.goto = watchGoto(bot.pathfinder.goto)
-  })
-}
 
 const fight = {}
 ctx.fight = fight
@@ -3545,6 +3324,8 @@ function bindAll () {
   bindBunker(ctx)
   bindSenses(ctx)
   bindAlarms(ctx)
+  bindConnection(ctx)
+  bindViewer(ctx)
 }
 bindAll()
 wireRuntime()
