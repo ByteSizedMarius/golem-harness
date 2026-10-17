@@ -553,7 +553,7 @@ test('collect finds a drop in sight in a lit room, never one around the corner',
 test('the veins of scene name ore in lit sight, never ore around a corner or in the dark', () => {
   const veins = (light, at) => {
     const env = { ...cave(light, at), VEIN_SENSE_R: botConstant('VEIN_SENSE_R') }
-    return loadBotFunctions(['veinScan'], env).veinScan(env.bot)
+    return loadBotFunctions(['veinScan'], env).veinScan()
   }
   assert.strictEqual(veins(LIT), 'coal W ~1', 'control: in sight')
   assert.strictEqual(veins(DARK, FAR_END), null)
@@ -878,6 +878,18 @@ test('overhead cover counts and tops the rock only once the sky shows, and gives
   assert.deepStrictEqual(cover(shaft(DARK, 68)), [{ sky: false, unseen: true }, 'Overhead unseen. '], 'rock 2.4 blocks over the eye')
   const open = world({ open: (x, y, z) => x === 0 && z === 0 && y >= 64, light: () => LIT, skyLight: () => 15 })
   assert.deepStrictEqual(cover(open)[0], { sky: true }, 'sky light 15 at the head')
+})
+
+test('overhead cover scans no cell above the top of the world', () => {
+  const env = shaft(LIT)
+  env.bot.game = { minY: 0, height: 256 }
+  for (let y = 66; y <= 400; y++) env.SEEN.add(ck(0, y, 0))
+  let highest = -Infinity
+  const blockAt = env.bot.blockAt
+  env.bot.blockAt = (p) => { highest = Math.max(highest, p.y); return blockAt(p) }
+  const oh = loadBotFunctions(['overheadCover'], env).overheadCover()
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(oh)), { sky: false, canopy: false, firstUp: 1, cover: 4, topY: 69 })
+  assert.ok(highest <= 255, `scanned up to y${highest}`)
 })
 
 test('the walked trail marks only what the body fills and sees by its light, never a cell behind a wall', () => {

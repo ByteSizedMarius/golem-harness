@@ -4,7 +4,7 @@ const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const shelter = require('../lib/shelter')
-const { QUIET_MS, legLedger, takenText } = require('../lib/legs')
+const { QUIET_MS, legLedger, takenText } = require('../lib/leg-ledger')
 const {
   botConstant, loadBotFunctions, HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, digInProblemWith,

@@ -6,7 +6,7 @@ const { performance } = require('node:perf_hooks')
 const mineflayer = require('mineflayer')
 const { pathfinder, goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
-const { legLedger } = require('../lib/legs')
+const { legLedger } = require('../lib/leg-ledger')
 const { loadBotFunctions } = require('./helpers')
 
 function lane () {

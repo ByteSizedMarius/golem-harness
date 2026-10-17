@@ -8,7 +8,7 @@ const { goals } = require('mineflayer-pathfinder')
 const walk = require('../lib/walk')
 const { playerNamed, playersAround } = require('../lib/players')
 const { summarizePlan, planRisk } = require('../lib/plan')
-const { legLedger } = require('../lib/legs')
+const { legLedger } = require('../lib/leg-ledger')
 const { createDescribe } = require('../lib/bot/describe')
 const { loadBotFunctions, botConstant, startApp, fakeClock } = require('./helpers')
 

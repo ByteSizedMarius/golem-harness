@@ -6,7 +6,7 @@
 // waits added up, at most LONGEST.
 // body marks a route that moves or uses the body.
 
-const { strikeBudgetMs, STRIKE_SWING_MS, HOLD_MAX_S } = require('../lib/pace')
+const { strikeBudgetMs, STRIKE_SWING_MS, HOLD_MAX_S } = require('../lib/combat-rules')
 
 const required = (spec) => ({ ...spec, required: true })
 

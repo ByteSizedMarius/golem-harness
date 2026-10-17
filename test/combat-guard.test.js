@@ -5,7 +5,7 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const { routeWithin } = require('../lib/flee')
 const { mobFamily, expireConfirmed } = require('../lib/shelter')
-const pace = require('../lib/pace')
+const rules = require('../lib/combat-rules')
 const { loadBotFunctions, combatReflexIn, botConstant, laneAt } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
@@ -72,13 +72,13 @@ async function standoff (extra, mob, over = {}) {
     guardState: { up: false, slot: -1, pilot: false },
     LEGACY_HIT_MS: botConstant('LEGACY_HIT_MS'),
     mobHurt: { wait: () => 0 },
-    noCritReason: pace.noCritReason,
-    JUMP_FALL_TICKS: pace.JUMP_FALL_TICKS,
-    JUMP_TICKS: pace.JUMP_TICKS,
+    noCritReason: rules.noCritReason,
+    JUMP_FALL_TICKS: rules.JUMP_FALL_TICKS,
+    JUMP_TICKS: rules.JUMP_TICKS,
     AGGRO_CONFIRMED: new Map(),
     bunker: { building: false },
     shared: { mcData: null },
-    HITBOX_1710: pace.HITBOX_1710,
+    HITBOX_1710: rules.HITBOX_1710,
     GUARD_REACH: botConstant('GUARD_REACH'),
     GUARD_STEPS: botConstant('GUARD_STEPS'),
     CREEPER_DROP: botConstant('CREEPER_DROP'),
@@ -131,7 +131,7 @@ async function standoff (extra, mob, over = {}) {
 const zombie = (x) => ({ id: 7, name: 'zombie', width: 0.6, height: 1.95, position: new Vec3(x, 64, 0.5) })
 const IN_REACH = { inMeleeReach: () => true }
 // The bot.js melee reach rule in place of the stub.
-const REACH_RULE = { inMeleeReach: undefined, SWING_REACH: pace.SWING_REACH }
+const REACH_RULE = { inMeleeReach: undefined, SWING_REACH: rules.SWING_REACH }
 const skeleton = (x) => ({ id: 8, name: 'skeleton', position: new Vec3(x, 64, 0.5) })
 
 test('a closing zombie raises the sword block only when it can walk to the body over seen cells', async () => {
@@ -381,9 +381,9 @@ test('the vanguard reflex neither chases nor swings at a zombie that hit the bod
         fight: guardFight({ stance: 'vanguard' }),
         entityPerceptible: () => seen,
         takeLegs (reflex, why) { legs.push(why) },
-        runCells: pace.runCells,
-        RUN_COAST: pace.RUN_COAST,
-        RUN_TICKS: pace.RUN_TICKS,
+        runCells: rules.runCells,
+        RUN_COAST: rules.RUN_COAST,
+        RUN_TICKS: rules.RUN_TICKS,
         ...env
       }
     })
@@ -397,7 +397,7 @@ test('the vanguard reflex neither chases nor swings at a zombie that hit the bod
     assert.deepStrictEqual(await fight(false, 5.5, { sprintBlock }), NONE, `a chase behind the wall, run ${sprintBlock()}`)
   }
   for (const legacy of [true, false]) {
-    const reach = { ...IN_REACH, LEGACY_1710: legacy, meleeAim: undefined, HITBOX_1710: pace.HITBOX_1710 }
+    const reach = { ...IN_REACH, LEGACY_1710: legacy, meleeAim: undefined, HITBOX_1710: rules.HITBOX_1710 }
     assert.ok((await fight(true, 3.5, reach)).swings > 0, `control: no swing in sight, 1.7.10 ${legacy}`)
     assert.deepStrictEqual(await fight(false, 3.5, reach), NONE, `a swing behind the wall, 1.7.10 ${legacy}`)
   }

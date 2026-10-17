@@ -4,7 +4,7 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
-const { legLedger } = require('../lib/legs')
+const { legLedger } = require('../lib/leg-ledger')
 const { entityInCell } = require('../lib/shelter')
 const { botConstant, reflexIn, loadBotFunctions } = require('./helpers')
 

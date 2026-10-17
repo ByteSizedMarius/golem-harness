@@ -4,7 +4,7 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
-const { QUIET_MS, LONG_QUIET_MS, legLedger, takenText, laneBlocks } = require('../lib/legs')
+const { QUIET_MS, LONG_QUIET_MS, legLedger, takenText, laneBlocks } = require('../lib/leg-ledger')
 const { routeDeadline } = require('../lib/walk')
 const { loadBotFunctions, combatReflexIn, awaitRoute } = require('./helpers')
 

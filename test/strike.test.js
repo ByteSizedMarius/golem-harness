@@ -4,10 +4,10 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
-const pace = require('../lib/pace')
+const rules = require('../lib/combat-rules')
 const { isDoor } = require('../lib/doors')
 const { expireConfirmed } = require('../lib/shelter')
-const { legLedger, takenText } = require('../lib/legs')
+const { legLedger, takenText } = require('../lib/leg-ledger')
 const { createLane } = require('../lib/bot/lane')
 const vm = require('node:vm')
 const { routeHandler, runRoute, awaitRoute, fakeClock, toolNamed, botConstant, botSource, balanced, loadBotFunctions, combatReflexIn, wireListeners } = require('./helpers')
@@ -81,7 +81,7 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
     clearControlStates () {}
   })
   const fill = {}
-  const mobHurt = pace.hurtWindows(clock.now)
+  const mobHurt = rules.hurtWindows(clock.now)
   mobHurt.wire(bot)
   const lane = {}
   createLane(lane)
@@ -97,21 +97,21 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
     knownCell: () => true,
     perch: { cell: null },
     console: { log () {} },
-    noCritReason: pace.noCritReason,
-    noRunReason: pace.noRunReason,
-    runCells: pace.runCells,
-    RUN_COAST: pace.RUN_COAST,
-    JUMP_FALL_TICKS: pace.JUMP_FALL_TICKS,
-    JUMP_TICKS: pace.JUMP_TICKS,
-    RUN_MAX: pace.RUN_MAX,
-    RUN_TICKS: pace.RUN_TICKS,
-    SWING_REACH: pace.SWING_REACH,
-    HITBOX_1710: pace.HITBOX_1710,
+    noCritReason: rules.noCritReason,
+    noRunReason: rules.noRunReason,
+    runCells: rules.runCells,
+    RUN_COAST: rules.RUN_COAST,
+    JUMP_FALL_TICKS: rules.JUMP_FALL_TICKS,
+    JUMP_TICKS: rules.JUMP_TICKS,
+    RUN_MAX: rules.RUN_MAX,
+    RUN_TICKS: rules.RUN_TICKS,
+    SWING_REACH: rules.SWING_REACH,
+    HITBOX_1710: rules.HITBOX_1710,
     Vec3,
     fight: { lastAttackT: 0 },
-    STRIKE_SWING_MS: pace.STRIKE_SWING_MS,
-    STRIKE_APPROACH_MS: pace.STRIKE_APPROACH_MS,
-    strikeBudgetMs: pace.strikeBudgetMs,
+    STRIKE_SWING_MS: rules.STRIKE_SWING_MS,
+    STRIKE_APPROACH_MS: rules.STRIKE_APPROACH_MS,
+    strikeBudgetMs: rules.strikeBudgetMs,
     Date: { now: clock.now },
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
@@ -179,7 +179,7 @@ async function strikeRun (walkMs) {
 }
 
 test('/strike ends at its own budget, before the tool timeout, however long its approaches take', async () => {
-  const budget = pace.strikeBudgetMs(5)
+  const budget = rules.strikeBudgetMs(5)
   const timeout = toolNamed('strike').timeoutMs
   assert.ok(budget < timeout, `the budget ${budget} ms is not under the tool timeout ${timeout} ms`)
   const slow = await strikeRun(5900)
@@ -301,8 +301,8 @@ async function holdAt (query, walls, seen = true, legacy = true) {
     nearHostiles: () => [],
     mobClass: (e) => (e.name === 'zombie' ? 'hostile' : 'passive'),
     disengageHp: () => 8,
-    SWING_REACH: pace.SWING_REACH,
-    HOLD_MAX_S: pace.HOLD_MAX_S,
+    SWING_REACH: rules.SWING_REACH,
+    HOLD_MAX_S: rules.HOLD_MAX_S,
     OPENABLE: botConstant('OPENABLE'),
     isDoor
   })
@@ -379,8 +379,8 @@ test('a sprint opener stops once its zombie goes out of sight', async () => {
 test('a sprint opener needs food above 6 and names hunger when it is not', () => {
   const blockAt = (p) => (p.y < 64 ? { name: 'stone', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' })
   const flat = { from: new Vec3(0.5, 64, 0.5), to: new Vec3(4.5, 64, 0.5), blockAt, known: () => true }
-  assert.strictEqual(pace.noRunReason({ ...flat, food: 7 }), null, 'control: a fed body runs')
-  assert.strictEqual(pace.noRunReason({ ...flat, food: 6 }), 'too hungry')
+  assert.strictEqual(rules.noRunReason({ ...flat, food: 7 }), null, 'control: a fed body runs')
+  assert.strictEqual(rules.noRunReason({ ...flat, food: 6 }), 'too hungry')
 })
 
 test('a strike swing waits out the hurt window of its target, from its last hurt animation', async () => {

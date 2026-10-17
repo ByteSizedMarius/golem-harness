@@ -24,7 +24,7 @@ function body (head, feet = AIR) {
   }
   const env = { bot, OPENABLE: botConstant('OPENABLE'), equipPickFor: async () => {} }
   return {
-    buried: () => loadBotFunctions(['waterState'], env).waterState(bot).buried,
+    buried: () => loadBotFunctions(['waterState'], env).waterState().buried,
     digOutHead: () => loadBotFunctions(['digOutHead'], env).digOutHead(),
     digs
   }

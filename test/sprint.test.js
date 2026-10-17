@@ -105,7 +105,7 @@ function sprintBot (path, { sprint = true, moving = true, pos = new Vec3(0.5, 64
     reflexes: [{ name: 'combat', active: false, _fleeUntil: 0 }], noJumpReason, passedNodes, nodeStep: step,
     console: { log: (s) => logs.push(s) }, Date: { now: () => clock.t }, closeDoorsBehind () {}
   }
-  const ctx = loadBotFunctions(['sprintTick', 'skipPassedNodes', 'hookTicks', 'beforePathfinder', 'afterPathfinder'], env)
+  const ctx = loadBotFunctions(['sprintTick', 'skipPassedNodes', 'wirePathfinderTicks', 'beforePathfinder', 'afterPathfinder'], env)
   return { env, controls, ctx, logs, clock, setMoving: (m) => { moving = m } }
 }
 
@@ -169,7 +169,7 @@ test('the nodes a hop passed leave the live path, the ones after its landing sta
 test('a path reset or a stopped pathfinder mid-hop lets go of jump, sprint and forward', () => {
   for (const [label, end] of [['a reset on the ground', 'reset'], ['a reset in the air', 'air'], ['the pathfinder stopped', 'stop']]) {
     const h = sprintBot(east(6))
-    h.ctx.hookTicks()
+    h.ctx.wirePathfinderTicks()
     h.ctx.sprintTick()
     Object.assign(h.controls, { sprint: true, forward: true })
     assert.strictEqual(h.controls.jump, true, `${label}: control, the hop holds jump`)
@@ -184,7 +184,7 @@ test('a path reset or a stopped pathfinder mid-hop lets go of jump, sprint and f
     assert.deepStrictEqual([h.controls.jump, h.controls.sprint, h.controls.forward, h.env.hopping], [false, false, false, false], label)
   }
   const walker = sprintBot(east(6), { sprint: false })
-  walker.ctx.hookTicks()
+  walker.ctx.wirePathfinderTicks()
   walker.ctx.sprintTick()
   walker.controls.forward = true
   walker.env.bot.emit('path_reset', 'goal_moved')
@@ -198,8 +198,8 @@ test('under the real plugin loader the hop hooks run around the pathfinder\'s ow
   client.end = () => {}
   const bot = mineflayer.createBot({ client, username: 'Claude', loadInternalPlugins: false })
   bot.loadPlugin(pathfinder)
-  const ctx = loadBotFunctions(['hookTicks', 'beforePathfinder', 'afterPathfinder'], { bot })
-  ctx.hookTicks()
+  const ctx = loadBotFunctions(['wirePathfinderTicks', 'beforePathfinder', 'afterPathfinder'], { bot })
+  ctx.wirePathfinderTicks()
   await once(bot, 'inject_allowed')
   const ticks = bot.listeners('physicsTick')
   const own = ticks.findIndex((fn) => fn.name === 'monitorMovement')

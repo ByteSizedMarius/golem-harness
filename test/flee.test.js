@@ -6,7 +6,7 @@ const { goals } = require('mineflayer-pathfinder')
 const MC_DATA = require('minecraft-data')('1.21.11')
 const { fleeHeading, planFlee, creeperCover, routeWithin } = require('../lib/flee')
 const { expireConfirmed } = require('../lib/shelter')
-const { legLedger, takenText } = require('../lib/legs')
+const { legLedger, takenText } = require('../lib/leg-ledger')
 const vm = require('node:vm')
 const { loadBotFunctions, combatReflexIn, botConstant, botSource, balanced, reflexIn, fakeClock, laneAt } = require('./helpers')
 

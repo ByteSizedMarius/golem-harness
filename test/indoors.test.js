@@ -21,7 +21,7 @@ function room (doorway, known = () => true) {
     return STONE
   }
   const env = {
-    bot: { entity: { position: new Vec3(0.5, 64, 0.5) }, blockAt },
+    bot: { entity: { position: new Vec3(0.5, 64, 0.5) }, blockAt, game: { minY: 0, height: 256 } },
     ck,
     Vec3,
     INDOORS: new Map(),
