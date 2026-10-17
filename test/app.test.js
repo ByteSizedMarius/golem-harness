@@ -1,15 +1,19 @@
 'use strict'
-// Routes registered on the createApp app stand in for the ones bot.js's installRoutes() registers.
+// Routes registered on the createApp app stand in for the ones bot.js's installRoutes() registers,
+// except in the test that installs the lib/routes groups.
 const test = require('node:test')
 const assert = require('node:assert')
 const crypto = require('node:crypto')
+const fs = require('node:fs')
 const http = require('node:http')
+const path = require('node:path')
 const util = require('node:util')
 const { createApp } = require('../lib/app')
 const { ROUTE_BOUNDS } = require('../lib/bounds')
-const { PORT, UNAUTHORIZED, hmac, newNonce, startApp, stateControl } = require('./helpers')
+const { bindDebugRoutes } = require('../lib/routes/debug')
+const { PORT, ROOT, UNAUTHORIZED, codeOnly, hmac, newNonce, startApp, stateControl } = require('./helpers')
 
-// A createApp app on a loopback port, with get(target) sending a signed GET.
+// A createApp app on a loopback port, with get(target) sending a GET, signed unless signed is false.
 async function factoryServer (t) {
   const token = crypto.randomBytes(32).toString('hex')
   const server = http.createServer()
@@ -19,14 +23,20 @@ async function factoryServer (t) {
   const onRequests = []
   const { app, verbs } = createApp({ token, port, chat: { send () {} }, onRequest: (res) => { onRequests.push(res) } })
   server.on('request', app)
-  function get (target) {
+  function get (target, { signed = true } = {}) {
     const time = String(Date.now())
     const nonce = newNonce()
-    const headers = { 'X-Golem-Time': time, 'X-Golem-Nonce': nonce, 'X-Golem-Sig': hmac(token, `GET\n${target}\n${time}\n${nonce}`) }
+    const headers = signed ? { 'X-Golem-Time': time, 'X-Golem-Nonce': nonce, 'X-Golem-Sig': hmac(token, `GET\n${target}\n${time}\n${nonce}`) } : {}
     return new Promise((resolve, reject) => {
       const req = http.request({ host: '127.0.0.1', port, path: target, headers, agent: false }, (res) => {
-        res.resume()
-        res.on('end', () => resolve({ status: res.statusCode }))
+        let body = ''
+        res.setEncoding('utf8')
+        res.on('data', (d) => { body += d })
+        res.on('end', () => {
+          let json
+          try { json = JSON.parse(body) } catch {}
+          resolve({ status: res.statusCode, json })
+        })
       })
       req.on('error', reject)
       req.end()
@@ -70,6 +80,35 @@ test('app-I1 an unsigned request gets 401 for a route registered after createApp
   assert.strictEqual(s.routeHits('/state').length, 1, '/state ran unsigned')
   for (const target of ['/nope', '/bot.js', '/package.json']) assertUnauthorized(await s.get(target, { signed: false }), target)
   assertUnauthorized(await s.wire('/nope', { method: 'POST', key: null }), 'POST /nope')
+})
+
+// ASVS 8.2.1
+test('app-I1 every route the lib/routes groups install answers 401 to an unsigned request', async (t) => {
+  const f = await factoryServer(t)
+  const routesDir = path.join(ROOT, 'lib', 'routes')
+  const ctx = {}
+  const groups = []
+  let declared = 0
+  for (const file of fs.readdirSync(routesDir).filter((name) => name.endsWith('.js'))) {
+    declared += codeOnly(fs.readFileSync(path.join(routesDir, file), 'utf8')).match(/\bapp\.get\(/g)?.length ?? 0
+    const mod = require(path.join(routesDir, file))
+    for (const key of Object.keys(mod)) {
+      const group = /^create(\w+)Routes$/.exec(key)
+      if (group) {
+        mod[key](ctx)
+        groups.push(group[1])
+      }
+    }
+  }
+  const before = f.app.router.stack.length
+  for (const group of groups) ctx[`install${group}Routes`](f.app)
+  assert.strictEqual(f.app.router.stack.length - before, declared, 'routes installed')
+  const fight = { threatDebugUntil: 0 }
+  bindDebugRoutes({ bot: {}, fight, ok: (res, data) => res.json({ ok: true, ...data }), err: (res, e) => res.json({ ok: false, error: e.message }) })
+  assert.strictEqual((await f.get('/threatdebug?secs=1')).status, 200, 'control: a signed /threatdebug')
+  assert.ok(fight.threatDebugUntil > 0, 'control: the signed /threatdebug ran')
+  const paths = new Set(f.app.router.stack.filter((layer) => layer.route).map((layer) => layer.route.path))
+  for (const target of paths) assertUnauthorized(await f.get(target, { signed: false }), target)
 })
 
 // ASVS 2.2.1
