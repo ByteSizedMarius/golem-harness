@@ -146,7 +146,11 @@ function guardRequest ({ token, port, method = 'GET', url = '/state', time, nonc
 const DUMMY_ROUTES = [
   '/state', '/tick', '/chatlog', '/walls', '/outline', '/roof', '/build', '/find', '/mine', '/collect', '/craft',
   '/smelt', '/furnace', '/chest', '/withdraw', '/deposit', '/gather', '/toss', '/goto', '/follow',
-  '/waypoint', '/waypoints', '/snapshot', '/record', '/stream', '/pov', '/sign', '/rename', '/bunker'
+  '/waypoint', '/waypoints', '/snapshot', '/record', '/stream', '/pov', '/sign', '/rename', '/bunker',
+  '/strike', '/shoot', '/brace', '/hold', '/pillar', '/pathdebug', '/threatdebug', '/journal', '/lookat', '/stance', '/gaze',
+  '/scene', '/section', '/passages', '/map', '/entities', '/listen', '/blockat', '/pulse', '/events', '/bridging', '/tidy',
+  '/dig_tunnel', '/dig_stair', '/digat', '/enchant', '/placeitem', '/equip', '/activate', '/use', '/fish', '/reflexes',
+  '/gesture', '/job', '/job_stop', '/guard'
 ]
 
 function parseResponse (buf) {
@@ -811,7 +815,42 @@ function routeHandler (route, env) {
   const async = /\basync\b/.test(src.slice(at, arrow)) ? 'async ' : ''
   const code = `(${async}(req, res) => ${handler})`
   const ctx = loadBotFunctions([], { ok: (res, body) => { res.body = body }, err: (res, e) => { res.error = e }, ...env }, code)
+  // Module code has Node's Buffer, a vm context does not.
+  ctx.Buffer ??= Buffer
   return { handle: vm.runInContext(code, ctx), res: {} }
+}
+
+// An fs over one file holding text, null for a missing one. bytesRead() counts the bytes it handed out.
+function fakeFile (text) {
+  const data = text === null ? null : Buffer.from(text, 'utf8')
+  let bytes = 0
+  let cursor = 0
+  const exists = () => {
+    if (!data) throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
+  }
+  const fs = {
+    statSync () { exists(); return { size: data.length, isFile: () => true } },
+    openSync () { exists(); cursor = 0; return 7 },
+    readSync (fd, buf, a, b, c) {
+      exists()
+      const opts = a !== null && typeof a === 'object' ? a : { offset: a, length: b, position: c }
+      const offset = opts.offset ?? 0
+      const length = opts.length ?? buf.byteLength - offset
+      const from = opts.position == null ? cursor : Number(opts.position)
+      const chunk = data.subarray(from, from + length)
+      buf.set(chunk, offset)
+      if (opts.position == null) cursor = from + chunk.length
+      bytes += chunk.length
+      return chunk.length
+    },
+    closeSync () {},
+    readFileSync (p, enc) {
+      exists()
+      bytes += data.length
+      return enc ? data.toString(typeof enc === 'string' ? enc : enc.encoding) : Buffer.from(data)
+    }
+  }
+  return { fs, bytesRead: () => bytes }
 }
 
 function replyOf (res) {
@@ -1122,8 +1161,7 @@ async function actAfter (built) {
 
 const stoppedBuild = (why) => ({ mode: 'up', at: { x: 0, y: 65, z: 0 }, sealed: false, dug: 0, placed: 1, height: 3, gaps: [], exit: [], stopped: why })
 
-// The bot's lane for a body at entity whose last bunker is cell, with no build, perch, melee threat or pilot claim, and a
-// job running when job is true.
+// The bot's lane for a body at entity whose last bunker is cell, unclaimed but for a job when job is true.
 function laneAt (entity, cell, job = false) {
   const lane = {}
   createLane(lane)
@@ -1244,7 +1282,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, groundMemory, walkingBody, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
+  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, groundMemory, walkingBody, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, laneAt,
   buildVerbEnv, digInProblemWith, facings, digJob

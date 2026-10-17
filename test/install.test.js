@@ -62,10 +62,10 @@ test('the guard answers before routing: an unsigned unknown route, /chat, disabl
 test('a signature over the decoded, reordered or case-changed target gets 401 for the target as sent', async (t) => {
   const s = await startApp(t)
   assert.strictEqual((await s.wire('/chat?msg=hello%20there')).status, 200, 'control: signed as sent')
-  assert.strictEqual((await s.wire('/walls?w=5&d=3')).status, 200, 'control: signed as sent')
+  assert.strictEqual((await s.wire('/walls?x=1&z=1&w=5&d=3')).status, 200, 'control: signed as sent')
   const pairs = [
-    ['/%73tate', '/state'], ['/chat?msg=a%20b', '/chat?msg=a+b'], ['/walls?d=3&w=5', '/walls?w=5&d=3'],
-    ['/walls?w=5&w=65', '/walls?w=5'], ['/state?', '/state'], ['/STATE', '/state'], ['/state/', '/state']
+    ['/%73tate', '/state'], ['/chat?msg=a%20b', '/chat?msg=a+b'], ['/walls?x=1&z=1&d=3&w=5', '/walls?x=1&z=1&w=5&d=3'],
+    ['/walls?x=1&z=1&w=5&w=65', '/walls?x=1&z=1&w=5'], ['/state?', '/state'], ['/STATE', '/state'], ['/state/', '/state']
   ]
   for (const [target, signPath] of pairs) {
     const r = await s.wire(target, { signPath })
@@ -169,21 +169,21 @@ test('case and trailing-slash variants of /snapshot get 403, HEAD included, and 
 
 test('a bounded route parameter: min and max pass, min-1, max+1, a repeated or a fractional value get 400', async (t) => {
   const s = await startApp(t)
-  for (const [route, p] of [['/walls', 'h'], ['/bunker', 'height']]) {
+  for (const [route, p, base] of [['/walls', 'h', 'x=1&z=1&'], ['/bunker', 'height', '']]) {
     const [min, max] = ROUTE_BOUNDS[route][p]
-    for (const v of [min, max]) assert.strictEqual((await s.get(`${route}?${p}=${v}`)).status, 200, `${route} ${p}=${v}`)
+    for (const v of [min, max]) assert.strictEqual((await s.get(`${route}?${base}${p}=${v}`)).status, 200, `${route} ${p}=${v}`)
     for (const q of [`${p}=${min - 1}`, `${p}=${max + 1}`, `${p}=${min}&${p}=${max}`]) {
-      assert.strictEqual((await s.get(`${route}?${q}`)).status, 400, `${route} ${q}`)
+      assert.strictEqual((await s.get(`${route}?${base}${q}`)).status, 400, `${route} ${q}`)
     }
     assert.strictEqual(s.routeHits(route).length, 2, `${route} ran for a refused ${p}`)
   }
-  assert.strictEqual((await s.get('/walls?w=7.5')).status, 400, 'w=7.5')
+  assert.strictEqual((await s.get('/walls?x=1&z=1&w=7.5')).status, 400, 'w=7.5')
   assert.strictEqual(s.routeHits('/walls').length, 2, '/walls ran for w=7.5')
 })
 
 test('bounds apply to case and trailing-slash variants of bounded routes', async (t) => {
   const s = await startApp(t)
-  assert.strictEqual((await s.wire('/WALLS?w=64')).status, 200, 'control: /WALLS?w=64')
+  assert.strictEqual((await s.wire('/WALLS?x=1&z=1&w=64')).status, 200, 'control: /WALLS?x=1&z=1&w=64')
   assert.strictEqual(s.routeHits('/walls').length, 1)
   for (const target of ['/WALLS?w=65', '/walls/?w=65']) {
     assert.strictEqual((await s.wire(target)).status, 400, target)

@@ -1,6 +1,7 @@
 'use strict'
 
 // The control API routes (lib/routes/) the pilot may call. Each param is that route's query parameter of the same name.
+// The HTTP guards in lib/bounds.js and lib/install.js check int, num, enum and bool params against the specs here.
 // structural names the top-level reply fields the route generates that keep up to 4000 characters.
 // timeoutMs is how long a route that answers once its action ended may take: its walks and mineflayer
 // waits added up, at most LONGEST.
@@ -21,8 +22,9 @@ const CONSUME = 2500
 // Routes whose walks have no bound in lib/routes/, or that walk once per item or per cell.
 const LONGEST = 600000
 
-const X = { type: 'num', min: -30000000, max: 30000000 }
-const Y = { type: 'num', min: -2048, max: 2048 }
+// The world's coordinate limit and the 1.21 overworld build height, to the last whole block.
+const X = { type: 'num', min: -30000000, max: 29999999 }
+const Y = { type: 'num', min: -64, max: 319 }
 const XYZ = { x: required(X), y: required(Y), z: required(X) }
 const AT = { x: X, y: Y, z: X }
 const NAME = { type: 'str', maxLen: 64 }
@@ -103,10 +105,10 @@ const TOOLS = [
   { name: 'use', route: '/use', body: true, description: 'Right-click a block with an item: till, sow, fill or pour a bucket.', params: { ...XYZ, item: NAME }, timeoutMs: LONGEST },
   { name: 'useon', route: '/useon', body: true, description: 'Use an item on a creature in sight within 16: shears on a sheep, a bucket on a cow.', params: { name: required(NAME), item: required(NAME) }, timeoutMs: LONGEST },
   { name: 'toss', route: '/toss', body: true, description: 'Drop items, or throw them toward a player with to. Walk away afterwards or you pick them up again.', params: { name: required(NAME), count: COUNT, to: PLAYER }, timeoutMs: EVENT },
-  { name: 'fish', route: '/fish', body: true, description: 'Job: cast the fishing rod count times, at seen water (x,y,z) or ahead. Each catch arrives as an event.', params: { count: { type: 'int', min: 1, max: 32 }, ...AT } },
-  { name: 'chest', route: '/chest', body: true, description: 'List the chest at x,y,z. Without x,y,z, list every chest seen within radius (default 12), nearest first, and the items of the nearest.', params: { ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
-  { name: 'withdraw', route: '/withdraw', body: true, description: 'Take items from the chest at x,y,z or the nearest seen within radius (default 12). name matches as a substring.', params: { name: required(NAME), count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
-  { name: 'deposit', route: '/deposit', body: true, description: 'Put items into the chest at x,y,z or the nearest seen within radius (default 12). name matches as a substring. When the chest fills, the error names the other chests seen.', params: { name: required(NAME), count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
+  { name: 'fish', route: '/fish', body: true, description: 'Job: cast the fishing rod count times, at seen water (x, y and z together) or ahead. Each catch arrives as an event.', params: { count: { type: 'int', min: 1, max: 32 }, ...AT } },
+  { name: 'chest', route: '/chest', body: true, description: 'List the chest at x, y and z together. Without them, list every chest seen within radius (default 12), nearest first, and the items of the nearest.', params: { ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
+  { name: 'withdraw', route: '/withdraw', body: true, description: 'Take items from the chest at x, y and z together, or the nearest seen within radius (default 12). name matches as a substring.', params: { name: required(NAME), count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
+  { name: 'deposit', route: '/deposit', body: true, description: 'Put items into the chest at x, y and z together, or the nearest seen within radius (default 12). name matches as a substring. When the chest fills, the error names the other chests seen.', params: { name: required(NAME), count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
   // The walk, the window and one withdraw per item kind.
   { name: 'grave', route: '/grave', body: true, description: 'List the gravestone at x,y,z or the nearest in sight. take: all or an item name.', params: { at: POINT, take: NAME }, timeoutMs: LONGEST },
 
