@@ -25,6 +25,12 @@ const { countVerbs } = require('./lib/verbs')
 const { GRAVESTONE, renameBlocks, overrideRecipes, craftable } = require('./lib/server-overrides')
 const { smeltYield, burnItems, COOK_PROBE_TICKS } = require('./lib/furnace')
 
+// The HMAC key that signs every control API request and response.
+const GOLEM_TOKEN = process.env.GOLEM_TOKEN || ''
+if (GOLEM_TOKEN.length < 32) {
+  console.error('[bot] GOLEM_TOKEN is missing or shorter than 32 characters, refusing to start')
+  process.exit(1)
+}
 const { HOST, PORT, VERSION, USERNAME, CTRL_PORT, VIEW_PORT, LEGACY_1710, LEGACY_HIT_MS, SERVER_OVERRIDES, SERVER_RECIPES, GRAVES, ROOT } = require('./lib/bot/config')
 const { createContext } = require('./lib/context')
 const { createStreams, bindStreams, wireChatCapture, wireServerMessages } = require('./lib/bot/streams')
@@ -34,12 +40,6 @@ const { createDescribe, bindDescribe, wireIndoorsReset } = require('./lib/bot/de
 const { createLane, bindLane } = require('./lib/bot/lane')
 const { createMemory, bindMemory, wireSeenWorld, wireSeenSave } = require('./lib/bot/memory')
 const { createReflexes, bindReflexes } = require('./lib/bot/reflexes')
-// The HMAC key that signs every control API request and response.
-const GOLEM_TOKEN = process.env.GOLEM_TOKEN || ''
-if (GOLEM_TOKEN.length < 32) {
-  console.error('[bot] GOLEM_TOKEN is missing or shorter than 32 characters, refusing to start')
-  process.exit(1)
-}
 
 const bot = mineflayer.createBot({
   // MC_VERSION=auto lets mineflayer detect the server's version from the handshake
