@@ -383,6 +383,22 @@ test('a sprint opener needs food above 6 and names hunger when it is not', () =>
   assert.strictEqual(rules.noRunReason({ ...flat, food: 6 }), 'too hungry')
 })
 
+test('a sprint opener refuses a run through fire or a cobweb', () => {
+  const run = (hazard) => rules.noRunReason({
+    from: new Vec3(0.5, 64, 0.5),
+    to: new Vec3(4.5, 64, 0.5),
+    food: 20,
+    known: () => true,
+    blockAt: (p) => {
+      if (p.y < 64) return { name: 'stone', boundingBox: 'block' }
+      return { name: p.x === 2 && p.y === 64 && p.z === 0 ? hazard : 'air', boundingBox: 'empty' }
+    }
+  })
+  assert.strictEqual(run('air'), null, 'control: a clear run')
+  assert.strictEqual(run('cobweb'), 'blocked on the way')
+  assert.strictEqual(run('fire'), 'blocked on the way')
+})
+
 test('a strike swing waits out the hurt window of its target, from its last hurt animation', async () => {
   const world = verbWorld([zombie(2.5)], { legacy: true })
   let hurtAt = null
