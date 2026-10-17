@@ -8,9 +8,7 @@ const express = require('express')
 const fs = require('fs')
 const { Vec3 } = require('vec3')
 const { installSecurity, chatMaxLen, BUNKER_MODES } = require('./lib/install')
-const { classifySound } = require('./lib/sounds')
 const { entityInCell, bunkerSummary } = require('./lib/shelter')
-const { ambientChange, sameVein } = require('./lib/wake')
 const { smoothLook } = require('./lib/head')
 const { pacePlacements, STRIKE_SWING_MS, STRIKE_APPROACH_MS, strikeBudgetMs, JUMP_FALL_TICKS, HOLD_MAX_S } = require('./lib/pace')
 const { isDoor } = require('./lib/doors')
@@ -26,7 +24,7 @@ if (GOLEM_TOKEN.length < 32) {
   console.error('[bot] GOLEM_TOKEN is missing or shorter than 32 characters, refusing to start')
   process.exit(1)
 }
-const { HOST, PORT, VERSION, USERNAME, CTRL_PORT, VIEW_PORT, LEGACY_1710, LEGACY_HIT_MS, SERVER_OVERRIDES, SERVER_RECIPES, GRAVES, ROOT } = require('./lib/bot/config')
+const { HOST, PORT, VERSION, USERNAME, CTRL_PORT, VIEW_PORT, LEGACY_1710, LEGACY_HIT_MS, SERVER_OVERRIDES, SERVER_RECIPES } = require('./lib/bot/config')
 const { createContext } = require('./lib/context')
 const { createStreams, bindStreams, wireChatCapture, wireServerMessages } = require('./lib/bot/streams')
 const { createItems, bindItems } = require('./lib/bot/items')
@@ -46,6 +44,8 @@ const { createBunkerCells, bindBunkerCells } = require('./lib/bot/bunker-cells')
 const { createBunkerBuild, bindBunkerBuild } = require('./lib/bot/bunker-build')
 const { createCombat, bindCombat, wireGuardDrop, wireItemUseCosts, wireArmSwings, wireArrowTracking, wireDamageAttribution, wireFloodDrops, wireMobHurt } = require('./lib/bot/combat')
 const { createBunker, bindBunker, wireThreatReset } = require('./lib/bot/bunker')
+const { createSenses, bindSenses, wireSoundTablePin, wireHearing, wireOwnEditStamps, wireWorldChangeNotes, wireWorldChangeEvents, wireOreCallout } = require('./lib/bot/senses')
+const { createAlarms, bindAlarms, wireWearAlarm, wirePocketAlarm, wireTrailMarks, wireBodyAlarms } = require('./lib/bot/alarms')
 
 const bot = mineflayer.createBot({
   // MC_VERSION=auto lets mineflayer detect the server's version from the handshake
@@ -104,7 +104,7 @@ ctx.shared = shared
 shared.mcData = null
 shared.ready = false
 createLegs(ctx)
-const { navPlaced, collectSafely, collectLock, collectBusy, watchedWork, watchGoto, walkGaveUp, knownMoves, legs, takeLegs, safeStop, stopPath, freezeBody, swimUp, walkRoute, namedStop, routeEnd, stagedGoto, gotoQuery, doorBeside, nudgeInto } = ctx
+const { navPlaced, collectSafely, collectLock, collectBusy, watchedWork, watchGoto, walkGaveUp, knownMoves, legs, takeLegs, safeStop, stopPath, swimUp, walkRoute, namedStop, routeEnd, stagedGoto, gotoQuery, doorBeside, nudgeInto } = ctx
 shared.considerateMoves = null    // default no-dig profile (protects builds + terrain)
 shared.forestryMoves = null       // lumberjack profile: may break ONLY leaves+logs (built at spawn)
 
@@ -328,7 +328,7 @@ createStreams(ctx)
 const { chatLog, streams, eventLog, emitEvent, pulseLog } = ctx
 
 createDescribe(ctx)
-const { vecStr, round, HOSTILE_NAMES, OPENABLE, cellText, compass, yawToCompass, spatial3D, veinScan, suffocates, waterState, glyphFor, overheadCover, skyPhrase, indoors, coverPhrase, nightfall, terrainClass } = ctx
+const { vecStr, round, HOSTILE_NAMES, OPENABLE, cellText, compass, yawToCompass, spatial3D, veinScan, waterState, glyphFor, overheadCover, skyPhrase, indoors, coverPhrase, nightfall, terrainClass } = ctx
 
 createItems(ctx)
 const { resolveBlockIds, resolveItem, heldInfo, PICK_TIER, neededPickTier, equipPickFor, holdDigTool, FOOD_UPDATE_MS, safeFood, foodUpdate, holdHarvester } = ctx
@@ -346,7 +346,7 @@ createJobBoard(ctx)
 const { deaths, jobs } = ctx
 
 createMemory(ctx)
-const { waypoints, memory, journal, SEEN, SURFACE, markTrail, knownBlocks, nearestKnown, rememberedStation, arrivedStation } = ctx
+const { waypoints, memory, journal, SEEN, SURFACE, knownBlocks, nearestKnown, rememberedStation, arrivedStation } = ctx
 
 // ---- MACROS subsystem helpers ----
 // how far below the bot's feet we tolerate before refusing to dig down toward a target
@@ -372,108 +372,11 @@ function wireLightPackets () {
 // waking me, the bot FREEZES to buy me time, and everything else is a pull-only buffer. Aggregate
 // aggressively — a village or a mob-filled cave must never become an event firehose.
 
-let lastWearWarn = 0
-function wireWearAlarm () {
-  setInterval(() => {   // low-durability alarm: once per minute max, only when a tool is nearly dead
-    try {
-      const h = heldInfo()
-      if (h && h.maxDurability && h.durability / h.maxDurability < 0.12 && Date.now() - lastWearWarn > 60000) {
-        lastWearWarn = Date.now()
-        emitEvent('wear', `${h.name} nearly broken (${h.durability}/${h.maxDurability}) — swap or craft a spare`)
-      }
-    } catch (e) {}
-  }, 5000)
-}
+createAlarms(ctx)
 
-// ---- SOUND TABLE PIN (07-15): the audio twin of the viewer atlas bug, finally dead. minecraft-data's
-// 1.21.11 sounds.json is shifted off the REAL game registry (all 1838 ids wrong — a stale extra entry
-// near the top cascades the whole file). The 07-13 "phantom on Peaceful" decoded: pig.saddle was
-// entity.pig.step, chicken.hurt was entity.chicken.step, phantom.swoop was entity.pig.ambient —
-// real animals near the helmsman, misheard. sounds-1.21.11.json is ground truth, generated from the helmsman's own
-// 1.21.11.jar data generator (registries.json protocol_ids). mineflayer's sound.js resolves packet
-// soundIds via bot.registry.sounds, so overriding that table is the whole fix. Lives in bot.js, not
-// node_modules — survives npm reinstall. If the server version ever moves past 1.21.11, regenerate
-// (recipe in the memory note / DRIVING.md) — the pin skips itself on version mismatch rather than lie.
-function wireSoundTablePin () {
-  bot.once('spawn', () => {
-    try {
-      if (bot.version === '1.21.11') {
-        const fixed = JSON.parse(fs.readFileSync(ROOT + '/sounds-1.21.11.json', 'utf8'))
-        bot.registry.sounds = fixed
-        console.log('[bot] sound table pinned: ' + Object.keys(fixed).length + ' real 1.21.11 ids')
-      } else {
-        console.log('[bot] sound table pin SKIPPED — version ' + bot.version + ' has no ground-truth table; hearings may drift')
-      }
-    } catch (e) { console.log('[bot] sound table pin failed: ' + e.message) }
-  })
-}
+createSenses(ctx)
+const { HEARD, hearSummary, stampOwnEdit } = ctx
 
-// ---- EARS: the server only sends sounds a player would hear, so hearing is fair by construction.
-// Danger tier (lava / fuse / explosion) emits an event at most once per 45s per category — enough
-// to wake me, impossible to flood me. Everything else lands in a rolling buffer read via /listen
-// and a one-line Hear: in /scene. Entity sounds are categorized by SPECIES, counted not streamed.
-const HEARD = []
-const dangerHeard = {}
-let lastThunder = 0
-let lastThunderPos = null
-function onSound(name, position) {
-  try {
-    const n = String(name)
-    const cat = classifySound(n, { legacy1710: LEGACY_1710 })
-    if (!cat) return
-    if (cat === 'thunder') { lastThunder = Date.now(); lastThunderPos = position || null }
-    const here = bot.entity.position
-    const dist = position ? Math.round(position.distanceTo(here)) : null
-    const dir = position ? compass(position.x - here.x, position.z - here.z) : '?'
-    HEARD.push({ cat, dir, dist, t: Date.now() })
-    if (HEARD.length > 80) HEARD.shift()
-    // 1.7.10 lightning plays an explosion where its thunder struck.
-    if (cat === 'explosion' && position && lastThunderPos && Date.now() - lastThunder < 2000 &&
-      position.distanceTo(lastThunderPos) <= 2) return
-    if (cat === 'lava' || cat === 'fuse' || cat === 'explosion') {
-      if (Date.now() - (dangerHeard[cat] || 0) > 45000) {
-        dangerHeard[cat] = Date.now()
-        emitEvent('hear', `${cat.toUpperCase()} ${dir} ~${dist} — heard it`)
-      }
-    }
-  } catch (e) {}
-}
-function wireHearing () {
-  bot.on('soundEffectHeard', (name, position) => onSound(name, position))
-}
-function hearSummary(windowMs) {
-  const now = Date.now()
-  const fresh = HEARD.filter(h => now - h.t < windowMs)
-  if (!fresh.length) return null
-  const byCat = {}
-  for (const h of fresh) {
-    const g = byCat[h.cat] || (byCat[h.cat] = { n: 0, nearest: Infinity, dirs: {} })
-    g.n++; g.dirs[h.dir] = (g.dirs[h.dir] || 0) + 1
-    if (h.dist != null && h.dist < g.nearest) g.nearest = h.dist
-  }
-  return Object.entries(byCat).sort((a, b) => b[1].n - a[1].n).slice(0, 5)
-    .map(([c, g]) => `${c} ${Object.entries(g.dirs).sort((a, b) => b[1] - a[1])[0][0]}${g.nearest < Infinity ? ' ~' + g.nearest : ''}${g.n > 1 ? ' (x' + g.n + ')' : ''}`)
-    .join('; ')
-}
-
-// ---- FELT WORLD-CHANGES: blockUpdate near me, with my OWN digs/places filtered out (bot.dig and
-// bot.placeBlock are wrapped once to stamp their cells). Digested — one [event] line per 6s burst
-// at most; the co-player's pickaxe becomes something I feel instead of stale-map surprise.
-const recentOwnEdits = new Map()
-const stampOwnEdit = (p) => { if (p) { recentOwnEdits.set(ck(p.x, p.y, p.z), Date.now()); if (recentOwnEdits.size > 500) { const c = Date.now() - 20000; for (const [k, t] of recentOwnEdits) if (t < c) recentOwnEdits.delete(k) } } }
-// (07-14) wrap at SPAWN, not module scope — bot.dig/placeBlock are plugin-injected and racing
-// them here lost this boot ("reading 'bind' of undefined"), which would have narrated every own
-// dig/place as a world-change.
-function wireOwnEditStamps () {
-  bot.once('spawn', () => {
-    try {
-      const origDig = bot.dig.bind(bot)
-      bot.dig = (block, ...a) => { try { stampOwnEdit(block && block.position) } catch (e) {} ; return origDig(block, ...a) }
-      const origPlace = bot.placeBlock.bind(bot)
-      bot.placeBlock = (ref, face) => { try { stampOwnEdit(ref.position.plus(face)) } catch (e) {} ; return origPlace(ref, face) }
-    } catch (e) { console.log('[bot] own-edit wrap skipped:', e.message) }
-  })
-}
 function wireLookPaceGoto () {
   bot.once('spawn', () => {
     const combat = reflexes.find(r => r.name === 'combat')
@@ -483,180 +386,12 @@ function wireLookPaceGoto () {
   })
 }
 
-let changeBuf = []
-let lastChangeEmit = 0
-function noteWorldChange (oldB, newB) {
-  try {
-    if (!oldB || !newB || oldB.name === newB.name) return
-    const p = newB.position || (oldB && oldB.position)
-    if (!p) return
-    const d = bot.entity.position.distanceTo(p)
-    if (d > 16) return
-    const own = recentOwnEdits.get(ck(p.x, p.y, p.z))
-    if (own && Date.now() - own < 8000) return
-    if (!seenNow(p)) return
-    changeBuf.push({ from: oldB.name, to: newB.name, dir: compass(p.x - bot.entity.position.x, p.z - bot.entity.position.z), d: Math.round(d), t: Date.now() })
-    if (changeBuf.length > 200) changeBuf.splice(0, changeBuf.length - 200)
-  } catch (e) {}
-}
-function wireWorldChangeNotes () {
-  bot.on('blockUpdate', noteWorldChange)
-}
-function worldChangeEvent () {
-  try {
-    if (!changeBuf.length || Date.now() - lastChangeEmit < 6000) return
-    const batch = changeBuf; changeBuf = []
-    const byKind = {}
-    for (const c of batch) {
-      const k = `${c.from}→${c.to}`
-      const g = byKind[k] || (byKind[k] = { n: 0, dirs: {}, nearest: Infinity })
-      g.n++; g.dirs[c.dir] = (g.dirs[c.dir] || 0) + 1
-      if (c.d < g.nearest) g.nearest = c.d
-    }
-    const line = Object.entries(byKind).sort((a, b) => b[1].n - a[1].n).slice(0, 3)
-      .map(([k, g]) => `${k}${g.n > 1 ? ' x' + g.n : ''} ${Object.entries(g.dirs).sort((a, b) => b[1] - a[1])[0][0]} ~${g.nearest}`)
-      .join('; ')
-    lastChangeEmit = Date.now()
-    emitEvent('world', `changed near me: ${line}`, null, { quiet: batch.every(c => ambientChange(c.from, c.to)) })
-  } catch (e) {}
-}
-function wireWorldChangeEvents () {
-  setInterval(worldChangeEvent, 3000)
-}
-
-// ---- BODY ALARMS: damage freezes everything (the bot buys my slow reaction time); hunger warns
-// once per crossing; death stamps a waypoint and says what was lost where.
-let lastHp = 20
-let lastPosSafe = null
-let lastHurtEmit = 0
-// The damage in one hit at or above which a hurt event skips the throttle.
-const BIG_HIT = 4
-let lowFoodWarned = false
-// pocket-fullness sense (07-16, the helmsman's ask after the museum purge found ZERO free slots —
-// full pockets make pickups fail SILENTLY and stopped a dig mid-escape on 07-15). Same one-warning-
-// per-episode + hysteresis shape as the food alarm: say it once at "getting full" (≤4 free), once
-// more at FULL (0 free), re-arm only after real space opens up (≥6 free). Polled 5s — cheap.
-let pocketsWarned = 0                                   // 0 = quiet, 1 = warned "getting full", 2 = warned FULL
-function wirePocketAlarm () {
-  setInterval(() => {
-    try {
-      if (!bot || !bot.inventory || !bot.entity) return
-      const empty = bot.inventory.emptySlotCount ? bot.inventory.emptySlotCount() : bot.inventory.slots.slice(9, 45).filter(s => !s).length
-      if (empty === 0 && pocketsWarned < 2) { pocketsWarned = 2; emitEvent('pockets', 'pockets FULL (0 free) — pickups now fail silently; bank or /toss before mining/looting') }
-      else if (empty <= 4 && empty > 0 && pocketsWarned < 1) { pocketsWarned = 1; emitEvent('pockets', `pockets getting full — ${empty} slots free`) }
-      else if (empty >= 6) pocketsWarned = 0
-    } catch (e) {}
-  }, 5000)
-}
 const fight = {}
 ctx.fight = fight
 fight.lastAttrib = null            // set by the damage_event wire; read by the hurt handler above
-function wireTrailMarks () {
-  setInterval(() => {
-    try {
-      lastPosSafe = bot.entity.position.clone()
-      markTrail(lastPosSafe.floored())
-    } catch (e) {}
-  }, 2000)
-}
-// Digs out the block the head suffocates in, true once the dig starts.
-async function digOutHead () {
-  const hb = bot.blockAt(bot.entity.position.offset(0, 1.6, 0).floored())
-  if (!suffocates(hb) || OPENABLE.test(hb.name) || hb.name === 'bedrock') return false
-  await equipPickFor(hb.name)
-  bot.dig(hb).catch(() => {})
-  return true
-}
-function wireBodyAlarms () {
-  bot.on('health', async () => {
-    try {
-      if (bot.health < lastHp - 0.5) {
-        const dmg = +(lastHp - bot.health).toFixed(1)
-        const hurtDue = (ms) => dmg >= BIG_HIT || Date.now() - lastHurtEmit > ms
-        if (fight.swingWait) {
-          lastHp = bot.health                               // a health update during the wait counts from here
-          await fight.swingWait
-        }
-        // LAW AMENDED 07-14, built 07-15: hurt-FREEZE is for UNEXPLAINED damage only. When damage
-        // attribution (damage_event wire below) has just named a living attacker, freezing is the
-        // worst response — the combat reflex owns it; we only narrate.
-        const attrib = (fight.lastAttrib && Date.now() - fight.lastAttrib.t < 1500) ? fight.lastAttrib : null
-        // cls is the mobClass of the attacker the hit is attributed to, null for an unattributed hit and
-        // for an environmental one that kept an attribution.
-        fight.lastHit = { dmg, t: Date.now(), cls: attrib && attrib.entity && !attrib.envHit ? mobClass(attrib.entity) : null }   // feeds the reflex's ADAPTIVE tripwire (death #2 lesson)
-        if (attrib && !attrib.env && !bunker.building) {
-          // DEATH #9 (07-23): this line used to say "combat reflex has it" on attribution alone —
-          // fourteen times, while the watcher was silently dropping the attacker at its distance
-          // gate. Now the hurt event reports what the body is DOING, and a ranged hit triggers
-          // the cover response HERE, directly — not two hops later through a gate that can drop it.
-          let action = 'combat reflex engaging'
-          const cr = reflexes.find(r => r.name === 'combat')
-          if (attrib.ranged) {
-            if (attrib.entity && cr && cr.on) { action = 'RANGED — breaking eye-line'; try { cr.takeCover(bot, attrib.entity, attrib.desc) } catch (e) {} }
-            else if (!attrib.entity) action = 'RANGED, shooter unseen — PILOT: move or seal NOW'
-            else action = 'RANGED and combat reflex is OFF — PILOT: move or seal NOW'
-          } else if (attrib.entity && attrib.entity.position.distanceTo(bot.entity.position) > CONFIRMED_HORIZON) {
-            action = 'attacker beyond reflex reach — PILOT must act'
-          } else if (!cr || !cr.on) {
-            action = 'combat reflex is OFF — PILOT must act'
-          }
-          if (hurtDue(2000)) {
-            lastHurtEmit = Date.now()
-            emitEvent('hurt', `took ${dmg} — ${attrib.desc} — HP ${bot.health}/20 — ${action}`)
-          }
-        }
-        const ws = waterState(bot)
-        // Every hit during a bunker build lands here, attributed or not.
-        if (bunker.building) {
-          onBuildHit(attrib)
-          if (hurtDue(3000)) {
-            lastHurtEmit = Date.now()
-            emitEvent('hurt', `took ${dmg} damage while building the bunker${attrib ? `, ${attrib.desc}` : ''}, HP ${bot.health}/20`)
-          }
-        } else if (!attrib) {
-          freezeBody()
-          const cause = ws && ws.buried ? 'SUFFOCATING inside a block' : ws && ws.inLava ? 'LAVA' : ws && ws.submerged ? 'drowning' : 'unknown — look around'
-          if (hurtDue(3000)) {
-            lastHurtEmit = Date.now()
-            emitEvent('hurt', `took ${dmg} damage (${cause}) — HP ${bot.health}/20 — FROZE all action; assess before moving`)
-          }
-        } else if (attrib.env && hurtDue(3000)) {
-          // An environmental hit, or a sourceless one with no hostile near, never freezes the body.
-          lastHurtEmit = Date.now()
-          emitEvent('hurt', `took ${dmg} damage (${attrib.desc}), HP ${bot.health}/20`)
-        }
-        // Every hit gets the rescues below, attributed or not.
-        // SELF-RESCUE REFLEXES (the cases freezing makes WORSE — a frozen body suffocates or sinks):
-        // buried = dig the head block NOW (my own cell, fairness-clean, like yanking a hand from fire)
-        if (ws && ws.buried) {
-          try { await digOutHead() } catch (e) {}
-        }
-        // drowning = SWIM UP, don't freeze (learned live 07-12: the freeze held me under during the
-        // farm flood; only the next walk order saved me). Hold jump ~3s to surface, then release.
-        if (ws && ws.submerged && !ws.buried) {
-          try { swimUp(3000) } catch (e) {}
-        }
-      }
-      lastHp = bot.health
-      if (bot.food <= 7 && !lowFoodWarned) { lowFoodWarned = true; emitEvent('hunger', `food ${bot.food}/20 — eat soon (/eat)`) }
-      if (bot.food > 10) lowFoodWarned = false
-    } catch (e) {}
-  })
-  bot.on('death', () => {
-    try {
-      const p = lastPosSafe || bot.entity.position
-      const at = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }
-      try { waypoints.set('lastdeath', at, GRAVES ? { note: 'your items are in a gravestone here' } : {}) } catch (e) {}
-      const items = GRAVES ? 'your items are in a gravestone there, take them with grave' : 'drops despawn in ~5 min'
-      const msg = `DIED near (${at.x},${at.y},${at.z}) — waypoint 'lastdeath' set; ${items}`
-      deaths.died(msg)
-      emitEvent('death', msg)
-    } catch (e) {}
-  })
-}
 
 createCombat(ctx)
-const { STANCES, drawAndLoose, CONFIRMED_HORIZON, guardState, legsMoving, mobClass, perched, inChokepoint, meleeAim, inMeleeReach, meleeThreat, disengageHp, creeperRoute, nearHostiles, combatReflex, fleeToPlayerReflex, mobHurt, sprintBlock, meleeSwing, chargedSwing } = ctx
+const { STANCES, drawAndLoose, guardState, legsMoving, mobClass, perched, inChokepoint, meleeAim, inMeleeReach, meleeThreat, disengageHp, creeperRoute, nearHostiles, combatReflex, fleeToPlayerReflex, mobHurt, sprintBlock, meleeSwing, chargedSwing } = ctx
 fight.stance = 'guard'
 fight.threatDebugUntil = 0                   // /threatdebug window: score players, narrate only
 fight.lastHit = { dmg: 0, t: 0 }             // last hit taken (size + when) — scales the disengage tripwire while FRESH
@@ -681,43 +416,6 @@ const { bunkerReflex, buildBunker } = ctx
 installReflexes()
 // (the /threatdebug route lives with the other routes below — `app` doesn't exist yet up here,
 // learned via a TDZ crashloop the moment this block first loaded)
-
-// ---- ORE CALLOUT: passive prospector sense (07-17, "your ore senses need tuning" — the helmsman).
-// A player's eyes are always on; the pilot's /find only fires when asked. Every 4s, sweep ore in
-// lit sight within 12 and announce anything new. Announced set is pruned by distance+age so it
-// can't OOM (the SEEN lesson).
-const ORE_ANNOUNCED = new Map()   // "x,y,z" -> { t, name }
-let ORE_IDS = null
-function oreCallout () {
-  try {
-    if (!shared.ready || !bot.entity || !shared.mcData) return
-    if (!ORE_IDS) ORE_IDS = Object.values(shared.mcData.blocksByName)
-      .filter(b => /_ore$/.test(b.name) || b.name === 'ancient_debris').map(b => b.id)
-    const here = bot.entity.position
-    for (const [k, ore] of ORE_ANNOUNCED) {                    // prune: >10min old or >48 away
-      const [x, y, z] = k.split(',').map(Number)
-      if (Date.now() - ore.t > 600000 || here.distanceTo(new Vec3(x, y, z)) > 48) ORE_ANNOUNCED.delete(k)
-    }
-    const fresh = {}
-    for (const v of findVisible(ORE_IDS, 12, 12)) {
-      const k = `${v.pos.x},${v.pos.y},${v.pos.z}`
-      if (ORE_ANNOUNCED.has(k)) continue
-      const b = bot.blockAt(v.pos)
-      // A block of a vein already announced is recorded without a callout.
-      const known = !!b && sameVein(ORE_ANNOUNCED, b.name, v.pos)
-      ORE_ANNOUNCED.set(k, { t: Date.now(), name: b ? b.name : null })
-      if (!b || known) continue
-      const dir = compass(v.pos.x - Math.floor(here.x), v.pos.z - Math.floor(here.z)) || 'HERE'
-      const g = fresh[b.name] = fresh[b.name] || { n: 0, dir, d: Math.round(v.dist), y: v.pos.y }
-      g.n++
-    }
-    for (const [name, g] of Object.entries(fresh))
-      emitEvent('ore', `${name}${g.n > 1 ? ' x' + g.n : ''} in view ${g.dir} ~${g.d} (y${g.y})`)
-  } catch (e) {}
-}
-function wireOreCallout () {
-  setInterval(oreCallout, 4000)
-}
 
 function wireWorldSeed () {
   for (const name of ['login', 'respawn']) {
@@ -3047,7 +2745,6 @@ app.get('/pillar', async (req, res) => {
 })
 
 createBunkerBuild(ctx)
-const { onBuildHit } = ctx
 
 // GET /bunker?mode=auto|up|down&height=N: builds the shelter above and answers once it stands.
 app.get('/bunker', async (req, res) => {
@@ -3846,6 +3543,8 @@ function bindAll () {
   bindBunkerBuild(ctx)
   bindCombat(ctx)
   bindBunker(ctx)
+  bindSenses(ctx)
+  bindAlarms(ctx)
 }
 bindAll()
 wireRuntime()
