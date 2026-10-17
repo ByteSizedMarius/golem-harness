@@ -208,7 +208,7 @@ function jobRig (t) {
     clearLane: () => {}
   })
   const fns = loadBotFunctions(['stopCollect', 'stopPath'], c.env)
-  c.env.jobs = createJobs({ stop: () => { fns.stopPath(); fns.stopCollect() },emit: () => {}, deaths: deathLedger() })
+  c.env.jobs = createJobs({ stop: () => { fns.stopPath(); fns.stopCollect() }, emit: () => {}, deaths: deathLedger() })
   return c
 }
 
@@ -265,30 +265,6 @@ test('/stop ends the collect of a gather job at once and frees the collect for t
   assert.strictEqual(res.error, undefined)
 })
 
-test('a wood gather that replaces a running one leaves the planner timeout at the session default', async (t) => {
-  const c = jobRig(t)
-  c.blocks['1,64,0'] = new Block('oak_log', new Vec3(1, 64, 0))
-  Object.assign(c.env.shared, {
-    mcData: { blocksArray: [], blocks: { 1: { name: 'oak_log', drops: [900] } }, items: { 900: { name: 'oak_log' } }, itemsByName: { oak_log: {} } },
-    considerateMoves: new Movements(),
-    forestryMoves: new Movements(),
-    thinkTimeout: 10000
-  })
-  const gather = () => runRoute('/gather', { resource: 'oak_log', amount: '1' }, c.env).job
-  const first = gather()
-  assert.ok(await waitFor(() => c.seen.digs === 1, 2000), 'control: the first gather digs')
-  assert.strictEqual(c.bot.pathfinder.thinkTimeout, 3000, 'control: forestry shortens the timeout')
-  const second = gather()
-  assert.ok(await waitFor(() => c.seen.digs === 2, 2000), 'the second gather digs')
-  c.seen.finishDig()
-  assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the drop')
-  c.pockets.push({ name: 'oak_log', count: 1 })
-  c.bot.emit('entityGone', c.seen.drops[0])
-  assert.ok(await waitFor(() => !c.env.jobs.running(), 2000), 'both gathers ended')
-  assert.deepStrictEqual([c.env.jobs.get(first).status, c.env.jobs.get(second).status], ['cancelled', 'done'])
-  assert.strictEqual(c.bot.pathfinder.thinkTimeout, 10000)
-})
-
 test('a wood gather that replaces a running one keeps its forestry movements until it ends itself', async (t) => {
   const c = jobRig(t)
   c.blocks['1,64,0'] = new Block('oak_log', new Vec3(1, 64, 0))
@@ -321,6 +297,7 @@ test('a wood gather that replaces a running one keeps its forestry movements unt
   c.pockets.push({ name: 'oak_log', count: 1 })
   c.bot.emit('entityGone', c.seen.drops[0])
   assert.ok(await waitFor(() => !c.env.jobs.running(), 2000), 'the second gather ended')
+  assert.strictEqual(c.env.jobs.get(second).status, 'done')
   assert.strictEqual(set.at(-1), considerateMoves)
   assert.strictEqual(c.bot.pathfinder.thinkTimeout, 10000)
 })

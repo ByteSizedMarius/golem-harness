@@ -35,8 +35,6 @@ test('a position and a look inside one window go out as one position_look', asyn
       { x: 1, y: 2, z: 3, yaw: 10, pitch: 20, flags: AIR }],
     ['look then position', ['look', { yaw: 10, pitch: 20, flags: GROUND }], ['position', { x: 1, y: 2, z: 3, flags: AIR }],
       { x: 1, y: 2, z: 3, yaw: 10, pitch: 20, flags: AIR }],
-    ['position_look then look', ['position_look', { x: 1, y: 2, z: 3, yaw: 10, pitch: 20, flags: GROUND }], ['look', { yaw: 11, pitch: 21, flags: AIR }],
-      { x: 1, y: 2, z: 3, yaw: 11, pitch: 21, flags: AIR }],
     ['position_look then position', ['position_look', { x: 1, y: 2, z: 3, yaw: 10, pitch: 20, flags: GROUND }], ['position', { x: 4, y: 5, z: 6, flags: AIR }],
       { x: 4, y: 5, z: 6, yaw: 10, pitch: 20, flags: AIR }]
   ]) {

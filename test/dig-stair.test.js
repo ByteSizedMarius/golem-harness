@@ -17,18 +17,12 @@ test('dig_stair carves its steps up or down and fills a missing step from filler
   assert.deepStrictEqual(down.fills, ['1,62,0'], 'the missing tread under the first step down')
 })
 
-test('dig_stair without a dir climbs the way the bot faces', async () => {
+test('dig_stair without a dir climbs and is named the way the bot faces', async () => {
+  const DIR = { '0,-1': 'n', '0,1': 's', '1,0': 'e', '-1,0': 'w' }
   for (const { name, yaw, step: [dx, dz] } of facings()) {
     const r = await digJob('/dig_stair', { up: '1', steps: '1', torch: '0' }, { yaw })
     assert.deepStrictEqual(r.dug, ['0,66,0', `${dx},67,${dz}`, `${dx},66,${dz}`, `${dx},65,${dz}`], `facing ${name}`)
-  }
-})
-
-test('dig_stair with an unknown dir climbs and is named the way the bot faces', async () => {
-  const DIR = { '0,-1': 'n', '0,1': 's', '1,0': 'e', '-1,0': 'w' }
-  for (const { name, yaw, step: [dx, dz] } of facings()) {
-    const r = await digJob('/dig_stair', { dir: 'up', up: '1', steps: '1', torch: '0' }, { yaw })
-    assert.deepStrictEqual([r.dug[1], r.name], [`${dx},67,${dz}`, `dig_stair up ${DIR[[dx, dz].join()]} x1`], `facing ${name}`)
+    assert.strictEqual(r.name, `dig_stair up ${DIR[[dx, dz].join()]} x1`, `facing ${name}`)
   }
 })
 

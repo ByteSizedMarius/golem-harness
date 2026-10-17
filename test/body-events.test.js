@@ -8,7 +8,7 @@ const { createAlarms, bindAlarms, wireBodyAlarms } = require('../lib/bot/alarms'
 const { createConnection, bindConnection, wireConnectionSpawn } = require('../lib/bot/connection')
 
 // A spawned bot with the alarm and connection listeners wired, recording every emitted event.
-function eventRig (t) {
+function eventRig (t, { entityPerceptible = () => true } = {}) {
   t.mock.timers.enable({ apis: ['setInterval'] })
   const events = []
   const bot = new EventEmitter()
@@ -32,7 +32,7 @@ function eventRig (t) {
     emitEvent: (kind, msg, data) => { events.push({ kind, data: data || null }) },
     waterState: () => null,
     round: (p) => p,
-    entityPerceptible: () => true,
+    entityPerceptible,
     reflexes: [{ name: 'combat', fairFill: () => null }],
     liveEntities: () => [],
     nightfall: (fired) => fired,
@@ -65,6 +65,12 @@ test('every hostile mob in sight raises a hostile event, a neutral one does not'
     bot.emit('entitySpawn', { id, name, type: 'mob', position: new Vec3(id + 3, 64, 0.5) })
   }
   assert.deepStrictEqual(events.filter((e) => e.kind === 'hostile').map((e) => e.data.mob), ['blaze', 'creeper'])
+})
+
+test('a hostile mob the body cannot perceive raises no hostile event', (t) => {
+  const { bot, events } = eventRig(t, { entityPerceptible: (en) => en.id !== 3 })
+  for (const id of [2, 3]) bot.emit('entitySpawn', { id, name: 'zombie', type: 'mob', position: new Vec3(id + 3, 64, 0.5) })
+  assert.deepStrictEqual(events.filter((e) => e.kind === 'hostile').map((e) => e.data.id), [2])
 })
 
 test('one death sends one death event', (t) => {

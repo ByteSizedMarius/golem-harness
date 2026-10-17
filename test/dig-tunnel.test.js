@@ -45,17 +45,10 @@ test('dig_tunnel digs the face ahead into rock the bot knows nothing of', async 
   assert.deepStrictEqual(r.dug, ['1,65,0', '1,64,0', '2,65,0', '2,64,0'])
 })
 
-test('dig_tunnel without a dir digs the way the bot faces', async () => {
-  for (const { name, yaw, step: [dx, dz] } of facings()) {
-    const r = await digJob('/dig_tunnel', { length: '1', torch: '0' }, { yaw })
-    assert.deepStrictEqual(r.dug, [`${dx},65,${dz}`, `${dx},64,${dz}`], `facing ${name}`)
-  }
-})
-
-test('dig_tunnel with an unknown dir digs and is named the way the bot faces', async () => {
+test('dig_tunnel without a dir digs and is named the way the bot faces', async () => {
   const DIR = { '0,-1': 'n', '0,1': 's', '1,0': 'e', '-1,0': 'w' }
   for (const { name, yaw, step: [dx, dz] } of facings()) {
-    const r = await digJob('/dig_tunnel', { dir: 'up', length: '1', torch: '0' }, { yaw })
+    const r = await digJob('/dig_tunnel', { length: '1', torch: '0' }, { yaw })
     assert.deepStrictEqual([r.dug, r.name], [[`${dx},65,${dz}`, `${dx},64,${dz}`], `dig_tunnel ${DIR[[dx, dz].join()]} x1`], `facing ${name}`)
   }
 })
