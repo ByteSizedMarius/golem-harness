@@ -48,6 +48,17 @@ test('a wall or a pit whose cell level with the feet the bot has not seen shows 
   assert.deepStrictEqual([grid(hidden)[1].trim(), grid(hidden)[2].trim()], ['0  @  ?', '0  ?  0'])
 })
 
+test('water and lava read as liquid and a filled cauldron as a wall', () => {
+  // West water over a pit, east lava, south a cauldron under a ledge.
+  const blockAt = terrain({ '-1,0': 60, '1,0': 60 }, {
+    '-1,61,0': WATER, '-1,62,0': WATER, '-1,63,0': WATER, '-1,64,0': WATER,
+    '1,61,0': block('lava', 'empty'), '1,62,0': block('lava', 'empty'), '1,63,0': block('lava', 'empty'), '1,64,0': block('lava', 'empty'),
+    '0,64,1': block('water_cauldron', 'block'), '0,65,1': STONE, '0,66,1': STONE, '0,67,1': STONE
+  })
+  assert.strictEqual(stepView(blockAt, all, FEET, 1).split('\n')[1], '  ~  @  ~', 'liquid')
+  assert.strictEqual(stepView(blockAt, all, FEET, 1).split('\n')[2], '  0  #  0', 'cauldron')
+})
+
 test('a body sunk into farmland or standing on a slab reads level ground as 0', () => {
   const blockAt = terrain()
   assert.strictEqual(stepView(blockAt, all, new Vec3(0.5, 63.94, 0.5), 1), ['  0  0  0', '  0  @  0', '  0  0  0'].join('\n'))

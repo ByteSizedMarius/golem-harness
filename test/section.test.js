@@ -53,6 +53,45 @@ test('open air that goes on under the frame drops below it', () => {
   assert.strictEqual(floorPhrase(cols, O.y), 'floor: level d0, drops below the frame at d1')
 })
 
+// runs[d] holds the open [lo, hi] spans at x d, z 0, wet the [d, y] water cells, and the rest is
+// seen rock.
+function layers (runs, wet = []) {
+  const cells = new Set()
+  for (const [d, spans] of Object.entries(runs)) for (const [lo, hi] of spans) for (let y = lo; y <= hi; y++) cells.add(key(Number(d), y, 0))
+  const water = new Set(wet.map(([d, y]) => key(d, y, 0)))
+  return sectionColumns({
+    o: O, dx: 1, dz: 0, len: Object.keys(runs).length - 1, up: 8, down: 12,
+    open: (x, y, z) => cells.has(key(x, y, z)),
+    wet: (x, y, z) => water.has(key(x, y, z)),
+    known: () => true,
+    blockAt: (p) => (cells.has(key(p.x, p.y, p.z)) ? { name: 'air', boundingBox: 'empty' } : { name: 'stone', boundingBox: 'block' })
+  })
+}
+
+const TUNNEL = [64, 65]
+
+test('a column measures the open run at the body\'s level, never a cave under its floor', () => {
+  const cols = layers({ 0: [TUNNEL], 1: [TUNNEL], 2: [TUNNEL], 3: [[56, 57], TUNNEL], 4: [TUNNEL] })
+  assert.deepStrictEqual([cols[3].lo, cols[3].hi], TUNNEL)
+  assert.strictEqual(floorPhrase(cols, O.y), 'floor: level d0–4')
+})
+
+test('water in a cave under the floor is not water in the passage', () => {
+  const runs = { 0: [TUNNEL], 1: [[56, 57], TUNNEL] }
+  assert.strictEqual(layers(runs, [[1, 64]])[1].water, true, 'control: water in the tunnel')
+  assert.strictEqual(layers(runs, [[1, 56]])[1].water, false)
+})
+
+test('the passage ends at a column whose open cells do not join it', () => {
+  const cols = layers({ 0: [TUNNEL], 1: [TUNNEL], 2: [[56, 57]] })
+  assert.strictEqual(cols[2].lo, null)
+})
+
+test('a passage that steps down is followed below the body\'s level', () => {
+  const cols = layers({ 0: [[64, 66]], 1: [[63, 65]], 2: [[62, 64]], 3: [[61, 63]] })
+  assert.strictEqual(floorPhrase(cols, O.y), 'floor: level d0, down 1 at d1, down 2 at d2, down 3 at d3')
+})
+
 // Air at x 0..2, y 64..65, z 0 in stone all round, every open cell at light level light.
 function closedRoom (light, yaw = 0) {
   const air = (p) => p.x >= 0 && p.x <= 2 && p.z === 0 && (p.y === 64 || p.y === 65)

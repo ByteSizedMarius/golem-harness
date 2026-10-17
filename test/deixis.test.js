@@ -39,6 +39,24 @@ test('a look stops at the first block it meets, through air and water, and not p
   assert.strictEqual(lookedAt(eye, yaw, pitch, () => null), null, 'unloaded world')
 })
 
+test('a look passes water, lava and a bubble column', () => {
+  const eye = new Vec3(0.5, 65.62, 0.5)
+  const { yaw, pitch } = aim(eye, new Vec3(6.5, 63.5, 0.5))
+  for (const name of ['water', 'lava', 'bubble_column']) {
+    const hit = lookedAt(eye, yaw, pitch, flat({ '5,63,0': block(name) }))
+    assert.deepStrictEqual([hit.block.name, hit.cell.x], ['stone', 6], `${name} is looked through`)
+  }
+})
+
+test('a filled cauldron stops a look', () => {
+  const eye = new Vec3(0.5, 65.62, 0.5)
+  const { yaw, pitch } = aim(eye, new Vec3(6.5, 63.5, 0.5))
+  for (const name of ['water_cauldron', 'lava_cauldron']) {
+    const hit = lookedAt(eye, yaw, pitch, flat({ '5,63,0': block(name) }))
+    assert.deepStrictEqual([hit.block.name, hit.cell.x], [name, 5], `${name} stops the look`)
+  }
+})
+
 // chatPointer for Steve at (0.5, 64, 0.5) looking at the stone at (5, 63, 0), with the bot at (0.5, 64, 6.5).
 // A crouching Steve looks from 1.27 up at the chest at (5, 64, 0), over which a look from 1.62 up passes.
 function pointer ({ seen = true, sees = () => true, far = false, crouching = false } = {}) {
