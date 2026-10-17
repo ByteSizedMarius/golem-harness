@@ -145,6 +145,11 @@ test('a failing chest, withdraw or deposit names the other seen chests and no un
   assert.deepStrictEqual(lacking.opened, ['5,64,0'])
   assert.ok(stocked['5,64,0'].closed, 'withdraw: the window stays open')
 
+  const pocketsFull = { '5,64,0': chestWindow([stack('cobblestone', 10)]) }
+  pocketsFull['5,64,0'].withdraw = async () => { throw new Error('destination full') }
+  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone' }, chestEnv([NEAR], pocketsFull).env), 'destination full')
+  assert.ok(pocketsFull['5,64,0'].closed, 'withdraw into full pockets: the window stays open')
+
   const full = [...Array.from({ length: CHEST_SLOTS - 1 }, () => stack('stone', 64)), stack('cobblestone', 50)]
   const windows = { '5,64,0': chestWindow(full) }
   const { env, opened } = chestEnv([NEAR, FAR, HIDDEN], windows, [stack('cobblestone', 20)])

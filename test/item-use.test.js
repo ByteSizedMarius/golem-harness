@@ -169,3 +169,13 @@ test('a 1.21 shield comes down before a walk or a sprint, and a moving body rais
   assert.match(res.error.message, /moving/)
   assert.deepStrictEqual(log, moves)
 })
+
+test('toss throws the item named exactly before one whose name only contains it', async () => {
+  const pickaxe = item('diamond_pickaxe')
+  const diamonds = new Item(registry.itemsByName.diamond.id, 5)
+  const tossed = []
+  const bot = { inventory: { items: () => [pickaxe, diamonds] }, toss: async (type, metadata, count) => { tossed.push([type, count]) } }
+  const reply = await awaitRoute('/toss', { name: 'diamond' }, { bot, shared: { ready: true } })
+  assert.deepStrictEqual(reply, { tossed: 'diamond', count: 5, toward: null })
+  assert.deepStrictEqual(tossed, [[diamonds.type, 5]])
+})
