@@ -1,6 +1,7 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const EventEmitter = require('node:events')
 const { Vec3 } = require('vec3')
 const { loadBotFunctions, botConstant } = require('./helpers')
 
@@ -101,5 +102,52 @@ test('a sourceless hit by an in-range arrow with no shooter in sight reads as an
     const r = sourcelessHit(mobs, [from])
     assert.deepStrictEqual(r && { desc: r.desc, entity: r.entity, ranged: r.ranged },
       { desc: 'hit by an arrow', entity: null, ranged: true }, label)
+  }
+})
+
+// The attribution of a sourceless hit at the last of swings, the times player Steve, 2 east of a body at the origin,
+// swung his arm facing yaw, with a zombie at hostileX on the body's row.
+async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5 } = {}) {
+  const clock = { now: 0 }
+  const body = { id: 1, position: new Vec3(0.5, 64, 0.5) }
+  const steve = { id: 2, type: 'player', username: 'Steve', yaw, position: new Vec3(2.5, 64, 0.5) }
+  const zombie = { id: 3, name: 'zombie', position: new Vec3(hostileX, 64, 0.5) }
+  const bot = Object.assign(new EventEmitter(), { entity: body, entities: {}, _client: new EventEmitter() })
+  const fight = { damageTypes: ['generic'], lastAttrib: null }
+  const ctx = loadBotFunctions(['wireArmSwings', 'wireDamageAttribution'], {
+    bot,
+    fight,
+    Date: { now: () => clock.now },
+    setTimeout: (fn) => fn(),
+    console: { log () {} },
+    liveEntities: () => [steve, zombie],
+    nearestHostile: () => zombie,
+    lastSwing: new Map(),
+    arrows: new Map(),
+    AGGRO_CONFIRMED: new Map(),
+    damageTypeMissed: false,
+    ...Object.fromEntries(['SWING_MS', 'SWING_GAP_MS', 'SWING_FACING', 'ARROW_FLIGHT_MS', 'ARROW_HIT_MS', 'ARROW_RANGE']
+      .map(name => [name, botConstant(name)]))
+  })
+  ctx.wireArmSwings()
+  ctx.wireDamageAttribution()
+  bot.emit('spawn')
+  for (const t of swings) {
+    clock.now = t
+    bot.emit('entitySwingArm', steve)
+  }
+  bot._client.emit('damage_event', { entityId: body.id, sourceTypeId: 0, sourceCauseId: 0, sourceDirectId: 0 })
+  await fight.swingWait
+  return fight.lastAttrib && fight.lastAttrib.desc
+}
+
+test('a sourceless hit names a player whose lone swing faced the body from no farther than the nearest hostile', async () => {
+  assert.strictEqual(await swingHit(), 'no attacker named, Steve swung nearby', 'control: a lone facing swing, the zombie farther')
+  for (const [label, row, desc] of [
+    ['a swing facing away', { yaw: -WEST }, 'zombie W ~3 (nearest hostile)'],
+    ['a swing 100 ms after the previous one', { swings: [9900, 10000] }, 'zombie W ~3 (nearest hostile)'],
+    ['a zombie closer than the player', { hostileX: -0.5 }, 'zombie W ~1 (nearest hostile)']
+  ]) {
+    assert.strictEqual(await swingHit(row), desc, label)
   }
 })

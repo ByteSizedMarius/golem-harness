@@ -1,7 +1,9 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const { Vec3 } = require('vec3')
 const { classifySound } = require('../lib/sounds')
+const { loadBotFunctions } = require('./helpers')
 const mcData = require('minecraft-data')('1.21.11')
 
 const LEGACY = { legacy1710: true }
@@ -77,6 +79,39 @@ test('thunder from both names gives thunder', () => {
     assert.strictEqual(classify('minecraft:entity.lightning_bolt.thunder', opts), 'thunder')
     assert.strictEqual(classify('ambient.weather.thunder', opts), 'thunder')
   }
+})
+
+// The bot's onSound for a body at the origin on a 1.7.10 server, and the types of the events it raised.
+function ears () {
+  const raised = []
+  const { onSound } = loadBotFunctions(['onSound'], {
+    bot: { entity: { position: new Vec3(0.5, 64, 0.5) } },
+    classifySound,
+    LEGACY_1710: true,
+    HEARD: [],
+    dangerHeard: {},
+    lastThunder: 0,
+    lastThunderPos: null,
+    emitEvent: (type) => raised.push(type)
+  })
+  return { onSound, raised }
+}
+
+test('the explosion 1.7.10 lightning plays where its thunder struck raises no hear event, one elsewhere does', () => {
+  const thunder = 'minecraft:entity.lightning_bolt.thunder'
+  const explode = 'minecraft:entity.generic.explode'
+  const strike = new Vec3(20.5, 64, 0.5)
+  const control = ears()
+  control.onSound(explode, strike)
+  assert.deepStrictEqual(control.raised, ['hear'], 'control: an explosion with no thunder before it')
+  const atStrike = ears()
+  atStrike.onSound(thunder, strike)
+  atStrike.onSound(explode, strike.offset(1, 0, 0))
+  assert.deepStrictEqual(atStrike.raised, [], 'an explosion 1 from the strike')
+  const elsewhere = ears()
+  elsewhere.onSound(thunder, strike)
+  elsewhere.onSound(explode, strike.offset(0, 0, 3))
+  assert.deepStrictEqual(elsewhere.raised, ['hear'], 'an explosion 3 from the strike')
 })
 
 test('extinguish_fire gives lava under legacy1710 only', () => {
