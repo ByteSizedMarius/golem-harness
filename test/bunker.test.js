@@ -4,7 +4,7 @@ const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const shelter = require('../lib/shelter')
-const { QUIET_MS } = require('../lib/legs')
+const { QUIET_MS, legLedger, takenText } = require('../lib/legs')
 const {
   botConstant, loadBotFunctions, HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, digInProblemWith,
@@ -597,6 +597,8 @@ test('the pillar verb beside a hill rises at least 2 over the hilltop and says w
     return awaitRoute('/pillar', { height: '3' }, {
       bot: { entity, blockAt: dirtWhere(solid) },
       bunker: { building: false },
+      legs: legLedger(),
+      takenText,
       perch: { cell: null },
       fillers: () => [{ name: 'dirt', count: 64 }],
       jumpPlace: async () => { entity.position = entity.position.offset(0, 1, 0); return true },
@@ -622,6 +624,8 @@ test('the pillar verb at the bottom of a shaft climbs out level instead of risin
   const r = await awaitRoute('/pillar', { height: '2' }, {
     bot: { entity, blockAt: dirtWhere(solid) },
     bunker: { building: false },
+    legs: legLedger(),
+    takenText,
     perch: { cell: null },
     fillers: () => [{ name: 'dirt', count: 64 }],
     jumpPlace: async () => { entity.position = entity.position.offset(0, 1, 0); return true },

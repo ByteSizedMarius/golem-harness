@@ -7,15 +7,18 @@ const { goals } = require('mineflayer-pathfinder')
 const pace = require('../lib/pace')
 const { isDoor } = require('../lib/doors')
 const { expireConfirmed } = require('../lib/shelter')
+const { legLedger, takenText } = require('../lib/legs')
+const { createLane } = require('../lib/bot/lane')
 const vm = require('node:vm')
-const { routeHandler, runRoute, fakeClock, toolNamed, botConstant, botSource, balanced, loadBotFunctions, combatReflexIn, wireListeners } = require('./helpers')
+const { routeHandler, runRoute, awaitRoute, fakeClock, toolNamed, botConstant, botSource, balanced, loadBotFunctions, combatReflexIn, wireListeners } = require('./helpers')
 
 // seen says whether the body perceives the zombie.
 const zombie = (x, seen = true) => ({ id: 7, name: 'zombie', width: 0.6, height: 1.95, seen, position: new Vec3(x, 64, 0.5) })
 
 // did records the body's actions in order: walk, jump, swing, draw, use. hits holds each swing's time, the
 // server's fall distance and whether the body stood on the ground. The floor is at y 63, solid cells
-// start at y ceiling, and a walk ends 2 west of its goal.
+// start at y ceiling, and a walk ends 2 west of its goal. stop() runs the /stop handler over the world's
+// leg ledger and pilot lane.
 function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
   const clock = fakeClock()
   const did = []
@@ -74,11 +77,16 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
       did.push('swing')
       hits.push({ t: clock.now(), fall, onGround: bot.entity.onGround })
     },
-    useOn: async () => { did.push('use') }
+    useOn: async () => { did.push('use') },
+    clearControlStates () {}
   })
   const fill = {}
   const mobHurt = pace.hurtWindows(clock.now)
   mobHurt.wire(bot)
+  const lane = {}
+  createLane(lane)
+  lane.clearLane()
+  lane.strikeRun.lane = null
   const env = {
     bot,
     goals,
@@ -114,13 +122,25 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
       return e.seen
     },
     drawAndLoose: async () => { did.push('draw'); return true },
-    claimLane: () => ({}),
-    releaseLane () {},
-    strikeRun: { lane: null },
+    legs: legLedger(),
+    takenText,
+    pilotLane: lane.pilotLane,
+    claimLane: lane.claimLane,
+    releaseLane: lane.releaseLane,
+    strikeRun: lane.strikeRun,
     stopPath () {},
     round: (v) => v && { x: v.x, y: v.y, z: v.z }
   }
-  return { bot, env, clock, did, hits }
+  const stop = () => runRoute('/stop', {}, {
+    bot,
+    bunker: {},
+    legs: env.legs,
+    stopFollow () {},
+    stopPath: () => env.stopPath(),
+    clearLane: lane.clearLane,
+    jobs: { stopAll: () => 0 }
+  })
+  return { bot, env, clock, did, hits, stop }
 }
 
 // Advances the fake clock 10 ms a step until route answers, ten minutes at most.
@@ -426,20 +446,12 @@ test("the pilot's 1.7.10 sword block order ends with a death, and with anything 
   assert.strictEqual(env.guardState.pilot, false, 'a pickaxe in hand kept the order')
 })
 
-test('a 1.7.10 strike on a zombie that hit the body swings once per hurt window, and the combat reflex swings none', async () => {
-  const world = verbWorld([zombie(2.5)], { legacy: true })
-  const { bot, env, clock, hits } = world
-  const z = bot.entities[7]
-  let raises = 0
-  Object.assign(bot, { health: 20, quickBarSlot: 0, activateItem () { raises++ }, deactivateItem () {} })
-  // The server shows the hurt animation 2 ticks after a hit.
-  const attack = bot.attack
-  bot.attack = () => {
-    attack()
-    clock.setTimeout(() => bot.emit('entityHurt', z), 100)
-  }
+// The combat reflex of bot.js wired into world after foe hit the body, checking every 300 ms and acting while no act
+// runs, as in bot.js. Zombies and spiders are hostile.
+function combatIn (world, foe) {
+  const { bot, env, clock } = world
   Object.assign(env, {
-    AGGRO_CONFIRMED: new Map([[z.id, { name: 'zombie', t: 0 }]]),
+    AGGRO_CONFIRMED: new Map([[foe.id, { name: foe.name, t: 0 }]]),
     expireConfirmed,
     CONFIRMED_MS: botConstant('CONFIRMED_MS'),
     CONFIRMED_HORIZON: botConstant('CONFIRMED_HORIZON'),
@@ -448,7 +460,7 @@ test('a 1.7.10 strike on a zombie that hit the body swings once per hurt window,
     guardState: { up: false, slot: -1, pilot: false },
     bunker: { building: false },
     holdRun: { on: false },
-    mobClass: (e) => (e.name === 'zombie' ? 'hostile' : 'passive'),
+    mobClass: (e) => (['zombie', 'spider'].includes(e.name) ? 'hostile' : 'passive'),
     entityEngageable: () => true,
     nearHostiles: () => [],
     perchStrike: () => false,
@@ -467,12 +479,27 @@ test('a 1.7.10 strike on a zombie that hit the body swings once per hurt window,
   loadBotFunctions(['meleeSwing', 'inMeleeReach', 'losClear'], env)
   const combat = combatReflexIn(env)
   combat.fairFill = env.reflexes[0].fairFill
-  // The reflex loop of bot.js: a check every 300 ms, an act while none runs.
   clock.setInterval(() => {
     if (combat.active || !combat.check(bot)) return
     combat.active = true
     combat.act(bot).finally(() => { combat.active = false })
   }, 300)
+  return combat
+}
+
+test('a 1.7.10 strike on a zombie that hit the body swings once per hurt window, and the combat reflex swings none', async () => {
+  const world = verbWorld([zombie(2.5)], { legacy: true })
+  const { bot, clock, hits } = world
+  const z = bot.entities[7]
+  let raises = 0
+  Object.assign(bot, { health: 20, quickBarSlot: 0, activateItem () { raises++ }, deactivateItem () {} })
+  // The server shows the hurt animation 2 ticks after a hit.
+  const attack = bot.attack
+  bot.attack = () => {
+    attack()
+    clock.setTimeout(() => bot.emit('entityHurt', z), 100)
+  }
+  const combat = combatIn(world, z)
   const res = await drive('/strike', { name: 'zombie', max: '5' }, world)
   assert.strictEqual(res.error, undefined, res.error && res.error.message)
   assert.strictEqual(res.body.swings, 5, 'control: five strike swings')
@@ -480,4 +507,128 @@ test('a 1.7.10 strike on a zombie that hit the body swings once per hurt window,
   assert.strictEqual(hits.length, res.body.swings, 'the combat reflex swung beside the strike')
   for (let i = 1; i < hits.length; i++) assert.ok(hits[i].t - hits[i - 1].t >= 500, `swings ${hits[i].t - hits[i - 1].t} ms apart`)
   assert.strictEqual(raises, 0, 'the combat reflex raised the sword block during the strike')
+})
+
+test('a stop between strike swings ends the strike as stopped, naming no reflex', async () => {
+  const world = verbWorld([zombie(2.5)])
+  const attack = world.bot.attack
+  world.bot.attack = () => {
+    attack()
+    if (world.hits.length === 1) world.stop()
+  }
+  const res = await drive('/strike', { name: 'zombie', max: '5' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual({ swings: res.body.swings, reason: res.body.reason, takenBy: res.body.takenBy }, { swings: 1, reason: 'stopped', takenBy: undefined })
+  assert.strictEqual(world.hits.length, 1)
+})
+
+test('a stop during a shoot volley ends it as stopped and frees the lane', async () => {
+  const world = verbWorld([zombie(6.5)])
+  const z = world.bot.entities[7]
+  let shots = 0
+  world.env.drawAndLoose = async () => {
+    shots++
+    z.position = z.position.offset(1, 0, 0)
+    if (shots === 1) world.stop()
+    return true
+  }
+  const res = await drive('/shoot', { name: 'zombie', max: '8' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual({ shotsFired: res.body.shotsFired, outcome: res.body.outcome }, { shotsFired: 1, outcome: 'stopped' })
+  assert.strictEqual(shots, 1)
+  assert.deepStrictEqual([world.env.pilotLane.token, world.env.strikeRun.lane], [null, null])
+})
+
+test('a shoot refused before its first shot leaves the lane another verb holds', async () => {
+  const refusals = {
+    'no target in sight': (world) => { world.bot.entities = {} },
+    'a player': (world) => { world.bot.entities[7].type = 'player' },
+    'no bow': (world) => { world.bot.inventory.items = () => [{ name: 'arrow' }] },
+    'no arrows': (world) => { world.bot.inventory.items = () => [{ name: 'bow' }] }
+  }
+  for (const [why, setUp] of Object.entries(refusals)) {
+    const world = verbWorld([zombie(6.5)])
+    setUp(world)
+    const held = world.env.claimLane('goto', 60000)
+    await drive('/shoot', { name: 'zombie' }, world)
+    assert.strictEqual(world.env.pilotLane.token, held, `${why} released the lane held before`)
+    assert.strictEqual(world.env.pilotLane.why, 'goto', `${why} overwrote the lane`)
+    assert.strictEqual(world.env.strikeRun.lane, null, why)
+    assert.deepStrictEqual(world.did, [], why)
+  }
+})
+
+test('a stop during a pillar ends it as stopped after the block in hand', async () => {
+  const entity = { position: new Vec3(0.5, 64, 0.5) }
+  const legs = legLedger()
+  const lane = {}
+  createLane(lane)
+  const bunker = { building: false }
+  const stop = () => runRoute('/stop', {}, { bot: { clearControlStates () {} }, bunker, legs, stopFollow () {}, stopPath () {}, clearLane: lane.clearLane, jobs: { stopAll: () => 0 } })
+  let placed = 0
+  const r = await awaitRoute('/pillar', { height: '3' }, {
+    bot: { entity, blockAt: (p) => ({ name: 'stone', boundingBox: p.y < entity.position.y ? 'block' : 'empty', position: p }) },
+    bunker,
+    legs,
+    takenText,
+    perch: { cell: null },
+    fillers: () => [{ name: 'dirt', count: 64 }],
+    pillarHeight: (height) => ({ height, safe: 2, why: 'flat ground' }),
+    BUNKER_MAX_HEIGHT: 6,
+    knownCell: () => true,
+    jumpPlace: async () => {
+      entity.position = entity.position.offset(0, 1, 0)
+      if (++placed === 1) stop()
+      return true
+    }
+  })
+  assert.deepStrictEqual(r, { placed: 1, rose: 1, stopped: 'stopped by the pilot' })
+})
+
+test('the post-fight refuel waits while a shoot volley holds the hand, and runs without one', async () => {
+  // A spider that hit the body stands in reach and dies after 3 s, the shoot target 6 off steps back a block a shot.
+  const fightBeside = () => {
+    const spider = { id: 8, name: 'spider', width: 1.4, height: 0.9, seen: true, position: new Vec3(2.5, 64, 0.5) }
+    const world = verbWorld([zombie(6.5), spider], { legacy: true })
+    const { bot, env, clock } = world
+    Object.assign(bot, { food: 10, health: 20, quickBarSlot: 0, activateItem () {}, deactivateItem () {} })
+    const refuels = []
+    env.refuelAfterFight = async () => { refuels.push(clock.now()) }
+    env.drawAndLoose = async () => {
+      bot.entities[7].position = bot.entities[7].position.offset(1, 0, 0)
+      return true
+    }
+    combatIn(world, spider)
+    clock.setTimeout(() => { delete bot.entities[8] }, 3000)
+    return { world, refuels }
+  }
+  const alone = fightBeside()
+  while (alone.world.clock.now() < 6000) {
+    await new Promise((resolve) => setImmediate(resolve))
+    alone.world.clock.advance(10)
+  }
+  assert.strictEqual(alone.refuels.length, 1, 'control: the refuel after the fight')
+  const volley = fightBeside()
+  const res = await drive('/shoot', { name: 'zombie', max: '8' }, volley.world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  const answered = volley.world.clock.now()
+  assert.ok(answered > 3500, `control: the volley ran past the fight, answered at ${answered} ms`)
+  assert.deepStrictEqual(volley.refuels.filter((t) => t < answered), [], 'the refuel swapped the hand during the volley')
+})
+
+test('a combat flee that takes the legs during a strike approach ends the strike as stopped, naming the reflex', async () => {
+  const world = verbWorld([zombie(10.5)])
+  const { env, clock } = world
+  let walk = null
+  world.bot.pathfinder.goto = () => new Promise((resolve, reject) => { walk = reject })
+  env.stopPath = () => { if (walk) walk(new Error('Path was stopped before it could be completed')) }
+  const { takeLegs } = loadBotFunctions(['takeLegs'], { legs: env.legs, yieldJob () {} })
+  clock.setTimeout(() => {
+    takeLegs('combat', 'flee from zombie')
+    env.stopPath()
+  }, 1000)
+  const res = await drive('/strike', { name: 'zombie', max: '3' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual({ swings: res.body.swings, reason: res.body.reason, takenBy: res.body.takenBy },
+    { swings: 0, reason: 'stopped', takenBy: 'the combat reflex took the legs to flee from zombie' })
 })

@@ -66,6 +66,8 @@ test('a pillar top holds the legs from every flee but an emergency at disengage 
     bot: { entity, blockAt: (p) => ({ name: 'stone', boundingBox: 'block', position: p }) },
     bunker: { building: false },
     BUNKER_WALK: 'refused while a bunker is being built',
+    legs: legLedger(),
+    takenText,
     perch: { cell: null },
     fillers: () => [{ name: 'dirt', count: 64 }],
     pillarHeight: (height) => ({ height, safe: 2, why: 'flat ground' }),
