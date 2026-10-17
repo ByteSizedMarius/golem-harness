@@ -92,6 +92,14 @@ test('the section without a dir runs the way the bot faces', () => {
   }
 })
 
+test('the section with an unknown dir runs and is labelled the way the bot faces', () => {
+  const DIR = { '0,-1': 'n', '0,1': 's', '1,0': 'e', '-1,0': 'w' }
+  for (const { name, yaw, step } of facings()) {
+    const faced = runRoute('/section', { dir: 'up' }, closedRoom(15, yaw)).summary
+    assert.strictEqual(faced, runRoute('/section', { dir: DIR[step.join()] }, closedRoom(15, yaw)).summary, `facing ${name}`)
+  }
+})
+
 test('the section takes a full direction name like the dig jobs', () => {
   const body = runRoute('/section', { dir: 'east' }, closedRoom(15, Math.PI))
   assert.strictEqual(body.summary, 'Section EAST from (0,64,0): floor: level d0–2; headroom 2; sealed from d3.')

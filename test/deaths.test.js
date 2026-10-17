@@ -14,7 +14,8 @@ function gotoEnv (walk) {
     releaseLane () {},
     walkRoute: () => ({ end () {}, walked: () => 2.5, mark: 0 }),
     stagedGoto: async () => { walk(); return { arrived: false, reason: 'stalled' } },
-    doorBeside: () => null
+    doorBeside: () => null,
+    memory: { lastWaypoint: null }
   }
 }
 

@@ -9,6 +9,7 @@ const walk = require('../lib/walk')
 const { playerNamed, playersAround } = require('../lib/players')
 const { summarizePlan, planRisk } = require('../lib/plan')
 const { legLedger } = require('../lib/legs')
+const { createDescribe } = require('../lib/bot/describe')
 const { loadBotFunctions, botConstant, startApp, fakeClock } = require('./helpers')
 
 const { UNLOADED, UNKNOWN, standCell, targetKind, resolveTarget, crumbCentre, arrivedAt, watchProgress, walkAttempt, routeDeadline } = walk
@@ -832,6 +833,24 @@ test('a /goto walks past open ground it has not seen, and the same way under roc
   assert.strictEqual((await replyFor(false)).arrived, true)
   const buried = await replyFor(true)
   assert.deepStrictEqual([buried.arrived, buried.reason, buried.edge], [false, 'unseen-way', { x: 1, y: 64, z: 0 }])
+})
+
+test('a /goto into a rock column beside the bot replies no-floor only when it knows the column, else unseen-way with the target as edge', async () => {
+  const pillar = (bot) => { bot.blockAt = (p) => (p.y <= 63 || (p.x === 1 && p.z === 0) ? STONE : AIR) }
+  const known = await goto({ x: 1, y: 40, z: 0 }, { setup: pillar })
+  assert.strictEqual(known.reason, 'no-floor', 'control: every cell of the column known')
+  const unseen = await goto({ x: 1, y: 40, z: 0 }, { setup: pillar, over: { cellKnown: (p) => p.y >= 60 } })
+  assert.deepStrictEqual([unseen.arrived, unseen.reason, unseen.edge], [false, 'unseen-way', { x: 1, y: 40, z: 0 }])
+})
+
+test('a /goto to x and z beside a column it has not seen names that column as edge, without a y', async () => {
+  const describe = {}
+  createDescribe(describe)
+  const pillar = (bot) => { bot.blockAt = (p) => (p.y <= 63 || (p.x === 1 && p.z === 0) ? STONE : AIR) }
+  const known = await goto({ x: 1, z: 0 }, { setup: pillar, over: { round: describe.round } })
+  assert.strictEqual(known.reason, 'no-floor', 'control: every cell of the column known')
+  const unseen = await goto({ x: 1, z: 0 }, { setup: pillar, over: { cellKnown: (p) => p.y >= 60, round: describe.round } })
+  assert.deepStrictEqual([unseen.reason, unseen.target, unseen.edge], ['unseen-way', { x: 1, z: 0 }, { x: 1, z: 0 }])
 })
 
 test('a nametag shows only for a player who neither sneaks nor is invisible, within 64 blocks', () => {

@@ -1152,7 +1152,7 @@ function facings () {
   })
 }
 
-// Runs a dig job route for a body at (0, 64, 0) facing yaw in dark stone, returning its result with the cells dug and filled.
+// Runs a dig job route for a body at (0, 64, 0) facing yaw in dark stone, returning its result with the cells dug and filled and the job's name.
 async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, known = [], sky = () => false, yaw = 0 } = {}) {
   const key = (p) => `${p.x},${p.y},${p.z}`
   const open = new Set(air)
@@ -1170,11 +1170,12 @@ async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, 
   }
   const NEIGHBOURS = botConstant('NEIGHBOURS')
   let job = null
+  let name = null
   await awaitRoute(route, query, {
     bot,
     require,
     bunker: { building: false },
-    jobs: { start: (name, fn) => { job = fn({ cancelled: false, progress () {} }); return { id: 1 } } },
+    jobs: { start: (n, fn) => { name = n; job = fn({ cancelled: false, progress () {} }); return { id: 1 } } },
     emitEvent () {},
     refuseWhileBuilding () {},
     equipPickFor: async () => {},
@@ -1187,7 +1188,7 @@ async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, 
     skyInSight: () => sky(bot.entity.position),
     seesLit: (p) => NEIGHBOURS.some(([dx, dy, dz]) => open.has(key(p.offset(dx, dy, dz))))
   })
-  return { ...(await job), dug, fills }
+  return { ...(await job), dug, fills, name }
 }
 
 module.exports = {

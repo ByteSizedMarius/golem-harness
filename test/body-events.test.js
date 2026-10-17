@@ -42,6 +42,7 @@ function eventRig (t) {
     bunker: { building: false },
     freezeBody () {},
     waypoints: { set () {} },
+    memory: { lastWaypoint: 'home' },
     deaths: { died () {} }
   }
   createCombat(ctx)
@@ -56,7 +57,7 @@ function eventRig (t) {
     bot.food = food
     await Promise.all(bot.listeners('health').map((f) => f()))
   }
-  return { bot, events, update }
+  return { bot, events, update, memory: ctx.memory }
 }
 
 test('every hostile mob in sight raises a hostile event, a neutral one does not', (t) => {
@@ -71,6 +72,13 @@ test('one death sends one death event', (t) => {
   const { bot, events } = eventRig(t)
   bot.emit('death')
   assert.deepStrictEqual(events.map((e) => e.kind), ['death'])
+})
+
+test('a death forgets the waypoint the body last stood at', (t) => {
+  const { bot, memory } = eventRig(t)
+  assert.strictEqual(memory.lastWaypoint, 'home', 'control')
+  bot.emit('death')
+  assert.strictEqual(memory.lastWaypoint, null)
 })
 
 test('food falling to 7 then 6 sends one low_food event carrying the food level', async (t) => {

@@ -1,7 +1,12 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const { EventEmitter, once } = require('node:events')
+const mineflayer = require('mineflayer')
+const { pathfinder, goals } = require('mineflayer-pathfinder')
+const { Vec3 } = require('vec3')
 const { createJobs } = require('../lib/jobs')
+const { createJobBoard, bindJobBoard } = require('../lib/bot/jobs')
 const { deathLedger } = require('../lib/deaths')
 const { waitFor, loadBotFunctions, routeHandler } = require('./helpers')
 
@@ -112,4 +117,25 @@ test('a job the body died during ends with the death message, the next job witho
   assert.ok(await waitFor(() => jobs.get(next).status !== 'running', 2000))
   assert.deepStrictEqual(emitted, ['dig_tunnel e x12: done, died: DIED near (1,60,4)', 'fish: done'])
   assert.deepStrictEqual([jobs.get(fatal).died, jobs.get(next).died], ['DIED near (1,60,4)', null])
+})
+
+test("a job started while another job walks keeps its first goal under the real pathfinder", async () => {
+  const client = new EventEmitter()
+  client.version = '1.21.11'
+  client.write = () => {}
+  client.end = () => {}
+  const bot = mineflayer.createBot({ client, username: 'Claude', loadInternalPlugins: false })
+  bot.loadPlugin(pathfinder)
+  await once(bot, 'inject_allowed')
+  Object.assign(bot, { entity: { position: new Vec3(0.5, 64, 0.5), velocity: new Vec3(0, 0, 0) }, clearControlStates () {}, stopDigging () {} })
+  const ctx = { bot, emitEvent () {}, stopCollect () {}, ...loadBotFunctions(['safeStop', 'stopPath'], { bot }) }
+  createJobBoard(ctx)
+  bindJobBoard(ctx)
+  ctx.jobs.start('gather oak_log x4', async () => { bot.pathfinder.setGoal(new goals.GoalNear(20, 64, 0, 1)) })
+  await new Promise(setImmediate)
+  assert.ok(bot.pathfinder.goal, 'control: the gather job walks')
+  const build = new goals.GoalNear(5, 64, 5, 1)
+  const { id } = ctx.jobs.start('build hut 5x5h3 @5,5', async () => { bot.pathfinder.setGoal(build) })
+  assert.ok(await waitFor(() => ctx.jobs.get(id).status !== 'running', 2000), 'the build job ended')
+  assert.strictEqual(bot.pathfinder.goal, build)
 })

@@ -24,6 +24,14 @@ test('dig_stair without a dir climbs the way the bot faces', async () => {
   }
 })
 
+test('dig_stair with an unknown dir climbs and is named the way the bot faces', async () => {
+  const DIR = { '0,-1': 'n', '0,1': 's', '1,0': 'e', '-1,0': 'w' }
+  for (const { name, yaw, step: [dx, dz] } of facings()) {
+    const r = await digJob('/dig_stair', { dir: 'up', up: '1', steps: '1', torch: '0' }, { yaw })
+    assert.deepStrictEqual([r.dug[1], r.name], [`${dx},67,${dz}`, `dig_stair up ${DIR[[dx, dz].join()]} x1`], `facing ${name}`)
+  }
+})
+
 test('dig_stair up stops where the sky shows, at any height', async () => {
   const deep = await digJob('/dig_stair', { ...UP_EAST, steps: '6' })
   assert.deepStrictEqual([deep.stopped, deep.endY], ['steps done', 70], 'no sky in sight')
