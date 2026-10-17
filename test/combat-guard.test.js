@@ -6,7 +6,7 @@ const { goals } = require('mineflayer-pathfinder')
 const { routeWithin } = require('../lib/flee')
 const { mobFamily, expireConfirmed } = require('../lib/shelter')
 const pace = require('../lib/pace')
-const { loadBotFunctions, combatReflexIn, botConstant } = require('./helpers')
+const { loadBotFunctions, combatReflexIn, botConstant, laneAt } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const HERE = new Vec3(0.5, 64, 0.5)
@@ -355,4 +355,30 @@ test('the vanguard reflex neither chases nor swings at a zombie that hit the bod
     assert.ok((await fight(true, 3.5, reach)).swings > 0, `control: no swing in sight, 1.7.10 ${legacy}`)
     assert.deepStrictEqual(await fight(false, 3.5, reach), NONE, `a swing behind the wall, 1.7.10 ${legacy}`)
   }
+})
+
+test('the vanguard reflex sets no chase goal while the body stands inside its bunker', async () => {
+  // The chase goals and leg takings against a zombie in sight 6 out, for a body whose last bunker is cell.
+  const chase = async (cell) => {
+    const chases = []
+    const legs = []
+    const entity = { position: HERE, onGround: true }
+    const lane = laneAt(entity, cell)
+    await standoff(open, zombie(6.5), {
+      bot: { entity, pathfinder: { goal: null, isMoving: () => false, setGoal (g) { this.goal = g; if (g) chases.push(g) } } },
+      env: {
+        STANCES: { vanguard: { fleeDist: 12, bowBand: [7, 24], chase: true, engage: 'closers' } },
+        fight: guardFight({ stance: 'vanguard' }),
+        sprintBlock: () => 'beyond 8',
+        takeLegs (reflex, why) { legs.push(why) },
+        bunker: lane.bunker,
+        laneBlocks: lane.laneBlocks,
+        laneNarrate: lane.laneNarrate
+      }
+    })
+    return { chases: chases.length, legs }
+  }
+  const outside = await chase(null)
+  assert.ok(outside.chases > 0 && outside.legs.includes('chase'), `control: no chase outside a bunker, ${JSON.stringify(outside)}`)
+  assert.deepStrictEqual(await chase(new Vec3(0, 64, 0)), { chases: 0, legs: [] })
 })

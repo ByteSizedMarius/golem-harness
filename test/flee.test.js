@@ -8,7 +8,7 @@ const { fleeHeading, planFlee, creeperCover, routeWithin } = require('../lib/fle
 const { expireConfirmed } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/legs')
 const vm = require('node:vm')
-const { loadBotFunctions, combatReflexIn, botConstant, botSource, balanced, reflexIn, fakeClock } = require('./helpers')
+const { loadBotFunctions, combatReflexIn, botConstant, botSource, balanced, reflexIn, fakeClock, laneAt } = require('./helpers')
 
 const HERE = new Vec3(0, 64, 0)
 const near = (a, b) => Math.abs(a - b) < 1e-9
@@ -257,6 +257,20 @@ test('a flee the pillar top holds back keeps the body still and raises a combat 
   const r = fleeIn(plateau(), creeper(5.5, 64, 0.5), null, { laneBlocks: () => true, perchHolds: () => true })
   assert.strictEqual(r.goal, null)
   assert.deepStrictEqual(r.combatEvents, ['the combat reflex kept the body on the pillar top instead of a flee: creeper E ~5, same level'])
+})
+
+test('a body inside its bunker starts no flee, not even from a creeper beside it', () => {
+  // Ground 25 wide, which keeps the flee plan fast.
+  const patch = plateau({ solid: (x, y, z) => y < 64 && Math.abs(x) <= 12 && Math.abs(z) <= 12 })
+  const flee = (cell) => {
+    // fleeIn stands the body at (0.5, 64, 0.5).
+    const lane = laneAt({ position: new Vec3(0.5, 64, 0.5) }, cell)
+    return fleeIn(patch, creeper(5.5, 64, 0.5), null, { laneBlocks: lane.laneBlocks, laneNarrate: lane.laneNarrate, perchHolds: lane.perchHolds })
+  }
+  const outside = flee(null)
+  assert.ok(outside.goal && outside.takenBy, `control: no flee outside a bunker, ${JSON.stringify(outside)}`)
+  const inside = flee(new Vec3(0, 64, 0))
+  assert.deepStrictEqual([inside.goal, inside.takenBy, inside.events], [null, null, []])
 })
 
 test('a swelling creeper is fled to a seen corner within a few steps that hides the body from its eyes, else far', () => {

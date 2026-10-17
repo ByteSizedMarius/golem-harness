@@ -16,6 +16,7 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const shelter = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/legs')
+const { createLane, bindLane } = require('../lib/bot/lane')
 const { installSecurity } = require('../lib/install')
 const { countVerbs } = require('../lib/verbs')
 const { createApp } = require('../lib/app')
@@ -1074,6 +1075,17 @@ async function actAfter (built) {
 
 const stoppedBuild = (why) => ({ mode: 'up', at: { x: 0, y: 65, z: 0 }, sealed: false, dug: 0, placed: 1, height: 3, gaps: [], exit: [], stopped: why })
 
+// The bot's lane for a body at entity whose last bunker is cell, with no build, job, perch, melee threat or pilot claim.
+function laneAt (entity, cell) {
+  const lane = {}
+  createLane(lane)
+  bindLane({ bot: { entity }, hpMelee: () => false, jobs: { running: () => false }, meleeThreat: () => null, emitEvent () {} })
+  Object.assign(lane.bunker, { building: false, stop: null, cell })
+  lane.perch.cell = null
+  lane.clearLane()
+  return lane
+}
+
 // ---- build verb fakes ----
 
 // The build routes' env: no threat, every cell known, and seenNow following over.cellKnown unless over sets its own.
@@ -1175,6 +1187,6 @@ module.exports = {
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
   botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
-  BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild,
+  BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, laneAt,
   buildVerbEnv, digInProblemWith, digJob
 }

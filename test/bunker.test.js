@@ -2,12 +2,13 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
+const { goals } = require('mineflayer-pathfinder')
 const shelter = require('../lib/shelter')
 const { QUIET_MS } = require('../lib/legs')
 const {
   botConstant, loadBotFunctions, HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, digInProblemWith,
-  awaitRoute
+  awaitRoute, bunkerReflexIn, combatReflexIn
 } = require('./helpers')
 
 const mobClass = (e) => e.cls
@@ -41,6 +42,23 @@ test('a down build re-checks threats after centring and falls back to up or refu
   r = await h.ctx.buildBunker('auto', 3)
   assert.match(String(r.error), /spider 5 blocks away/, `a spider closed in during the centring, got ${JSON.stringify(r)}`)
   assert.ok(!h.log.includes('digIn') && !h.log.includes('pillarShell'), `built after the second pick refused: ${h.log}`)
+})
+
+test('a bunker build is refused while the body stands in water or lava', async () => {
+  const standingIn = async (feet) => {
+    const h = buildHarness()
+    h.env.liquidProblem = loadBotFunctions(['liquidProblem'], {
+      bot: { entity: { position: HERE }, blockAt: (p) => ({ name: p.equals(HERE.floored()) ? feet : 'air', position: p }) }
+    }).liquidProblem
+    return { r: await h.ctx.buildBunker('auto', 3), log: h.log }
+  }
+  const dry = await standingIn('air')
+  assert.strictEqual(dry.r.mode, 'down', `control: dry ground builds, got ${JSON.stringify(dry.r)}`)
+  for (const liquid of ['water', 'lava']) {
+    const { r, log } = await standingIn(liquid)
+    assert.match(String(r.error), new RegExp(`^no bunker possible here \\(.*\\b${liquid}\\b`), `in ${liquid}, got ${JSON.stringify(r)}`)
+    assert.ok(!log.includes('digIn') && !log.includes('pillarShell'), `built in ${liquid}: ${log}`)
+  }
 })
 
 test('a finished or failed build starts the quiet that follow waits out', async () => {
@@ -96,6 +114,31 @@ test('a refused or failed build keeps the bunker the body stands in, a cell the 
   r = await h.ctx.buildBunker('auto', 3)
   assert.match(String(r.error), /already being built/, 'control: a second build while one runs')
   assert.strictEqual(h.bunker.cell, running, "a second build cleared the running build's cell")
+})
+
+test('no walk reaches the pathfinder while a bunker builds, whoever asks for it', async () => {
+  const h = buildHarness()
+  const walked = []
+  h.env.bot.pathfinder = { setGoal (g) { if (g) walked.push(g) }, goto: async (g) => { walked.push(g) }, setMovements () {} }
+  const goal = new goals.GoalNear(5, 64, 5, 1)
+  // The refusals a route or reflex meets when it asks the pathfinder for a walk.
+  const walk = async () => {
+    const refused = []
+    try { h.env.bot.pathfinder.setGoal(goal) } catch (e) { refused.push(e.message) }
+    try { await h.env.bot.pathfinder.goto(goal) } catch (e) { refused.push(e.message) }
+    return refused
+  }
+  assert.deepStrictEqual([await walk(), walked.length], [[], 2], 'control: both walks before the build')
+  walked.length = 0
+  let during = null
+  const digIn = h.env.digIn
+  h.env.digIn = async () => { during = await walk(); return digIn() }
+  const r = await h.ctx.buildBunker('auto', 3)
+  assert.strictEqual(r.mode, 'down', `control: the build ran, ${JSON.stringify(r)}`)
+  const refusal = botConstant('BUNKER_WALK')
+  assert.deepStrictEqual(during, [refusal, refusal], 'a walk during the build was not refused')
+  assert.deepStrictEqual(walked, [], 'the pathfinder took a goal during the build')
+  assert.deepStrictEqual([await walk(), walked.length], [[], 2], 'walks stay refused after the build')
 })
 
 test('stop or death ends a bunker build as stopped and the body does not flee', async () => {
@@ -375,6 +418,44 @@ test('the bunker reflex waits 15 s after fleeing a player', () => {
   assert.strictEqual(bunkerDecider('player', 16000), 'build', 'a flee from a player 16 s ago')
 })
 
+test('the bunker reflex arms below 8 HP within 15 s of a mob hit, and after it fired only once HP is back at 12', async () => {
+  const bot = { health: 20 }
+  const fight = { lastHit: { dmg: 3, t: 0, cls: 'hostile' } }
+  const env = {
+    bot,
+    fight,
+    reflexes: [{ name: 'combat', _fleeCls: null, _fleeT: 0 }],
+    bunkerHolds: () => false,
+    BUNKER_HP: botConstant('BUNKER_HP'),
+    BUNKER_REARM_HP: botConstant('BUNKER_REARM_HP'),
+    BUNKER_HEIGHT: botConstant('BUNKER_HEIGHT'),
+    BUNKER_HALTS: botConstant('BUNKER_HALTS'),
+    shelterInputs: () => ({ requested: 'auto', threats: [{ ...zombie(30), entity: {} }], problems: { down: null, up: null }, buildMs: { down: 2930, up: 1300 } }),
+    chooseShelter: shelter.chooseShelter,
+    bunkerSummary: shelter.bunkerSummary,
+    buildBunker: async () => ({ mode: 'up', at: { x: 0, y: 67, z: 0 }, sealed: true, dug: 0, placed: 16, gaps: [], exit: [] }),
+    emitEvent () {},
+    takeLegs () {}
+  }
+  loadBotFunctions(['bunkerReflexDecide'], env)
+  const reflex = bunkerReflexIn(env)
+  env.reflexes.push(reflex)
+  const arms = (health, hitAgoMs = 1000) => {
+    bot.health = health
+    fight.lastHit.t = Date.now() - hitAgoMs
+    return reflex.check(bot)
+  }
+  assert.strictEqual(arms(7), true, 'control: HP 7, a mob hit 1 s ago')
+  assert.strictEqual(arms(8), false, 'HP 8')
+  assert.strictEqual(arms(7, 16000), false, 'a mob hit 16 s ago')
+  await reflex.act(bot)
+  assert.strictEqual(arms(7), false, 'armed again right after it fired')
+  arms(11)
+  assert.strictEqual(arms(7), false, 'armed again after HP rose to 11')
+  arms(12)
+  assert.strictEqual(arms(7), true, 'not armed again after HP rose to 12')
+})
+
 // ---- digInProblem ----
 
 test('a dig-in over unseen ground holds against a spider, counts the slowest dig there and names no unseen cave', () => {
@@ -398,14 +479,14 @@ test('a dig-in over unseen ground holds against a spider, counts the slowest dig
   assert.strictEqual(pick.mode, 'down', `no dig-in against a spider: ${JSON.stringify(pick)}`)
 })
 
-// digInProblem for a body on dirt at (0, 64, 0) with liquid at cell, which the bot knows only when known.
-function digInBeside (cell, liquid, known) {
+// digInProblem for a body on dirt at (0, 64, 0) with the block name at cell, which the bot knows only when known.
+function digInWith (cell, name, known) {
   const key = (p) => `${p.x},${p.y},${p.z}`
-  const isOpen = (p) => p.y >= 64 || key(p) === cell
+  const isOpen = (p) => p.y >= 64 || (key(p) === cell && /water|lava/.test(name))
   const env = {
     bot: {
       entity: { position: new Vec3(0.5, 64, 0.5), onGround: true },
-      blockAt: (p) => ({ name: key(p) === cell ? liquid : isOpen(p) ? 'air' : 'dirt', boundingBox: isOpen(p) ? 'empty' : 'block', position: p })
+      blockAt: (p) => ({ name: key(p) === cell ? name : isOpen(p) ? 'air' : 'dirt', boundingBox: isOpen(p) ? 'empty' : 'block', position: p })
     },
     SIDES: botConstant('SIDES'),
     BUNKER_GROUND: botConstant('BUNKER_GROUND'),
@@ -419,9 +500,43 @@ function digInBeside (cell, liquid, known) {
 }
 
 test('a dig-in refuses water or lava beside the body or in seen ground beside the shaft, never for liquid it has not seen', () => {
-  assert.strictEqual(digInBeside('1,64,0', 'water', false), 'water beside the body')
-  assert.strictEqual(digInBeside('1,62,0', 'lava', true), 'lava beside the shaft')
-  assert.strictEqual(digInBeside('1,62,0', 'lava', false), null)
+  assert.strictEqual(digInWith('1,64,0', 'water', false), 'water beside the body')
+  assert.strictEqual(digInWith('1,65,0', 'lava', false), 'lava beside the body', 'lava beside the head')
+  assert.strictEqual(digInWith('1,62,0', 'lava', true), 'lava beside the shaft')
+  assert.strictEqual(digInWith('1,62,0', 'lava', false), null)
+})
+
+test('a dig-in that meets liquid beside the body mid-dig plugs it and digs no deeper', async () => {
+  const dry = await digHarness().ctx.digIn()
+  assert.strictEqual(dry.dug, 3, `control: dry ground digs 3 deep, got ${JSON.stringify(dry)}`)
+
+  // Lava flows in beside the first cell while the body digs it.
+  let flowing = false
+  const { ctx } = digHarness({ 0: () => { flowing = true } })
+  const ground = ctx.bot.blockAt
+  ctx.bot.blockAt = (p) => (flowing && p.x === 1 && p.y === 63 && p.z === 0 ? { name: 'lava', position: p } : ground(p))
+  const plugged = []
+  ctx.placeFiller = async (cell) => { plugged.push(`${cell.x},${cell.y},${cell.z}`); return 'placed' }
+  const r = await ctx.digIn()
+  assert.strictEqual(r.dug, 1, `dug past the lava, got ${JSON.stringify(r)}`)
+  assert.match(String(r.stopped), /^lava\b/, 'the stop does not name the lava')
+  assert.deepStrictEqual(plugged, ['1,63,0'], 'the lava was not plugged')
+})
+
+test('a dig-in digs only natural ground, refusing clay and terracotta', async () => {
+  assert.strictEqual(digInProblemWith(), null, 'control: seen dirt below')
+  assert.strictEqual((await digHarness().ctx.digIn()).dug, 3, 'control: dirt digs 3 deep')
+
+  assert.match(String(digInWith('0,63,0', 'clay', true)), /^clay\b/, 'seen clay below')
+
+  // Ground the body has not seen is judged as it digs.
+  assert.strictEqual(digInWith('0,62,0', 'terracotta', false), null, 'control: unseen ground passes the preflight')
+  const { ctx } = digHarness()
+  const ground = ctx.bot.blockAt
+  ctx.bot.blockAt = (p) => (p.x === 0 && p.y === 62 && p.z === 0 ? { name: 'terracotta', position: p } : ground(p))
+  const r = await ctx.digIn()
+  assert.strictEqual(r.dug, 1, `dug into terracotta, got ${JSON.stringify(r)}`)
+  assert.match(String(r.stopped), /^terracotta\b/, 'the stop does not name the terracotta')
 })
 
 // ---- pillarProblem ----
@@ -529,4 +644,54 @@ test('the bunker reflex flees after a failed build, naming what ended it, but no
   assert.ok(onError[0].why.includes(error), `the flee after an error does not name it: ${JSON.stringify(onError[0])}`)
   const done = { mode: 'up', at: { x: 0, y: 67, z: 0 }, sealed: true, dug: 0, placed: 16, gaps: [], exit: [] }
   assert.strictEqual((await actAfter(done)).length, 0, 'a flee after a finished bunker')
+})
+
+test('the flee after a failed build runs although a flee was under way when the build began', async () => {
+  const mob = { id: 9, name: 'zombie', cls: 'hostile', position: new Vec3(3.5, 64, 0.5) }
+  const bot = { health: 5, entity: { position: HERE }, pathfinder: { goal: null, setGoal (g) { this.goal = g } }, setControlState () {} }
+  // The combat reflex with a planner that always finds a goal, so only its flee latch can hold a flee back.
+  const combat = combatReflexIn({
+    bot,
+    goals,
+    reflexes: [],
+    console: { log () {} },
+    setTimeout () {},
+    laneBlocks: () => false,
+    airFlood: () => ({}),
+    knownCell: () => true,
+    entityPerceptible: () => true,
+    nearHostiles: () => [],
+    fleeWorld: () => ({}),
+    mobClass,
+    planFlee: () => ({ goal: new Vec3(-10, 64, 0) }),
+    fleeLog: () => '',
+    threatWhy: (what) => what,
+    takeLegs () {},
+    stopPath () {},
+    emitEvent () {}
+  })
+  combat._fleeUntil = Date.now() + 6000
+  combat.fleeFrom(bot, mob, 'a second flee', 'emergency')
+  assert.strictEqual(bot.pathfinder.goal, null, 'control: a flee under way holds back another')
+
+  const h = buildHarness({ scenes: [{ threats: [zombie(30)] }] })
+  h.env.reflexes.splice(0, 1, combat)
+  h.env.pillarShell = async () => {
+    h.log.push('pillarShell')
+    return { at: new Vec3(0, 65, 0), placed: 1, stopped: 'hit while building' }
+  }
+  const reflex = bunkerReflexIn({
+    reflexes: [combat],
+    emitEvent () {},
+    takeLegs () {},
+    buildBunker: h.ctx.buildBunker,
+    bunkerSummary: shelter.bunkerSummary,
+    shelterInputs: () => ({ requested: 'auto', threats: [{ ...zombie(3), entity: mob }] }),
+    BUNKER_HALTS: botConstant('BUNKER_HALTS'),
+    BUNKER_HEIGHT: 3,
+    BUNKER_REARM_HP: 12
+  })
+  await reflex.act(bot)
+  assert.ok(h.log.includes('pillarShell'), `control: the build began, ${h.log}`)
+  assert.ok(bot.pathfinder.goal, 'the flee after the failed build did not run')
 })
