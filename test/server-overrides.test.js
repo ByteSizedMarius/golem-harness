@@ -141,18 +141,17 @@ test('an overrides file without a blocks object is refused at start', (t) => {
 })
 
 test('an item alias resolves to its 1.21 item, and an unknown name stays unknown', (t) => {
-  const overrides = readServerOverrides(overridesFile(t, { ...OVERRIDES, items: { fence: 'oak_fence' } }))
-  const { resolveItem } = loadBotFunctions(['resolveItem'], { shared: { mcData }, SERVER_OVERRIDES: overrides })
-  assert.strictEqual(resolveItem('fence').name, 'oak_fence')
-  assert.strictEqual(resolveItem('oak_fence').name, 'oak_fence')
-  assert.strictEqual(resolveItem('fence_gate'), null)
-})
-
-test('without an overrides file or an items map no alias applies', (t) => {
-  for (const overrides of [readServerOverrides(undefined), readServerOverrides(overridesFile(t))]) {
+  const rows = [
+    ['an items map', readServerOverrides(overridesFile(t, { ...OVERRIDES, items: { fence: 'oak_fence' } })), 'oak_fence'],
+    ['no overrides file', readServerOverrides(undefined), null],
+    ['no items map', readServerOverrides(overridesFile(t)), null]
+  ]
+  for (const [label, overrides, alias] of rows) {
     const { resolveItem } = loadBotFunctions(['resolveItem'], { shared: { mcData }, SERVER_OVERRIDES: overrides })
-    assert.strictEqual(resolveItem('fence'), null)
-    assert.strictEqual(resolveItem('oak_fence').name, 'oak_fence')
+    const fence = resolveItem('fence')
+    assert.strictEqual(fence && fence.name, alias, label)
+    assert.strictEqual(resolveItem('oak_fence').name, 'oak_fence', label)
+    assert.strictEqual(resolveItem('fence_gate'), null, label)
   }
 })
 

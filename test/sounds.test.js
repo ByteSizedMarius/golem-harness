@@ -3,7 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { classifySound } = require('../lib/sounds')
-const { loadBotFunctions } = require('./helpers')
+const { loadBotFunctions, functionSource } = require('./helpers')
 const mcData = require('minecraft-data')('1.21.11')
 
 const LEGACY = { legacy1710: true }
@@ -82,9 +82,10 @@ test('thunder from both names gives thunder', () => {
 })
 
 // The bot's onSound for a body at the origin on a 1.7.10 server, and the types of the events it raised.
-function ears () {
+function ears (extra = {}) {
   const raised = []
   const { onSound } = loadBotFunctions(['onSound'], {
+    ...extra,
     bot: { entity: { position: new Vec3(0.5, 64, 0.5) } },
     classifySound,
     LEGACY_1710: true,
@@ -112,6 +113,29 @@ test('the explosion 1.7.10 lightning plays where its thunder struck raises no he
   elsewhere.onSound(thunder, strike)
   elsewhere.onSound(explode, strike.offset(0, 0, 3))
   assert.deepStrictEqual(elsewhere.raised, ['hear'], 'an explosion 3 from the strike')
+})
+
+test('a danger sound raises at most one hear event per category within the throttle window', () => {
+  // The window is the number the gate compares a category's last hear stamp against.
+  const gate = /dangerHeard[^\n]*?>=?\s*(\d+)/.exec(functionSource('onSound'))
+  assert.ok(gate, 'the danger gate in onSound')
+  const window = Number(gate[1])
+  let now = Date.now()
+  const { onSound, raised } = ears({ Date: { now: () => now } })
+  const lava = 'minecraft:block.lava.ambient'
+  const explode = 'minecraft:entity.generic.explode'
+  const at = new Vec3(8.5, 64, 0.5)
+  const heard = (name) => {
+    const before = raised.length
+    onSound(name, at)
+    return raised.length - before
+  }
+  assert.strictEqual(heard(lava), 1, 'control: the first lava sound')
+  now += window
+  assert.strictEqual(heard(lava), 0, 'lava again on the last ms of the window')
+  assert.strictEqual(heard(explode), 1, 'an explosion inside the lava window')
+  now += 1
+  assert.strictEqual(heard(lava), 1, 'lava again once the window has passed')
 })
 
 test('extinguish_fire gives lava under legacy1710 only', () => {

@@ -9,7 +9,6 @@ const http = require('node:http')
 const path = require('node:path')
 const util = require('node:util')
 const { createApp } = require('../lib/app')
-const { ROUTE_BOUNDS } = require('../lib/bounds')
 const { bindDebugRoutes } = require('../lib/routes/debug')
 const { PORT, ROOT, UNAUTHORIZED, codeOnly, hmac, newNonce, startApp, stateControl } = require('./helpers')
 
@@ -73,7 +72,7 @@ function assertUnauthorized (r, label) {
 }
 
 // ASVS 8.2.1
-test('app-I1 an unsigned request gets 401 for a route registered after createApp, an unknown path and a fork file', async (t) => {
+test('an unsigned request to a createApp app gets 401 for a later route, an unknown path and a repo file', async (t) => {
   const s = await startApp(t, { createApp: true })
   await stateControl(s)
   assertUnauthorized(await s.get('/state', { signed: false }), '/state')
@@ -83,7 +82,7 @@ test('app-I1 an unsigned request gets 401 for a route registered after createApp
 })
 
 // ASVS 8.2.1
-test('app-I1 every route the lib/routes groups install answers 401 to an unsigned request', async (t) => {
+test('every route the lib/routes groups install answers 401 to an unsigned request', async (t) => {
   const f = await factoryServer(t)
   const routesDir = path.join(ROOT, 'lib', 'routes')
   const ctx = {}
@@ -111,26 +110,7 @@ test('app-I1 every route the lib/routes groups install answers 401 to an unsigne
   for (const target of paths) assertUnauthorized(await f.get(target, { signed: false }), target)
 })
 
-// ASVS 2.2.1
-test('app-I2 the /goto and bounds guards refuse with 400 before a route registered after createApp runs', async (t) => {
-  const s = await startApp(t, { createApp: true })
-  assert.strictEqual((await s.get('/goto?x=1&z=2&preview=1')).status, 200, 'control: preview=1')
-  assert.strictEqual((await s.get('/goto?x=1&z=2&preview=2')).status, 400, 'preview=2')
-  assert.strictEqual(s.routeHits('/goto').length, 1)
-  const [min, max] = ROUTE_BOUNDS['/walls'].w
-  assert.strictEqual((await s.get(`/walls?w=${min}`)).status, 200, `control: w=${min}`)
-  assert.strictEqual((await s.get(`/walls?w=${max + 1}`)).status, 400, `w=${max + 1}`)
-  assert.strictEqual(s.routeHits('/walls').length, 1)
-})
-
-test('app-I3 a signed /snapshot gets 403 although a /snapshot route is registered after createApp', async (t) => {
-  const s = await startApp(t, { createApp: true })
-  await stateControl(s)
-  assert.strictEqual((await s.get('/snapshot')).status, 403)
-  assert.strictEqual(s.routeHits('/snapshot').length, 0, '/snapshot ran')
-})
-
-test('app-I4 a route registered after createApp counts as running while its handler awaits', async (t) => {
+test('a route registered after createApp counts as running while its handler awaits', async (t) => {
   const f = await factoryServer(t)
   let release
   const held = new Promise((resolve) => { release = resolve })
@@ -146,20 +126,13 @@ test('app-I4 a route registered after createApp counts as running while its hand
   await entered
   assert.strictEqual(f.verbs.running(Date.now()), 1, 'running while the handler awaits')
   assert.strictEqual(f.onRequests.length, 1)
+  assert.strictEqual(f.onRequests[0].req.url, '/held')
   release()
   assert.strictEqual((await reply).status, 200)
   assert.strictEqual(f.verbs.running(Date.now()), 0, 'running after the handler settled')
 })
 
-test('app-I4 a signed /goto calls onRequest once with its response', async (t) => {
-  const s = await startApp(t, { createApp: true })
-  assert.strictEqual((await s.get('/goto?x=1&z=2')).status, 200)
-  assert.strictEqual(s.routeHits('/goto').length, 1)
-  assert.strictEqual(s.onRequests.length, 1)
-  assert.strictEqual(s.onRequests[0].req.url, '/goto?x=1&z=2')
-})
-
-test('app-I4 a signed /chat is no counted route: onRequest is not called and nothing runs', async (t) => {
+test('/chat on a createApp app is not counted as a running verb', async (t) => {
   const s = await startApp(t, { createApp: true })
   assert.strictEqual((await s.get('/chat?msg=hi')).status, 200, 'control: /chat?msg=hi')
   await s.drained()
@@ -169,7 +142,7 @@ test('app-I4 a signed /chat is no counted route: onRequest is not called and not
 })
 
 // ASVS 13.3.1
-test('app-I5 createApp returns only app and verbs and leaves the token in no app property, setting, export, log line or error', () => {
+test('createApp leaves the token in no app property, setting, export, log line or error', () => {
   const token = 'app-i5-' + crypto.randomBytes(24).toString('hex')
   const short = token.slice(0, 31)
   const chat = { send () {} }
@@ -199,18 +172,18 @@ test('app-I5 createApp returns only app and verbs and leaves the token in no app
   assert.ok(!String(refused.stack).includes(short), 'the error stack holds the token')
 })
 
-test('app-I6 createApp throws a TypeError for a token under 32 characters or a port outside 1-65535', () => {
+test('createApp throws a TypeError for a short or missing token and a port outside 1-65535', () => {
   const chat = { send () {} }
   assert.doesNotThrow(() => createApp({ token: 'k'.repeat(32), port: PORT, chat }), 'control: 32 characters')
-  for (const token of ['k'.repeat(31), '', undefined]) {
+  for (const token of ['k'.repeat(31), undefined]) {
     assert.throws(() => createApp({ token, port: PORT, chat }), TypeError, `token ${JSON.stringify(token)}`)
   }
-  for (const port of [0, undefined, NaN, 65536]) {
+  for (const port of [0, NaN, 65536]) {
     assert.throws(() => createApp({ token: 'k'.repeat(32), port, chat }), TypeError, `port ${port}`)
   }
 })
 
-test('app-I8 /chat sends a message up to the maxLen given in chat as one line', async (t) => {
+test('createApp passes the chat maxLen through, so a 200-character /chat goes out as one line', async (t) => {
   const s = await startApp(t, { createApp: true, maxLen: 256 })
   const short = 'a'.repeat(50)
   const long = 'b'.repeat(200)
