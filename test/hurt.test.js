@@ -1,6 +1,7 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const { EventEmitter } = require('node:events')
 const vm = require('node:vm')
 const { botSource, balanced, botConstant } = require('./helpers')
 
@@ -37,4 +38,34 @@ test('a hit of 4 or more damage emits a hurt event inside the throttle window, t
   await hit(1)
   await hit(5)
   assert.deepStrictEqual(events.map((m) => m.match(/^took (\S+) /)[1]), ['1', '5'])
+})
+
+test('the first health update of a session counts no hit, a lower one after it freezes the body', async () => {
+  const { createAlarms, bindAlarms, wireBodyAlarms } = require('../lib/bot/alarms')
+  const bot = new EventEmitter()
+  const hurt = []
+  let froze = 0
+  const fight = { lastHit: null, lastAttrib: null, swingWait: null }
+  const ctx = {
+    bot,
+    fight,
+    bunker: { building: false },
+    reflexes: [],
+    mobClass: () => null,
+    waterState: () => null,
+    freezeBody: () => { froze++ },
+    emitEvent: (kind, msg) => { if (kind === 'hurt') hurt.push(msg) }
+  }
+  createAlarms(ctx)
+  bindAlarms(ctx)
+  wireBodyAlarms()
+  const update = async (hp) => {
+    Object.assign(bot, { health: hp, food: 20 })
+    await Promise.all(bot.listeners('health').map((f) => f()))
+  }
+  // A relaunch at 12 HP.
+  await update(12)
+  assert.deepStrictEqual({ hurt, froze, lastHit: fight.lastHit }, { hurt: [], froze: 0, lastHit: null }, 'the first update')
+  await update(9)
+  assert.deepStrictEqual({ hurt: hurt.map((m) => m.match(/^took (\S+) /)[1]), froze, dmg: fight.lastHit && fight.lastHit.dmg }, { hurt: ['3'], froze: 1, dmg: 3 })
 })

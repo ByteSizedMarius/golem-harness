@@ -10,7 +10,9 @@ const { PRESENCE_GAP_MS, PRESENCE_FORGET_MS, PRESENCE_MAX, playerNamed, playersA
 const { QUIET_MS, LONG_QUIET_MS, legLedger } = require('../lib/legs')
 const { countVerbs } = require('../lib/verbs')
 const { isDoor, panelAcross, doorCrossing } = require('../lib/doors')
-const { loadBotFunctions } = require('./helpers')
+const { expireConfirmed } = require('../lib/shelter')
+const { createReflexes, bindReflexes } = require('../lib/bot/reflexes')
+const { loadBotFunctions, combatReflexIn, botConstant } = require('./helpers')
 
 const ME = new Vec3(0.5, 64, 0.5)
 const player = (id, username, position) => ({ id, type: 'player', name: 'player', username, position })
@@ -217,6 +219,55 @@ test('presence skips the followed player', () => {
   env.follow.followState = { name: 'Steve' }
   ctx.presenceTick()
   assert.deepStrictEqual(events, [])
+})
+
+// ---- a player who hits ----
+
+test('a player who hit the body is scored only inside the threatdebug window, and outside it the lower reflexes run', async () => {
+  const steve = player(7, 'Steve', new Vec3(3.5, 64, 0.5))
+  const bot = { entity: { position: ME }, entities: { 7: steve } }
+  const fight = { stance: 'guard', threatDebugUntil: 0 }
+  const env = {
+    bot,
+    Vec3,
+    fight,
+    expireConfirmed,
+    console: { log () {} },
+    CONFIRMED_HORIZON: botConstant('CONFIRMED_HORIZON'),
+    CONFIRMED_MS: botConstant('CONFIRMED_MS'),
+    STANCES: { guard: { fleeDist: 16, bowBand: [7, 24], chase: false, engage: 'closers' } },
+    AGGRO_CONFIRMED: new Map([[7, { name: 'player', t: Date.now() }]]),
+    bunker: { building: false },
+    liveEntities: () => [steve],
+    mobClass: () => 'player',
+    airFlood: () => ({}),
+    knownCell: () => true,
+    entityPerceptible: () => true,
+    entityEngageable: () => true,
+    holdRun: { on: false },
+    emitEvent () {}
+  }
+  const combat = combatReflexIn(env)
+  const fired = []
+  combat.act = async () => { fired.push('combat') }
+  const unstuck = { name: 'unstuck', on: true, active: false, check: () => true, act: async () => { fired.push('unstuck') } }
+  const ctx = {}
+  createReflexes(ctx)
+  bindReflexes({ bot, shared: { ready: true } })
+  ctx.reflexes.push(combat, unstuck)
+  let tick = null
+  const setInterval = globalThis.setInterval
+  globalThis.setInterval = (fn) => { tick = fn; return 0 }
+  try { ctx.startReflexes() } finally { globalThis.setInterval = setInterval }
+  assert.strictEqual(combat.check(bot), false, 'outside the window')
+  tick()
+  await new Promise(setImmediate)
+  fight.threatDebugUntil = Date.now() + 60000
+  assert.strictEqual(combat.check(bot), true, 'inside the window')
+  assert.strictEqual(combat._threat.e, steve)
+  tick()
+  await new Promise(setImmediate)
+  assert.deepStrictEqual(fired, ['unstuck', 'combat'])
 })
 
 // ---- follow ----

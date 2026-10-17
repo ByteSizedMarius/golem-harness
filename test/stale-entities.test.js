@@ -35,7 +35,7 @@ test('the hostile alarm says nothing of a mob of the dimension before until the 
   const env = {
     bot: { entity: { position: ME }, entities: { 1: zombie(1) } },
     staleEntities: new Set([1]),
-    HOSTILE: new Set(['zombie']),
+    mobClass: (e) => (e.name === 'zombie' ? 'hostile' : 'passive'),
     warnedMobs: new Set(),
     nightFired: false,
     reflexes: [{ name: 'combat', fairFill: () => ({}) }],
@@ -59,7 +59,7 @@ test('the hostile alarm says nothing when the perception flood throws', () => {
   const events = []
   const env = {
     bot: { entity: { position: ME }, entities: {} },
-    HOSTILE: new Set(['zombie']),
+    mobClass: (e) => (e.name === 'zombie' ? 'hostile' : 'passive'),
     warnedMobs: new Set(),
     reflexes: [{ name: 'combat', fairFill: () => { throw new Error('flood failed') } }],
     entityPerceptible: () => true,
