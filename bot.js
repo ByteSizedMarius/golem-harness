@@ -1,12 +1,12 @@
 // Golem — a Mineflayer body for language-model pilots
-// Doing-layer: structured perception + actions over a tiny HTTP API (drive with curl).
+// Structured perception and actions over a small HMAC-signed HTTP API.
 const mineflayer = require('mineflayer')
 const { pathfinder } = require('mineflayer-pathfinder')
 const { plugin: collectBlock } = require('mineflayer-collectblock')
 const armorManager = require('mineflayer-armor-manager')
 const { chatMaxLen } = require('./lib/install')
 
-// The HMAC key that signs every control API request and response.
+// The control API's HMAC key.
 const GOLEM_TOKEN = process.env.GOLEM_TOKEN || ''
 if (GOLEM_TOKEN.length < 32) {
   console.error('[bot] GOLEM_TOKEN is missing or shorter than 32 characters, refusing to start')
@@ -139,22 +139,13 @@ function wireLightPackets () {
   bot._client.on('update_light', (packet) => freshLight(packet.chunkX, packet.chunkZ))
 }
 
-// ==== VISION 2 (2026-07-11): the vertical sense, the air flood-fill, and the ray-sweep retina ====
-// Two tiers of knowing, everywhere: seen (SEEN, or lit sight now) / unknown (silence means "didn't
-// look", never "clear").
-
-// ==== SECOND SENSES (2026-07-12, Fable) — ears, felt world-changes, body alarms, tool sense ====
-// Design constraints set by the helmsman: my reaction time is long, so alarms exist ONLY for what's worth
-// waking me, the bot FREEZES to buy me time, and everything else is a pull-only buffer. Aggregate
-// aggressively — a village or a mob-filled cave must never become an event firehose.
-
 createAlarms(ctx)
 
 createSenses(ctx)
 
 const fight = {}
 ctx.fight = fight
-fight.lastAttrib = null            // set by the damage_event wire; read by the hurt handler above
+fight.lastAttrib = null            // set by the damage_event wire, read by the hurt handler in alarms.js
 
 createCombat(ctx)
 const { combatReflex, fleeToPlayerReflex } = ctx
@@ -178,6 +169,14 @@ createLane(ctx)
 
 createBunker(ctx)
 const { bunkerReflex } = ctx
+
+createAwareness(ctx)
+
+createFollow(ctx)
+
+createBunkerCells(ctx)
+
+createBunkerBuild(ctx)
 installReflexes()
 
 function wireWorldSeed () {
@@ -190,7 +189,7 @@ function wireWorldSeed () {
 }
 
 // ---- HTTP control layer ----
-// The pilot routes in flight, which follow waits out. A reply says when the body died while its route ran.
+// Follow waits while a pilot route runs.
 const { app, verbs } = createApp({ token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text), maxLen: chatMaxLen(process.env.GOLEM_CHAT_MAX) }, onRequest: deaths.watch })
 ctx.verbs = verbs
 createReply(ctx)
@@ -210,17 +209,6 @@ createSeeingRoutes(ctx)
 const { installSeeingRoutes } = ctx
 createWorkingRoutes(ctx)
 const { installWorkingRoutes } = ctx
-installRoutes()
-
-createAwareness(ctx)
-
-createFollow(ctx)
-
-// ==== VISION 2 endpoints: /gaze (the look verb), /section (the vertical slice), /passages ====
-
-createBunkerCells(ctx)
-
-createBunkerBuild(ctx)
 
 function wireEarly () {
   wireConnectionHardening()
@@ -270,6 +258,7 @@ function wireRuntime () {
   wirePathfinderTicks()
   wirePathLog()
 }
+// Priority order: lava_watch, bunker, combat, unstuck, current_watch, narrator, trek, flee_to_player.
 function installReflexes () {
   reflexes.push(unstuckReflex)
   reflexes.push(currentWatchReflex)
@@ -325,6 +314,7 @@ function bindAll () {
 }
 bindAll()
 wireRuntime()
+installRoutes()
 app.listen(CTRL_PORT, '127.0.0.1', (e) => {
   if (e) {
     console.error(`[bot] control API cannot listen on 127.0.0.1:${CTRL_PORT}: ${e.message}`)
