@@ -17,10 +17,10 @@ const { createApp } = require('./lib/app')
 const { createContext } = require('./lib/context')
 const { createStreams, bindStreams, wireChatCapture, wireServerMessages } = require('./lib/bot/streams')
 const { createItems, bindItems } = require('./lib/bot/items')
-const { createSight, bindSight, wireLightChanges, wireLightReload, wireSightMemoDrops, wireGroundTopForget, wireSkyInSightReset } = require('./lib/bot/sight')
+const { createSight, bindSight, wireLightChanges, wireLightReload, wireLightPackets, wireSightMemoDrops, wireGroundTopForget, wireSkyInSightReset } = require('./lib/bot/sight')
 const { createDescribe, bindDescribe, wireIndoorsReset } = require('./lib/bot/describe')
 const { createLane, bindLane } = require('./lib/bot/lane')
-const { createMemory, bindMemory, wireSeenWorld, wireSeenSave } = require('./lib/bot/memory')
+const { createMemory, bindMemory, wireWorldSeed, wireSeenWorld, wireSeenSave } = require('./lib/bot/memory')
 const { createReflexes, bindReflexes } = require('./lib/bot/reflexes')
 const { createLegs, bindLegs, wirePlanKnownReset, wireGateManners, wireLivePath, wirePathfinderTicks, wirePathLog } = require('./lib/bot/legs')
 const { createJobBoard, bindJobBoard } = require('./lib/bot/jobs')
@@ -31,7 +31,7 @@ const { createPlacing, bindPlacing } = require('./lib/bot/placing')
 const { createWatchReflexes, bindWatchReflexes } = require('./lib/bot/watch-reflexes')
 const { createBunkerCells, bindBunkerCells } = require('./lib/bot/bunker-cells')
 const { createBunkerBuild, bindBunkerBuild } = require('./lib/bot/bunker-build')
-const { createCombat, bindCombat, wireGuardDrop, wireItemUseCosts, wireArmSwings, wireArrowTracking, wireDamageAttribution, wireFloodDrops, wireMobHurt } = require('./lib/bot/combat')
+const { createCombat, bindCombat, wireDamageTypes, wireGuardDrop, wireItemUseCosts, wireArmSwings, wireArrowTracking, wireDamageAttribution, wireFloodDrops, wireMobHurt } = require('./lib/bot/combat')
 const { createBunker, bindBunker, wireThreatReset } = require('./lib/bot/bunker')
 const { createSenses, bindSenses, wireSoundTablePin, wireHearing, wireOwnEditStamps, wireWorldChangeNotes, wireWorldChangeEvents, wireOreCallout } = require('./lib/bot/senses')
 const { createAlarms, bindAlarms, wireWearAlarm, wirePocketAlarm, wireTrailMarks, wireBodyAlarms } = require('./lib/bot/alarms')
@@ -60,26 +60,33 @@ const bot = mineflayer.createBot({
   // reset heartbeat cursor.
 })
 
-// ---- connection hardening (cannibalized from Mindcraft's mcdata.js): cheap plumbing that keeps a
-// long-running bot alive on real servers. (a) throttle position/look packets to <=1 per 50ms so
-// pathfinder movement spam doesn't trip server anti-cheat and get us kicked; (b) swallow the common
-// 'PartialReadError' protocol-desync that would otherwise crash the client. Pure plumbing — it only
-// reorders OUTBOUND packets, so the bot's own position tracking (and our fairness/LOS) is untouched.
+// Move packets go out at most once per 50 ms. A PartialReadError the client emits is logged and dropped.
 function wireConnectionHardening () {
   try {
     const _write = bot._client.write.bind(bot._client)
-    let lastPos = 0, posTimer = null
-    bot._client.write = (name, data) => {
-      if (name === 'position' || name === 'position_look' || name === 'look') {
-        const dt = Date.now() - lastPos
-        if (dt < 50) {                                   // coalesce a burst: keep only the latest
-          if (posTimer) clearTimeout(posTimer)
-          posTimer = setTimeout(() => { posTimer = null; lastPos = Date.now(); _write(name, data) }, 50 - dt)
-          return
-        }
-        lastPos = Date.now()
-      }
+    let lastPos = 0, posTimer = null, pending = null
+    const flush = () => {
+      posTimer = null
+      lastPos = Date.now()
+      const { name, data } = pending
+      pending = null
       return _write(name, data)
+    }
+    bot._client.write = (name, data) => {
+      if (name !== 'position' && name !== 'position_look' && name !== 'look') return _write(name, data)
+      // A burst inside one window goes out as one packet with its newest position, look and flags.
+      if (!pending || pending.name === name || name === 'position_look') pending = { name, data }
+      else {
+        const merged = { ...pending.data, ...data }
+        for (const k of name === 'look' ? ['x', 'y', 'z'] : ['yaw', 'pitch']) merged[k] = pending.data[k]
+        pending = { name: 'position_look', data: merged }
+      }
+      const dt = Date.now() - lastPos
+      if (dt >= 50) {
+        clearTimeout(posTimer)
+        return flush()
+      }
+      if (!posTimer) posTimer = setTimeout(flush, 50 - dt)
     }
     const _emit = bot._client.emit.bind(bot._client)
     bot._client.emit = (event, ...args) => {
@@ -99,13 +106,7 @@ const ctx = createContext()
 ctx.bot = bot
 wireEarly()
 
-const shared = {}
-ctx.shared = shared
-shared.mcData = null
-shared.ready = false
 createLegs(ctx)
-shared.considerateMoves = null    // default no-dig profile (protects builds + terrain)
-shared.forestryMoves = null       // lumberjack profile: may break ONLY leaves+logs (built at spawn)
 
 createViewer(ctx)
 createConnection(ctx)
@@ -129,42 +130,17 @@ createJobBoard(ctx)
 const { deaths } = ctx
 
 createMemory(ctx)
-const { memory } = ctx
 
 createPlacing(ctx)
 
 createSight(ctx)
-const { freshLight } = ctx
-function wireLightPackets () {
-  bot._client.on('update_light', (packet) => freshLight(packet.chunkX, packet.chunkZ))
-}
 
 createAlarms(ctx)
 
 createSenses(ctx)
 
-const fight = {}
-ctx.fight = fight
-fight.lastAttrib = null            // set by the damage_event wire, read by the hurt handler in alarms.js
-
 createCombat(ctx)
 const { combatReflex, fleeToPlayerReflex } = ctx
-fight.stance = 'guard'
-fight.threatDebugUntil = 0                   // /threatdebug window: score players, narrate only
-fight.lastHit = { dmg: 0, t: 0 }             // last hit taken (size + when) — scales the disengage tripwire while FRESH
-fight.lastAttackT = 0                        // when the bot last attacked
-// The damage type names by registry id, from the registry the server sends before spawn. Via sends
-// generic as 16.
-fight.damageTypes = []
-function wireDamageTypes () {
-  bot._client.on('registry_data', (packet) => {
-    try {
-      if (/^(minecraft:)?damage_type$/.test(packet.id)) fight.damageTypes = packet.entries.map(e => e.key.replace(/^minecraft:/, ''))
-    } catch (e) { console.log('[combat] damage type registry unreadable: ' + e.message) }
-  })
-}
-// Resolves once a sourceless hit beside a player or with an arrow in flight has its attribution.
-fight.swingWait = null
 createLane(ctx)
 
 createBunker(ctx)
@@ -178,15 +154,6 @@ createBunkerCells(ctx)
 
 createBunkerBuild(ctx)
 installReflexes()
-
-function wireWorldSeed () {
-  for (const name of ['login', 'respawn']) {
-    bot._client.on(name, (packet) => {
-      const seed = (packet.worldState || packet).hashedSeed
-      memory.worldSeed = seed == null ? '' : String(seed)
-    })
-  }
-}
 
 // ---- HTTP control layer ----
 // Follow waits while a pilot route runs.
@@ -212,11 +179,11 @@ const { installWorkingRoutes } = ctx
 
 function wireEarly () {
   wireConnectionHardening()
+}
+function wireRuntime () {
   wireLightPackets()
   wireDamageTypes()
   wireWorldSeed()
-}
-function wireRuntime () {
   wirePlanKnownReset()
   wireConnectionSpawn()
   wireConnectionEvents()
@@ -261,14 +228,7 @@ function wireRuntime () {
 }
 // Priority order: lava_watch, bunker, combat, unstuck, current_watch, narrator, trek, flee_to_player.
 function installReflexes () {
-  reflexes.push(unstuckReflex)
-  reflexes.push(currentWatchReflex)
-  reflexes.push(narratorReflex)
-  reflexes.push(trekReflex)
-  reflexes.unshift(combatReflex)
-  reflexes.push(fleeToPlayerReflex)
-  reflexes.unshift(lavaWatchReflex)
-  reflexes.splice(reflexes.findIndex(r => r.name === 'combat'), 0, bunkerReflex)
+  reflexes.push(lavaWatchReflex, bunkerReflex, combatReflex, unstuckReflex, currentWatchReflex, narratorReflex, trekReflex, fleeToPlayerReflex)
 }
 function installRoutes () {
   installDebugRoutes(app)

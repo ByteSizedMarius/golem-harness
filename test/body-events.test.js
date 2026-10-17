@@ -5,7 +5,7 @@ const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const { createCombat, bindCombat } = require('../lib/bot/combat')
 const { createAlarms, bindAlarms, wireBodyAlarms } = require('../lib/bot/alarms')
-const { bindConnection, wireConnectionSpawn } = require('../lib/bot/connection')
+const { createConnection, bindConnection, wireConnectionSpawn } = require('../lib/bot/connection')
 
 // A spawned bot with the alarm and connection listeners wired, recording every emitted event.
 function eventRig (t) {
@@ -25,7 +25,6 @@ function eventRig (t) {
   })
   const ctx = {
     bot,
-    shared: {},
     knownMoves: (m) => m,
     navPlaced: [],
     startReflexes () {},
@@ -38,7 +37,6 @@ function eventRig (t) {
     liveEntities: () => [],
     nightfall: (fired) => fired,
     startViewer () {},
-    fight: { lastHit: null, lastAttrib: null, swingWait: null },
     bunker: { building: false },
     freezeBody () {},
     waypoints: { set () {} },
@@ -47,6 +45,7 @@ function eventRig (t) {
   }
   createCombat(ctx)
   createAlarms(ctx)
+  createConnection(ctx)
   bindCombat(ctx)
   bindAlarms(ctx)
   bindConnection(ctx)
