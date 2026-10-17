@@ -10,9 +10,6 @@ const { Vec3 } = require('vec3')
 const { installSecurity, chatMaxLen, BUNKER_MODES } = require('./lib/install')
 const { classifySound } = require('./lib/sounds')
 const { SHELTER, mobFamily, chooseShelter, entityInCell, babyFlag, upBuildMs, downBuildMs, expireConfirmed, bunkerSummary } = require('./lib/shelter')
-const { crumbCentre, nametagGoal } = require('./lib/walk')
-const { playerNamed, playersAround, presenceUpdate, presenceText } = require('./lib/players')
-const { POINT_RANGE, deictic, lookedAt } = require('./lib/deixis')
 const { ambientChange, sameVein } = require('./lib/wake')
 const { headFree, smoothLook } = require('./lib/head')
 const { pacePlacements, STRIKE_SWING_MS, STRIKE_APPROACH_MS, strikeBudgetMs, hurtWindows, noCritReason, runCells, noRunReason, JUMP_FALL_TICKS, JUMP_TICKS, RUN_MAX, RUN_TICKS, RUN_COAST, SWING_REACH, HITBOX_1710, HOLD_MAX_S } = require('./lib/pace')
@@ -38,6 +35,9 @@ const { createLane, bindLane } = require('./lib/bot/lane')
 const { createMemory, bindMemory, wireSeenWorld, wireSeenSave } = require('./lib/bot/memory')
 const { createReflexes, bindReflexes } = require('./lib/bot/reflexes')
 const { createLegs, bindLegs, wirePlanKnownReset, wireGateManners, wireLivePath, wirePathfinderTicks, wirePathLog } = require('./lib/bot/legs')
+const { createJobBoard, bindJobBoard } = require('./lib/bot/jobs')
+const { createFollow, bindFollow } = require('./lib/bot/follow')
+const { createAwareness, bindAwareness, wireStaleEntities, wireCrumbRecording, wireCrumbForget, wirePresenceTick } = require('./lib/bot/awareness')
 
 const bot = mineflayer.createBot({
   // MC_VERSION=auto lets mineflayer detect the server's version from the handshake
@@ -89,7 +89,7 @@ bot.loadPlugin(collectBlock)
 bot.loadPlugin(armorManager)   // auto-equip best armor (freebie for the survival ramp; no-op on Peaceful)
 const ctx = createContext()
 ctx.bot = bot
-Object.assign(ctx, { chatPointer, hpMelee, meleeThreat, yieldJob, playerEntity })
+Object.assign(ctx, { hpMelee, meleeThreat, resetThreatState })
 wireEarly()
 
 const shared = {}
@@ -758,20 +758,9 @@ reflexes.push({
   async act () { logPulse(this._msg) }
 })
 
-// ---- async jobs registry (long actions run in background; driver keeps reacting) ----
-const { createJobs } = require('./lib/jobs')
+createJobBoard(ctx)
+const { deaths, jobs, yieldJob } = ctx
 const { takenText } = require('./lib/legs')
-const { deathLedger } = require('./lib/deaths')
-const deaths = deathLedger()
-ctx.deaths = deaths
-const jobs = createJobs({ stop: () => { safeStop(); stopCollect() }, emit: (name, msg) => emitEvent('job', name + ': ' + msg), deaths })
-ctx.jobs = jobs
-// Ends the running job and its walk for a reflex that needs the body, naming the reflex in the job's takenBy.
-function yieldJob (reflex, why) {
-  if (!jobs.yieldTo({ reflex, why })) return
-  try { bot.stopDigging() } catch (e) {}
-  stopPath()
-}
 
 createMemory(ctx)
 const { waypoints, memory, journal, SEEN, SURFACE, markSeen, markTrail, knownBlocks, nearestKnown, rememberedStation, arrivedStation } = ctx
@@ -2357,6 +2346,7 @@ const app = express()
 installSecurity(app, { token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text), maxLen: chatMaxLen(process.env.GOLEM_CHAT_MAX) } })
 // The pilot routes in flight, which follow waits out. A reply says when the body died while its route ran.
 const verbs = countVerbs(app, deaths.watch)
+ctx.verbs = verbs
 // ?brief=1 on ANY endpoint strips null/undefined fields from the reply — LLM pilots pay
 // by the token and "reason":null earns nothing. Empty ARRAYS survive on purpose: law 2
 // makes [] a statement ("looked, found none") and silence a different one ("didn't look").
@@ -2530,109 +2520,8 @@ app.get('/find', (req, res) => {
   } catch (e) { err(res, e) }
 })
 
-// ---- player locator (07-14, the helmsman's ask: "so we avoid 'where I am' and in case we ever get
-// lost from each-other"). Consented co-op sense: live position when the server tracks them,
-// last-seen breadcrumb (pos + age + heading) when out of range. Breadcrumbs update every 5s.
-const playerCrumbs = Object.create(null)
-ctx.playerCrumbs = playerCrumbs
-// The ids of the entities loaded at the last dimension change that the server has not updated since.
-const staleEntities = new Set()
-function wireStaleEntities () {
-  for (const ev of ['entitySpawn', 'entityMoved', 'entityUpdate', 'entityGone']) bot.on(ev, (e) => { if (e) staleEntities.delete(e.id) })
-}
-// The entities besides the body that the server updated since the last dimension change.
-function liveEntities () {
-  return Object.values(bot.entities).filter(e => e && e !== bot.entity && !staleEntities.has(e.id))
-}
-// The player named name by their entity. bot.players can lack the entity of a player the server tracks.
-function playerEntity (name) {
-  return playerNamed(bot.entities, name, (e) => staleEntities.has(e.id))
-}
-function trackedPlayers () {
-  return playersAround(bot.entities, bot.entity, (e) => staleEntities.has(e.id))
-}
-// How the bot perceives player en: seen with the exact distance, by the nametag from its 5-block cube, or null.
-function playerSighting (en, fill) {
-  const me = bot.entity.position
-  if (entityPerceptible(en, fill)) return { tier: 'seen', dist: Math.round(en.position.distanceTo(me)), bearing: compass(en.position.x - me.x, en.position.z - me.z) }
-  if (!nametagVisible(en)) return null
-  const c = crumbCentre(en.position)
-  return { tier: 'nametag', dist: Math.round(c.distanceTo(me) / 5) * 5, bearing: compass(c.x - me.x, c.z - me.z) }
-}
-// The block a chat line points at with "here", "there", "this" or "that": the one its speaker looks at as
-// it arrives, when the bot sees the speaker within POINT_RANGE and sees that block too. Else null.
-function chatPointer (from, msg) {
-  if (!shared.ready || !deictic(msg)) return null
-  const en = playerEntity(from)
-  if (!en || en.position.distanceTo(bot.entity.position) > POINT_RANGE) return null
-  if (!entityPerceptible(en, reflexes.find(r => r.name === 'combat').fairFill(bot))) return null
-  const eye = en.position.offset(0, en.crouching ? 1.27 : 1.62, 0)
-  const hit = lookedAt(eye, en.headYaw ?? en.yaw, en.pitch, (p) => bot.blockAt(p))
-  if (!hit || !seesLit(hit.cell, 64)) return null
-  return { block: hit.block.name, x: hit.cell.x, y: hit.cell.y, z: hit.cell.z }
-}
-// A crumb's nametag is true when the player was known only by the nametag.
-function recordCrumbs () {
-  try {
-    let fill = null
-    for (const en of trackedPlayers()) {
-      const name = en.username
-      const seen = entityPerceptible(en, fill ??= reflexes.find(r => r.name === 'combat').fairFill(bot))
-      if (!seen && !nametagVisible(en)) continue
-      const prev = playerCrumbs[name]
-      const pos = seen ? en.position.clone() : crumbCentre(en.position)
-      playerCrumbs[name] = { pos, t: Date.now(), nametag: !seen, prev: prev ? { pos: prev.pos, t: prev.t } : null }
-    }
-  } catch (e) {}
-}
-function wireCrumbRecording () {
-  setInterval(recordCrumbs, 5000)
-}
-let crumbDimension = null
-function forgetCrumbsElsewhere () {
-  if (bot.game.dimension === crumbDimension) return
-  crumbDimension = bot.game.dimension
-  for (const name of Object.keys(playerCrumbs)) delete playerCrumbs[name]
-  staleEntities.clear()
-  for (const e of Object.values(bot.entities)) if (e !== bot.entity) staleEntities.add(e.id)
-  resetThreatState()
-}
-function wireCrumbForget () {
-  bot.on('game', forgetCrumbsElsewhere)
-}
-// What the last presence event said about each player name.
-const presence = new Map()
-// True once the first player entity was logged against bot.players.
-let playersLogged = false
-// Emits a player event on each presence change, except for the followed player, whom follow reports.
-function presenceTick () {
-  try {
-    const around = trackedPlayers()
-    if (!playersLogged && around.length) {
-      playersLogged = true
-      const players = bot.players || {}
-      const withEntity = Object.keys(players).filter(n => players[n] && players[n].entity)
-      console.log(`[players] bot.players: ${Object.keys(players).join(', ') || 'none'} (with an entity: ${withEntity.join(', ') || 'none'}), player entities: ${around.map(e => e.username).join(', ')}`)
-    }
-    let fill = null
-    const sightings = []
-    for (const en of around) {
-      const s = playerSighting(en, fill ??= reflexes.find(r => r.name === 'combat').fairFill(bot))
-      if (s) sightings.push({ name: en.username, ...s })
-    }
-    const quiet = new Set(follow.followState ? [follow.followState.name] : [])
-    for (const ev of presenceUpdate(presence, sightings, { now: Date.now(), quiet })) emitEvent('player', presenceText(ev), ev)
-  } catch (e) {}
-}
-function wirePresenceTick () {
-  setInterval(() => { if (shared.ready && bot.entity) presenceTick() }, 2000)
-}
-function crumbFix (c, me) {
-  const agoSec = Math.round((Date.now() - c.t) / 1000)
-  const bearing = compass(c.pos.x - me.x, c.pos.z - me.z)
-  if (c.nametag) return { agoSec, dist: Math.round(c.pos.distanceTo(me) / 5) * 5, bearing }
-  return { lastSeen: { x: Math.round(c.pos.x), y: Math.round(c.pos.y), z: Math.round(c.pos.z) }, agoSec, dist: +c.pos.distanceTo(me).toFixed(0), bearing }
-}
+createAwareness(ctx)
+const { liveEntities, playerEntity, playerSighting, chatPointer, nearestSeen, targetSeen, whereIs, entityLabel } = ctx
 // /pathdebug?secs=30 — tap the pathfinder's event stream into bot.log for N seconds.
 // Built 07-14 night for the doors-v2 hunt: stalls with no error and no movement need the
 // planner's own words — path_update statuses and especially path_reset REASONS.
@@ -2650,18 +2539,6 @@ app.get('/pathdebug', (req, res) => {
     ok(res, { tapping: secs })
   } catch (e) { err(res, e) }
 })
-
-// The nearest entity named name within radius that the body perceives, or undefined.
-function nearestSeen (name, radius) {
-  const here = bot.entity.position
-  const fill = reflexes.find(r => r.name === 'combat').fairFill(bot)
-  return liveEntities()
-    .filter(en => en.position && (en.name === name || en.displayName === name) && en.position.distanceTo(here) <= radius && entityPerceptible(en, fill))
-    .sort((a, b) => a.position.distanceTo(here) - b.position.distanceTo(here))[0]
-}
-function targetSeen (en) {
-  return entityPerceptible(en, reflexes.find(r => r.name === 'combat').fairFill(bot))
-}
 
 // /useon?name=<entity>&item=<item> — right-click a creature with a held item: shears on
 // sheep, bucket on cow, saddle on horse. The husbandry verb (07-14, built pen-side with the
@@ -2970,22 +2847,6 @@ app.get('/shoot', async (req, res) => {
     })
   } catch (e) { err(res, e) } finally { bot.removeListener('entityDead', onDead) }
 })
-// A player in sight gets the exact position, one known by the nametag a bearing and a rough distance, else the crumb.
-function whereIs (name) {
-  const me = bot.entity.position
-  const en = playerEntity(name)
-  const s = en && playerSighting(en, reflexes.find(r => r.name === 'combat').fairFill(bot))
-  if (s && s.tier === 'seen') {
-    const p = en.position
-    return { name, live: true, pos: { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) }, dist: s.dist, bearing: s.bearing }
-  }
-  if (s) return { name, live: true, nametag: true, dist: s.dist, bearing: s.bearing }
-  const c = playerCrumbs[name]
-  if (!c) return { name, live: false, note: 'never seen this session' }
-  let heading = null
-  if (c.prev && c.pos.distanceTo(c.prev.pos) > 1) heading = compass(c.pos.x - c.prev.pos.x, c.pos.z - c.prev.pos.z)
-  return { name, live: false, ...crumbFix(c, me), heading }
-}
 app.get('/where', (req, res) => {
   try {
     if (!shared.ready) return err(res, new Error('not ready'))
@@ -2994,10 +2855,6 @@ app.get('/where', (req, res) => {
     ok(res, whereIs(name))
   } catch (e) { err(res, e) }
 })
-// Players go by their username, every other entity by its type name.
-function entityLabel (en) {
-  return (en.type === 'player' && en.username) || en.name || en.username || en.displayName
-}
 app.get('/entities', (req, res) => {
   try {
     if (!shared.ready) return err(res, new Error('not ready'))
@@ -3415,109 +3272,8 @@ app.get('/tidy', async (req, res) => {
 })
 app.get('/job_stop', (req, res) => { const stopped = jobs.stop(parseInt(req.query.id)); ok(res, { stopped }) })
 
-// continuous follow via pathfinder's dynamic GoalFollow (auto-repaths as target moves).
-// SUPERVISED since 07-16: bare GoalFollow had no stall recovery — it wedged at the east door
-// twice (once mid-emergency; "you do tarry") while /goto's wedge drill sat one verb over.
-// A 400ms watcher now runs the same drill (stop → 700ms → doorwayCommit → re-arm) whenever the
-// bot stops progressing while the target is beyond range, and quietly re-acquires the target
-// entity when it drops out of tracking (one honest event, no alarm spam).
-const follow = {}
-follow.followState = null
-function stopFollow () {
-  if (!follow.followState) return
-  try { clearInterval(follow.followState.timer) } catch (e) {}
-  follow.followState = null
-}
-// The followed player's entity and its sighting tier while the bot sees it or its nametag, else null.
-function followTarget (st) {
-  const ent = playerEntity(st.name)
-  const s = ent && playerSighting(ent, reflexes.find(r => r.name === 'combat').fairFill(bot))
-  return s ? { ent, tier: s.tier } : null
-}
-// What the follow goal aims at: the entity in sight, else the cell of its nametag cube centre.
-function followAim (t) {
-  if (t.tier === 'seen') return t.ent
-  const c = crumbCentre(t.ent.position)
-  return ck(Math.floor(c.x), Math.floor(c.y), Math.floor(c.z))
-}
-function armFollow (st, t) {
-  st.aim = followAim(t)
-  st.goal = t.tier === 'seen' ? new goals.GoalFollow(t.ent, st.range) : nametagGoal(t.ent.position, st.range)
-  bot.pathfinder.setGoal(st.goal, true)
-}
-// True while something else owns the legs.
-function followHeld (now) {
-  const cr = reflexes.find(r => r.name === 'combat')
-  if (cr && (cr.active || now < cr._fleeUntil || now < cr._coverUntil)) return true
-  if (reflexes.some(r => r.name === 'unstuck' && r.active)) return true
-  return bunkerHolds() || now < pilotLane.until || jobs.running() || verbs.running(now) > 0 || now < legs.quietUntil()
-}
-// The supervisor's 400 ms check. Only unfollow and stop end a follow: arriving, a stall, a fight or a
-// lost sight hold it, and it re-arms its goal once the legs are free. st is the follow it belongs to.
-async function followTick (st) {
-  if (follow.followState !== st || st.drilling) return
-  const now = Date.now()
-  const rest = () => { st.lastPos = bot.entity.position.clone(); st.lastT = now }
-  // FOLLOW YIELDS TO COMBAT (07-21: the wedge drill held the legs still on a live creeper
-  // fuse, 9.4 through armor).
-  if (followHeld(now)) return rest()
-  const t = followTarget(st)
-  if (!t) {
-    // The goal would walk to where the bot cannot see the player.
-    if (st.goal && bot.pathfinder.goal === st.goal) stopPath()
-    if (!st.lostT) st.lostT = now
-    else if (!st.told && now - st.lostT > 12000) {
-      st.told = true
-      emitEvent('follow', `lost sight of ${st.name}, still following and going on once they show again`)
-    }
-    return rest()
-  }
-  if (st.lostT) {
-    if (st.told) emitEvent('follow', `${st.name} is back in view, following again`)
-    st.lostT = 0
-    st.told = false
-  }
-  const goal = bot.pathfinder.goal
-  // A cleared goal re-arms, and so does one whose aim changed: an entity the server replaced, a new nametag cube or tier.
-  if (!goal || (goal === st.goal && followAim(t) !== st.aim)) {
-    armFollow(st, t)
-    return rest()
-  }
-  // Another walk owns the legs until it clears its goal.
-  if (goal !== st.goal) return rest()
-  const p = bot.entity.position
-  // A body at rest is parked, not wedged: GoalFollow plans again only once the player moves past range.
-  const near = t.tier === 'seen' ? t.ent.position.distanceTo(p) <= st.range + 1.5 : goal.isEnd(p.floored())
-  if (!bot.pathfinder.isMoving() || p.distanceTo(st.lastPos) >= 1.0 || near) return rest()
-  if (now - st.lastT < 4500) return       // same patience as stagedGoto (doors-v2 lesson)
-  st.drilling = true                      // wedged while the target walks away — the drill
-  console.log('[follow] wedged — running the doorway drill')
-  try {
-    // HARD goal clear, not safeStop: GoalFollow is DYNAMIC — a stop leaves it set and the
-    // pathfinder resumes re-planning toward the target DURING the drill, fighting nudgeInto
-    // for the control states every tick (found live 07-16: same door, same drill — goto's
-    // drill crossed clean, follow's lost the threshold 3x. The legs need ONE owner.)
-    try { bot.pathfinder.setGoal(null) } catch (e) {}
-    try { bot.clearControlStates() } catch (e) {}
-    await new Promise(r => setTimeout(r, 700))
-    if (follow.followState !== st || followHeld(Date.now())) return
-    // The drill ends with this follow, and when a reflex or another walk takes the legs.
-    const route = walkRoute()
-    const taken = route.stopped
-    route.stopped = () => taken() || follow.followState !== st
-    let crossed = false
-    try { crossed = !!((await doorwayCommit(route)) || {}).through } catch (e) { console.log('[follow] drill error: ' + e.message) } finally { route.end() }
-    if (follow.followState !== st) return
-    const live = !followHeld(Date.now()) && followTarget(st)
-    if (live) armFollow(st, live)
-    st.lastPos = bot.entity.position.clone(); st.lastT = Date.now()
-    if (crossed) console.log('[follow] through clean — following resumed')
-    else if (Date.now() - st.warnT > 30000) {    // drill keeps retrying ~5s; the EVENT stays rare
-      st.warnT = Date.now()
-      emitEvent('follow', `wedged following ${st.name} and the doorway drill did not clear it — may need help`)
-    }
-  } finally { st.drilling = false }
-}
+createFollow(ctx)
+const { follow, stopFollow, followTarget, armFollow, followTick } = ctx
 app.get('/follow', (req, res) => {
   try {
     if (bunker.building) return err(res, new Error(BUNKER_WALK))
@@ -6303,6 +6059,9 @@ function bindAll () {
   bindMemory(ctx)
   bindReflexes(ctx)
   bindLegs(ctx)
+  bindJobBoard(ctx)
+  bindFollow(ctx)
+  bindAwareness(ctx)
 }
 bindAll()
 wireRuntime()
