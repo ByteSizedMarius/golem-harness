@@ -9,7 +9,7 @@ const STONE = { name: 'stone', boundingBox: 'block' }
 const CHEST = { name: 'chest', boundingBox: 'block' }
 
 // A chest at (-304,63,76) in a stone nook open only to the east, under a block at y 65, on a stone floor at y 62.
-function waypointAt (x, y, z, position = new Vec3(-299.5, 63, 76.5)) {
+function waypointAt (x, y, z, position = new Vec3(-299.5, 63, 76.5), seenNow = () => true) {
   const solid = new Set(['-305,63,76', '-304,63,75', '-304,63,77', '-304,65,76'])
   const blockAt = (p) => {
     const k = `${p.x},${p.y},${p.z}`
@@ -21,6 +21,7 @@ function waypointAt (x, y, z, position = new Vec3(-299.5, 63, 76.5)) {
     bot: { entity: { position }, blockAt },
     Vec3,
     cellKnown: () => true,
+    seenNow,
     journal () {},
     memory: { lastWaypoint: null },
     waypoints: { get: () => undefined, set: (name, at) => { stored.push({ name, at }); return at }, link () {} }
@@ -38,6 +39,14 @@ test('a waypoint set on a chest moves to the cell beside it to stand in', () => 
   assert.deepStrictEqual(reply.at, { x: -303, y: 63, z: 76 })
   assert.deepStrictEqual(JSON.parse(JSON.stringify(stored)), [{ name: 'base', at: { x: -303, y: 63, z: 76 } }])
   assert.match(reply.moved, /chest/)
+})
+
+test('a waypoint on a chest seen before and out of sight now stays as given and names no block', () => {
+  assert.match(waypointAt(-304, 63, 76).reply.moved, /chest/, 'control: in sight')
+  const { reply, stored } = waypointAt(-304, 63, 76, undefined, () => false)
+  assert.doesNotMatch(JSON.stringify(reply), /chest|stone/)
+  assert.strictEqual(reply.moved, undefined)
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(stored)), [{ name: 'base', at: { x: -304, y: 63, z: 76 } }])
 })
 
 test('a waypoint stamped without coordinates stores the cell the bot stands in', () => {

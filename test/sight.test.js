@@ -580,6 +580,38 @@ test('section in total darkness names no ore and no air past two blocks', () => 
   assert.strictEqual(row.slice(0, 7), '?#@  ??')
 })
 
+test('section draws a cell seen before and out of sight now as unseen, whatever it holds now', () => {
+  // Stone laid at 0,65,0, the room's west end, after the bot saw that end lit.
+  const section = (light, seen) => {
+    const env = cave(light, FAR_END)
+    const base = env.bot.blockAt
+    env.bot.blockAt = (p) => (p.x === 0 && p.y === 65 && p.z === 0 ? { ...base(p), name: 'stone', type: IDS.stone, boundingBox: 'block', light: 0 } : base(p))
+    if (seen) for (let x = -1; x <= 0; x++) for (let y = 63; y <= 66; y++) env.SEEN.add(ck(x, y, 0))
+    return runRoute('/section', { dir: 'w' }, { ...env, sectionColumns, floorPhrase })
+  }
+  const row = (body) => body.grid.split('\n').find((r) => r.startsWith('y 65')).slice(5)
+  assert.strictEqual(row(section(LIT, false))[5], '#', 'control: the stone in sight')
+  assert.deepStrictEqual(section(DARK, true), section(DARK, false))
+})
+
+test('scene names the block ahead only in sight, and reads a dark cell the same whatever it holds', () => {
+  // A tunnel north from the body at x 0, y 64..65, open to z -2 with coal at 0,65,-3, or open to z -4 without.
+  const ahead = (light, coal) => {
+    const env = world({
+      open: (x, y, z) => x === 0 && (y === 64 || y === 65) && z <= 0 && z >= (coal ? -2 : -4),
+      ores: coal ? { '0,65,-3': 'coal_ore' } : {},
+      light: () => light
+    })
+    const scene = JSON.parse(summaries(env)[0])
+    return [scene.summary.match(/Ahead: [^.]*\./)[0], scene.ahead]
+  }
+  assert.strictEqual(ahead(LIT, true)[0], 'Ahead: coal_ore @3.', 'control: in sight')
+  const dark = ahead(DARK, true)
+  assert.doesNotMatch(JSON.stringify(dark), /coal/)
+  assert.strictEqual(dark[0], 'Ahead: unseen @3.')
+  assert.deepStrictEqual(ahead(DARK, false), dark, 'dark air reads like dark ore')
+})
+
 // A corridor at z 0, y 64..65 east from x 0 to 9 at light level light, or with bend, a room at
 // x 0..3 and a lit passage on south at x 3 from z 1 to 9.
 function corridor (light, bend = false) {

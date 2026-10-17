@@ -239,6 +239,21 @@ test('a shot counts only once an arrow is loosed, and a kill only once the body 
   assert.deepStrictEqual([unseen.shotsFired, unseen.killed, unseen.outcome], [1, false, 'lost sight'])
 })
 
+test('a strike counts a kill and walks to the drops only once the body sees the target die', async () => {
+  // seen sets whether the body sees the zombie die from the swing.
+  const strike = async (seen) => {
+    const world = verbWorld([zombie(2.5)])
+    world.bot.attack = () => { world.did.push('swing'); world.bot.entities[7].seen = seen; delete world.bot.entities[7] }
+    const res = await drive('/strike', { name: 'zombie' }, world)
+    assert.strictEqual(res.error, undefined, res.error && res.error.message)
+    return { reply: res.body, did: world.did }
+  }
+  const inSight = await strike(true)
+  assert.deepStrictEqual([inSight.reply.killed, inSight.reply.note, inSight.did], [true, 'walked to drops', ['swing', 'walk']], 'control: died in sight')
+  const unseen = await strike(false)
+  assert.deepStrictEqual([unseen.reply.killed, unseen.reply.reason, unseen.reply.note, unseen.did], [false, 'lost sight', 'lost sight of it', ['swing']])
+})
+
 test('a strike whose zombie goes out of sight swings no more and ends with lost sight', async () => {
   const walked = verbWorld([zombie(6.5)])
   walked.bot.pathfinder.goto = async () => { walked.did.push('walk'); walked.bot.entities[7].seen = false }

@@ -176,6 +176,20 @@ test('tidy stops at a stalled reclaim, keeps the rest queued and says why', asyn
   assert.deepStrictEqual(c.env.navPlaced.map((p) => p.x).sort(), [1, 2])
 })
 
+test('tidy counts a scaffold block as gone only when the body sees it gone', async (t) => {
+  // seen sets whether the body sees the cell where the removed block stood.
+  const tidy = async (seen) => {
+    const c = collector(t, { blocks: {}, reach: () => false })
+    c.env.seenNow = () => seen
+    c.env.navPlaced.push({ x: 1, y: 64, z: 0 })
+    return { reply: await within(awaitRoute('/tidy', {}, c.env)), queued: c.env.navPlaced }
+  }
+  assert.deepStrictEqual((await tidy(true)).reply, { reclaimed: 0, alreadyGone: 1, failed: 0, remaining: 0, reason: null }, 'control: seen gone')
+  const unseen = await tidy(false)
+  assert.deepStrictEqual(unseen.reply, { reclaimed: 0, alreadyGone: 0, failed: 0, remaining: 1, reason: null })
+  assert.deepStrictEqual(unseen.queued, [{ x: 1, y: 64, z: 0 }])
+})
+
 // A collector for test t that runs gather jobs, wired to stop as bot.js wires them, and answers /stop.
 function jobRig (t) {
   const c = collector(t, { blocks: ORE, reach: () => true, holdDig: true })
