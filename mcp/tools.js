@@ -1,7 +1,7 @@
 'use strict'
 
-// One tool per bot.js route the pilot may call. Each param is that route's query parameter of the same name.
-// structural names the top-level reply fields bot.js generates that keep up to 4000 characters.
+// The control API routes (lib/routes/) the pilot may call. Each param is that route's query parameter of the same name.
+// structural names the top-level reply fields the route generates that keep up to 4000 characters.
 // timeoutMs is how long a route that answers once its action ended may take: its walks and mineflayer
 // waits added up, at most LONGEST.
 // body marks a route that moves or uses the body.
@@ -18,7 +18,7 @@ const EVENT = 20000
 const PLACE = 5000
 // mineflayer's wait for a food item to be eaten.
 const CONSUME = 2500
-// Routes whose walks have no bound in bot.js, or that walk once per item or per cell.
+// Routes whose walks have no bound in lib/routes/, or that walk once per item or per cell.
 const LONGEST = 600000
 
 const X = { type: 'num', min: -30000000, max: 30000000 }
@@ -41,7 +41,7 @@ const ON = { type: 'enum', values: ['1', '0'] }
 const FACE = { type: 'enum', values: ['N', 'S', 'E', 'W'] }
 const THEN = { type: 'enum', values: ['blockat'] }
 const TUNNEL_DIR = { type: 'enum', values: ['n', 's', 'e', 'w', 'north', 'south', 'east', 'west'] }
-// The reflexes bot.js runs, in the order it checks them.
+// The reflexes the bot runs, in the order it checks them.
 const REFLEXES = ['lava_watch', 'bunker', 'combat', 'unstuck', 'current_watch', 'narrator', 'trek', 'flee_to_player']
 
 const TOOLS = [
@@ -65,7 +65,7 @@ const TOOLS = [
   { name: 'events', route: '/events', description: 'Interrupt events since a cursor: hurt, health_critical, low_food, death, hostile (a mob in sight within 16), nightfall, combat, bunker, job ends, gather and build milestones, player and server.', params: { since: CURSOR }, lists: ['events'] },
 
   // Moving
-  { name: 'goto', route: '/goto', body: true, description: 'Walk to x,z (y optional: without it the surface, with it the floor nearest y), a waypoint, a player you can see or last saw, or the nearest block type in sight (stops adjacent). range N stops within N, 0 on the cell. It drops at most 3 and shuts doors it opened. It says why it gave up. A plan ending over 2 (or range) off your y or dropping over 3 needs accept. preview only plans.', params: { ...AT, waypoint: WAYPOINT, player: PLAYER, block: NAME, range: { type: 'int', min: 0, max: 32 }, preview: FLAG, accept: FLAG }, timeoutMs: LONGEST },
+  { name: 'goto', route: '/goto', body: true, description: 'Walk to x,z (y optional: without it the surface, with it the floor nearest y), a waypoint, a player you can see or last saw, or the nearest block type in sight (stops adjacent). range N stops within N, 0 on the cell. It drops at most 3 and shuts doors it opened. It says why it gave up. A plan ending over 2 (or range) off the y you asked for or dropping over 3 needs accept. preview only plans.', params: { ...AT, waypoint: WAYPOINT, player: PLAYER, block: NAME, range: { type: 'int', min: 0, max: 32 }, preview: FLAG, accept: FLAG }, timeoutMs: LONGEST },
   { name: 'follow', route: '/follow', body: true, description: 'Keep following a player you see or whose nametag shows, repathing as they move, until unfollow or stop. It waits out fights, jobs, your other calls, reflex moves and lost sight, stays put in a bunker, and runs the doorway drill when wedged.', params: { name: required(PLAYER), range: RANGE } },
   { name: 'unfollow', route: '/unfollow', description: 'Stop following.', params: {} },
   { name: 'stop', route: '/stop', description: 'Cancel the path, clear movement, stop all jobs, end a build or bunker.', params: {} },
@@ -118,9 +118,9 @@ const TOOLS = [
 
   // Fighting
   // The route's own budget for 5 swings, and one equip wait it cannot cut short.
-  { name: 'strike', route: '/strike', body: true, description: 'Up to max melee swings at a creature in sight within 16, approaching it, with item from your pockets (iron_sword by default). Ends early on lost sight. Never players or creepers.', params: { name: required(NAME), item: NAME, max: { type: 'int', min: 1, max: 5 } }, timeoutMs: strikeBudgetMs(5) + EVENT },
+  { name: 'strike', route: '/strike', body: true, description: 'Up to max melee swings at a creature in sight within 16, approaching it, with item from your pockets (iron_sword by default). Ends early on lost sight, or with reason stopped when stop or a reflex takes the legs. Never players or creepers.', params: { name: required(NAME), item: NAME, max: { type: 'int', min: 1, max: 5 } }, timeoutMs: strikeBudgetMs(5) + EVENT },
   // 8 shots, each a 1.55 s draw and a 2 s watch for the kill, and the bow's equip.
-  { name: 'shoot', route: '/shoot', body: true, description: 'Up to max full-charge bow shots at a creature in sight within 25, without approaching. Ends on a kill, the target gone or unseen, no clear line, no arrows, or two arrows at unchanged range (a wall). Never players.', params: { name: required(NAME), max: { type: 'int', min: 1, max: 8 } }, timeoutMs: 8 * (1550 + 2000) + EVENT },
+  { name: 'shoot', route: '/shoot', body: true, description: 'Up to max full-charge bow shots at a creature in sight within 25, without approaching. Ends on a kill, the target gone or unseen, no clear line, no arrows, or two arrows at unchanged range (a wall). Ends with outcome stopped when stop or a reflex takes the legs. Never players.', params: { name: required(NAME), max: { type: 'int', min: 1, max: 8 } }, timeoutMs: 8 * (1550 + 2000) + EVENT },
   { name: 'guard', route: '/guard', body: true, description: 'Raise (1) or lower (0) your shield, or a 1.7.10 sword block. A walk or swing lowers it. The block returns after a fight until on is 0, a death or a non-sword in hand.', params: { on: ON } },
   { name: 'brace', route: '/brace', description: 'Hold the legs against reflexes for sec seconds, except creepers, low health, lava, drowning, the bunker and unexplained hits. stop releases it early.', params: { sec: { type: 'int', min: 1, max: 30 } } },
   // The longest hold, a swing still running at its end and the sword's equip.

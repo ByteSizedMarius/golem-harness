@@ -15,11 +15,11 @@ Blocks come from your pockets: dirt first, then cobblestone and other stone-like
 
 Pillaring up holds against zombies, husks and zombie villagers, digging in against spiders. Digging in also holds against skeletons, strays and bogged. With feet or head in water or lava, any other mob near, both kinds near, or a mob too close for the build to finish first, the body flees instead, and the `bunker` tool refuses.
 
-A mob's hit before the body is out of reach stops the build. After that hit, or a build that fails, the body flees. An arrow does not stop a dig-in. While it builds, no tool walks or digs (the refusal names the bunker), and `stop` ends the build.
+A mob's hit before the body is out of reach stops the build. After that hit, or a build that fails, the body flees if the reflex started the build. The `bunker` tool answers with the reason instead. An arrow does not stop a dig-in. While it builds, no tool walks or digs (the refusal names the bunker), and `stop` ends the build.
 
 ## Inside and out
 
 The bunker event says where the body sits, whether the shelter is sealed, and which cells to dig to leave. Inside, the combat reflex holds the body still: fleeing, taking cover and chasing wait until it leaves the cell, and it still swings at whatever comes within reach. You decide when to come out.
 
 - Dug in: `digat` the cap, then `pillar` climbs out, fills the shaft from the same blocks the bunker uses and rises exactly the height you ask for.
-- Shell: `digat` the two wall blocks the event names, then `goto` the ground below with its y (without y it stops on the ledge). A drop of more than 3 hurts.
+- Shell: on a pillar of 2, `digat` the two wall blocks the event names, then `goto` the ground below with its y (without y it stops on the ledge). `goto` drops at most 2, so on a taller pillar `digat` the block under the feet, one at a time, down to the ground. A drop of more than 3 hurts.

@@ -3,9 +3,9 @@
 ## Key rules
 
 - A creeper flee in `takenBy` or a combat event says where the creeper stood. Walk around it, not back toward it.
-- A creeper swells within 3, explodes 1.5 s later, and its blast reaches 6. `shoot` it from beyond 8.
+- A creeper swells within 3, explodes 1.5 s later, and its blast reaches 6. `shoot` it from beyond your stance's flee distance.
 
-You are the strategist, the combat reflex is the trigger finger. It runs in the body every 300 ms, and by the time you read an event the fight is often over. Read the narration, decide to retreat, press or reposition, and override with `stop`, `shoot` or `strike`.
+You are the strategist, the combat reflex is the trigger finger. It runs every 300 ms, so a fight is often over before you read its event. Read the narration, decide to retreat, press or reposition, and override with `stop`, `shoot` or `strike`.
 
 ## How the reflex decides
 
@@ -13,9 +13,9 @@ You are the strategist, the combat reflex is the trigger finger. It runs in the 
 - Behaviour gate: sustained closing at pursuit pace. A zombie charges at about 3.8 blocks/s, and the trigger is 0.6.
 - Attribution: an attacker you perceive is named ("hit by zombie SW ~2"), any other reads as "something", and both are engaged past both gates. An arrow names the nearest skeleton you see within 15 that faces you. Otherwise it is "hit by an arrow", with a bearing only when you saw the arrow.
 - It kites what it cannot afford to trade with (creepers always, and wither skeletons) and disengages on a tripwire scaled to the last hit taken.
-- Damage with no attribution at all freezes all action. A fall, lava, fire, or a sourceless hit with no hostile within 4 blocks only raises a hurt event.
+- Damage with no attribution at all freezes all action. A fall, lava, fire, or a sourceless hit with no hostile within 4 only raises a hurt event.
 - Perception may flow through the floor, urgency must flow through the path. Enemies a storey away with no eye line are `watched:`: narrated, never driving the legs or the pack count.
-- The legs have one owner. Your movement tools hold a soft lane that the reflex's own moves defer to, and `brace` holds a hard one that only a creeper, low health, lava, drowning, an unexplained hit or the bunker overrides. Mid-fight, `follow` yields to combat entirely.
+- The legs have one owner. Your movement tools hold a soft lane that the reflex's own moves defer to, and `brace` holds a hard one that only a creeper, low health, lava, drowning, an unexplained hit or the bunker overrides. `follow` yields to combat mid-fight.
 - `stance` sets the posture the reflex fights by. The reflex flees a creeper within 16 (12 vanguard, 8 skirmish). Farther out it shoots the creeper when it has a bow and a clear line, else flees.
 - A `goto`, `collect` or job that a reflex stopped names the reflex in `takenBy`. The combat reflex adds what it did and where a threat you perceive stands.
 
@@ -30,13 +30,13 @@ You are the strategist, the combat reflex is the trigger finger. It runs in the 
 
 ## Beside a teammate
 
-- Agree fire lanes before the cave. The default split: they melee, you hold ranged beyond an agreed line, unless you agree another.
+- Agree fire lanes before the cave. The default split: they melee, you hold ranged beyond an agreed line.
 - Never loose through their lane. Before a creeper you both run.
 
 ## Fleeing
 
-A flee ends on a cell you have seen: solid floor, no drop over 3 beside it or on the way there, no lava or fire within 2 of it or of the way. It lies 8 to 16 blocks away from the threat and the other hostiles you perceive within 16. With no such cell the body stands still and raises its guard. A creeper flee and a stand each raise one combat event, at most one per 8 s.
+A flee ends on a cell you have seen: solid floor, no drop over 3 beside it or on the way, no lava or fire within 2 of it or the way. It lies 8 to 16 blocks from you, away from the threat and other hostiles you perceive within 16, and farther from the nearest than you are now. With no such cell the body stands still and raises its guard. A creeper flee and a stand each raise one combat event, at most one per 8 s.
 
 flee_to_player is on by default. When the combat reflex flees, it runs to a player you see within 24 blocks, farther from the threat than you, if such a way leads there, and a `flee_to_player` event arrives through `wait_events`. `reflexes(name: "flee_to_player", on: "0")` switches it off.
 
-On top of a `pillar` the body stays put. It leaves only when a mob that can hit you in melee has your health under the disengage tripwire. A flee it holds back raises a combat event too.
+On a `pillar` top the body stays put. It leaves only when a mob that can hit you in melee has your health under the disengage tripwire. A flee it holds back raises a combat event too.
