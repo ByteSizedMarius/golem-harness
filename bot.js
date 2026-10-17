@@ -38,6 +38,9 @@ const { createLegs, bindLegs, wirePlanKnownReset, wireGateManners, wireLivePath,
 const { createJobBoard, bindJobBoard } = require('./lib/bot/jobs')
 const { createFollow, bindFollow } = require('./lib/bot/follow')
 const { createAwareness, bindAwareness, wireStaleEntities, wireCrumbRecording, wireCrumbForget, wirePresenceTick } = require('./lib/bot/awareness')
+const { createUnstuck, bindUnstuck } = require('./lib/bot/unstuck')
+const { createPlacing, bindPlacing } = require('./lib/bot/placing')
+const { createWatchReflexes, bindWatchReflexes } = require('./lib/bot/watch-reflexes')
 
 const bot = mineflayer.createBot({
   // MC_VERSION=auto lets mineflayer detect the server's version from the handshake
@@ -89,7 +92,7 @@ bot.loadPlugin(collectBlock)
 bot.loadPlugin(armorManager)   // auto-equip best armor (freebie for the survival ramp; no-op on Peaceful)
 const ctx = createContext()
 ctx.bot = bot
-Object.assign(ctx, { hpMelee, meleeThreat, resetThreatState })
+Object.assign(ctx, { hpMelee, meleeThreat, resetThreatState, centerOnCell, placeFiller, fillers })
 wireEarly()
 
 const shared = {}
@@ -329,434 +332,11 @@ const { resolveBlockIds, resolveItem, heldInfo, PICK_TIER, neededPickTier, pickF
 createReflexes(ctx)
 const { reflexes, startReflexes } = ctx
 
-// unstuck: watch for the PATHFINDER wedging — isMoving() true but the bot isn't actually advancing.
-// Conservative by design: gated on isMoving() so it never touches legitimate slow mining (which isn't
-// pathfinder movement).
-reflexes.push({
-  name: 'unstuck', on: true, active: false,
-  _lastPos: null, _stallStart: 0,
-  // The cells the walk made progress in, oldest first.
-  _crumbs: [],
-  check (bot) {
-    if (!this._hooked) {                                        // planner heartbeat hookup (07-22)
-      try {
-        // True from a stuck reset until the goal changes, another reset comes or a replan finds no path.
-        bot.on('path_reset', (reason) => { this._stuckLoop = reason === 'stuck' })
-        bot.on('goal_updated', (g, dynamic) => {
-          this._stuckLoop = false
-          this._dynamic = !!dynamic
-        })
-        // A replan after a stuck reset is no heartbeat.
-        bot.on('path_update', (r) => {
-          if (r.path.length === 0) this._stuckLoop = false
-          if (!this._stuckLoop) this._lastPathUpdate = Date.now()
-        })
-        this._hooked = true
-      } catch (e) {}
-    }
-    let moving = false
-    // The path stays empty for a tick between a stuck reset and its replan.
-    try { moving = bot.pathfinder.isMoving() || (!!this._stuckLoop && !!bot.pathfinder.goal) } catch (e) {}
-    if (!moving) { this._stallStart = 0; this._lastPos = null; this._crumbs = []; return false }
-    const p = bot.entity.position
-    if (!this._lastPos) { this._lastPos = p.clone(); this._stallStart = 0; return false }
-    const advanced = p.distanceTo(this._lastPos) >= 0.35
-    this._lastPos = p.clone()
-    if (advanced) {                                             // still making progress
-      const c = p.floored()
-      const last = this._crumbs[this._crumbs.length - 1]
-      if (!last || !last.equals(c)) this._crumbs = [...this._crumbs.slice(-7), c]
-      this._stallStart = 0
-      return false
-    }
-    if (!this._stallStart) { this._stallStart = Date.now(); return false }
-    const stalled = Date.now() - this._stallStart
-    // A long-goal path COMPUTATION is indistinguishable from a wedge out here (isMoving true,
-    // zero movement). While the planner still emits path_update heartbeats, give it 30s
-    // before declaring wedged — 10s patience was murdering healthy 400-block treks (07-22).
-    if (Date.now() - (this._lastPathUpdate || 0) < 8000 && stalled < 30000) return false
-    return stalled > 10000                                      // wedged >10s while pathing
-  },
-  async act () {
-    this._stallStart = 0
-    this._lastPos = null
-    const crumbs = this._crumbs
-    this._crumbs = []
-    await climbLadder(crumbs, !!this._dynamic)
-  }
-})
+createUnstuck(ctx)
+const { unstuckReflex, unstuckKnows, passable } = ctx
 
-// How long the ladder watches a replanned walk for progress.
-const UNSTUCK_WATCH_TICKS = 100
-
-// Frees a wedged body by replan, step back, open or jump, then break, and stops the walk if none works.
-async function climbLadder (crumbs, dynamic) {
-  const goal = bot.pathfinder.goal
-  if (!goal) return
-  const stuckAt = bot.entity.position.clone()
-  legs.take('unstuck', 'free the body from a wedge')
-  const mark = legs.mark()
-  const tried = []
-  let step = headingStep()
-  // True once the ladder is done: the body is free or the walk went to someone else.
-  const rung = async (name, what, event) => {
-    tried.push(name)
-    const how = await replanWatch(goal, dynamic, stuckAt, mark)
-    console.log(`[unstuck] ${name} ${what}: ${how}`)
-    if (how === 'freed' && event) emitEvent('reflex', 'unstuck: ' + event)
-    if (how === 'stuck') step = headingStep()
-    return how !== 'stuck'
-  }
-  const elsewhere = (name) => {
-    if (legs.mark() === mark) return false
-    console.log(`[unstuck] ${name}: the legs went elsewhere`)
-    return true
-  }
-
-  await idleLegs()
-  const wedge = bodyOverlap()
-  const free = wedge && nearestStandable()
-  if (free) await centerOnCell(free)
-  else if (!wedge) await centerOnCell()
-  const from = cellText(bot.entity.position.floored())
-  const inside = !wedge ? '' : free ? `, out of the ${wedge.name}` : ` inside the ${wedge.name}`
-  if (await rung('replan', `from ${from}${inside}`, `replanned the walk from ${from}`)) return
-
-  if (elsewhere('step back')) return
-  const here = bot.entity.position.floored()
-  const back = crumbs.slice().reverse().find((c) => !c.equals(here) && c.y === here.y && Math.hypot(c.x - here.x, c.z - here.z) <= 3 && standable(c))
-  if (!back) console.log('[unstuck] step back: no earlier free cell')
-  else {
-    await idleLegs()
-    if (await centerOnCell(back)) {
-      if (await rung('step back', `to ${cellText(back)}`, `stepped back to ${cellText(back)}`)) return
-    } else {
-      tried.push('step back')
-      console.log(`[unstuck] step back to ${cellText(back)}: did not get there`)
-    }
-  }
-
-  if (elsewhere('open or jump')) return
-  const front = bot.entity.position.floored().plus(step)
-  const door = [front, front.offset(0, 1, 0)].map((c) => bot.blockAt(c))
-    .find((b) => b && OPENABLE.test(b.name) && !b.name.startsWith('iron_') && unstuckKnows(b.position) && !b.getProperties().open)
-  if (door) {
-    const what = `the ${door.name} at ${cellText(door.position)}`
-    await idleLegs()
-    const failed = await tryStep(() => bot.activateBlock(door))
-    if (failed) {
-      tried.push('open')
-      console.log(`[unstuck] open ${what}: ${failed}`)
-    } else if (await rung('open', what, `opened ${what}`)) return
-  } else if (canJumpOnto(front)) {
-    const what = `the ${bot.blockAt(front).name} at ${cellText(front)}`
-    await idleLegs()
-    if (await jumpOnto(front)) {
-      if (await rung('jump', `onto ${what}`, `jumped onto ${what}`)) return
-    } else {
-      tried.push('jump')
-      console.log(`[unstuck] jump onto ${what}: did not get up`)
-    }
-  } else console.log('[unstuck] open or jump: no door or step in front')
-
-  if (elsewhere('break')) return
-  const start = bot.entity.position.floored()
-  const plan = breakPlan(start.plus(step))
-  if (plan.refusal) {
-    tried.push(`break refused (${plan.refusal})`)
-    console.log(`[unstuck] break refused: ${plan.refusal}`)
-  } else {
-    await idleLegs()
-    const out = await breakThrough(plan.cells, start, step)
-    const names = (list) => list.map((b) => `${b.name} at ${cellText(b.cell)}`).join(' and ')
-    tried.push('break')
-    if (out.broken.length) {
-      const fate = out.left.length ? `could not put back ${names(out.left)}` : out.broken.length > 1 ? 'put them back' : 'put it back'
-      emitEvent('reflex', `unstuck: broke ${names(out.broken)} to get through${out.through ? '' : ' but the way on was blocked'}, ${fate}`)
-    }
-    const what = names(out.broken.length ? out.broken : plan.cells)
-    if (out.through) {
-      if (await rung('break', what, null)) return
-    } else console.log(`[unstuck] break ${what}: not through${out.error ? ` (${out.error})` : ''}`)
-  }
-
-  if (elsewhere('stop')) return
-  await idleLegs()
-  const text = stuckText(tried, step)
-  console.log('[unstuck] stop ' + text)
-  emitEvent('reflex', 'unstuck: ' + text)
-}
-
-// Waits 2 ticks after the stop for the server to correct the position.
-async function idleLegs () {
-  stopPath()
-  bot.clearControlStates()
-  await bot.waitForTicks(2)
-}
-
-// 'freed' once the body reaches the goal or is 1.5 from stuckAt and nearer the goal, 'ended' if the goal or legs went elsewhere, else 'stuck'.
-async function replanWatch (goal, dynamic, stuckAt, mark) {
-  bot.pathfinder.setGoal(goal, dynamic)
-  const h0 = goal.heuristic(stuckAt.floored())
-  for (let t = 0; t < UNSTUCK_WATCH_TICKS; t += 5) {
-    await bot.waitForTicks(5)
-    const p = bot.entity.position
-    if (goal.isEnd(p.floored())) return 'freed'
-    if (bot.pathfinder.goal !== goal || legs.mark() !== mark) return 'ended'
-    if (p.distanceTo(stuckAt) >= 1.5 && goal.heuristic(p.floored()) < h0) return 'freed'
-  }
-  return 'stuck'
-}
-
-async function tryStep (fn) {
-  try {
-    await fn()
-    return null
-  } catch (e) {
-    return e.message
-  }
-}
-
-function headingStep () {
-  const dx = -Math.sin(bot.entity.yaw)
-  const dz = -Math.cos(bot.entity.yaw)
-  return Math.abs(dx) > Math.abs(dz) ? new Vec3(Math.sign(dx), 0, 0) : new Vec3(0, 0, Math.sign(dz))
-}
-
-// The cells the body's box touches and the row beneath them.
-function bodyCells () {
-  const p = bot.entity.position
-  const cells = []
-  for (let x = Math.floor(p.x - 0.3); x <= Math.floor(p.x + 0.3); x++) {
-    for (let y = Math.floor(p.y) - 1; y <= Math.floor(p.y + 1.8); y++) {
-      for (let z = Math.floor(p.z - 0.3); z <= Math.floor(p.z + 0.3); z++) cells.push(new Vec3(x, y, z))
-    }
-  }
-  return cells
-}
-
-// The first block whose collision box the body's box overlaps, or null.
-function bodyOverlap () {
-  const p = bot.entity.position
-  const E = 1e-3
-  for (const c of bodyCells()) {
-    const b = bot.blockAt(c)
-    for (const s of (b && b.shapes) || []) {
-      if (p.x + 0.3 > c.x + s[0] + E && p.x - 0.3 < c.x + s[3] - E && p.y + 1.8 > c.y + s[1] + E && p.y < c.y + s[4] - E &&
-        p.z + 0.3 > c.z + s[2] + E && p.z - 0.3 < c.z + s[5] - E) return b
-    }
-  }
-  return null
-}
-
-function unstuckKnows (p) {
-  return bodyCells().some((c) => c.equals(p)) || cellKnown(p)
-}
-
-function passable (p) {
-  const b = bot.blockAt(p)
-  return !!b && b.boundingBox === 'empty' && !/water|lava/.test(b.name)
-}
-
-function standable (c) {
-  const floor = bot.blockAt(c.offset(0, -1, 0))
-  return [c, c.offset(0, 1, 0), c.offset(0, -1, 0)].every(unstuckKnows) && passable(c) && passable(c.offset(0, 1, 0)) &&
-    !!floor && floor.boundingBox === 'block'
-}
-
-function nearestStandable () {
-  const p = bot.entity.position
-  const feet = p.floored()
-  const cells = []
-  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) cells.push(feet.offset(dx, 0, dz))
-  const dist = (c) => Math.hypot(c.x + 0.5 - p.x, c.z + 0.5 - p.z)
-  return cells.sort((a, b) => dist(a) - dist(b)).find(standable) || null
-}
-
-function canJumpOnto (front) {
-  const b = bot.blockAt(front)
-  const above = front.offset(0, 1, 0)
-  const lift = bot.entity.position.floored().offset(0, 2, 0)
-  return !!b && b.boundingBox === 'block' && Math.max(...b.shapes.map((s) => s[4])) <= 1 &&
-    [front, above, above.offset(0, 1, 0), lift].every(unstuckKnows) &&
-    passable(above) && passable(above.offset(0, 1, 0)) && passable(lift)
-}
-
-async function jumpOnto (front) {
-  const up = () => {
-    const p = bot.entity.position
-    return p.y >= front.y + 1 && Math.floor(p.x) === front.x && Math.floor(p.z) === front.z
-  }
-  await bot.lookAt(new Vec3(front.x + 0.5, bot.entity.position.y + 1.62, front.z + 0.5), true)
-  try {
-    bot.setControlState('forward', true)
-    bot.setControlState('jump', true)
-    for (let i = 0; i < 20 && !up(); i++) await bot.waitForTicks(1)
-  } finally {
-    bot.setControlState('jump', false)
-    bot.setControlState('forward', false)
-  }
-  return up()
-}
-
-// The blocks at front and above it to break and put back, or why none may be broken.
-function breakPlan (front) {
-  const cells = [front, front.offset(0, 1, 0)].filter((c) => {
-    const b = bot.blockAt(c)
-    return !!b && b.boundingBox === 'block'
-  })
-  if (!cells.length) return { refusal: 'nothing solid in front' }
-  if (!cells.every(unstuckKnows)) return { refusal: 'the block in front is unseen' }
-  const need = {}
-  for (const c of cells) {
-    const b = bot.blockAt(c)
-    const why = keepWhole(b, c)
-    if (why) return { refusal: `the ${b.name} at ${cellText(c)} ${why}` }
-    need[b.name] = (need[b.name] || 0) + 1
-  }
-  for (const [name, n] of Object.entries(need)) {
-    const have = bot.inventory.items().filter((i) => i.name === name).reduce((s, i) => s + i.count, 0)
-    if (have < n) return { refusal: `no ${name} in pockets to put back` }
-  }
-  const floor = front.offset(0, -1, 0)
-  const fb = bot.blockAt(floor)
-  if (!unstuckKnows(floor) || !fb || fb.boundingBox !== 'block') return { refusal: `no floor to walk on at ${cellText(floor)}` }
-  return { cells: cells.map((c) => ({ cell: c, name: bot.blockAt(c).name })) }
-}
-
-// Why the block b at c stays whole, or null.
-function keepWhole (b, c) {
-  if (!b.diggable || b.name === 'bedrock') return 'cannot be broken'
-  if (CONTAINERS.test(b.name)) return 'is a container'
-  if (OPENABLE.test(b.name)) return 'is a door'
-  if (/(^|_)bed$/.test(b.name)) return 'is a bed'
-  const wet = (p) => unstuckKnows(p) && /water|lava/.test((bot.blockAt(p) || {}).name || '')
-  if ((b.getProperties() || {}).waterlogged || NEIGHBOURS.some(([dx, dy, dz]) => wet(c.offset(dx, dy, dz)))) return 'holds back liquid'
-  return null
-}
-
-// Breaks cells, walks through and puts the same blocks back, from start if the way on is blocked.
-async function breakThrough (cells, start, step) {
-  let broken = []
-  let error = null
-  for (const { cell, name } of [...cells].reverse()) {
-    await equipPickFor(name)
-    error = await tryStep(() => bot.dig(bot.blockAt(cell)))
-    if (error || !passable(cell)) break
-    broken.push({ cell, name })
-  }
-  broken = broken.sort((a, b) => a.cell.y - b.cell.y)
-  const front = start.plus(step)
-  const past = front.plus(step)
-  let through = false
-  if (broken.length === cells.length && standable(past)) {
-    error = (await tryStep(async () => { through = await centerOnCell(front) && await centerOnCell(past) })) || error
-  }
-  if (!through) error = (await tryStep(() => centerOnCell(start))) || error
-  const left = []
-  for (const b of broken) {
-    const item = bot.inventory.items().find((i) => i.name === b.name)
-    if (item) error = (await tryStep(() => placeFiller(b.cell, item))) || error
-    if (bot.blockAt(b.cell).name !== b.name) left.push(b)
-  }
-  return { through, broken, left, error }
-}
-
-function stuckText (tried, step) {
-  const feet = bot.entity.position.floored()
-  const front = feet.plus(step)
-  const wall = [front, front.offset(0, 1, 0)].find((c) => {
-    const b = bot.blockAt(c)
-    return !!b && b.boundingBox === 'block' && unstuckKnows(c)
-  })
-  const at = `stuck at ${cellText(feet)}` + (wall ? ` against ${bot.blockAt(wall).name} at ${cellText(wall)}` : '')
-  return `${at}, tried ${tried.join(', ')}`
-}
-
-// current_watch: warn the instant FLOWING water (a current that pushes) comes within ~2 blocks —
-// the exact hazard that dragged me under and that I'm otherwise blind to. Change-gated: fires ONCE
-// on ENTERING a current zone (re-arms when clear), so it never spams. Flow = a water block whose
-// metadata != 0 (0 is a still source). Emits a [reflex] the Monitor tails, so I'm woken before it grabs me.
-reflexes.push({
-  name: 'current_watch', on: true, active: false,
-  _near: false, _dir: null, _dist: 9,
-  check (bot) {
-    let near = false, dir = null, dist = 9
-    try {
-      const p = bot.entity.position.floored()
-      const V = require('vec3').Vec3
-      for (let dx = -2; dx <= 2; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -2; dz <= 2; dz++) {
-        const c = new V(p.x + dx, p.y + dy, p.z + dz)
-        const b = bot.blockAt(c)
-        if (b && b.name.includes('water') && b.metadata !== 0 && perceived(c)) {   // flowing, not a still source
-          const d = Math.abs(dx) + Math.abs(dz)
-          if (d < dist) { dist = d; dir = compass(dx, dz) || 'here' }
-          near = true
-        }
-      }
-    } catch (e) {}
-    this._dir = dir; this._dist = dist
-    // edge-gate + COOLDOWN: spreading water flickers at the range boundary, so "newly entering"
-    // could re-trigger every tick (machine-gunned 12 events on 07-12) — one alarm per episode.
-    const fire = near && !this._near && Date.now() - (this._lastFire || 0) > 15000
-    if (fire) this._lastFire = Date.now()
-    this._near = near
-    return fire
-  },
-  async act (bot) {
-    emitEvent('current', `flowing water ${this._dir || 'near'} ~${this._dist} — CURRENT, it can push you`, { dir: this._dir, dist: this._dist })
-  }
-})
-
-// narrator: the ambient-awareness pulse. check() diffs a salient snapshot against the last pulse; when
-// something meaningful shifts (day-phase, HP/food swing, a new perceptible hostile within 16, a >14-block move) it
-// logPulse()s a lean line. Change-gated + rate-capped (>=2.5s) so it's holistic, not spammy — and it's
-// PULL (I read /pulse when I look), never a push interrupt. Toggle off via /reflexes if I want silence.
-reflexes.push({
-  name: 'narrator', on: true, active: false,
-  _last: null, _lastT: 0, _minGap: 2500, _msg: '',
-  check (bot) {
-    try {
-      const now = Date.now()
-      const pos = bot.entity.position
-      const snap = {
-        phase: bot.time && skyInSight() ? dayPhase(bot.time.timeOfDay) : null,
-        health: Math.round(bot.health), food: Math.round(bot.food),
-        pos: pos.clone(), hostiles: new Set()
-      }
-      let nearest = null, fill = null
-      try {
-        for (const e of liveEntities()) {
-          if (!e.position) continue
-          const nm = String(e.name || e.displayName || '').toLowerCase()
-          if (!HOSTILE_NAMES.has(nm)) continue
-          const d = e.position.distanceTo(pos)
-          if (d > 16 || !entityPerceptible(e, fill ??= reflexes.find(r => r.name === 'combat').fairFill(bot))) continue
-          snap.hostiles.add(e.id); if (!nearest || d < nearest.d) nearest = { e, d, nm }
-        }
-      } catch (e) {}
-      if (!this._last) { this._last = snap; return false }        // seed baseline on first tick
-      if (now - this._lastT < this._minGap) return false          // rate cap
-
-      const L = this._last, ch = []
-      // Without the sky in sight the last phase seen stands.
-      if (snap.phase === null) snap.phase = L.phase
-      else if (snap.phase !== L.phase) ch.push(snap.phase)
-      if (L.health - snap.health >= 2) ch.push(`HP ${L.health}→${snap.health}`)
-      else if (snap.health - L.health >= 4) ch.push(`HP up ${L.health}→${snap.health}`)
-      if (L.food - snap.food >= 2) ch.push(`food ${L.food}→${snap.food}`)
-      for (const id of snap.hostiles) {
-        if (!L.hostiles.has(id) && nearest) { ch.push(`hostile ${nearest.nm} ${compass(nearest.e.position.x - pos.x, nearest.e.position.z - pos.z)} ~${Math.round(nearest.d)}`); break }
-      }
-      if (snap.pos.distanceTo(L.pos) >= 14) ch.push(`at (${Math.round(snap.pos.x)},${Math.round(snap.pos.z)})`)
-
-      if (!ch.length) return false                                // nothing salient — keep the baseline
-      this._msg = ch.join('; '); this._last = snap; this._lastT = now
-      return true
-    } catch (e) { return false }
-  },
-  async act () { logPulse(this._msg) }
-})
+createWatchReflexes(ctx)
+const { currentWatchReflex, narratorReflex, trekReflex, lavaWatchReflex } = ctx
 
 createJobBoard(ctx)
 const { deaths, jobs, yieldJob } = ctx
@@ -771,56 +351,8 @@ const GATHER_MAX_DROP = 2
 const GATHER_MAX_RISE = 4   // don't target logs more than ~4 above feet — out of dig-reach without
                             // climbing, so with canDig=false they just time out. Get the reachable trunk.
 
-// place `names[]` (first match in inventory wins) at an exact coord, reusing the /roof
-// placement approach: prefer the block below as reference (face +Y), else a solid side
-// neighbor (face pointing back toward the target). Returns {done, placed?, skipped?, ...}.
-// walk=false: place from where I stand, NO pathfinder trip. The dig verbs (stair/tunnel) depend on
-// the bot staying ON its launch cell — a GoalNear walk here once dragged the bot off mid-step and
-// the follow-up nudge chased a target from 4 blocks away (the 07-11 open-terrain ascend stall).
-// ---- SOFT COVER (07-20, a 4.6 pilot's field report): thin snow and soft plants read as
-// "occupied" to naive cell checks — layer snow's boundingBox even lies ('block') — but the
-// game treats them as replaceable, and snowfall RE-COVERS half-built courses in cold biomes,
-// so a snowy plain bricked every build verb with "cell occupied by snow" / silent skips.
-// Doctrine: never treat soft cover as an obstacle OR as a reference face; break it (instant
-// with any tool) so placement lands in honest air.
-const SOFT_COVER = new Set(['snow', 'short_grass', 'grass', 'tall_grass', 'fern', 'large_fern', 'dead_bush'])
-const isSoftCover = (b) => !!b && SOFT_COVER.has(b.name)
-async function clearSoftCover (p) {
-  const b = bot.blockAt(p)
-  if (isSoftCover(b)) { try { await bot.dig(b) } catch (e) {} }
-  return bot.blockAt(p)
-}
-
-async function macroPlaceAt(Vec3, x, y, z, names, walk = true) {
-  const target = new Vec3(x, y, z)
-  const tb = bot.blockAt(target)
-  if (tb && tb.boundingBox === 'block' && !isSoftCover(tb)) return { done: true, skipped: true }
-  let ref = null, face = null
-  const below = bot.blockAt(new Vec3(x, y - 1, z))
-  if (below && below.boundingBox === 'block' && !isSoftCover(below)) { ref = below; face = new Vec3(0, 1, 0) }
-  else {
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const nb = bot.blockAt(new Vec3(x + dx, y, z + dz))
-      if (nb && nb.boundingBox === 'block' && !isSoftCover(nb)) { ref = nb; face = new Vec3(-dx, 0, -dz); break }
-    }
-  }
-  if (!ref) return { done: false }
-  const nameList = Array.isArray(names) ? names : [names]
-  let it = null
-  for (const n of nameList) { it = bot.inventory.items().find(m => m.name === n); if (it) break }
-  if (!it) return { done: false, noItem: true }
-  try {
-    if (walk) await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 3))
-    refuseWhileBuilding()
-    await clearSoftCover(target)
-    refuseWhileBuilding()
-    await bot.equip(it, 'hand')
-    await bot.lookAt(target.offset(0.5, 0.5, 0.5), true)
-    refuseWhileBuilding()
-    await bot.placeBlock(ref, face)
-    return { done: true, placed: true }
-  } catch (e) { return Object.assign({ done: false, error: e.message }, walkGaveUp(e)) }
-}
+createPlacing(ctx)
+const { isSoftCover, clearSoftCover, macroPlaceAt, placeSpot, reachToPlace, isInteractive, sneakPlace, passageAxis, occupant, fillFrom } = ctx
 
 createSight(ctx)
 const { touchesFill, holdsWater, gridWalk, lineCell, heldLight, freshLight, seesLit, findVisible, nearestVisible, cellKnown, knownCell, outOfSight, perceived, bodyTouches, seenNow, ck, floodPassable, airFlood, showsNow, skyInSight, raySweep, losClear, entityPerceptible, nametagVisible } = ctx
@@ -831,72 +363,6 @@ function wireLightPackets () {
 // ==== VISION 2 (2026-07-11): the vertical sense, the air flood-fill, and the ray-sweep retina ====
 // Two tiers of knowing, everywhere: seen (SEEN, or lit sight now) / unknown (silence means "didn't
 // look", never "clear").
-
-// ---- TREK SENSE (07-16, designed trail-side with the helmsman: "spot the environment as it
-// changes and point out some things" on long ranges). The passenger-window sense: while the body
-// TRAVELS, sweep the retina along the direction of MOTION every ~20 blocks and fingerprint the
-// country — biome, terrain classes in view, and BUILT blocks out in the wild. Speak ONE compact
-// [event] scan line ONLY when the fingerprint CHANGES (throttled 15s). Silence = same country,
-// not "didn't look". Fair by construction: the same eye-rays /gaze uses, no new channel. Pushed
-// LAST so combat/unstuck always outrank sightseeing; sensing only, never touches the controls.
-reflexes.push({
-  name: 'trek', on: true, active: false,
-  _lastPos: null, _fp: null, _lastSayT: 0,
-  check (bot) {
-    try {
-      const p = bot.entity.position
-      if (this._lastPos && p.distanceTo(this._lastPos) < 20) return false
-      let moving = false
-      try { moving = bot.pathfinder.isMoving() || !!bot.pathfinder.goal } catch (e) {}
-      if (!moving) { this._lastPos = p.clone(); return false }   // parked: keep the anchor fresh, stay quiet
-      return true
-    } catch (e) { return false }
-  },
-  async act (bot) {
-    try {
-      const p = bot.entity.position
-      const from = this._lastPos
-      this._lastPos = p.clone()
-      let yaw = bot.entity.yaw                                   // sweep along MOTION, not the head
-      if (from) { const dx = p.x - from.x, dz = p.z - from.z; if (Math.hypot(dx, dz) > 2) yaw = Math.atan2(-dx, dz) }
-      const sweep = raySweep({ yaw, pitch: 0, maxDist: 96 })
-      const classes = new Set(); const built = new Set()
-      let builtSample = null
-      for (const h of sweep.hits) {
-        const cls = terrainClass(h.name)
-        classes.add(cls)
-        if (cls === 'structure' && !h.name.includes('torch')) {
-          built.add(h.name)
-          if (!builtSample || h.dist < builtSample.dist) builtSample = h
-        }
-      }
-      let biome = '?'
-      try { const b = bot.blockAt(p.floored()); if (b && b.biome && b.biome.name) biome = b.biome.name } catch (e) {}
-      const fp = { biome, cls: [...classes].sort().join('|'), built: [...built].sort().join('|') }
-      const prev = this._fp
-      this._fp = fp
-      const parts = []
-      if (!prev) parts.push(`trek baseline: ${biome.replace(/_/g, ' ')}; in view ${[...classes].join(', ') || 'nothing near'}`)
-      else {
-        if (fp.biome !== prev.biome) parts.push(`entering ${biome.replace(/_/g, ' ')}`)
-        const oldCls = new Set(prev.cls.split('|'))
-        const newCls = [...classes].filter(c => !oldCls.has(c))
-        if (newCls.length) parts.push(`now in view: ${newCls.join(', ')}`)
-        const oldBuilt = new Set(prev.built.split('|'))
-        const newBuilt = [...built].filter(b => !oldBuilt.has(b))
-        if (newBuilt.length && builtSample) {
-          let dir = ''
-          try { if (builtSample.pos) dir = ' ' + compass(builtSample.pos.x - p.x, builtSample.pos.z - p.z) } catch (e) {}
-          parts.push(`BUILT blocks${dir} ~${Math.round(builtSample.dist)}: ${newBuilt.slice(0, 3).join(', ')} — structure?`)
-        }
-      }
-      if (parts.length && Date.now() - this._lastSayT > 15000) {
-        this._lastSayT = Date.now()
-        emitEvent('scan', parts.join('; '))
-      }
-    } catch (e) {}
-  }
-})
 
 // ==== SECOND SENSES (2026-07-12, Fable) — ears, felt world-changes, body alarms, tool sense ====
 // Design constraints set by the helmsman: my reaction time is long, so alarms exist ONLY for what's worth
@@ -1754,7 +1220,7 @@ function wireFloodDrops () {
 }
 
 // the watcher+responder reflex — priority ABOVE unstuck (unshift), toggle via /reflexes name=combat
-reflexes.unshift({
+const combatReflex = {
   name: 'combat', on: true, active: false,
   _hist: new Map(), _lastNarrate: new Map(), _threat: null,
   // _seenAt maps an entity id to where the body last perceived it.
@@ -2188,10 +1654,10 @@ reflexes.unshift({
       await pilotGuard()                                      // the food in hand ended the pilot's block
     }
   }
-})
+}
 // flee_to_player: a combat flee runs to a player in sight within 24 blocks who stands farther from
 // the threat, not straight away from it. It shapes the flee and never fires by itself.
-reflexes.push({
+const fleeToPlayerReflex = {
   name: 'flee_to_player', on: true, active: false,
   check () { return false },
   // The player to run to, or undefined. A nametag alone gives no route to run along.
@@ -2201,72 +1667,11 @@ reflexes.push({
       e.position && e.position.distanceTo(here) <= 24 &&
       e.position.distanceTo(threatPos) > here.distanceTo(threatPos) && entityPerceptible(e, fill))
   }
-})
-// LAVA WATCH (07-17, death #3 autopsy: flowing lava advanced into a path that was air at plan
-// time — the pathfinder's plan-time safety cannot see a moving hazard, and the flee latch sprints
-// a committed vector. Body-level veto, priority ABOVE combat: burns kill faster than brawls.
-// Perceived lava in the near shell = kill goal + controls NOW, back away, tell the pilot.)
-reflexes.unshift({
-  name: 'lava_watch', on: true, active: false, _coolUntil: 0, _hit: null,
-  check (bot) {
-    if (Date.now() < this._coolUntil) return false
-    try {
-      const p = bot.entity.position.floored()
-      const V = require('vec3').Vec3
-      for (let dx = -2; dx <= 2; dx++) for (let dy = -1; dy <= 2; dy++) for (let dz = -2; dz <= 2; dz++) {
-        const c = new V(p.x + dx, p.y + dy, p.z + dz)
-        const b = bot.blockAt(c)
-        if (b && b.name === 'lava' && perceived(c)) {
-          this._hit = { dx, dz, d: Math.abs(dx) + Math.abs(dz), dir: compass(dx, dz) || 'UNDER ME' }
-          return true
-        }
-      }
-    } catch (e) {}
-    return false
-  },
-  async act (bot) {
-    const h = this._hit
-    // Parked next to STATIC lava (a dam, a pit wall): same cell, hazard no nearer than last
-    // fire = re-firing every 4s only kills pilot goals and floods the log (07-17 churn-pit
-    // spam loop). Warn happened already — stand down 30s and leave the call to the pilot.
-    // Flowing lava still breaks through: it gets CLOSER, so h.d drops and we act.
-    const posNow = bot.entity.position.floored()
-    if (this._lastPos && posNow.equals(this._lastPos) && this._lastD != null && h.d >= this._lastD) {
-      this._coolUntil = Date.now() + 30000
-      this._lastD = h.d
-      return
-    }
-    this._lastPos = posNow; this._lastD = h.d
-    this._coolUntil = Date.now() + 4000
-    try {
-      if (bunker.building) {
-        emitEvent('lava', `LAVA ${h.dir} ~${h.d}, not moving while the bunker is built`)
-        return
-      }
-      takeLegs('lava_watch', 'back away from lava')
-      stopPath()                                           // whatever the plan was, it ends here
-      const here = bot.entity.position
-      if (h.d === 0) {
-        // standing in/over it: nearest non-lava, non-solid neighbor cell, fast
-        const V = require('vec3').Vec3
-        for (const [ax, az] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
-          const feet = bot.blockAt(new V(Math.floor(here.x) + ax, Math.floor(here.y), Math.floor(here.z) + az))
-          if (feet && feet.name !== 'lava' && feet.boundingBox === 'empty') {
-            bot.pathfinder.setGoal(new goals.GoalNear(here.x + ax, here.y, here.z + az, 0))
-            break
-          }
-        }
-      } else {
-        bot.pathfinder.setGoal(new goals.GoalNear(here.x - h.dx * 3, here.y, here.z - h.dz * 3, 1))
-      }
-      emitEvent('lava', `LAVA ${h.dir} ~${h.d} — STOPPED, backing off; route around it deliberately`)
-    } catch (e) {}
-  }
-})
+}
 // bunker: below BUNKER_HP and within 15 s of a mob's hit, the body builds the bunker that holds
 // against the mobs near it. It flees when none does and when the build fails or stops short, unless
 // the pilot's stop or a death ended it. A provokable mob that hits has been provoked.
-reflexes.splice(reflexes.findIndex(r => r.name === 'combat'), 0, {
+const bunkerReflex = {
   name: 'bunker', on: true, active: false, _spent: false,
   check (bot) {
     if (this._spent && bot.health >= BUNKER_REARM_HP) this._spent = false
@@ -2287,7 +1692,8 @@ reflexes.splice(reflexes.findIndex(r => r.name === 'combat'), 0, {
     const near = cause && shelterInputs('auto').threats[0]
     if (near) reflexes.find(r => r.name === 'combat').fleeFrom(bot, near.entity, `${cause}, fleeing from ${near.name}`, 'emergency')
   }
-})
+}
+installReflexes()
 function wireThreatReset () {
   bot.on('death', resetThreatState)
   bot.on('spawn', resetThreatState)
@@ -3000,22 +2406,6 @@ app.get('/collect', async (req, res) => {
     ok(res, namedStop({ picked, missed, reason: done.reason, hint: enclosedHint(missed) }, route.mark))
   } catch (e) { err(res, e) } finally { releaseLane(lane) }
 })
-
-// The cell beside the feet that a block placed on the ground below fills: air or soft cover over a
-// solid block, clear of the body, or null.
-function placeSpot () {
-  const base = bot.entity.position.floored()
-  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-    const spot = base.offset(dx, 0, dz)
-    const spotBlock = bot.blockAt(spot)
-    const belowBlock = bot.blockAt(spot.offset(0, -1, 0))
-    if (!spotBlock || !(spotBlock.name === 'air' || isSoftCover(spotBlock))) continue
-    if (!belowBlock || belowBlock.boundingBox !== 'block' || isSoftCover(belowBlock)) continue
-    if (entityInCell(spot, [bot.entity])) continue
-    return spot
-  }
-  return null
-}
 
 // Crafts at a crafting table seen within 16 blocks, else in the 2x2 grid if the recipe fits, and never places a table.
 async function craftItem (item, count) {
@@ -3803,49 +3193,6 @@ app.get('/fish', (req, res) => {
     ok(res, { job: id, casts: count, aimed: !!aim })
   } catch (e) { err(res, e) }
 })
-
-// Walks within reach of cell, and refuses while the body overlaps it.
-async function reachToPlace (cell) {
-  await bot.pathfinder.goto(new goals.GoalNear(cell.x, cell.y, cell.z, 3))
-  if (entityInCell(cell, [bot.entity])) throw new Error(`refusing to place into ${cell.x},${cell.y},${cell.z}: my body overlaps that cell, step out of it first`)
-}
-
-// True for a block that a click opens or toggles. Iron doors and trapdoors take redstone only.
-function isInteractive (b) {
-  return !!b && !/^iron_/.test(b.name) &&
-    /(^|_)(chest|barrel|furnace|smoker|crafting_table|crafter|door|trapdoor|fence_gate|lever|button|bed|anvil|enchanting_table|brewing_stand|hopper|dispenser|dropper|beacon|note_block|jukebox|repeater|comparator|daylight_detector|cake|shulker_box|loom|stonecutter|grindstone|cartography_table|smithing_table|lectern|bell|sign|flower_pot)$/.test(b.name)
-}
-
-async function sneakPlace (ref, place) {
-  if (!isInteractive(ref)) return place()
-  bot.setControlState('sneak', true)
-  try {
-    await bot.waitForTicks(1)
-    return await place()
-  } catch (e) {
-    if (bot.currentWindow) bot.closeWindow(bot.currentWindow)
-    const what = cellKnown(ref.position) ? `the ${ref.name} at ${cellText(ref.position)}` : 'the block it went against'
-    throw new Error(`did not place while sneaking against ${what} (${e.message})`)
-  } finally { bot.setControlState('sneak', false) }
-}
-
-// The axis a door or gate at cell passes along, 'x' or 'z', when solid neighbours seen now form a line on the other axis.
-function passageAxis (cell) {
-  const solid = (dx, dz) => {
-    const p = cell.offset(dx, 0, dz)
-    const b = seenNow(p) && bot.blockAt(p)
-    return !!b && b.boundingBox === 'block' && !isSoftCover(b)
-  }
-  const lineZ = solid(0, -1) || solid(0, 1)
-  const lineX = solid(1, 0) || solid(-1, 0)
-  return lineZ === lineX ? null : lineZ ? 'x' : 'z'
-}
-
-// The name of the block keeping a placement out of cell p, when the bot sees p now.
-function occupant (p) {
-  const b = bot.blockAt(p)
-  return b && b.name !== 'air' && b.boundingBox !== 'empty' && !isSoftCover(b) && seenNow(p) ? b.name : null
-}
 
 app.get('/placeitem', async (req, res) => {
   try {
@@ -4877,6 +4224,7 @@ const BUNKER_FILL = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', '
 const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]]
 // The neighbours a placement may click, the one below first.
 const NEIGHBOURS = [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]
+ctx.NEIGHBOURS = NEIGHBOURS
 const solidAt = (p) => { const b = bot.blockAt(p); return !!b && b.boundingBox === 'block' && !isSoftCover(b) }
 const xyz = (v) => ({ x: v.x, y: v.y, z: v.z })
 
@@ -5482,14 +4830,6 @@ app.get('/gather', (req, res) => {
   } catch (e) { err(res, e) }
 })
 
-// Fills cell with a carried filler block from where the body stands. Null once it is solid, else why not.
-async function fillFrom (cell) {
-  const r = await macroPlaceAt(Vec3, cell.x, cell.y, cell.z, fillers().map(i => i.name), false)
-  if (r.done) return null
-  if (r.noItem) return 'no filler blocks carried'
-  return r.error ? `the block did not place (${r.error})` : 'nothing solid beside it to place against'
-}
-
 // Why a dig job stops after digging p (bared lava or water, or with falls a gravel or sand cap), or null.
 async function struckHazard (p, falls) {
   for (const [dx, dy, dz] of NEIGHBOURS) {
@@ -6050,6 +5390,16 @@ function wireRuntime () {
   wirePathfinderTicks()
   wirePathLog()
 }
+function installReflexes () {
+  reflexes.push(unstuckReflex)
+  reflexes.push(currentWatchReflex)
+  reflexes.push(narratorReflex)
+  reflexes.push(trekReflex)
+  reflexes.unshift(combatReflex)
+  reflexes.push(fleeToPlayerReflex)
+  reflexes.unshift(lavaWatchReflex)
+  reflexes.splice(reflexes.findIndex(r => r.name === 'combat'), 0, bunkerReflex)
+}
 function bindAll () {
   bindStreams(ctx)
   bindItems(ctx)
@@ -6062,6 +5412,9 @@ function bindAll () {
   bindJobBoard(ctx)
   bindFollow(ctx)
   bindAwareness(ctx)
+  bindUnstuck(ctx)
+  bindPlacing(ctx)
+  bindWatchReflexes(ctx)
 }
 bindAll()
 wireRuntime()
