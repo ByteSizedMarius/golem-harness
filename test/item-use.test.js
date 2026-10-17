@@ -97,10 +97,41 @@ test('a bow draw holds a running walk still until the arrow is loosed, and drops
     bot.attack()
     setImmediate(fn)
   }
-  const ctx = loadBotFunctions(['drawAndLoose'], { ...env, bowLine: () => true })
+  const ctx = loadBotFunctions(['drawAndLoose'], { ...env, bowLine: () => true, reflexes: [{ name: 'combat', fairFill: () => ({}) }], entityPerceptible: () => true })
   walk()
   assert.strictEqual(await ctx.drawAndLoose(target), true)
   assert.deepStrictEqual(log, ['forward true', 'sprint true', 'forward false', 'sprint false', 'use bow', 'release', 'forward true', 'sprint true'])
+})
+
+test('a bow draw re-aims only at a target still in line and in sight, and looses either way', async () => {
+  for (const [label, lost, aims] of [
+    ['control: in line and in sight', {}, [0.5, 6.5]],
+    ['line blocked', { line: false }, [0.5]],
+    ['out of sight', { seen: false }, [0.5]]
+  ]) {
+    const { bot, env, log } = body()
+    const target = { id: 7, name: 'skeleton', position: new Vec3(10.5, 64, 0.5) }
+    bot.entities[7] = target
+    const looks = []
+    bot.lookAt = async (p) => { looks.push(p.z) }
+    const sight = { line: true, seen: true }
+    // During the draw the target steps 6 south and leaves what lost names.
+    env.setTimeout = (fn) => {
+      target.position = new Vec3(10.5, 64, 6.5)
+      Object.assign(sight, lost)
+      setImmediate(fn)
+    }
+    const fill = {}
+    const ctx = loadBotFunctions(['drawAndLoose'], {
+      ...env,
+      bowLine: () => sight.line,
+      reflexes: [{ name: 'combat', fairFill: () => fill }],
+      entityPerceptible: (e, f) => e === target && f === fill && sight.seen
+    })
+    assert.strictEqual(await ctx.drawAndLoose(target), true, label)
+    assert.deepStrictEqual(looks, aims, label)
+    assert.deepStrictEqual(log, ['use bow', 'release'], label)
+  }
 })
 
 test('a bow draw that throws hands the walk its legs back and the error to the caller', () => {

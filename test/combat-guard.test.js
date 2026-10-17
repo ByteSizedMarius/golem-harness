@@ -28,7 +28,7 @@ const guardFight = (over) => ({ stance: 'guard', lastHit: { dmg: 0, t: 0 }, last
 // fight cycles against mob, which closed 1 block in the last second and stands out of melee reach. The body
 // carries only a sword. over.bot and over.env replace entries of the bot and the env, and an undefined env entry
 // loads the bot.js function of that name. over.seenAt is where the body last perceived mob. over.next(combat, bot)
-// runs after the act.
+// runs after the act. over.flee keeps the bot.js flee behind the record of flee classes.
 async function standoff (extra, mob, over = {}) {
   const lines = []
   const fled = []
@@ -115,7 +115,11 @@ async function standoff (extra, mob, over = {}) {
   const load = Object.entries(over.env || {}).filter(([, v]) => v === undefined).map(([k]) => k)
   loadBotFunctions(['standoffGuard', 'fleeWorld', 'creeperRoute', 'meleeSwing', 'chargedSwing', 'legsMoving', ...load], env)
   const combat = combatReflexIn(env)
-  combat.fleeFrom = (b, e, why, klass) => { fled.push(klass) }
+  const flee = combat.fleeFrom
+  combat.fleeFrom = (b, e, why, klass) => {
+    fled.push(klass)
+    if (over.flee) return flee.call(combat, b, e, why, klass)
+  }
   combat._hist.set(mob.id, { d: dist + 1, t: Date.now() - 1000, closes: 3, logT: 0 })
   combat._threat = { e: mob, cls: 'hostile', dist, confirmed: env.AGGRO_CONFIRMED.has(mob.id) }
   if (over.seenAt) combat._seenAt.set(mob.id, over.seenAt)
@@ -263,6 +267,48 @@ test('a body on its pillar top over a pack of three swings without a jump and ke
   const r = await standoff(pillar, pack[0], { bot: top, env })
   assert.ok(r.swings > 0, 'no swing from the pillar top')
   assert.deepStrictEqual({ fled: r.fled, jumps, cell: perch.cell }, { fled: [], jumps: 0, cell })
+})
+
+// The bow draws and flee count of a fight with a skeleton in sight 10 out and two zombies, for a body at entity in
+// lane, over the blocks of extra. The body carries a bow and arrows.
+async function skeletonPack (extra, entity, lane) {
+  const draws = []
+  const sk = skeleton(10.5)
+  const pack = [sk, { ...zombie(-2.5), id: 9 }, { ...zombie(-3.5), id: 10 }]
+  const items = [{ name: 'iron_sword' }, { name: 'bow' }, { name: 'arrow' }]
+  const r = await standoff(extra, sk, {
+    bot: { entity, inventory: { items: () => items, slots: [] } },
+    env: {
+      nearHostiles: () => pack.map((e) => ({ e, at: e.position })),
+      liveEntities: () => [],
+      bowLine: () => true,
+      drawAndLoose: async (e) => { draws.push(e.name); return false },
+      perch: lane.perch,
+      perchHolds: lane.perchHolds,
+      laneBlocks: lane.laneBlocks,
+      laneNarrate: lane.laneNarrate
+    },
+    flee: true
+  })
+  return { draws, flees: r.fled.length }
+}
+
+test('a body on its pillar top shoots a skeleton when the pack of three it cannot flee holds it there', async () => {
+  const entity = { position: new Vec3(0.5, 66, 0.5), onGround: true }
+  const lane = laneAt(entity, null)
+  const cell = new Vec3(0, 66, 0)
+  lane.perch.cell = cell
+  const pillar = (p) => p.x === 0 && p.z === 0 && p.y < 66 ? 'stone' : null
+  const r = await skeletonPack(pillar, entity, lane)
+  assert.ok(r.draws.length > 0 && r.flees > 0, `no bow draw from the pillar top, ${JSON.stringify(r)}`)
+  assert.ok(r.draws.every((name) => name === 'skeleton'), JSON.stringify(r))
+  assert.strictEqual(lane.perch.cell, cell)
+})
+
+test('a body on the ground with a job running ends the fight at the pack flee the job holds back and draws no bow', async () => {
+  const entity = { position: HERE, onGround: true }
+  const r = await skeletonPack(open, entity, laneAt(entity, null, true))
+  assert.deepStrictEqual(r, { draws: [], flees: 1 })
 })
 
 test('the combat reflex swings at a zombie only once its look ray meets the hitbox within 3 of the eye', async () => {

@@ -106,14 +106,15 @@ test('a sourceless hit by an in-range arrow with no shooter in sight reads as an
 })
 
 // The attribution of a sourceless hit at the last of swings, the times player Steve, 2 east of a body at the origin,
-// swung his arm facing yaw, with a zombie at hostileX on the body's row.
-async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5 } = {}) {
+// swung his arm facing yaw, with a zombie at hostileX on the body's row. seen says whether the body perceives Steve.
+async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, seen = true } = {}) {
   const clock = { now: 0 }
   const body = { id: 1, position: new Vec3(0.5, 64, 0.5) }
   const steve = { id: 2, type: 'player', username: 'Steve', yaw, position: new Vec3(2.5, 64, 0.5) }
   const zombie = { id: 3, name: 'zombie', position: new Vec3(hostileX, 64, 0.5) }
   const bot = Object.assign(new EventEmitter(), { entity: body, entities: {}, _client: new EventEmitter() })
   const fight = { damageTypes: ['generic'], lastAttrib: null }
+  const fill = { cells: new Set() }
   const ctx = loadBotFunctions(['wireArmSwings', 'wireDamageAttribution'], {
     bot,
     fight,
@@ -122,6 +123,11 @@ async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5 }
     console: { log () {} },
     liveEntities: () => [steve, zombie],
     nearestHostile: () => zombie,
+    reflexes: [{ name: 'combat', fairFill: () => fill }],
+    entityPerceptible: (e, f) => {
+      assert.strictEqual(f, fill, 'entityPerceptible got another fill')
+      return e !== steve || seen
+    },
     lastSwing: new Map(),
     arrows: new Map(),
     AGGRO_CONFIRMED: new Map(),
@@ -150,4 +156,8 @@ test('a sourceless hit names a player whose lone swing faced the body from no fa
   ]) {
     assert.strictEqual(await swingHit(row), desc, label)
   }
+})
+
+test('a sourceless hit never names a swinging player the body cannot perceive', async () => {
+  assert.strictEqual(await swingHit({ seen: false }), 'zombie W ~3 (nearest hostile)')
 })

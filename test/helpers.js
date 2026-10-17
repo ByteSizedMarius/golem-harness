@@ -1075,11 +1075,12 @@ async function actAfter (built) {
 
 const stoppedBuild = (why) => ({ mode: 'up', at: { x: 0, y: 65, z: 0 }, sealed: false, dug: 0, placed: 1, height: 3, gaps: [], exit: [], stopped: why })
 
-// The bot's lane for a body at entity whose last bunker is cell, with no build, job, perch, melee threat or pilot claim.
-function laneAt (entity, cell) {
+// The bot's lane for a body at entity whose last bunker is cell, with no build, perch, melee threat or pilot claim, and a
+// job running when job is true.
+function laneAt (entity, cell, job = false) {
   const lane = {}
   createLane(lane)
-  bindLane({ bot: { entity }, hpMelee: () => false, jobs: { running: () => false }, meleeThreat: () => null, emitEvent () {} })
+  bindLane({ bot: { entity }, hpMelee: () => false, jobs: { running: () => job }, meleeThreat: () => null, emitEvent () {} })
   Object.assign(lane.bunker, { building: false, stop: null, cell })
   lane.perch.cell = null
   lane.clearLane()
