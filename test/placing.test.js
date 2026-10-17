@@ -3,6 +3,8 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
+const registry = require('prismarine-registry')('1.21.11')
+const Block = require('prismarine-block')(registry)
 const shelter = require('../lib/shelter')
 const { overrideRecipes } = require('../lib/server-overrides')
 const { deathLedger } = require('../lib/deaths')
@@ -62,8 +64,9 @@ test('placeitem refuses a cell the body overlaps after its walk, the head cell i
 })
 
 // craftItem over a body at (0.5, 64, 0.5) carrying a crafting table, with a placed table at tableAt or none,
-// unseen when seen is false. A 3x3 recipe needs the table, a 2x2 one does not. goto puts the body 2.5 short of its goal in x.
-function crafter ({ tableAt = null, needsTable = true, seen = true } = {}) {
+// unseen when seen is false. A 3x3 recipe needs the table, a 2x2 one does not. goto puts the body 2.5 short of its goal in x,
+// or finds no path when unreachable is true.
+function crafter ({ tableAt = null, needsTable = true, seen = true, unreachable = false } = {}) {
   const entity = body(0.5, 64, 0.5)
   const log = []
   const recipe = { result: { count: needsTable ? 1 : 4 } }
@@ -73,7 +76,7 @@ function crafter ({ tableAt = null, needsTable = true, seen = true } = {}) {
     bot: {
       recipesFor: (id, meta, min, t) => (t || !needsTable ? [recipe] : []),
       findBlocks: ({ maxDistance }) => (tableAt && tableAt.distanceTo(entity.position) <= maxDistance ? [tableAt] : []),
-      pathfinder: { goto: async (g) => { log.push(['goto', g.x, g.y, g.z, g.r]); entity.position = new Vec3(g.x - 2.5, g.y, g.z + 0.5) } },
+      pathfinder: { goto: async (g) => { log.push(['goto', g.x, g.y, g.z, g.r]); if (unreachable) throw new Error('No path to the goal!'); entity.position = new Vec3(g.x - 2.5, g.y, g.z + 0.5) } },
       async craft (r, n, t) { log.push(['craft', t ? key(t.position) : null]) },
       async placeBlock () { log.push(['placeBlock']) },
       async equip (item) { log.push(['equip', item.name]) }
@@ -114,6 +117,12 @@ test('craft walks to a table 10 blocks off and crafts at it', async () => {
   const r = await ctx.craftItem({ id: 1, name: 'chest' }, 1)
   assert.deepStrictEqual(log, [['goto', 10, 64, 0, 3], ['craft', '10,64,0']])
   assert.deepStrictEqual({ ...r }, { crafted: 'chest', requested: 1, made: 1, usedTable: true, nowHave: 0, note: undefined })
+})
+
+test('craft names a seen table it cannot reach', async () => {
+  const { log, ctx } = crafter({ tableAt: new Vec3(10, 64, 0), unreachable: true })
+  await assert.rejects(ctx.craftItem({ id: 1, name: 'chest' }, 1), { message: 'cannot reach the crafting table at 10,64,0' })
+  assert.deepStrictEqual(log, [['goto', 10, 64, 0, 3]])
 })
 
 test('craft makes a 2x2 recipe in the inventory grid with no table about', async () => {
@@ -266,6 +275,80 @@ test('a death mid-build ends walls with the reason, what it placed and the death
     died: 'Claude was slain by Zombie', ok: true, placed: 3, skipped: 0, failed: 0, stopped: 'the body died', size: '3x3', height: 1, door: 'west'
   })
   assert.strictEqual(rig.placed().length, 3)
+})
+
+// A 3x3 cabin two rows high at x 1..3, z -1..1 on base 64, its doorway at 1,64,0 and 1,65,0.
+const CABIN = { x: '1', z: '-1', w: '3', d: '3', h: '2', base: '64' }
+
+// The /build job of CABIN by a body at (0.5, 64, 0.5) holding cobblestone and carrying a stone pickaxe, stone in the doorway.
+// onDoorWalk(world, job) runs at each walk of the door phase. log records walks by phase and digs with the held item.
+async function buildCabin (onDoorWalk = () => {}) {
+  const log = []
+  const world = {}
+  for (const y of [64, 65]) {
+    const stone = Block.fromStateId(registry.blocksByName.stone.defaultState, 0)
+    stone.position = new Vec3(1, y, 0)
+    world[`1,${y},0`] = stone
+  }
+  const items = [{ name: 'cobblestone', count: 64 }, { name: 'stone_pickaxe', count: 1 }]
+  let phase = null
+  let job = null
+  let result = null
+  const bot = Object.assign(new EventEmitter(), {
+    entity: body(0.5, 64, 0.5),
+    entities: {},
+    heldItem: items[0],
+    blockAt: (p) => world[key(p)] || { ...(p.y <= 63 ? STONE : AIR), position: p },
+    inventory: { items: () => items },
+    pathfinder: { goto: async () => { log.push(`walk in ${phase}`); if (phase === 'door') onDoorWalk(world, job) } },
+    async equip (item) { this.heldItem = item },
+    async lookAt () {},
+    async placeBlock () {},
+    async dig (b) { log.push(`dig ${key(b.position)} with ${this.heldItem && this.heldItem.name}`) }
+  })
+  const env = buildVerbEnv(bot, {
+    emitEvent () {},
+    PICK_TIER: botConstant('PICK_TIER'),
+    DIG_TOOL: botConstant('DIG_TOOL'),
+    jobs: {
+      start: (name, fn) => {
+        job = { cancelled: false, progress (msg) { phase = msg.replace('phase: ', '') } }
+        result = fn(job)
+        return { id: 1 }
+      }
+    }
+  })
+  await awaitRoute('/build', CABIN, env)
+  return { reply: await result, log }
+}
+
+const digs = (log) => log.filter((l) => l.startsWith('dig'))
+
+test('build digs its doorway with the tool for the block', async () => {
+  const { log } = await buildCabin()
+  assert.deepStrictEqual(digs(log), ['dig 1,64,0 with stone_pickaxe', 'dig 1,65,0 with stone_pickaxe'])
+})
+
+test('build leaves a doorway cell that holds a door once its walk there ends', async () => {
+  const door = (world) => {
+    for (const y of [64, 65]) world[`1,${y},0`] = { name: 'oak_door', boundingBox: 'block', position: new Vec3(1, y, 0) }
+  }
+  const { log } = await buildCabin(door)
+  assert.ok(log.includes('walk in door'), 'control: the door phase walked')
+  assert.deepStrictEqual(digs(log), [])
+})
+
+test('build digs no doorway cell once the pilot took over during its walk there', async () => {
+  const { reply, log } = await buildCabin((world, job) => { job.cancelled = true })
+  assert.ok(log.includes('walk in door'), 'control: the door phase walked')
+  assert.deepStrictEqual(digs(log), [])
+  assert.strictEqual(reply.stopped, 'stopped by the pilot')
+})
+
+test('build answers not ready before it reads the body position', async () => {
+  const { handle, res } = routeHandler('/build', buildVerbEnv({ entity: null }, { shared: { ready: false } }))
+  await handle({ query: { x: '1', z: '-1' } }, res)
+  assert.strictEqual(res.error && res.error.message, 'not ready')
 })
 
 // placeitem by a body at (-1.5, 64, 0.5) carrying name over the floor plus extra, blind to the cells in hidden,

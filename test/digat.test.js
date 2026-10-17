@@ -101,3 +101,9 @@ test('digat digs a log with an axe, dirt with a shovel, ore with the lowest pick
   assert.strictEqual(crop.bot.dugWith, null)
   assert.strictEqual(crop.reply.with, null)
 })
+
+test('digat answers a cave air cell as already air', async () => {
+  const r = await digWith('cave_air', TOOLS, 0)
+  assert.deepStrictEqual(r.reply, { already: 'air', at: { x: 2, y: 64, z: 0 } })
+  assert.strictEqual(r.bot.dugWith, undefined)
+})

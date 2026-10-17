@@ -3,7 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { createJobs } = require('../lib/jobs')
 const { deathLedger } = require('../lib/deaths')
-const { waitFor, loadBotFunctions } = require('./helpers')
+const { waitFor, loadBotFunctions, routeHandler } = require('./helpers')
 
 function registry () {
   const emitted = []
@@ -86,6 +86,22 @@ test('an erroring job reports its error, and one done reports done', async () =>
   assert.ok(await waitFor(() => jobs.get(good).status !== 'running', 2000))
   assert.deepStrictEqual(emitted, ['build cabin: error out of planks', 'fish: done'])
   assert.deepStrictEqual(jobs.get(good).result, { caught: 1 })
+})
+
+test('the job list keeps the running job and the 10 newest finished ones', async (t) => {
+  const { jobs } = registry()
+  for (let i = 1; i <= 15; i++) {
+    const { id } = jobs.start(`fish ${i}`, async () => ({ caught: i }))
+    assert.ok(await waitFor(() => jobs.get(id).status === 'done', 2000), `fish ${i} kept running`)
+  }
+  const { id: live } = jobs.start('dig_tunnel e x12', untilCancelled)
+  t.after(() => jobs.stop(live))
+  assert.deepStrictEqual(jobs.list().map((j) => [j.id, j.status]), [
+    ...Array.from({ length: 10 }, (_, i) => [i + 6, 'done']), [live, 'running']
+  ])
+  const { handle, res } = routeHandler('/job', { jobs })
+  handle({ query: { id: '5' } }, res)
+  assert.strictEqual(res.error && res.error.message, 'no job 5', 'a pruned id reads no job')
 })
 
 test('a job the body died during ends with the death message, the next job without it', async () => {

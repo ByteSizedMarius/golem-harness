@@ -3,7 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { sectionColumns, floorPhrase } = require('../lib/section')
-const { botConstant, runRoute } = require('./helpers')
+const { botConstant, facings, runRoute } = require('./helpers')
 
 const O = { x: 0, y: 64, z: 0 }
 const key = (x, y, z) => `${x},${y},${z}`
@@ -54,11 +54,11 @@ test('open air that goes on under the frame drops below it', () => {
 })
 
 // Air at x 0..2, y 64..65, z 0 in stone all round, every open cell at light level light.
-function closedRoom (light) {
+function closedRoom (light, yaw = 0) {
   const air = (p) => p.x >= 0 && p.x <= 2 && p.z === 0 && (p.y === 64 || p.y === 65)
   return {
     bot: {
-      entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 },
+      entity: { position: new Vec3(0.5, 64, 0.5), yaw },
       blockAt: (p) => (air(p) ? { name: 'air', boundingBox: 'empty', light, skyLight: 0 } : { name: 'stone', boundingBox: 'block', light: 0, skyLight: 0 }),
       time: { timeOfDay: 6000 },
       game: { minY: -64, height: 384 }
@@ -82,4 +82,17 @@ test('the section of a lit closed room underground reads its floor and where it 
 test('the section of the same room in total darkness knows only the cells within two blocks', () => {
   const body = runRoute('/section', { dir: 'e' }, closedRoom(0))
   assert.strictEqual(body.summary, 'Section E from (0,64,0): floor: level d0–1, floor unknown at d2; headroom 2; out of sight from d3.')
+})
+
+test('the section without a dir runs the way the bot faces', () => {
+  const DIR = { '0,-1': 'n', '0,1': 's', '1,0': 'e', '-1,0': 'w' }
+  for (const { name, yaw, step } of facings()) {
+    const faced = runRoute('/section', {}, closedRoom(15, yaw)).summary
+    assert.strictEqual(faced, runRoute('/section', { dir: DIR[step.join()] }, closedRoom(15, yaw)).summary, `facing ${name}`)
+  }
+})
+
+test('the section takes a full direction name like the dig jobs', () => {
+  const body = runRoute('/section', { dir: 'east' }, closedRoom(15, Math.PI))
+  assert.strictEqual(body.summary, 'Section EAST from (0,64,0): floor: level d0–2; headroom 2; sealed from d3.')
 })

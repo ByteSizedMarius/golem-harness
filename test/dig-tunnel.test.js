@@ -2,7 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
-const { digJob, awaitRoute, botConstant } = require('./helpers')
+const { digJob, facings, awaitRoute, botConstant } = require('./helpers')
 
 const EAST = { dir: 'e', length: '2', torch: '0' }
 
@@ -43,6 +43,19 @@ test('dig_tunnel digs the face ahead into rock the bot knows nothing of', async 
   const r = await digJob('/dig_tunnel', EAST)
   assert.strictEqual(r.stopped, 'length reached')
   assert.deepStrictEqual(r.dug, ['1,65,0', '1,64,0', '2,65,0', '2,64,0'])
+})
+
+test('dig_tunnel without a dir digs the way the bot faces', async () => {
+  for (const { name, yaw, step: [dx, dz] } of facings()) {
+    const r = await digJob('/dig_tunnel', { length: '1', torch: '0' }, { yaw })
+    assert.deepStrictEqual(r.dug, [`${dx},65,${dz}`, `${dx},64,${dz}`], `facing ${name}`)
+  }
+})
+
+test('dig_tunnel counts no cave air as dug', async () => {
+  const r = await digJob('/dig_tunnel', EAST, { blocks: { '1,65,0': 'cave_air', '2,64,0': 'cave_air' } })
+  assert.strictEqual(r.stopped, 'length reached')
+  assert.deepStrictEqual(r.dug, ['1,64,0', '2,65,0'])
 })
 
 test('dig_tunnel stops at bedrock and at a floor gap it cannot fill', async () => {

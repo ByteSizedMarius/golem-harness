@@ -1143,19 +1143,28 @@ function digInProblemWith ({ caves = [], known = (p) => p.y >= 63 } = {}) {
   return loadBotFunctions(['digInProblem'], env).digInProblem()
 }
 
-// Runs a dig job route for a body at (0, 64, 0) in dark stone and returns its result with the cells it dug and filled.
-async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, known = [] } = {}) {
+// A yaw facing each cardinal, with the step [dx, dz] along the bot's forward vector at that yaw.
+function facings () {
+  const { lookVec } = loadBotFunctions(['lookVec'], { Vec3 })
+  return [['north', 0], ['west', Math.PI / 2], ['south', Math.PI], ['east', -Math.PI / 2]].map(([name, yaw]) => {
+    const v = lookVec(yaw, 0)
+    return { name, yaw, step: Math.abs(v.x) >= Math.abs(v.z) ? [Math.sign(v.x), 0] : [0, Math.sign(v.z)] }
+  })
+}
+
+// Runs a dig job route for a body at (0, 64, 0) facing yaw in dark stone, returning its result with the cells dug and filled.
+async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, known = [], sky = () => false, yaw = 0 } = {}) {
   const key = (p) => `${p.x},${p.y},${p.z}`
   const open = new Set(air)
   const nameAt = (p) => (open.has(key(p)) ? 'air' : blocks[key(p)] || 'stone')
   const dug = []
   const fills = []
   const bot = {
-    entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 },
+    entity: { position: new Vec3(0.5, 64, 0.5), yaw },
     inventory: { emptySlotCount: () => 30 },
     blockAt: (p) => {
       const name = nameAt(p)
-      return { name, boundingBox: ['air', 'lava', 'water'].includes(name) ? 'empty' : 'block', position: p, skyLight: 0 }
+      return { name, boundingBox: ['air', 'cave_air', 'lava', 'water'].includes(name) ? 'empty' : 'block', position: p, skyLight: 0 }
     },
     async dig (b) { dug.push(key(b.position)); open.add(key(b.position)) }
   }
@@ -1175,6 +1184,7 @@ async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, 
     NEIGHBOURS,
     cellKnown: (p) => known.includes(key(p)),
     knownCell: (p) => known.includes(key(p)),
+    skyInSight: () => sky(bot.entity.position),
     seesLit: (p) => NEIGHBOURS.some(([dx, dy, dz]) => open.has(key(p.offset(dx, dy, dz))))
   })
   return { ...(await job), dug, fills }
@@ -1192,5 +1202,5 @@ module.exports = {
   botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, laneAt,
-  buildVerbEnv, digInProblemWith, digJob
+  buildVerbEnv, digInProblemWith, facings, digJob
 }
