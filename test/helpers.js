@@ -529,6 +529,11 @@ function botSource () {
   return botSrc
 }
 
+// botSource with each top-level wire* function replaced by its dedented body.
+function unwrappedBotSource () {
+  return botSource().replace(/^function wire[A-Z][\w$]* \(\) \{\r?\n([\s\S]*?)^\}\r?\n/gm, (_, body) => body.replace(/^ {2}/gm, ''))
+}
+
 const NOT_CALLEES = new Set(['if', 'for', 'while', 'switch', 'catch', 'with', 'function', 'return', 'typeof', 'void',
   'delete', 'await', 'async', 'new', 'in', 'of', 'instanceof', 'throw', 'case', 'yield', 'super', 'import', 'else', 'do',
   'require'])
@@ -805,7 +810,7 @@ function combatReflexIn (env) {
 
 // Runs bot.js's top-level bot.on and bot.once lines for event over env.
 function wireListeners (env, event) {
-  const lines = [...botSource().matchAll(new RegExp(`^bot\\.(?:on|once)\\('${event}', ([A-Za-z_$][\\w$]*)\\)$`, 'gm'))]
+  const lines = [...unwrappedBotSource().matchAll(new RegExp(`^bot\\.(?:on|once)\\('${event}', ([A-Za-z_$][\\w$]*)\\)$`, 'gm'))]
   assert.ok(lines.length, `no top-level ${event} listener in bot.js`)
   const code = lines.map((m) => m[0]).join('\n')
   vm.runInContext(code, loadBotFunctions(lines.map((m) => m[1]), env, code))
@@ -1150,7 +1155,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
+  botSource, unwrappedBotSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild,
   buildVerbEnv, digInProblemWith, digJob

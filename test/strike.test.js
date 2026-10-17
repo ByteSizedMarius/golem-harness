@@ -77,13 +77,15 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
     useOn: async () => { did.push('use') }
   })
   const fill = {}
+  const mobHurt = pace.hurtWindows(clock.now)
+  mobHurt.wire(bot)
   const env = {
     bot,
     goals,
     shared: { ready: true, mcData: null },
     LEGACY_1710: legacy,
     LEGACY_HIT_MS: 550,
-    mobHurt: pace.hurtWindows(bot, clock.now),
+    mobHurt,
     knownCell: () => true,
     perch: { cell: null },
     console: { log () {} },

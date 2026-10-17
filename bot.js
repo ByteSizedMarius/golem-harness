@@ -53,34 +53,37 @@ const bot = mineflayer.createBot({
 // pathfinder movement spam doesn't trip server anti-cheat and get us kicked; (b) swallow the common
 // 'PartialReadError' protocol-desync that would otherwise crash the client. Pure plumbing — it only
 // reorders OUTBOUND packets, so the bot's own position tracking (and our fairness/LOS) is untouched.
-try {
-  const _write = bot._client.write.bind(bot._client)
-  let lastPos = 0, posTimer = null
-  bot._client.write = (name, data) => {
-    if (name === 'position' || name === 'position_look' || name === 'look') {
-      const dt = Date.now() - lastPos
-      if (dt < 50) {                                   // coalesce a burst: keep only the latest
-        if (posTimer) clearTimeout(posTimer)
-        posTimer = setTimeout(() => { posTimer = null; lastPos = Date.now(); _write(name, data) }, 50 - dt)
-        return
+function wireConnectionHardening () {
+  try {
+    const _write = bot._client.write.bind(bot._client)
+    let lastPos = 0, posTimer = null
+    bot._client.write = (name, data) => {
+      if (name === 'position' || name === 'position_look' || name === 'look') {
+        const dt = Date.now() - lastPos
+        if (dt < 50) {                                   // coalesce a burst: keep only the latest
+          if (posTimer) clearTimeout(posTimer)
+          posTimer = setTimeout(() => { posTimer = null; lastPos = Date.now(); _write(name, data) }, 50 - dt)
+          return
+        }
+        lastPos = Date.now()
       }
-      lastPos = Date.now()
+      return _write(name, data)
     }
-    return _write(name, data)
-  }
-  const _emit = bot._client.emit.bind(bot._client)
-  bot._client.emit = (event, ...args) => {
-    if (event === 'error' && String((args[0] && args[0].message) || args[0] || '').includes('PartialReadError')) {
-      console.log('[bot] swallowed PartialReadError (protocol desync)')
-      return true
+    const _emit = bot._client.emit.bind(bot._client)
+    bot._client.emit = (event, ...args) => {
+      if (event === 'error' && String((args[0] && args[0].message) || args[0] || '').includes('PartialReadError')) {
+        console.log('[bot] swallowed PartialReadError (protocol desync)')
+        return true
+      }
+      return _emit(event, ...args)
     }
-    return _emit(event, ...args)
-  }
-} catch (e) { console.log('[bot] connection hardening skipped:', e.message) }
+  } catch (e) { console.log('[bot] connection hardening skipped:', e.message) }
+}
 
 bot.loadPlugin(pathfinder)
 bot.loadPlugin(collectBlock)
 bot.loadPlugin(armorManager)   // auto-equip best armor (freebie for the survival ramp; no-op on Peaceful)
+wireEarly()
 
 const shared = {}
 shared.mcData = null
@@ -204,7 +207,9 @@ function abandonCollect () {
 
 // knownCell of each cell knownMoves read this physics tick, by ck key.
 const PLAN_KNOWN = new Map()
-bot.on('physicsTick', () => PLAN_KNOWN.clear())
+function wirePlanKnownReset () {
+  bot.on('physicsTick', () => PLAN_KNOWN.clear())
+}
 // Makes m read a cell knownCell rejects as an unloaded one.
 function knownMoves (m) {
   const getBlock = m.getBlock.bind(m)
@@ -222,217 +227,221 @@ function knownMoves (m) {
   return m
 }
 
-bot.once('spawn', () => {
-  shared.mcData = require('minecraft-data')(bot.version)
-  // bot.registry shares these block entries.
-  if (SERVER_OVERRIDES) renameBlocks(shared.mcData, SERVER_OVERRIDES.blocks)
-  const moves = knownMoves(new Movements(bot))
-  // ---- CONSIDERATE PLAYER: don't vandalize builds/terrain, don't litter ----
-  moves.canDig = false            // NEVER break blocks to travel — protects your house AND the
-                                  // landscape (no tunneling shortcuts). NB: collectBlock swaps in
-                                  // its own dig-legs — collectSafely() cages that (07-20).
-  moves.maxDropDown = 3           // don't fling off tall ledges en route
-  moves.liquidCost = 15           // (07-14, after drowning in a decorative POND mid-sheep-drive:
-                                  // dry detours beat swims whenever one exists; swimming stays
-                                  // legal for genuine crossings — the helmsman's water-suite design)
-  moves.allow1by1towers = false  // no gratuitous pillar/shaft moves
-  moves.allowParkour = true      // jump small gaps instead of scaffolding them (less litter)
-  moves.scafoldingBlocks = []    // DEFAULT: no bridging → swim / walk / parkour, ZERO litter, no matter
-                                 // what I'm carrying. Bridging is a deliberate CHOICE: flip it on with
-                                 // /bridging?on=1 when a chasm/lava/gap genuinely needs a bridge, do the
-                                 // crossing, flip it off; every block it places is tracked for /tidy.
-  // DOORS (07-14): upstream ships canOpenDoors=false and only ever puts fence GATES in
-  // `openable`, so every door — even one standing open — reads as a wall (an open door's
-  // swung panel still has a collision shape). The walker couldn't leave its own house.
-  // Wooden doors join the openable set; the executor right-clicks them in passing
-  // (guarded in index.js so it never toggles an already-open door shut in my face).
-  // Iron doors stay walls — they want redstone, that's the game's rule, keep it.
-  const addDoors = (m) => { shared.mcData.blocksArray.forEach(b => { if (b.name.endsWith('_door') && !b.name.includes('iron')) m.openable.add(b.id) }); m.canOpenDoors = true }
-  addDoors(moves)
-  moves.infiniteLiquidDropdownDistance = false   // a drop into water is held to maxDropDown too
-  bot.pathfinder.setMovements(moves)
-  bot.pathfinder.thinkTimeout = 10000
-  shared.considerateMoves = moves       // remember the default so /gather can restore it after forestry
+function wireConnectionSpawn () {
+  bot.once('spawn', () => {
+    shared.mcData = require('minecraft-data')(bot.version)
+    // bot.registry shares these block entries.
+    if (SERVER_OVERRIDES) renameBlocks(shared.mcData, SERVER_OVERRIDES.blocks)
+    const moves = knownMoves(new Movements(bot))
+    // ---- CONSIDERATE PLAYER: don't vandalize builds/terrain, don't litter ----
+    moves.canDig = false            // NEVER break blocks to travel — protects your house AND the
+                                    // landscape (no tunneling shortcuts). NB: collectBlock swaps in
+                                    // its own dig-legs — collectSafely() cages that (07-20).
+    moves.maxDropDown = 3           // don't fling off tall ledges en route
+    moves.liquidCost = 15           // (07-14, after drowning in a decorative POND mid-sheep-drive:
+                                    // dry detours beat swims whenever one exists; swimming stays
+                                    // legal for genuine crossings — the helmsman's water-suite design)
+    moves.allow1by1towers = false  // no gratuitous pillar/shaft moves
+    moves.allowParkour = true      // jump small gaps instead of scaffolding them (less litter)
+    moves.scafoldingBlocks = []    // DEFAULT: no bridging → swim / walk / parkour, ZERO litter, no matter
+                                   // what I'm carrying. Bridging is a deliberate CHOICE: flip it on with
+                                   // /bridging?on=1 when a chasm/lava/gap genuinely needs a bridge, do the
+                                   // crossing, flip it off; every block it places is tracked for /tidy.
+    // DOORS (07-14): upstream ships canOpenDoors=false and only ever puts fence GATES in
+    // `openable`, so every door — even one standing open — reads as a wall (an open door's
+    // swung panel still has a collision shape). The walker couldn't leave its own house.
+    // Wooden doors join the openable set; the executor right-clicks them in passing
+    // (guarded in index.js so it never toggles an already-open door shut in my face).
+    // Iron doors stay walls — they want redstone, that's the game's rule, keep it.
+    const addDoors = (m) => { shared.mcData.blocksArray.forEach(b => { if (b.name.endsWith('_door') && !b.name.includes('iron')) m.openable.add(b.id) }); m.canOpenDoors = true }
+    addDoors(moves)
+    moves.infiniteLiquidDropdownDistance = false   // a drop into water is held to maxDropDown too
+    bot.pathfinder.setMovements(moves)
+    bot.pathfinder.thinkTimeout = 10000
+    shared.considerateMoves = moves       // remember the default so /gather can restore it after forestry
 
-  // ---- FORESTRY profile: a lumberjack's legs. Same considerate base, but permitted to break
-  // ONLY leaves and logs to travel — so it clears canopy to reach trunks and can always chew a
-  // leaf to free itself from a foliage wedge. Every other block (stone, dirt, ore, sand, and
-  // every plank/door/block of your builds) stays UNbreakable, so the no-tunnel / no-x-ray
-  // fairness floor is exactly as before. Swapped in only while /gather is harvesting wood.
-  shared.forestryMoves = knownMoves(new Movements(bot))
-  shared.forestryMoves.canDig = true
-  shared.forestryMoves.maxDropDown = 2          // gentler drops off trunk tops → avoid fall damage
-  shared.forestryMoves.infiniteLiquidDropdownDistance = false
-  shared.forestryMoves.allow1by1towers = false
-  shared.forestryMoves.allowParkour = true
-  shared.forestryMoves.scafoldingBlocks = []          // still zero litter — never places blocks to travel
-  const cantBreak = new Set()
-  for (const blk of shared.mcData.blocksArray) {
-    if (/(_log|_wood|_leaves)$/.test(blk.name)) continue   // leaves + logs are the ONLY breakables
-    cantBreak.add(blk.id)
-  }
-  shared.forestryMoves.blocksCantBreak = cantBreak
-  addDoors(shared.forestryMoves)                      // lumberjack legs get the same door manners
+    // ---- FORESTRY profile: a lumberjack's legs. Same considerate base, but permitted to break
+    // ONLY leaves and logs to travel — so it clears canopy to reach trunks and can always chew a
+    // leaf to free itself from a foliage wedge. Every other block (stone, dirt, ore, sand, and
+    // every plank/door/block of your builds) stays UNbreakable, so the no-tunnel / no-x-ray
+    // fairness floor is exactly as before. Swapped in only while /gather is harvesting wood.
+    shared.forestryMoves = knownMoves(new Movements(bot))
+    shared.forestryMoves.canDig = true
+    shared.forestryMoves.maxDropDown = 2          // gentler drops off trunk tops → avoid fall damage
+    shared.forestryMoves.infiniteLiquidDropdownDistance = false
+    shared.forestryMoves.allow1by1towers = false
+    shared.forestryMoves.allowParkour = true
+    shared.forestryMoves.scafoldingBlocks = []          // still zero litter — never places blocks to travel
+    const cantBreak = new Set()
+    for (const blk of shared.mcData.blocksArray) {
+      if (/(_log|_wood|_leaves)$/.test(blk.name)) continue   // leaves + logs are the ONLY breakables
+      cantBreak.add(blk.id)
+    }
+    shared.forestryMoves.blocksCantBreak = cantBreak
+    addDoors(shared.forestryMoves)                      // lumberjack legs get the same door manners
 
-  // ---- litter tracking: record blocks the PATHFINDER places (scaffolding) so /tidy can reclaim
-  // them. Only placements made mid-navigation (pathfinder.isMoving) are tracked; deliberate builds
-  // via /place, /build, … happen while the pathfinder is idle and are left untouched. ----
-  const _placeBlock = bot.placeBlock.bind(bot)
-  bot.placeBlock = async function (refBlock, faceVec) {
-    let navigating = false
-    try { navigating = bot.pathfinder.isMoving() } catch (e) {}
-    const result = await _placeBlock(refBlock, faceVec)
+    // ---- litter tracking: record blocks the PATHFINDER places (scaffolding) so /tidy can reclaim
+    // them. Only placements made mid-navigation (pathfinder.isMoving) are tracked; deliberate builds
+    // via /place, /build, … happen while the pathfinder is idle and are left untouched. ----
+    const _placeBlock = bot.placeBlock.bind(bot)
+    bot.placeBlock = async function (refBlock, faceVec) {
+      let navigating = false
+      try { navigating = bot.pathfinder.isMoving() } catch (e) {}
+      const result = await _placeBlock(refBlock, faceVec)
+      try {
+        if (navigating && refBlock && faceVec) {
+          const p = refBlock.position.plus(faceVec)
+          navPlaced.push({ x: p.x, y: p.y, z: p.z })
+        }
+      } catch (e) {}
+      return result
+    }
+
+    shared.ready = true
+    startReflexes()                     // start the always-on reflex loop (unstuck, +survival reflexes later)
+    console.log(`[bot] spawned as ${USERNAME} on ${bot.version} at`, vecStr(bot.entity.position))
+    // Seeing-layer (optional; never let it crash the bot)
     try {
-      if (navigating && refBlock && faceVec) {
-        const p = refBlock.position.plus(faceVec)
-        navPlaced.push({ x: p.x, y: p.y, z: p.z })
+      const { mineflayer: viewer } = require('prismarine-viewer')
+      // 07-14: the viewer's browser bundles were REBUILT with modern minecraft-data + a synthesized
+      // 1.21.11 atlas (1.21.8 models — newest published assets; every block in this world predates
+      // them). The client now resolves bot.version natively — no fallback, no shifted block ids.
+      // NOTE: the old `version: '1.21.4'` "pin" here was a NO-OP (mineflayer.js never read that
+      // option); the client was silently falling back to the 1.21.4 atlas on its own, which is why
+      // most-but-not-all blocks rendered right. Rebuild recipe + rollback: backups/viewer-1.21.11-rebuild/.
+      // prismarine-viewer keeps its http server to itself and listens with no error listener.
+      const http = require('http')
+      const createServer = http.createServer
+      const viewServers = []
+      http.createServer = (...args) => { const s = createServer(...args); viewServers.push(s); return s }
+      try {
+        viewer(bot, { port: VIEW_PORT, firstPerson: true })
+      } finally {
+        http.createServer = createServer
       }
-    } catch (e) {}
-    return result
-  }
+      for (const s of viewServers) s.on('error', (e) => console.log('[bot] viewer failed (non-fatal):', e.message))
+      console.log(`[bot] viewer on http://localhost:${VIEW_PORT}`)
+    } catch (e) { console.log('[bot] viewer failed (non-fatal):', e.message) }
 
-  shared.ready = true
-  startReflexes()                     // start the always-on reflex loop (unstuck, +survival reflexes later)
-  console.log(`[bot] spawned as ${USERNAME} on ${bot.version} at`, vecStr(bot.entity.position))
-  // Seeing-layer (optional; never let it crash the bot)
-  try {
-    const { mineflayer: viewer } = require('prismarine-viewer')
-    // 07-14: the viewer's browser bundles were REBUILT with modern minecraft-data + a synthesized
-    // 1.21.11 atlas (1.21.8 models — newest published assets; every block in this world predates
-    // them). The client now resolves bot.version natively — no fallback, no shifted block ids.
-    // NOTE: the old `version: '1.21.4'` "pin" here was a NO-OP (mineflayer.js never read that
-    // option); the client was silently falling back to the 1.21.4 atlas on its own, which is why
-    // most-but-not-all blocks rendered right. Rebuild recipe + rollback: backups/viewer-1.21.11-rebuild/.
-    // prismarine-viewer keeps its http server to itself and listens with no error listener.
-    const http = require('http')
-    const createServer = http.createServer
-    const viewServers = []
-    http.createServer = (...args) => { const s = createServer(...args); viewServers.push(s); return s }
+    // ---- event listeners: fire emitEvent for driver-interrupting conditions, each deduped ----
     try {
-      viewer(bot, { port: VIEW_PORT, firstPerson: true })
-    } finally {
-      http.createServer = createServer
-    }
-    for (const s of viewServers) s.on('error', (e) => console.log('[bot] viewer failed (non-fatal):', e.message))
-    console.log(`[bot] viewer on http://localhost:${VIEW_PORT}`)
-  } catch (e) { console.log('[bot] viewer failed (non-fatal):', e.message) }
+      const HOSTILE = new Set(['zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'enderman', 'witch', 'husk', 'stray', 'drowned', 'pillager', 'vindicator', 'zombie_villager', 'phantom'])
+      let lastHealth = (typeof bot.health === 'number') ? bot.health : 20
+      let lastDmg = 0                // throttle damage events so sustained damage doesn't flood the driver
+      const warnedMobs = new Set()   // entity ids already warned about, so a lingering mob isn't re-fired
+      let nightFired = false
+      let lowFoodFired = false
+      let critHealthFired = false
+      let lastDrownEvt = 0           // throttle timestamp for the drowning alarm (fire once per 3s)
 
-  // ---- event listeners: fire emitEvent for driver-interrupting conditions, each deduped ----
-  try {
-    const HOSTILE = new Set(['zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'enderman', 'witch', 'husk', 'stray', 'drowned', 'pillager', 'vindicator', 'zombie_villager', 'phantom'])
-    let lastHealth = (typeof bot.health === 'number') ? bot.health : 20
-    let lastDmg = 0                // throttle damage events so sustained damage doesn't flood the driver
-    const warnedMobs = new Set()   // entity ids already warned about, so a lingering mob isn't re-fired
-    let nightFired = false
-    let lowFoodFired = false
-    let critHealthFired = false
-    let lastDrownEvt = 0           // throttle timestamp for the drowning alarm (fire once per 3s)
-
-    // health event fires on any health/food change: covers damage-taken, health-critical, low-food
-    bot.on('health', () => {
-      try {
-        const h = bot.health
-        if (typeof h === 'number') {
-          if (h < lastHealth && Date.now() - lastDmg > 1500) {
-            lastDmg = Date.now()
-            // damage reporting lives in the SECOND-SENSES hurt listener now (freeze + cause guess);
-            // this older path keeps only the critical-health alarm below
+      // health event fires on any health/food change: covers damage-taken, health-critical, low-food
+      bot.on('health', () => {
+        try {
+          const h = bot.health
+          if (typeof h === 'number') {
+            if (h < lastHealth && Date.now() - lastDmg > 1500) {
+              lastDmg = Date.now()
+              // damage reporting lives in the SECOND-SENSES hurt listener now (freeze + cause guess);
+              // this older path keeps only the critical-health alarm below
+            }
+            if (h <= 6 && !critHealthFired) {
+              critHealthFired = true
+              emitEvent('health_critical', `health critical: ${h.toFixed(1)}`, { health: h })
+            } else if (h > 6) {
+              critHealthFired = false   // re-arm once recovered
+            }
+            lastHealth = h
           }
-          if (h <= 6 && !critHealthFired) {
-            critHealthFired = true
-            emitEvent('health_critical', `health critical: ${h.toFixed(1)}`, { health: h })
-          } else if (h > 6) {
-            critHealthFired = false   // re-arm once recovered
+          const f = bot.food
+          if (typeof f === 'number') {
+            if (f <= 6 && !lowFoodFired) {
+              lowFoodFired = true
+              emitEvent('low_food', `hunger low: ${f}`, { food: f })
+            } else if (f > 6) {
+              lowFoodFired = false   // re-arm once fed
+            }
           }
-          lastHealth = h
-        }
-        const f = bot.food
-        if (typeof f === 'number') {
-          if (f <= 6 && !lowFoodFired) {
-            lowFoodFired = true
-            emitEvent('low_food', `hunger low: ${f}`, { food: f })
-          } else if (f > 6) {
-            lowFoodFired = false   // re-arm once fed
+        } catch (e) {}
+      })
+
+      // breath event: fires when oxygen changes. Alarm ONLY on REAL drowning — a VALID low reading
+      // (0..12; bot.oxygenLevel returns junk like -1 sometimes) AND actually SUBMERGED (head in water).
+      // The old version fired on the junk reading alone, screaming at a bone-dry Claude; the submersion
+      // gate kills that. Time-throttled (3s) so a real drowning warns ONCE, not forty times.
+      bot.on('breath', () => {
+        try {
+          const o2 = bot.oxygenLevel
+          if (typeof o2 !== 'number' || o2 < 0 || o2 > 12) return    // ignore junk (-1) + healthy readings
+          const ws = waterState(bot)
+          if (!ws || !ws.submerged) return                           // not actually underwater → no alarm
+          if (Date.now() - lastDrownEvt < 3000) return               // throttle the spam
+          lastDrownEvt = Date.now()
+          emitEvent('drowning', `DROWNING — oxygen ${o2}/20, get to air NOW`, { oxygen: o2, health: bot.health })
+          // SURVIVAL REFLEX (07-17, drowned to 2HP mid-dig): an active dig pins the body underwater
+          // and nothing else lets go. Abort the dig and swim — air first, apologies after.
+          if (o2 <= 8) {
+            try { bot.stopDigging() } catch (e) {}
+            takeLegs('drown', 'swim up')
+            try { bot.pathfinder.setGoal(null) } catch (e) {}
+            try { swimUp(4000) } catch (e) {}
+            emitEvent('drowning', 'drown reflex: dig aborted, swimming up', {})
           }
-        }
-      } catch (e) {}
-    })
+        } catch (e) {}
+      })
 
-    // breath event: fires when oxygen changes. Alarm ONLY on REAL drowning — a VALID low reading
-    // (0..12; bot.oxygenLevel returns junk like -1 sometimes) AND actually SUBMERGED (head in water).
-    // The old version fired on the junk reading alone, screaming at a bone-dry Claude; the submersion
-    // gate kills that. Time-throttled (3s) so a real drowning warns ONCE, not forty times.
-    bot.on('breath', () => {
-      try {
-        const o2 = bot.oxygenLevel
-        if (typeof o2 !== 'number' || o2 < 0 || o2 > 12) return    // ignore junk (-1) + healthy readings
-        const ws = waterState(bot)
-        if (!ws || !ws.submerged) return                           // not actually underwater → no alarm
-        if (Date.now() - lastDrownEvt < 3000) return               // throttle the spam
-        lastDrownEvt = Date.now()
-        emitEvent('drowning', `DROWNING — oxygen ${o2}/20, get to air NOW`, { oxygen: o2, health: bot.health })
-        // SURVIVAL REFLEX (07-17, drowned to 2HP mid-dig): an active dig pins the body underwater
-        // and nothing else lets go. Abort the dig and swim — air first, apologies after.
-        if (o2 <= 8) {
-          try { bot.stopDigging() } catch (e) {}
-          takeLegs('drown', 'swim up')
-          try { bot.pathfinder.setGoal(null) } catch (e) {}
-          try { swimUp(4000) } catch (e) {}
-          emitEvent('drowning', 'drown reflex: dig aborted, swimming up', {})
-        }
-      } catch (e) {}
-    })
+      bot.on('death', () => {
+        try { emitEvent('death', 'bot died', { pos: (bot.entity ? round(bot.entity.position) : null) }) } catch (e) {}
+      })
 
-    bot.on('death', () => {
-      try { emitEvent('death', 'bot died', { pos: (bot.entity ? round(bot.entity.position) : null) }) } catch (e) {}
-    })
+      // warn once when a hostile mob is within ~16 blocks (via spawn event AND the slow scan below)
+      const considerMob = (en) => {
+        try {
+          if (!en || en === bot.entity || !en.position || !bot.entity) return
+          const nm = (en.name || '').toLowerCase()
+          if (!HOSTILE.has(nm)) return
+          if (warnedMobs.has(en.id)) return
+          const d = en.position.distanceTo(bot.entity.position)
+          if (d <= 16) {
+            // FAIRNESS (07-16, caught from inside a sealed night shelter: this alarm quoted live
+            // distances to skeletons through the dirt wall — raw-entity x-ray, the same leak-class
+            // as the combat watcher's). A distance-quoting alarm is SIGHT-class perception: shared
+            // air required (sealed hostiles may still be HEARD — ears are server-fair). NOT marked
+            // warned when gated, so the alarm still fires the moment the wall opens.
+            try { if (!entityPerceptible(en, reflexes.find(r => r.name === 'combat').fairFill(bot))) return } catch (e) { return }
+            warnedMobs.add(en.id)
+            emitEvent('hostile', `${nm} within ${d.toFixed(1)} blocks`, { mob: nm, id: en.id, pos: round(en.position), dist: +d.toFixed(1) })
+          }
+        } catch (e) {}
+      }
+      bot.on('entitySpawn', considerMob)
 
-    // warn once when a hostile mob is within ~16 blocks (via spawn event AND the slow scan below)
-    const considerMob = (en) => {
-      try {
-        if (!en || en === bot.entity || !en.position || !bot.entity) return
-        const nm = (en.name || '').toLowerCase()
-        if (!HOSTILE.has(nm)) return
-        if (warnedMobs.has(en.id)) return
-        const d = en.position.distanceTo(bot.entity.position)
-        if (d <= 16) {
-          // FAIRNESS (07-16, caught from inside a sealed night shelter: this alarm quoted live
-          // distances to skeletons through the dirt wall — raw-entity x-ray, the same leak-class
-          // as the combat watcher's). A distance-quoting alarm is SIGHT-class perception: shared
-          // air required (sealed hostiles may still be HEARD — ears are server-fair). NOT marked
-          // warned when gated, so the alarm still fires the moment the wall opens.
-          try { if (!entityPerceptible(en, reflexes.find(r => r.name === 'combat').fairFill(bot))) return } catch (e) { return }
-          warnedMobs.add(en.id)
-          emitEvent('hostile', `${nm} within ${d.toFixed(1)} blocks`, { mob: nm, id: en.id, pos: round(en.position), dist: +d.toFixed(1) })
-        }
-      } catch (e) {}
-    }
-    bot.on('entitySpawn', considerMob)
+      // slow ~2s scan: catch mobs that were already loaded, expire stale warnings, and poll nightfall
+      setInterval(() => {
+        try {
+          if (!bot.entity) return
+          for (const en of liveEntities()) considerMob(en)
+          // let a mob re-warn once it has left (>24) or despawned, so a fresh approach re-fires
+          for (const id of Array.from(warnedMobs)) {
+            const en = bot.entities && bot.entities[id]
+            if (!en || (en.position && en.position.distanceTo(bot.entity.position) > 24)) warnedMobs.delete(id)
+          }
+          nightFired = nightfall(nightFired)
+        } catch (e) {}
+      }, 2000)
+    } catch (e) { console.log('[bot] event listeners failed (non-fatal):', e.message) }
+  })
+}
 
-    // slow ~2s scan: catch mobs that were already loaded, expire stale warnings, and poll nightfall
-    setInterval(() => {
-      try {
-        if (!bot.entity) return
-        for (const en of liveEntities()) considerMob(en)
-        // let a mob re-warn once it has left (>24) or despawned, so a fresh approach re-fires
-        for (const id of Array.from(warnedMobs)) {
-          const en = bot.entities && bot.entities[id]
-          if (!en || (en.position && en.position.distanceTo(bot.entity.position) > 24)) warnedMobs.delete(id)
-        }
-        nightFired = nightfall(nightFired)
-      } catch (e) {}
-    }, 2000)
-  } catch (e) { console.log('[bot] event listeners failed (non-fatal):', e.message) }
-})
-
-bot.on('kicked', (r) => console.log('[bot] kicked:', r))
-bot.on('error', (e) => console.log('[bot] error:', e.message))
-// The connection dying MUST kill the process: the watchdog only relaunches on process death,
-// and a live control API over a dead socket serves stale world state with ok:true (ghost mode).
-bot.on('end', (r) => {
-  console.log('[bot] disconnected:', r, '— exiting so the watchdog can relaunch')
-  setTimeout(() => process.exit(1), 500)
-})
+function wireConnectionEvents () {
+  bot.on('kicked', (r) => console.log('[bot] kicked:', r))
+  bot.on('error', (e) => console.log('[bot] error:', e.message))
+  // The connection dying MUST kill the process: the watchdog only relaunches on process death,
+  // and a live control API over a dead socket serves stale world state with ok:true (ghost mode).
+  bot.on('end', (r) => {
+    console.log('[bot] disconnected:', r, '— exiting so the watchdog can relaunch')
+    setTimeout(() => process.exit(1), 500)
+  })
+}
 
 // ---- chat capture (so the driver can hear the world, not just speak to it) ----
 const chatLog = createChatLog({ self: USERNAME })
@@ -445,8 +454,10 @@ function pushChat(from, message, kind) {
 }
 // A pointer error leaves the line without one.
 const pointerOf = (from, message) => { try { return chatPointer(from, message) } catch (e) { return null } }
-bot.on('chat', (username, message) => pushChat(username, message, 'chat'))
-bot.on('whisper', (username, message) => pushChat(username, message, 'whisper'))
+function wireChatCapture () {
+  bot.on('chat', (username, message) => pushChat(username, message, 'chat'))
+  bot.on('whisper', (username, message) => pushChat(username, message, 'whisper'))
+}
 
 // Every system line no player wrote, as a server event. Deaths, joins, leaves and achievements wake the pilot,
 // at most 6 a minute, and every other line arrives quiet. A name in them is player-chosen text.
@@ -472,7 +483,9 @@ function serverMessage (msg, position) {
     }
   } catch (e) {}
 }
-bot.on('message', serverMessage)
+function wireServerMessages () {
+  bot.on('message', serverMessage)
+}
 
 // ---- helpers ----
 const vecStr = (v) => v ? `(${v.x.toFixed(1)}, ${v.y.toFixed(1)}, ${v.z.toFixed(1)})` : null
@@ -1553,12 +1566,18 @@ function lightChanged (oldB, newB) {
   if (was > now) dimAround(p, was)
   if (now > 0) lightAround(p, now)
 }
-bot.on('blockUpdate', lightChanged)
+function wireLightChanges () {
+  bot.on('blockUpdate', lightChanged)
+}
 function freshLight(cx, cz) {
   ESTIMATED_LIGHT.delete(cx + ',' + cz)
 }
-bot.on('chunkColumnLoad', (p) => freshLight(p.x >> 4, p.z >> 4))
-bot._client.on('update_light', (packet) => freshLight(packet.chunkX, packet.chunkZ))
+function wireLightReload () {
+  bot.on('chunkColumnLoad', (p) => freshLight(p.x >> 4, p.z >> 4))
+}
+function wireLightPackets () {
+  bot._client.on('update_light', (packet) => freshLight(packet.chunkX, packet.chunkZ))
+}
 // Sky light lost to the time of day, from 0 by day to 11 at midnight.
 function skyDarken () {
   const t = bot.time.timeOfDay
@@ -1627,14 +1646,16 @@ function cellKnown (p) {
   return sees
 }
 // A changed block drops the verdicts of its cell and the six beside it.
-bot.on('blockUpdate', (oldB, newB) => {
-  const p = (newB || oldB)?.position
-  if (!p) return
-  SIGHT_MEMO.cells.delete(ck(p.x, p.y, p.z))
-  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) SIGHT_MEMO.cells.delete(ck(p.x + dx, p.y + dy, p.z + dz))
-})
-// A loaded column brings blocks no verdict saw.
-bot.on('chunkColumnLoad', () => SIGHT_MEMO.cells.clear())
+function wireSightMemoDrops () {
+  bot.on('blockUpdate', (oldB, newB) => {
+    const p = (newB || oldB)?.position
+    if (!p) return
+    SIGHT_MEMO.cells.delete(ck(p.x, p.y, p.z))
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) SIGHT_MEMO.cells.delete(ck(p.x + dx, p.y + dy, p.z + dz))
+  })
+  // A loaded column brings blocks no verdict saw.
+  bot.on('chunkColumnLoad', () => SIGHT_MEMO.cells.clear())
+}
 // How many columns out groundAbove looks on each side.
 const GROUND_SPAN = 8
 // A sky-lit cell with ground more than this above it on two opposite sides is no surface.
@@ -1668,12 +1689,14 @@ function forgetGround (x0, z0, x1, z1) {
   for (let x = x0; x <= x1; x++) for (let z = z0; z <= z1; z++) GROUND_TOP.delete(x + ',' + z)
 }
 // Only a change at or above a column's ground top can move it.
-bot.on('blockUpdate', (oldB, newB) => {
-  const p = (newB || oldB)?.position
-  if (p && p.y >= GROUND_TOP.get(p.x + ',' + p.z)) forgetGround(p.x, p.z, p.x, p.z)
-})
-bot.on('chunkColumnLoad', (p) => forgetGround(p.x, p.z, p.x + 15, p.z + 15))
-bot.on('chunkColumnUnload', (p) => forgetGround(p.x, p.z, p.x + 15, p.z + 15))
+function wireGroundTopForget () {
+  bot.on('blockUpdate', (oldB, newB) => {
+    const p = (newB || oldB)?.position
+    if (p && p.y >= GROUND_TOP.get(p.x + ',' + p.z)) forgetGround(p.x, p.z, p.x, p.z)
+  })
+  bot.on('chunkColumnLoad', (p) => forgetGround(p.x, p.z, p.x + 15, p.z + 15))
+  bot.on('chunkColumnUnload', (p) => forgetGround(p.x, p.z, p.x + 15, p.z + 15))
+}
 // Surface: sky 15 in p or the cell above, and no SURFACE_DEPTH cover on two opposite sides.
 function onSurface (p, b) {
   if (heldLight(p, b).skyLight !== 15) {
@@ -1757,7 +1780,9 @@ function skyPhrase(oh) {
   return `UNDERGROUND — rock overhead (first solid ${oh.firstUp} up, ~${oh.cover} cover, top ~y${oh.topY}). `
 }
 const INDOORS = new Map()
-bot.on('physicsTick', () => INDOORS.clear())
+function wireIndoorsReset () {
+  bot.on('physicsTick', () => INDOORS.clear())
+}
 // Under a known roof, in a space of at most 8x8 and 4 high closed off by known walls and closed doors.
 function indoors (oh) {
   const o = bot.entity.position.floored()
@@ -1928,7 +1953,9 @@ function showsNow (p) {
   return !!b && (onSurface(p, b) || seesLit(p, 64))
 }
 const SKY_IN_SIGHT = new Map()
-bot.on('physicsTick', () => SKY_IN_SIGHT.clear())
+function wireSkyInSightReset () {
+  bot.on('physicsTick', () => SKY_IN_SIGHT.clear())
+}
 function skyInSight () {
   const head = bot.entity.position.floored().offset(0, 1, 0)
   const key = ck(head.x, head.y, head.z)
@@ -2092,15 +2119,17 @@ function heldInfo() {
   return out
 }
 let lastWearWarn = 0
-setInterval(() => {   // low-durability alarm: once per minute max, only when a tool is nearly dead
-  try {
-    const h = heldInfo()
-    if (h && h.maxDurability && h.durability / h.maxDurability < 0.12 && Date.now() - lastWearWarn > 60000) {
-      lastWearWarn = Date.now()
-      emitEvent('wear', `${h.name} nearly broken (${h.durability}/${h.maxDurability}) — swap or craft a spare`)
-    }
-  } catch (e) {}
-}, 5000)
+function wireWearAlarm () {
+  setInterval(() => {   // low-durability alarm: once per minute max, only when a tool is nearly dead
+    try {
+      const h = heldInfo()
+      if (h && h.maxDurability && h.durability / h.maxDurability < 0.12 && Date.now() - lastWearWarn > 60000) {
+        lastWearWarn = Date.now()
+        emitEvent('wear', `${h.name} nearly broken (${h.durability}/${h.maxDurability}) — swap or craft a spare`)
+      }
+    } catch (e) {}
+  }, 5000)
+}
 
 // ---- SOUND TABLE PIN (07-15): the audio twin of the viewer atlas bug, finally dead. minecraft-data's
 // 1.21.11 sounds.json is shifted off the REAL game registry (all 1838 ids wrong — a stale extra entry
@@ -2111,17 +2140,19 @@ setInterval(() => {   // low-durability alarm: once per minute max, only when a 
 // soundIds via bot.registry.sounds, so overriding that table is the whole fix. Lives in bot.js, not
 // node_modules — survives npm reinstall. If the server version ever moves past 1.21.11, regenerate
 // (recipe in the memory note / DRIVING.md) — the pin skips itself on version mismatch rather than lie.
-bot.once('spawn', () => {
-  try {
-    if (bot.version === '1.21.11') {
-      const fixed = JSON.parse(fs.readFileSync(ROOT + '/sounds-1.21.11.json', 'utf8'))
-      bot.registry.sounds = fixed
-      console.log('[bot] sound table pinned: ' + Object.keys(fixed).length + ' real 1.21.11 ids')
-    } else {
-      console.log('[bot] sound table pin SKIPPED — version ' + bot.version + ' has no ground-truth table; hearings may drift')
-    }
-  } catch (e) { console.log('[bot] sound table pin failed: ' + e.message) }
-})
+function wireSoundTablePin () {
+  bot.once('spawn', () => {
+    try {
+      if (bot.version === '1.21.11') {
+        const fixed = JSON.parse(fs.readFileSync(ROOT + '/sounds-1.21.11.json', 'utf8'))
+        bot.registry.sounds = fixed
+        console.log('[bot] sound table pinned: ' + Object.keys(fixed).length + ' real 1.21.11 ids')
+      } else {
+        console.log('[bot] sound table pin SKIPPED — version ' + bot.version + ' has no ground-truth table; hearings may drift')
+      }
+    } catch (e) { console.log('[bot] sound table pin failed: ' + e.message) }
+  })
+}
 
 // ---- EARS: the server only sends sounds a player would hear, so hearing is fair by construction.
 // Danger tier (lava / fuse / explosion) emits an event at most once per 45s per category — enough
@@ -2153,7 +2184,9 @@ function onSound(name, position) {
     }
   } catch (e) {}
 }
-bot.on('soundEffectHeard', (name, position) => onSound(name, position))
+function wireHearing () {
+  bot.on('soundEffectHeard', (name, position) => onSound(name, position))
+}
 function hearSummary(windowMs) {
   const now = Date.now()
   const fresh = HEARD.filter(h => now - h.t < windowMs)
@@ -2177,20 +2210,24 @@ const stampOwnEdit = (p) => { if (p) { recentOwnEdits.set(ck(p.x, p.y, p.z), Dat
 // (07-14) wrap at SPAWN, not module scope — bot.dig/placeBlock are plugin-injected and racing
 // them here lost this boot ("reading 'bind' of undefined"), which would have narrated every own
 // dig/place as a world-change.
-bot.once('spawn', () => {
-  try {
-    const origDig = bot.dig.bind(bot)
-    bot.dig = (block, ...a) => { try { stampOwnEdit(block && block.position) } catch (e) {} ; return origDig(block, ...a) }
-    const origPlace = bot.placeBlock.bind(bot)
-    bot.placeBlock = (ref, face) => { try { stampOwnEdit(ref.position.plus(face)) } catch (e) {} ; return origPlace(ref, face) }
-  } catch (e) { console.log('[bot] own-edit wrap skipped:', e.message) }
-})
-bot.once('spawn', () => {
-  const combat = reflexes.find(r => r.name === 'combat')
-  bot.look = smoothLook(bot, bot.look, () => combat.active)
-  bot._genericPlace = pacePlacements(bot._genericPlace)
-  bot.pathfinder.goto = watchGoto(bot.pathfinder.goto)
-})
+function wireOwnEditStamps () {
+  bot.once('spawn', () => {
+    try {
+      const origDig = bot.dig.bind(bot)
+      bot.dig = (block, ...a) => { try { stampOwnEdit(block && block.position) } catch (e) {} ; return origDig(block, ...a) }
+      const origPlace = bot.placeBlock.bind(bot)
+      bot.placeBlock = (ref, face) => { try { stampOwnEdit(ref.position.plus(face)) } catch (e) {} ; return origPlace(ref, face) }
+    } catch (e) { console.log('[bot] own-edit wrap skipped:', e.message) }
+  })
+}
+function wireLookPaceGoto () {
+  bot.once('spawn', () => {
+    const combat = reflexes.find(r => r.name === 'combat')
+    bot.look = smoothLook(bot, bot.look, () => combat.active)
+    bot._genericPlace = pacePlacements(bot._genericPlace)
+    bot.pathfinder.goto = watchGoto(bot.pathfinder.goto)
+  })
+}
 
 // ---- GATE MANNERS (07-15, built the day the chickens fled): the pathfinder and the unstuck reflex
 // open doors/gates and never close them — pen integrity and safe retreat both die on that habit.
@@ -2202,27 +2239,29 @@ bot.once('spawn', () => {
 // If I overshoot reach before it shuts (sprint/fall), it says so ONCE — an honest handoff, no lie.
 const PENDING_DOORS = []
 const isManneredDoor = (b) => b && /(_door|_fence_gate)$/.test(b.name) && b.name !== 'iron_door'
-bot.once('spawn', () => {
-  try {
-    const origActivate = bot.activateBlock.bind(bot)
-    bot.activateBlock = async (block, ...a) => {
-      const watch = isManneredDoor(block)
-      const r = await origActivate(block, ...a)
-      if (watch) {
-        try {
-          await bot.waitForTicks(2)
-          const fresh = bot.blockAt(block.position)
-          const open = fresh && fresh.getProperties && (fresh.getProperties() || {}).open
-          const key = block.position.toString()
-          const idx = PENDING_DOORS.findIndex(d => d.key === key)
-          if (open && idx < 0) PENDING_DOORS.push({ key, pos: block.position.clone(), t: Date.now(), warned: false })
-          else if (!open && idx >= 0) { PENDING_DOORS.splice(idx, 1); console.log('[bot] manners: closed behind me at ' + key) }
-        } catch (e) {}
+function wireGateManners () {
+  bot.once('spawn', () => {
+    try {
+      const origActivate = bot.activateBlock.bind(bot)
+      bot.activateBlock = async (block, ...a) => {
+        const watch = isManneredDoor(block)
+        const r = await origActivate(block, ...a)
+        if (watch) {
+          try {
+            await bot.waitForTicks(2)
+            const fresh = bot.blockAt(block.position)
+            const open = fresh && fresh.getProperties && (fresh.getProperties() || {}).open
+            const key = block.position.toString()
+            const idx = PENDING_DOORS.findIndex(d => d.key === key)
+            if (open && idx < 0) PENDING_DOORS.push({ key, pos: block.position.clone(), t: Date.now(), warned: false })
+            else if (!open && idx >= 0) { PENDING_DOORS.splice(idx, 1); console.log('[bot] manners: closed behind me at ' + key) }
+          } catch (e) {}
+        }
+        return r
       }
-      return r
-    }
-  } catch (e) { console.log('[bot] gate-manners wrap skipped: ' + e.message) }
-})
+    } catch (e) { console.log('[bot] gate-manners wrap skipped: ' + e.message) }
+  })
+}
 // Runs every physics tick, as a sprint crosses the reach band in about 0.3 s.
 function closeDoorsBehind () {
   if (!PENDING_DOORS.length) return
@@ -2258,7 +2297,9 @@ function noteWorldChange (oldB, newB) {
     if (changeBuf.length > 200) changeBuf.splice(0, changeBuf.length - 200)
   } catch (e) {}
 }
-bot.on('blockUpdate', noteWorldChange)
+function wireWorldChangeNotes () {
+  bot.on('blockUpdate', noteWorldChange)
+}
 function worldChangeEvent () {
   try {
     if (!changeBuf.length || Date.now() - lastChangeEmit < 6000) return
@@ -2277,7 +2318,9 @@ function worldChangeEvent () {
     emitEvent('world', `changed near me: ${line}`, null, { quiet: batch.every(c => ambientChange(c.from, c.to)) })
   } catch (e) {}
 }
-setInterval(worldChangeEvent, 3000)
+function wireWorldChangeEvents () {
+  setInterval(worldChangeEvent, 3000)
+}
 
 // ---- BODY ALARMS: damage freezes everything (the bot buys my slow reaction time); hunger warns
 // once per crossing; death stamps a waypoint and says what was lost where.
@@ -2292,23 +2335,27 @@ let lowFoodWarned = false
 // per-episode + hysteresis shape as the food alarm: say it once at "getting full" (≤4 free), once
 // more at FULL (0 free), re-arm only after real space opens up (≥6 free). Polled 5s — cheap.
 let pocketsWarned = 0                                   // 0 = quiet, 1 = warned "getting full", 2 = warned FULL
-setInterval(() => {
-  try {
-    if (!bot || !bot.inventory || !bot.entity) return
-    const empty = bot.inventory.emptySlotCount ? bot.inventory.emptySlotCount() : bot.inventory.slots.slice(9, 45).filter(s => !s).length
-    if (empty === 0 && pocketsWarned < 2) { pocketsWarned = 2; emitEvent('pockets', 'pockets FULL (0 free) — pickups now fail silently; bank or /toss before mining/looting') }
-    else if (empty <= 4 && empty > 0 && pocketsWarned < 1) { pocketsWarned = 1; emitEvent('pockets', `pockets getting full — ${empty} slots free`) }
-    else if (empty >= 6) pocketsWarned = 0
-  } catch (e) {}
-}, 5000)
+function wirePocketAlarm () {
+  setInterval(() => {
+    try {
+      if (!bot || !bot.inventory || !bot.entity) return
+      const empty = bot.inventory.emptySlotCount ? bot.inventory.emptySlotCount() : bot.inventory.slots.slice(9, 45).filter(s => !s).length
+      if (empty === 0 && pocketsWarned < 2) { pocketsWarned = 2; emitEvent('pockets', 'pockets FULL (0 free) — pickups now fail silently; bank or /toss before mining/looting') }
+      else if (empty <= 4 && empty > 0 && pocketsWarned < 1) { pocketsWarned = 1; emitEvent('pockets', `pockets getting full — ${empty} slots free`) }
+      else if (empty >= 6) pocketsWarned = 0
+    } catch (e) {}
+  }, 5000)
+}
 const fight = {}
 fight.lastAttrib = null            // set by the damage_event wire; read by the hurt handler above
-setInterval(() => {
-  try {
-    lastPosSafe = bot.entity.position.clone()
-    markTrail(lastPosSafe.floored())
-  } catch (e) {}
-}, 2000)
+function wireTrailMarks () {
+  setInterval(() => {
+    try {
+      lastPosSafe = bot.entity.position.clone()
+      markTrail(lastPosSafe.floored())
+    } catch (e) {}
+  }, 2000)
+}
 // The walked trail feeds SEEN with the perceived cells of the 7x7x4 box around feet cell o.
 function markTrail (o) {
   for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -1; dy <= 2; dy++) {
@@ -2324,91 +2371,93 @@ async function digOutHead () {
   bot.dig(hb).catch(() => {})
   return true
 }
-bot.on('health', async () => {
-  try {
-    if (bot.health < lastHp - 0.5) {
-      const dmg = +(lastHp - bot.health).toFixed(1)
-      const hurtDue = (ms) => dmg >= BIG_HIT || Date.now() - lastHurtEmit > ms
-      if (fight.swingWait) {
-        lastHp = bot.health                               // a health update during the wait counts from here
-        await fight.swingWait
-      }
-      // LAW AMENDED 07-14, built 07-15: hurt-FREEZE is for UNEXPLAINED damage only. When damage
-      // attribution (damage_event wire below) has just named a living attacker, freezing is the
-      // worst response — the combat reflex owns it; we only narrate.
-      const attrib = (fight.lastAttrib && Date.now() - fight.lastAttrib.t < 1500) ? fight.lastAttrib : null
-      // cls is the mobClass of the attacker the hit is attributed to, null for an unattributed hit and
-      // for an environmental one that kept an attribution.
-      fight.lastHit = { dmg, t: Date.now(), cls: attrib && attrib.entity && !attrib.envHit ? mobClass(attrib.entity) : null }   // feeds the reflex's ADAPTIVE tripwire (death #2 lesson)
-      if (attrib && !attrib.env && !bunker.building) {
-        // DEATH #9 (07-23): this line used to say "combat reflex has it" on attribution alone —
-        // fourteen times, while the watcher was silently dropping the attacker at its distance
-        // gate. Now the hurt event reports what the body is DOING, and a ranged hit triggers
-        // the cover response HERE, directly — not two hops later through a gate that can drop it.
-        let action = 'combat reflex engaging'
-        const cr = reflexes.find(r => r.name === 'combat')
-        if (attrib.ranged) {
-          if (attrib.entity && cr && cr.on) { action = 'RANGED — breaking eye-line'; try { cr.takeCover(bot, attrib.entity, attrib.desc) } catch (e) {} }
-          else if (!attrib.entity) action = 'RANGED, shooter unseen — PILOT: move or seal NOW'
-          else action = 'RANGED and combat reflex is OFF — PILOT: move or seal NOW'
-        } else if (attrib.entity && attrib.entity.position.distanceTo(bot.entity.position) > CONFIRMED_HORIZON) {
-          action = 'attacker beyond reflex reach — PILOT must act'
-        } else if (!cr || !cr.on) {
-          action = 'combat reflex is OFF — PILOT must act'
+function wireBodyAlarms () {
+  bot.on('health', async () => {
+    try {
+      if (bot.health < lastHp - 0.5) {
+        const dmg = +(lastHp - bot.health).toFixed(1)
+        const hurtDue = (ms) => dmg >= BIG_HIT || Date.now() - lastHurtEmit > ms
+        if (fight.swingWait) {
+          lastHp = bot.health                               // a health update during the wait counts from here
+          await fight.swingWait
         }
-        if (hurtDue(2000)) {
+        // LAW AMENDED 07-14, built 07-15: hurt-FREEZE is for UNEXPLAINED damage only. When damage
+        // attribution (damage_event wire below) has just named a living attacker, freezing is the
+        // worst response — the combat reflex owns it; we only narrate.
+        const attrib = (fight.lastAttrib && Date.now() - fight.lastAttrib.t < 1500) ? fight.lastAttrib : null
+        // cls is the mobClass of the attacker the hit is attributed to, null for an unattributed hit and
+        // for an environmental one that kept an attribution.
+        fight.lastHit = { dmg, t: Date.now(), cls: attrib && attrib.entity && !attrib.envHit ? mobClass(attrib.entity) : null }   // feeds the reflex's ADAPTIVE tripwire (death #2 lesson)
+        if (attrib && !attrib.env && !bunker.building) {
+          // DEATH #9 (07-23): this line used to say "combat reflex has it" on attribution alone —
+          // fourteen times, while the watcher was silently dropping the attacker at its distance
+          // gate. Now the hurt event reports what the body is DOING, and a ranged hit triggers
+          // the cover response HERE, directly — not two hops later through a gate that can drop it.
+          let action = 'combat reflex engaging'
+          const cr = reflexes.find(r => r.name === 'combat')
+          if (attrib.ranged) {
+            if (attrib.entity && cr && cr.on) { action = 'RANGED — breaking eye-line'; try { cr.takeCover(bot, attrib.entity, attrib.desc) } catch (e) {} }
+            else if (!attrib.entity) action = 'RANGED, shooter unseen — PILOT: move or seal NOW'
+            else action = 'RANGED and combat reflex is OFF — PILOT: move or seal NOW'
+          } else if (attrib.entity && attrib.entity.position.distanceTo(bot.entity.position) > CONFIRMED_HORIZON) {
+            action = 'attacker beyond reflex reach — PILOT must act'
+          } else if (!cr || !cr.on) {
+            action = 'combat reflex is OFF — PILOT must act'
+          }
+          if (hurtDue(2000)) {
+            lastHurtEmit = Date.now()
+            emitEvent('hurt', `took ${dmg} — ${attrib.desc} — HP ${bot.health}/20 — ${action}`)
+          }
+        }
+        const ws = waterState(bot)
+        // Every hit during a bunker build lands here, attributed or not.
+        if (bunker.building) {
+          onBuildHit(attrib)
+          if (hurtDue(3000)) {
+            lastHurtEmit = Date.now()
+            emitEvent('hurt', `took ${dmg} damage while building the bunker${attrib ? `, ${attrib.desc}` : ''}, HP ${bot.health}/20`)
+          }
+        } else if (!attrib) {
+          freezeBody()
+          const cause = ws && ws.buried ? 'SUFFOCATING inside a block' : ws && ws.inLava ? 'LAVA' : ws && ws.submerged ? 'drowning' : 'unknown — look around'
+          if (hurtDue(3000)) {
+            lastHurtEmit = Date.now()
+            emitEvent('hurt', `took ${dmg} damage (${cause}) — HP ${bot.health}/20 — FROZE all action; assess before moving`)
+          }
+        } else if (attrib.env && hurtDue(3000)) {
+          // An environmental hit, or a sourceless one with no hostile near, never freezes the body.
           lastHurtEmit = Date.now()
-          emitEvent('hurt', `took ${dmg} — ${attrib.desc} — HP ${bot.health}/20 — ${action}`)
+          emitEvent('hurt', `took ${dmg} damage (${attrib.desc}), HP ${bot.health}/20`)
+        }
+        // Every hit gets the rescues below, attributed or not.
+        // SELF-RESCUE REFLEXES (the cases freezing makes WORSE — a frozen body suffocates or sinks):
+        // buried = dig the head block NOW (my own cell, fairness-clean, like yanking a hand from fire)
+        if (ws && ws.buried) {
+          try { await digOutHead() } catch (e) {}
+        }
+        // drowning = SWIM UP, don't freeze (learned live 07-12: the freeze held me under during the
+        // farm flood; only the next walk order saved me). Hold jump ~3s to surface, then release.
+        if (ws && ws.submerged && !ws.buried) {
+          try { swimUp(3000) } catch (e) {}
         }
       }
-      const ws = waterState(bot)
-      // Every hit during a bunker build lands here, attributed or not.
-      if (bunker.building) {
-        onBuildHit(attrib)
-        if (hurtDue(3000)) {
-          lastHurtEmit = Date.now()
-          emitEvent('hurt', `took ${dmg} damage while building the bunker${attrib ? `, ${attrib.desc}` : ''}, HP ${bot.health}/20`)
-        }
-      } else if (!attrib) {
-        freezeBody()
-        const cause = ws && ws.buried ? 'SUFFOCATING inside a block' : ws && ws.inLava ? 'LAVA' : ws && ws.submerged ? 'drowning' : 'unknown — look around'
-        if (hurtDue(3000)) {
-          lastHurtEmit = Date.now()
-          emitEvent('hurt', `took ${dmg} damage (${cause}) — HP ${bot.health}/20 — FROZE all action; assess before moving`)
-        }
-      } else if (attrib.env && hurtDue(3000)) {
-        // An environmental hit, or a sourceless one with no hostile near, never freezes the body.
-        lastHurtEmit = Date.now()
-        emitEvent('hurt', `took ${dmg} damage (${attrib.desc}), HP ${bot.health}/20`)
-      }
-      // Every hit gets the rescues below, attributed or not.
-      // SELF-RESCUE REFLEXES (the cases freezing makes WORSE — a frozen body suffocates or sinks):
-      // buried = dig the head block NOW (my own cell, fairness-clean, like yanking a hand from fire)
-      if (ws && ws.buried) {
-        try { await digOutHead() } catch (e) {}
-      }
-      // drowning = SWIM UP, don't freeze (learned live 07-12: the freeze held me under during the
-      // farm flood; only the next walk order saved me). Hold jump ~3s to surface, then release.
-      if (ws && ws.submerged && !ws.buried) {
-        try { swimUp(3000) } catch (e) {}
-      }
-    }
-    lastHp = bot.health
-    if (bot.food <= 7 && !lowFoodWarned) { lowFoodWarned = true; emitEvent('hunger', `food ${bot.food}/20 — eat soon (/eat)`) }
-    if (bot.food > 10) lowFoodWarned = false
-  } catch (e) {}
-})
-bot.on('death', () => {
-  try {
-    const p = lastPosSafe || bot.entity.position
-    const at = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }
-    try { waypoints.set('lastdeath', at, GRAVES ? { note: 'your items are in a gravestone here' } : {}) } catch (e) {}
-    const items = GRAVES ? 'your items are in a gravestone there, take them with grave' : 'drops despawn in ~5 min'
-    const msg = `DIED near (${at.x},${at.y},${at.z}) — waypoint 'lastdeath' set; ${items}`
-    deaths.died(msg)
-    emitEvent('death', msg)
-  } catch (e) {}
-})
+      lastHp = bot.health
+      if (bot.food <= 7 && !lowFoodWarned) { lowFoodWarned = true; emitEvent('hunger', `food ${bot.food}/20 — eat soon (/eat)`) }
+      if (bot.food > 10) lowFoodWarned = false
+    } catch (e) {}
+  })
+  bot.on('death', () => {
+    try {
+      const p = lastPosSafe || bot.entity.position
+      const at = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }
+      try { waypoints.set('lastdeath', at, GRAVES ? { note: 'your items are in a gravestone here' } : {}) } catch (e) {}
+      const items = GRAVES ? 'your items are in a gravestone there, take them with grave' : 'drops despawn in ~5 min'
+      const msg = `DIED near (${at.x},${at.y},${at.z}) — waypoint 'lastdeath' set; ${items}`
+      deaths.died(msg)
+      emitEvent('death', msg)
+    } catch (e) {}
+  })
+}
 
 // ---- COMBAT LAYER (07-15, designed with the helmsman 07-14): attribution + the two-gate threat watcher.
 // GATE 1, SPECIES: only true hostiles get scored (mc-data category, with a PROVOKABLE override list —
@@ -2477,12 +2526,14 @@ fight.lastAttackT = 0                        // when the bot last attacked
 // The raised guard (shield, or the 1.7.10 sword block), slot the hotbar slot it rose in, pilot set by /guard.
 const guardState = { up: false, slot: -1, pilot: false }
 // A 1.7.10 sword block ends once another hotbar slot or anything but a sword is in hand.
-bot.on('heldItemChanged', (item) => {
-  if (!LEGACY_1710) return
-  const sword = !!item && /_sword$/.test(item.name)
-  if (bot.quickBarSlot !== guardState.slot || !sword) guardState.up = false
-  if (!sword && !reflexes.find(r => r.name === 'combat').active) guardState.pilot = false
-})
+function wireGuardDrop () {
+  bot.on('heldItemChanged', (item) => {
+    if (!LEGACY_1710) return
+    const sword = !!item && /_sword$/.test(item.name)
+    if (bot.quickBarSlot !== guardState.slot || !sword) guardState.up = false
+    if (!sword && !reflexes.find(r => r.name === 'combat').active) guardState.pilot = false
+  })
+}
 const MOVES = ['forward', 'back', 'left', 'right', 'sprint']
 function legsMoving () {
   return MOVES.some(c => bot.controlState[c])
@@ -2546,7 +2597,9 @@ function itemUseCosts () {
     }
   }
 }
-bot.once('spawn', itemUseCosts)
+function wireItemUseCosts () {
+  bot.once('spawn', itemUseCosts)
+}
 function lowerGuard () {
   if (!guardState.up) return
   try { bot.deactivateItem() } catch (e) {}
@@ -2578,18 +2631,22 @@ function nearestHostile () {
 let damageTypes = []
 // True once a damage_event named a type the registry lacks.
 let damageTypeMissed = false
-bot._client.on('registry_data', (packet) => {
-  try {
-    if (/^(minecraft:)?damage_type$/.test(packet.id)) damageTypes = packet.entries.map(e => e.key.replace(/^minecraft:/, ''))
-  } catch (e) { console.log('[combat] damage type registry unreadable: ' + e.message) }
-})
+function wireDamageTypes () {
+  bot._client.on('registry_data', (packet) => {
+    try {
+      if (/^(minecraft:)?damage_type$/.test(packet.id)) damageTypes = packet.entries.map(e => e.key.replace(/^minecraft:/, ''))
+    } catch (e) { console.log('[combat] damage type registry unreadable: ' + e.message) }
+  })
+}
 // Each player's last arm swing by entity id: when it came (t), when the one before it came (prev),
 // and the player's yaw as it swung.
 const lastSwing = new Map()
-bot.on('entitySwingArm', (e) => {
-  if (e && e.type === 'player') lastSwing.set(e.id, { t: Date.now(), prev: (lastSwing.get(e.id) || { t: 0 }).t, yaw: e.yaw })
-})
-bot.on('entityGone', (e) => { if (e) lastSwing.delete(e.id) })
+function wireArmSwings () {
+  bot.on('entitySwingArm', (e) => {
+    if (e && e.type === 'player') lastSwing.set(e.id, { t: Date.now(), prev: (lastSwing.get(e.id) || { t: 0 }).t, yaw: e.yaw })
+  })
+  bot.on('entityGone', (e) => { if (e) lastSwing.delete(e.id) })
+}
 // How far apart in ms a player's hit and its arm swing may arrive, in either order.
 const SWING_MS = 50
 // A swing counts only this many ms or more after the same player's previous one, which leaves out fast clicking.
@@ -2622,18 +2679,20 @@ const ARROW_RANGE = 15
 const ARROWS = new Set(['arrow', 'spectral_arrow'])
 // How far from the shooter's eye an arrow appears.
 const ARROW_LOOSE = 2
-bot.on('entitySpawn', (e) => {
-  if (!e || !ARROWS.has(e.name) || !bot.entity) return
-  const now = Date.now()
-  for (const [id, a] of arrows) if (now - a.t > ARROW_FLIGHT_MS + ARROW_HIT_MS) arrows.delete(id)
-  // The body's own arrows leave from its eyes.
-  if (e.position.distanceTo(bot.entity.position.offset(0, 1.62, 0)) < 2) return
-  arrows.set(e.id, { e, from: e.position.clone(), t: now, gone: 0 })
-})
-bot.on('entityGone', (e) => {
-  const a = e && arrows.get(e.id)
-  if (a && !a.gone) a.gone = Date.now()
-})
+function wireArrowTracking () {
+  bot.on('entitySpawn', (e) => {
+    if (!e || !ARROWS.has(e.name) || !bot.entity) return
+    const now = Date.now()
+    for (const [id, a] of arrows) if (now - a.t > ARROW_FLIGHT_MS + ARROW_HIT_MS) arrows.delete(id)
+    // The body's own arrows leave from its eyes.
+    if (e.position.distanceTo(bot.entity.position.offset(0, 1.62, 0)) < 2) return
+    arrows.set(e.id, { e, from: e.position.clone(), t: now, gone: 0 })
+  })
+  bot.on('entityGone', (e) => {
+    const a = e && arrows.get(e.id)
+    if (a && !a.gone) a.gone = Date.now()
+  })
+}
 // True when arrow a appeared within shooting range of the body.
 function arrowInRange (a) {
   return a.from.distanceTo(bot.entity.position) <= ARROW_RANGE + 1
@@ -2669,90 +2728,92 @@ function arrowHitOf (t, sourceless, direct, cause) {
 }
 // the wire: 1.21.11 sends damage_event with sourceCauseId = attacker entityId + 1 (0 = none).
 // Validation ritual (the helmsman's design): he punches the machine for science, we expect his name.
-bot.once('spawn', () => {
-  try {
-    // t is when the damage_event arrived. waited is true once a swing can no longer follow it.
-    const onDamage = (packet, t, waited) => {
-      try {
-        if (!bot.entity || packet.entityId !== bot.entity.id) return
-        const causeId = (packet.sourceCauseId || 0) - 1
-        const directId = (packet.sourceDirectId || 0) - 1
-        const type = damageTypes[packet.sourceTypeId]
-        if (type === undefined && !damageTypeMissed) {
-          damageTypeMissed = true
-          console.log(`[combat] damage type ${packet.sourceTypeId} is not in the registry, a hit without a source counts as environmental`)
-        }
-        const noSource = causeId < 0 && directId < 0
-        // Every 1.7.10 hit through Via is sourceless, a mob's included.
-        const sourceless = noSource && type === 'generic'
-        // After the swing wait, a non-env attribution of a later hit stays in place.
-        const newer = waited && fight.lastAttrib && !fight.lastAttrib.env && fight.lastAttrib.t > t
-        const hostile = sourceless ? nearestHostile() : undefined
-        // A sourceless hit is a player's when that player swung within SWING_MS of it, alone and facing
-        // the bot, with no hostile closer to the bot. The swing nearest in time wins.
-        const near = sourceless ? playersNear(hostile) : []
-        const swing = near.map(e => ({ e, s: lastSwing.get(e.id) }))
-          .filter(({ e, s }) => s && Math.abs(s.t - t) <= SWING_MS && s.t - s.prev >= SWING_GAP_MS && facesBot(e, s.yaw))
-          .sort((a, b) => Math.abs(a.s.t - t) - Math.abs(b.s.t - t))[0]
-        if (swing) {
-          const name = swing.e.username || 'a player'
-          if (!newer) fight.lastAttrib = { t, desc: `no attacker named, ${name} swung nearby`, entity: null, ranged: false, env: true }
-          console.log(`[combat] sourceless hit, ${name} swung nearby`)
-          return
-        }
-        // The swing of a player beside the bot may still follow, and an arrow in flight may vanish.
-        const flying = sourceless && [...arrows.values()].some(a => !a.gone && t - a.t <= ARROW_FLIGHT_MS && arrowInRange(a))
-        if ((near.length || flying) && !waited) {
-          const wait = new Promise(r => setTimeout(r, flying ? ARROW_HIT_MS : SWING_MS)).then(() => {
-            if (fight.swingWait === wait) fight.swingWait = null
-            onDamage(packet, t, true)
-          })
-          fight.swingWait = wait
-          return
-        }
-        const cause = sourceless ? hostile : causeId >= 0 ? bot.entities[causeId] : null
-        const direct = directId >= 0 ? bot.entities[directId] : null
-        const a = arrowHitOf(t, sourceless, direct, cause)
-        if (a) {
-          if (!newer) fight.lastAttrib = a
-          if (a.entity) AGGRO_CONFIRMED.set(a.entity.id, { name: a.entity.username || a.entity.name, t: Date.now(), ranged: true })
-          console.log(`[combat] attributed: ${a.entity ? 'hit by ' : ''}${a.desc}`)
-          return
-        }
-        // PROJECTILE TELL (07-23, death #9: the events said "zombie E ~33" while something plinked
-        // me at bow range — almost certainly a skeleton wearing a misattributed name. Whatever the
-        // cause entity claims to be, cause≠direct means the hit ARRIVED as a projectile, and the
-        // response must be ranged doctrine regardless of the name on the shaft.)
-        const ranged = !!(direct && (!cause || direct.id !== cause.id))
-        if (!cause) {
-          if (ranged) fight.lastAttrib = { t, desc: 'projectile, shooter unseen', entity: null, ranged: true }
-          // An attacker the bot doesn't track leaves the hit unattributed.
-          else if (!noSource) fight.lastAttrib = null
-          // env marks a hit without a source entity. Such a hit keeps a fresh attribution to an attacker,
-          // and a lava, fire or fall hit marks it envHit, so the hit can't arm the bunker.
-          else if (fight.lastAttrib && !fight.lastAttrib.env && Date.now() - fight.lastAttrib.t < 1500) {
-            if (!sourceless) fight.lastAttrib = { ...fight.lastAttrib, envHit: true }
-          } else {
-            fight.lastAttrib = { t, desc: sourceless ? 'no attacker named, no hostile within 4' : type || 'no attacker named', entity: null, ranged: false, env: true }
+function wireDamageAttribution () {
+  bot.once('spawn', () => {
+    try {
+      // t is when the damage_event arrived. waited is true once a swing can no longer follow it.
+      const onDamage = (packet, t, waited) => {
+        try {
+          if (!bot.entity || packet.entityId !== bot.entity.id) return
+          const causeId = (packet.sourceCauseId || 0) - 1
+          const directId = (packet.sourceDirectId || 0) - 1
+          const type = damageTypes[packet.sourceTypeId]
+          if (type === undefined && !damageTypeMissed) {
+            damageTypeMissed = true
+            console.log(`[combat] damage type ${packet.sourceTypeId} is not in the registry, a hit without a source counts as environmental`)
           }
-          return
-        }
-        const here = bot.entity.position
-        const dir = compass(cause.position.x - here.x, cause.position.z - here.z)
-        const dist = Math.round(cause.position.distanceTo(here))
-        const who = cause.username || cause.name || 'unknown'
-        const how = `${ranged ? ' (projectile)' : ''}${sourceless ? ' (nearest hostile)' : ''}`
-        // ranged is STICKY per attacker: one proven arrow makes it a ranged threat for the episode
-        const wasRanged = (AGGRO_CONFIRMED.get(cause.id) || {}).ranged || false
-        if (!newer) fight.lastAttrib = { t, desc: `${who} ${dir} ~${dist}${how}`, entity: cause, ranged: ranged || wasRanged }
-        AGGRO_CONFIRMED.set(cause.id, { name: who, t: Date.now(), ranged: ranged || wasRanged })
-        console.log(`[combat] attributed: hit by ${who} ${dir} ~${dist}${how}`)
-      } catch (e) {}
-    }
-    bot._client.on('damage_event', (packet) => onDamage(packet, Date.now(), false))
-    console.log('[bot] damage attribution wired')
-  } catch (e) { console.log('[bot] damage attribution wire failed: ' + e.message) }
-})
+          const noSource = causeId < 0 && directId < 0
+          // Every 1.7.10 hit through Via is sourceless, a mob's included.
+          const sourceless = noSource && type === 'generic'
+          // After the swing wait, a non-env attribution of a later hit stays in place.
+          const newer = waited && fight.lastAttrib && !fight.lastAttrib.env && fight.lastAttrib.t > t
+          const hostile = sourceless ? nearestHostile() : undefined
+          // A sourceless hit is a player's when that player swung within SWING_MS of it, alone and facing
+          // the bot, with no hostile closer to the bot. The swing nearest in time wins.
+          const near = sourceless ? playersNear(hostile) : []
+          const swing = near.map(e => ({ e, s: lastSwing.get(e.id) }))
+            .filter(({ e, s }) => s && Math.abs(s.t - t) <= SWING_MS && s.t - s.prev >= SWING_GAP_MS && facesBot(e, s.yaw))
+            .sort((a, b) => Math.abs(a.s.t - t) - Math.abs(b.s.t - t))[0]
+          if (swing) {
+            const name = swing.e.username || 'a player'
+            if (!newer) fight.lastAttrib = { t, desc: `no attacker named, ${name} swung nearby`, entity: null, ranged: false, env: true }
+            console.log(`[combat] sourceless hit, ${name} swung nearby`)
+            return
+          }
+          // The swing of a player beside the bot may still follow, and an arrow in flight may vanish.
+          const flying = sourceless && [...arrows.values()].some(a => !a.gone && t - a.t <= ARROW_FLIGHT_MS && arrowInRange(a))
+          if ((near.length || flying) && !waited) {
+            const wait = new Promise(r => setTimeout(r, flying ? ARROW_HIT_MS : SWING_MS)).then(() => {
+              if (fight.swingWait === wait) fight.swingWait = null
+              onDamage(packet, t, true)
+            })
+            fight.swingWait = wait
+            return
+          }
+          const cause = sourceless ? hostile : causeId >= 0 ? bot.entities[causeId] : null
+          const direct = directId >= 0 ? bot.entities[directId] : null
+          const a = arrowHitOf(t, sourceless, direct, cause)
+          if (a) {
+            if (!newer) fight.lastAttrib = a
+            if (a.entity) AGGRO_CONFIRMED.set(a.entity.id, { name: a.entity.username || a.entity.name, t: Date.now(), ranged: true })
+            console.log(`[combat] attributed: ${a.entity ? 'hit by ' : ''}${a.desc}`)
+            return
+          }
+          // PROJECTILE TELL (07-23, death #9: the events said "zombie E ~33" while something plinked
+          // me at bow range — almost certainly a skeleton wearing a misattributed name. Whatever the
+          // cause entity claims to be, cause≠direct means the hit ARRIVED as a projectile, and the
+          // response must be ranged doctrine regardless of the name on the shaft.)
+          const ranged = !!(direct && (!cause || direct.id !== cause.id))
+          if (!cause) {
+            if (ranged) fight.lastAttrib = { t, desc: 'projectile, shooter unseen', entity: null, ranged: true }
+            // An attacker the bot doesn't track leaves the hit unattributed.
+            else if (!noSource) fight.lastAttrib = null
+            // env marks a hit without a source entity. Such a hit keeps a fresh attribution to an attacker,
+            // and a lava, fire or fall hit marks it envHit, so the hit can't arm the bunker.
+            else if (fight.lastAttrib && !fight.lastAttrib.env && Date.now() - fight.lastAttrib.t < 1500) {
+              if (!sourceless) fight.lastAttrib = { ...fight.lastAttrib, envHit: true }
+            } else {
+              fight.lastAttrib = { t, desc: sourceless ? 'no attacker named, no hostile within 4' : type || 'no attacker named', entity: null, ranged: false, env: true }
+            }
+            return
+          }
+          const here = bot.entity.position
+          const dir = compass(cause.position.x - here.x, cause.position.z - here.z)
+          const dist = Math.round(cause.position.distanceTo(here))
+          const who = cause.username || cause.name || 'unknown'
+          const how = `${ranged ? ' (projectile)' : ''}${sourceless ? ' (nearest hostile)' : ''}`
+          // ranged is STICKY per attacker: one proven arrow makes it a ranged threat for the episode
+          const wasRanged = (AGGRO_CONFIRMED.get(cause.id) || {}).ranged || false
+          if (!newer) fight.lastAttrib = { t, desc: `${who} ${dir} ~${dist}${how}`, entity: cause, ranged: ranged || wasRanged }
+          AGGRO_CONFIRMED.set(cause.id, { name: who, t: Date.now(), ranged: ranged || wasRanged })
+          console.log(`[combat] attributed: hit by ${who} ${dir} ~${dist}${how}`)
+        } catch (e) {}
+      }
+      bot._client.on('damage_event', (packet) => onDamage(packet, Date.now(), false))
+      console.log('[bot] damage attribution wired')
+    } catch (e) { console.log('[bot] damage attribution wire failed: ' + e.message) }
+  })
+}
 // ---- PILOT LANE: a soft lane defers discretionary reflex goals, a hard one (/brace, /hold) passes only emergencies.
 // token is the claim releaseLane may clear.
 const pilotLane = { until: 0, why: null, hard: false, narrated: 0, token: null }
@@ -3026,12 +3087,14 @@ function threatWhy (what, e, fill) {
   return `${what}: ${e.username || e.name || '?'} ${compass(e.position.x - here.x, e.position.z - here.z)} ~${Math.round(e.position.distanceTo(here))}, ${level}`
 }
 // A block change in or beside the shared perception flood drops it, and so does a loaded column.
-bot.on('blockUpdate', (oldB, newB) => {
-  const combat = reflexes.find(r => r.name === 'combat')
-  const p = (newB || oldB)?.position
-  if (combat._fill && p && (combat._fill.cells.has(ck(p.x, p.y, p.z)) || touchesFill(p, combat._fill))) combat._fill = null
-})
-bot.on('chunkColumnLoad', () => { reflexes.find(r => r.name === 'combat')._fill = null })
+function wireFloodDrops () {
+  bot.on('blockUpdate', (oldB, newB) => {
+    const combat = reflexes.find(r => r.name === 'combat')
+    const p = (newB || oldB)?.position
+    if (combat._fill && p && (combat._fill.cells.has(ck(p.x, p.y, p.z)) || touchesFill(p, combat._fill))) combat._fill = null
+  })
+  bot.on('chunkColumnLoad', () => { reflexes.find(r => r.name === 'combat')._fill = null })
+}
 
 // the watcher+responder reflex — priority ABOVE unstuck (unshift), toggle via /reflexes name=combat
 reflexes.unshift({
@@ -3568,8 +3631,10 @@ reflexes.splice(reflexes.findIndex(r => r.name === 'combat'), 0, {
     if (near) reflexes.find(r => r.name === 'combat').fleeFrom(bot, near.entity, `${cause}, fleeing from ${near.name}`, 'emergency')
   }
 })
-bot.on('death', resetThreatState)
-bot.on('spawn', resetThreatState)
+function wireThreatReset () {
+  bot.on('death', resetThreatState)
+  bot.on('spawn', resetThreatState)
+}
 // (the /threatdebug route lives with the other routes below — `app` doesn't exist yet up here,
 // learned via a TDZ crashloop the moment this block first loaded)
 
@@ -3606,7 +3671,9 @@ function oreCallout () {
       emitEvent('ore', `${name}${g.n > 1 ? ' x' + g.n : ''} in view ${g.dir} ~${g.d} (y${g.y})`)
   } catch (e) {}
 }
-setInterval(oreCallout, 4000)
+function wireOreCallout () {
+  setInterval(oreCallout, 4000)
+}
 
 // ---- SEEN persistence: the fair fog-of-war memory survives restarts, one cell list per world
 // (server address, dimension, world seed, spawn point). Saved on a timer and on clean disconnect.
@@ -3673,19 +3740,25 @@ function enterSeenWorld () {
 try {
   if (!loadSeen(fs.readFileSync(SEEN_FILE, 'utf8'))) console.log('[bot] dropped SEEN memory saved under older rules')
 } catch (e) {}
-for (const name of ['login', 'respawn']) {
-  bot._client.on(name, (packet) => {
-    const seed = (packet.worldState || packet).hashedSeed
-    worldSeed = seed == null ? '' : String(seed)
-  })
+function wireWorldSeed () {
+  for (const name of ['login', 'respawn']) {
+    bot._client.on(name, (packet) => {
+      const seed = (packet.worldState || packet).hashedSeed
+      worldSeed = seed == null ? '' : String(seed)
+    })
+  }
 }
 // mineflayer emits game again when spawn_position arrives, which re-keys through enterSeenWorld.
-bot.on('game', enterSeenWorld)
+function wireSeenWorld () {
+  bot.on('game', enterSeenWorld)
+}
 let seenDirty = 0
-setInterval(() => {
-  try { if (SEEN.size + surfaceEdits + stationEdits !== seenDirty) { fs.writeFileSync(SEEN_FILE, seenJson()); seenDirty = SEEN.size + surfaceEdits + stationEdits } } catch (e) {}
-}, 120000)
-bot.on('end', () => { try { fs.writeFileSync(SEEN_FILE, seenJson()) } catch (e) {} })
+function wireSeenSave () {
+  setInterval(() => {
+    try { if (SEEN.size + surfaceEdits + stationEdits !== seenDirty) { fs.writeFileSync(SEEN_FILE, seenJson()); seenDirty = SEEN.size + surfaceEdits + stationEdits } } catch (e) {}
+  }, 120000)
+  bot.on('end', () => { try { fs.writeFileSync(SEEN_FILE, seenJson()) } catch (e) {} })
+}
 
 // ---- tiered pick choice: use the LOWEST pick that can harvest the target (stop burning iron
 // durability on plain stone), upgrade automatically for ore that needs better (protects drops).
@@ -3996,7 +4069,9 @@ function nametagVisible (en) {
 const playerCrumbs = Object.create(null)
 // The ids of the entities loaded at the last dimension change that the server has not updated since.
 const staleEntities = new Set()
-for (const ev of ['entitySpawn', 'entityMoved', 'entityUpdate', 'entityGone']) bot.on(ev, (e) => { if (e) staleEntities.delete(e.id) })
+function wireStaleEntities () {
+  for (const ev of ['entitySpawn', 'entityMoved', 'entityUpdate', 'entityGone']) bot.on(ev, (e) => { if (e) staleEntities.delete(e.id) })
+}
 // The entities besides the body that the server updated since the last dimension change.
 function liveEntities () {
   return Object.values(bot.entities).filter(e => e && e !== bot.entity && !staleEntities.has(e.id))
@@ -4042,7 +4117,9 @@ function recordCrumbs () {
     }
   } catch (e) {}
 }
-setInterval(recordCrumbs, 5000)
+function wireCrumbRecording () {
+  setInterval(recordCrumbs, 5000)
+}
 let crumbDimension = null
 function forgetCrumbsElsewhere () {
   if (bot.game.dimension === crumbDimension) return
@@ -4052,7 +4129,9 @@ function forgetCrumbsElsewhere () {
   for (const e of Object.values(bot.entities)) if (e !== bot.entity) staleEntities.add(e.id)
   resetThreatState()
 }
-bot.on('game', forgetCrumbsElsewhere)
+function wireCrumbForget () {
+  bot.on('game', forgetCrumbsElsewhere)
+}
 // What the last presence event said about each player name.
 const presence = new Map()
 // True once the first player entity was logged against bot.players.
@@ -4077,7 +4156,9 @@ function presenceTick () {
     for (const ev of presenceUpdate(presence, sightings, { now: Date.now(), quiet })) emitEvent('player', presenceText(ev), ev)
   } catch (e) {}
 }
-setInterval(() => { if (shared.ready && bot.entity) presenceTick() }, 2000)
+function wirePresenceTick () {
+  setInterval(() => { if (shared.ready && bot.entity) presenceTick() }, 2000)
+}
 function crumbFix (c, me) {
   const agoSec = Math.round((Date.now() - c.t) / 1000)
   const bearing = compass(c.pos.x - me.x, c.pos.z - me.z)
@@ -4140,7 +4221,10 @@ app.get('/useon', async (req, res) => {
   } catch (e) { err(res, e) }
 })
 // The hurt windows of the mobs around the body.
-const mobHurt = hurtWindows(bot)
+const mobHurt = hurtWindows()
+function wireMobHurt () {
+  mobHurt.wire(bot)
+}
 // Why the body cannot open on e with a sprint hit, or null.
 function sprintBlock (e) {
   const d = e.position.distanceTo(bot.entity.position)
@@ -4495,7 +4579,9 @@ function swimUp (ms) {
 
 // The pathfinder's own path array, which it shifts as the feet reach each node.
 let livePath = []
-bot.on('path_update', (r) => { livePath = r.path })
+function wireLivePath () {
+  bot.on('path_update', (r) => { livePath = r.path })
+}
 // True from a sprint jump's take-off until the body stands on the ground short of the next node.
 let hopping = false
 // The step of the straight run the last sprint jump took off along.
@@ -4565,7 +4651,9 @@ function hookTicks () {
   bot.once('inject_allowed', () => bot.on('physicsTick', afterPathfinder))
   bot.on('path_reset', () => { try { releaseJump() } catch (e) { console.log('[sprint] ' + e.message) } })
 }
-hookTicks()
+function wirePathfinderTicks () {
+  hookTicks()
+}
 
 // The status of the last path_update.
 let lastPathStatus = null
@@ -4579,7 +4667,9 @@ function logPathEvents () {
   bot.on('path_reset', (reason) => console.log(`[path] reset ${reason}`))
   bot.on('path_stop', () => console.log('[path] stop'))
 }
-logPathEvents()
+function wirePathLog () {
+  logPathEvents()
+}
 
 // maxY is exclusive.
 function worldColumn () {
@@ -8295,6 +8385,55 @@ app.get('/furnace', async (req, res) => {
   } catch (e) { err(res, e) }
 })
 
+function wireEarly () {
+  wireConnectionHardening()
+  wireLightPackets()
+  wireDamageTypes()
+  wireWorldSeed()
+}
+function wireRuntime () {
+  wirePlanKnownReset()
+  wireConnectionSpawn()
+  wireConnectionEvents()
+  wireChatCapture()
+  wireServerMessages()
+  wireLightChanges()
+  wireLightReload()
+  wireSightMemoDrops()
+  wireGroundTopForget()
+  wireIndoorsReset()
+  wireSkyInSightReset()
+  wireWearAlarm()
+  wireSoundTablePin()
+  wireHearing()
+  wireOwnEditStamps()
+  wireLookPaceGoto()
+  wireGateManners()
+  wireWorldChangeNotes()
+  wireWorldChangeEvents()
+  wirePocketAlarm()
+  wireTrailMarks()
+  wireBodyAlarms()
+  wireGuardDrop()
+  wireItemUseCosts()
+  wireArmSwings()
+  wireArrowTracking()
+  wireDamageAttribution()
+  wireFloodDrops()
+  wireThreatReset()
+  wireOreCallout()
+  wireSeenWorld()
+  wireSeenSave()
+  wireStaleEntities()
+  wireCrumbRecording()
+  wireCrumbForget()
+  wirePresenceTick()
+  wireMobHurt()
+  wireLivePath()
+  wirePathfinderTicks()
+  wirePathLog()
+}
+wireRuntime()
 app.listen(CTRL_PORT, '127.0.0.1', (e) => {
   if (e) {
     console.error(`[bot] control API cannot listen on 127.0.0.1:${CTRL_PORT}: ${e.message}`)
