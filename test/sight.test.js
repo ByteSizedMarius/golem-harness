@@ -718,7 +718,7 @@ function withCells (env, cells) {
 
 test('the lava watch fires on lava in sight, never on lava sealed in rock or behind a wall', () => {
   const watch = (cells) => {
-    const env = { ...withCells(cave(LIT), cells), require }
+    const env = withCells(cave(LIT), cells)
     const r = reflexIn('lava_watch', env)
     return r.check(env.bot) ? [r._hit.dir, r._hit.d] : null
   }
@@ -727,16 +727,91 @@ test('the lava watch fires on lava in sight, never on lava sealed in rock or beh
   assert.strictEqual(watch(behindWall(LAVA)), null, 'behind the wall')
 })
 
+// The lava watch over cells with the body at x 2 of the lit room: its event and the goal it walks to, or null when it stays quiet.
+async function lavaWatch (cells) {
+  const events = []
+  let goal = null
+  const env = {
+    ...withCells(cave(LIT, 2), cells),
+    bunker: { building: false },
+    takeLegs () {},
+    stopPath () {},
+    emitEvent: (kind, msg) => events.push(msg),
+    goals: { GoalNear: class { constructor (x, y, z, range) { Object.assign(this, { x, y, z, range }) } } }
+  }
+  env.bot.pathfinder = { setGoal: (g) => { goal = g } }
+  const r = reflexIn('lava_watch', env)
+  if (!r.check(env.bot)) return null
+  await r.act(env.bot)
+  return { event: events[0], goal }
+}
+
+test('the lava watch backs away from the nearest lava in sight', async () => {
+  const { event, goal } = await lavaWatch({ '0,64,0': LAVA, '3,64,0': LAVA })
+  assert.match(event, /^LAVA E ~1 /)
+  assert.strictEqual(goal.x, 2.5 - 3, 'three blocks west, away from the lava 1 east')
+})
+
+test('the lava watch names lava in the body column as above, below or here', async () => {
+  for (const [cell, dir] of [['2,64,0', 'here'], ['2,65,0', 'here'], ['2,63,0', 'below'], ['2,66,0', 'above']]) {
+    const { event } = await lavaWatch({ [cell]: LAVA })
+    assert.match(event, new RegExp(`^LAVA ${dir} ~0 `), cell)
+  }
+})
+
+test('the ore callout names ore straight above or below the body as above or below', () => {
+  const callout = (cell) => {
+    const events = []
+    const env = {
+      ...world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 3 && (y === 64 || y === 65), ores: { [cell]: 'coal_ore' }, light: () => LIT }),
+      ORE_IDS: [1],
+      ORE_ANNOUNCED: new Map(),
+      sameVein,
+      emitEvent: (kind, msg) => events.push(msg)
+    }
+    loadBotFunctions(['oreCallout'], env).oreCallout()
+    return events
+  }
+  assert.match(callout('0,66,0')[0], /^coal_ore in view above ~\d+ \(y66\)$/)
+  assert.match(callout('0,63,0')[0], /^coal_ore in view below ~\d+ \(y63\)$/)
+})
+
 test('the current watch fires on a current in lit sight or around the body, never on one behind a wall or in the dark', () => {
   const watch = (light, cells) => {
-    const env = { ...withCells(cave(light), cells), require }
+    const env = withCells(cave(light), cells)
     const r = reflexIn('current_watch', env)
     return r.check(env.bot) ? [r._dir, r._dist] : null
   }
   assert.deepStrictEqual(watch(LIT, { '2,64,0': current(LIT) }), ['E', 2], 'control: in lit sight')
   assert.strictEqual(watch(LIT, behindWall(current(LIT))), null, 'behind the wall')
   assert.strictEqual(watch(DARK, { '3,64,0': current(DARK) }), null, 'in the dark')
-  assert.deepStrictEqual(watch(DARK, { '0,64,0': current(DARK) }), ['-', 0], 'around the feet in the dark')
+  assert.deepStrictEqual(watch(DARK, { '0,64,0': current(DARK) }), ['here', 0], 'around the feet in the dark')
+  assert.deepStrictEqual(watch(LIT, { '0,63,0': current(LIT) }), ['below', 0], 'under the feet')
+})
+
+test('the current watch never takes a filled water cauldron for a current', () => {
+  const fires = (block) => {
+    const env = withCells(cave(LIT), { '1,64,0': block })
+    return reflexIn('current_watch', env).check(env.bot)
+  }
+  assert.strictEqual(fires(current(LIT)), true, 'control: a current')
+  assert.strictEqual(fires({ name: 'water_cauldron', boundingBox: 'block', light: LIT, metadata: 2 }), false)
+})
+
+test('the trek scans ahead along the way the body moves', async () => {
+  const env = cave(LIT)
+  let yaw = null
+  Object.assign(env, {
+    raySweep: (opts) => { yaw = opts.yaw; return { hits: [] } },
+    terrainClass: () => 'stone',
+    compass: () => 'N',
+    emitEvent () {}
+  })
+  const trek = reflexIn('trek', env)
+  trek._lastPos = env.bot.entity.position.offset(0, 0, 30)
+  await trek.act(env.bot)
+  const ahead = loadBotFunctions(['lookVec'], env).lookVec(yaw, 0)
+  assert.ok(ahead.z < -0.99, `moving north the scan looks north, got ${ahead}`)
 })
 
 // A one-cell shaft up to y roof - 1, then stone to y 69 and open air from y 70.
@@ -865,8 +940,9 @@ test('an unloaded cell between the body and a block hides the block', () => {
 // A lit room at x 0..3, z 0 and a pocket at x 0..2, z -2 that one cell of stone seals off from it.
 const besidePocket = (ores = {}) => world({ open: (x, y, z) => (y === 64 || y === 65) && ((z === 0 && x >= 0 && x <= 3) || (z === -2 && x >= 0 && x <= 2)), ores, light: () => LIT })
 
-// The narrator's console lines and the pulse reply after a zombie at cell x, 64, z joins the scene of env.
-function pulseWithZombie (env, x, z) {
+// The narrator's console lines and the pulse reply after a zombie at cell x, 64, z joins the scene of env,
+// with a skeleton at cell [x, z] of known in it from the start.
+function pulseWithZombie (env, x, z, known = null) {
   const lines = []
   Object.assign(env.bot, { entities: {}, health: 20, food: 20 })
   Object.assign(env, {
@@ -880,6 +956,7 @@ function pulseWithZombie (env, x, z) {
   loadBotFunctions(['airFlood', 'knownCell'], env)
   env.reflexes.push(combatReflexIn(env))
   const narrator = reflexIn('narrator', env)
+  if (known) env.bot.entities[2] = { id: 2, type: 'hostile', name: 'skeleton', position: new Vec3(known[0] + 0.5, 64, known[1] + 0.5), metadata: [0] }
   assert.strictEqual(narrator.check(env.bot), false, 'control: the first pulse seeds the baseline')
   env.bot.entities[1] = { id: 1, type: 'hostile', name: 'zombie', position: new Vec3(x + 0.5, 64, z + 0.5), metadata: [0] }
   if (narrator.check(env.bot)) narrator.act()
@@ -889,6 +966,10 @@ function pulseWithZombie (env, x, z) {
 test('the narrator and pulse name a hostile in shared air, never one sealed behind rock', () => {
   assert.match(pulseWithZombie(besidePocket(), 3, 0), /hostile zombie E ~3/, 'control: in the room')
   assert.doesNotMatch(pulseWithZombie(besidePocket(), 1, -2), /zombie/)
+})
+
+test('the narrator names the hostile that just appeared, not a nearer one already in view', () => {
+  assert.match(pulseWithZombie(besidePocket(), 3, 0, [1, 0]), /hostile zombie E ~3/)
 })
 
 // The world events after the cells at [x, y, z] in env turn from the from block (dirt) to the to block (farmland).
