@@ -337,6 +337,15 @@ test('a dig that opens onto a cave caps the shaft from 2 deep naming only the ce
   assert.strictEqual((await actAfter(r)).length, 1, 'the body stays in a 1-deep hole')
 })
 
+test('a finished pillar of 3 says to step out and drop, a taller one to dig the pillar down under the feet', () => {
+  const built = (height) => {
+    const top = 64 + height
+    return { mode: 'up', at: { x: 0, y: top, z: 0 }, sealed: true, dug: 0, placed: height + 13, height, gaps: [], exit: [{ x: 1, y: top, z: 0 }, { x: 1, y: top + 1, z: 0 }], stopped: undefined }
+  }
+  assert.strictEqual(shelter.bunkerSummary(built(3)), 'on a pillar at (0,67,0), sealed. To leave, dig (1,67,0) and (1,68,0), then step out and drop to the ground.')
+  assert.strictEqual(shelter.bunkerSummary(built(4)), 'on a pillar at (0,68,0), sealed. To leave, dig the block under your feet, one at a time, down to the ground.')
+})
+
 // ---- shelterInputs ----
 
 test('a mob out of sight counts as a bunker threat only after it hit the body', () => {

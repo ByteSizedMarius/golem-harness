@@ -165,7 +165,7 @@ pilot never has to be in the loop for a zombie's closing sprint — and doesn't 
 - **A threat watcher** runs in the body at 300ms, gated twice: a **species gate** (only true hostiles
   are scored, from game data — and a *provokable* list of neutral-but-armed mobs the reflex will never
   initiate on, because attacking an enderman is how you manufacture an enemy) and a **behavior gate**
-  (sustained closing at pursuit pace — measured zombie pursuit is ~3.8 blocks/s against a 0.6 trigger,
+  (sustained closing at pursuit pace — measured zombie pursuit is ~2.3 blocks/s against a 0.6 trigger,
   so a charge trips it and an ambling shamble doesn't).
 - **Damage attribution** decodes the protocol's damage events into "hit by *what*, *where*, *how far*" —
   so being hurt names the attacker instead of freezing the body, and the named attacker bypasses both

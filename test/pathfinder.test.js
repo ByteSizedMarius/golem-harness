@@ -7,7 +7,7 @@ const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
 const { Physics } = require('prismarine-physics')
 const { GRAVESTONE } = require('../lib/server-overrides')
-const { botConstant, groundMemory, loadBotFunctions } = require('./helpers')
+const { botConstant, groundMemory, loadBotFunctions, walkingBody } = require('./helpers')
 
 const WALL_ARM = ['cobblestone_wall', { up: 'false', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
 const WALL_POST = ['cobblestone_wall', { up: 'true', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
@@ -392,4 +392,24 @@ test('a corridor built in the air walks from past its door straight through its 
     const result = plan(new goals.GoalBlock(31, y0 + 6, 40))
     assert.deepStrictEqual(cellsOf(result.path), [25, 26, 27, 28, 29, 30, 31].map((x) => [x, y0 + 6, 40]), `${server}: ${result.status}`)
   }
+})
+
+const pillar = (height) => Object.fromEntries(Array.from({ length: height }, (_, i) => [`0,${64 + i},0`, STONE]))
+
+test('the walk and a collect drop 3 blocks off a pillar and not 4, the forestry legs 2 and not 3', async (t) => {
+  const ground = new goals.GoalBlock(3, 64, 0)
+  const statuses = []
+  for (const height of [2, 3, 4]) {
+    const { bot, plan, shared } = await walkingBody(t, new Vec3(0.5, 64 + height, 0.5), pillar(height))
+    let cage = null
+    bot.collectBlock = { movements: null, async collect () { cage = this.movements } }
+    const env = { bot, collectLock: botConstant('collectLock'), knownMoves: (m) => m, Movements, shared, watchedWork: (work) => work(), abandonCollect () {} }
+    await loadBotFunctions(['collectSafely'], env).collectSafely({ type: bot.registry.blocksByName.iron_ore.id }, 'iron_ore')
+    statuses.push([height, plan(ground).status, plan(ground, cage).status, plan(ground, shared.forestryMoves).status])
+  }
+  assert.deepStrictEqual(statuses, [
+    [2, 'success', 'success', 'success'],
+    [3, 'success', 'success', 'noPath'],
+    [4, 'noPath', 'noPath', 'noPath']
+  ])
 })

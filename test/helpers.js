@@ -8,12 +8,13 @@ const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
 const { spawn } = require('node:child_process')
-const { EventEmitter } = require('node:events')
+const { EventEmitter, once } = require('node:events')
 const vm = require('node:vm')
 const { performance } = require('node:perf_hooks')
 const express = require('express')
 const { Vec3 } = require('vec3')
-const { goals } = require('mineflayer-pathfinder')
+const mineflayer = require('mineflayer')
+const { pathfinder, goals } = require('mineflayer-pathfinder')
 const shelter = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const { createLane, bindLane } = require('../lib/bot/lane')
@@ -22,6 +23,7 @@ const { countVerbs } = require('../lib/verbs')
 const { createApp } = require('../lib/app')
 const { createServer } = require('../mcp/server')
 const { TOOLS } = require('../mcp/tools')
+const { createConnection, bindConnection, wireConnectionSpawn } = require('../lib/bot/connection')
 
 const ROOT = path.join(__dirname, '..')
 const ALLOW = ['me', 'tell', 'msg', 'w']
@@ -718,6 +720,48 @@ function groundMemory () {
   return { GROUND_TOP: new Map(), GROUND_SPAN: botConstant('GROUND_SPAN'), SURFACE_DEPTH: botConstant('SURFACE_DEPTH') }
 }
 
+// A body at pos on the real pathfinder with the walk's legs, over a stone floor plus cells ('x,y,z' -> [name, properties]).
+async function walkingBody (t, pos, cells = {}) {
+  const client = new EventEmitter()
+  client.version = '1.21.11'
+  client.write = () => {}
+  client.end = () => {}
+  const bot = mineflayer.createBot({ client, username: 'Claude', loadInternalPlugins: false })
+  bot.loadPlugin(pathfinder)
+  await once(bot, 'inject_allowed')
+  const Block = require('prismarine-block')(bot.registry)
+  Object.assign(bot, {
+    version: '1.21.11',
+    entity: { position: pos, velocity: new Vec3(0, 0, 0), width: 0.6, height: 1.8, onGround: true },
+    entities: {},
+    game: { minY: -64, height: 384, dimension: 'overworld' },
+    inventory: { items: () => [] },
+    clearControlStates () {},
+    async placeBlock () {},
+    blockAt (p) {
+      const c = p.floored()
+      const [name, props] = cells[`${c.x},${c.y},${c.z}`] || [c.y <= 63 ? 'stone' : 'air', {}]
+      const b = Block.fromProperties(name, props, 0)
+      b.position = c
+      return b
+    }
+  })
+  const ctx = { bot, knownMoves: (m) => m, navPlaced: [], startReflexes () {}, vecStr: (p) => `${p.x},${p.y},${p.z}`, startViewer () {} }
+  createConnection(ctx)
+  bindConnection(ctx)
+  wireConnectionSpawn()
+  // Keeps the spawn's mob scan interval from ever running.
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  bot.emit('spawn')
+  t.mock.timers.reset()
+  // The default 40 ms tick ends in 'partial' on a loaded machine.
+  const plan = (goal, moves = bot.pathfinder.movements) => {
+    bot.pathfinder.tickTimeout = bot.pathfinder.thinkTimeout
+    return bot.pathfinder.getPathFromTo(moves, bot.entity.position, goal).next().value.result
+  }
+  return { bot, plan, shared: ctx.shared }
+}
+
 let freeNames
 function sourceNames () {
   freeNames ??= new Set([...codeOnly(botSource()).matchAll(/(?<![.\w$])[A-Za-z_$][\w$]*/g)].map((m) => m[0]))
@@ -1200,7 +1244,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
+  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, groundMemory, walkingBody, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, laneAt,
   buildVerbEnv, digInProblemWith, facings, digJob

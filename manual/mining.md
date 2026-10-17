@@ -2,7 +2,7 @@
 
 - `find` before `mine`. With nothing in range, `mine` returns `mined: 0` and you learn nothing. `find` shows whether the resource is there and where, then mine it or travel to it.
 - An empty ore result usually means buried or unlit, not absent. Expose it by digging toward it: open a cave, follow a wall of exposed stone. Light a dark cave before you look.
-- Never dig the block under your own feet. It drops you into whatever is below: a cave, lava, a long fall. Dig into a face ahead of you or above. `gather` refuses targets more than about 2 below your feet, and with `digat` the rule is yours to keep.
+- Never dig the block under your own feet, except down a bunker pillar. It drops you into whatever is below: a cave, lava, a long fall. Dig into a face ahead of you or above. `gather` refuses targets more than about 2 below your feet, and with `digat` the rule is yours to keep.
 - `mine` gives up on a block it makes no progress toward for about 5 s, or after a minute, and its `reason` says `stalled` or `budget`. `tidy` stops the same way and keeps the rest queued.
 - A blocked route is your call: `dig_stair` or `dig_tunnel` on purpose, or another point.
 - `dig_tunnel` and `dig_stair` stop at lava or water they see ahead or a dig lays bare, and plug a hole onto lava with a filler block from your pockets. `dig_stair` also stops at gravel or sand in or over its passage.
