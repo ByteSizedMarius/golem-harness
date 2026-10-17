@@ -461,8 +461,7 @@ test("the pilot's 1.7.10 sword block order ends with a death, and with anything 
   assert.strictEqual(env.guardState.pilot, false, 'a pickaxe in hand kept the order')
 })
 
-// The combat reflex of bot.js wired into world after foe hit the body, checking every 300 ms and acting while no act
-// runs, as in bot.js. Zombies and spiders are hostile.
+// The combat reflex wired into world after foe hit the body, checked every 300 ms and acting while no act runs.
 function combatIn (world, foe) {
   const { bot, env, clock } = world
   Object.assign(env, {

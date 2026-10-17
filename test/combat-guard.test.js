@@ -28,7 +28,7 @@ const guardFight = (over) => ({ stance: 'guard', lastHit: { dmg: 0, t: 0 }, last
 // fight cycles against mob, which closed 1 block in the last second and stands out of melee reach. The body
 // carries only a sword. over.bot and over.env replace entries of the bot and the env, and an undefined env entry
 // loads the bot.js function of that name. over.seenAt is where the body last perceived mob. over.next(combat, bot)
-// runs after the act. over.flee keeps the bot.js flee behind the record of flee classes.
+// runs after the act. With over.flee the real fleeFrom runs after each class is recorded.
 async function standoff (extra, mob, over = {}) {
   const lines = []
   const fled = []
@@ -269,8 +269,7 @@ test('a body on its pillar top over a pack of three swings without a jump and ke
   assert.deepStrictEqual({ fled: r.fled, jumps, cell: perch.cell }, { fled: [], jumps: 0, cell })
 })
 
-// The bow draws and flee count of a fight with a skeleton in sight 10 out and two zombies, for a body at entity in
-// lane, over the blocks of extra. The body carries a bow and arrows.
+// The bow draws and flee count of a bow-carrying body at entity in lane against a skeleton 10 out and two zombies.
 async function skeletonPack (extra, entity, lane) {
   const draws = []
   const sk = skeleton(10.5)

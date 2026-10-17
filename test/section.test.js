@@ -53,8 +53,7 @@ test('open air that goes on under the frame drops below it', () => {
   assert.strictEqual(floorPhrase(cols, O.y), 'floor: level d0, drops below the frame at d1')
 })
 
-// runs[d] holds the open [lo, hi] spans at x d, z 0, wet the [d, y] water cells, and the rest is
-// seen rock.
+// runs[d] holds the open [lo, hi] spans at x d, wet the [d, y] water cells, the rest is seen rock.
 function layers (runs, wet = []) {
   const cells = new Set()
   for (const [d, spans] of Object.entries(runs)) for (const [lo, hi] of spans) for (let y = lo; y <= hi; y++) cells.add(key(Number(d), y, 0))

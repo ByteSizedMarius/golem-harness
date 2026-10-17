@@ -280,8 +280,7 @@ test('a death mid-build ends walls with the reason, what it placed and the death
 // A 3x3 cabin two rows high at x 1..3, z -1..1 on base 64, its doorway at 1,64,0 and 1,65,0.
 const CABIN = { x: '1', z: '-1', w: '3', d: '3', h: '2', base: '64' }
 
-// The /build job of CABIN by a body at (0.5, 64, 0.5) holding cobblestone and carrying a stone pickaxe, stone in the doorway.
-// onDoorWalk(world, job) runs at each walk of the door phase. log records walks by phase and digs with the held item.
+// The /build job of CABIN with stone in the doorway, onDoorWalk(world, job) running at each door-phase walk.
 async function buildCabin (onDoorWalk = () => {}) {
   const log = []
   const world = {}

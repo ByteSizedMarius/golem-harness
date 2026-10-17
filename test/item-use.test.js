@@ -115,7 +115,7 @@ test('a bow draw re-aims only at a target still in line and in sight, and looses
     const looks = []
     bot.lookAt = async (p) => { looks.push(p.z) }
     const sight = { line: true, seen: true }
-    // During the draw the target steps 6 south and leaves what lost names.
+    // During the draw the target steps 6 south and drops out of what lost names.
     env.setTimeout = (fn) => {
       target.position = new Vec3(10.5, 64, 6.5)
       Object.assign(sight, lost)

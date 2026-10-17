@@ -4,7 +4,7 @@ const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { routeHandler } = require('./helpers')
 
-// The bot.js GET /tick handler over a body at position, with no hostiles, chat, events or jobs.
+// The GET /tick handler over a body at position, with no hostiles, chat, events or jobs.
 function tickHarness (position) {
   const env = {
     shared: { ready: true },

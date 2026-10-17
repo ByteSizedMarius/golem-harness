@@ -221,8 +221,6 @@ test('presence skips the followed player', () => {
   assert.deepStrictEqual(events, [])
 })
 
-// ---- a player who hits ----
-
 test('a player who hit the body is scored only inside the threatdebug window, and outside it the lower reflexes run', async () => {
   const steve = player(7, 'Steve', new Vec3(3.5, 64, 0.5))
   const bot = { entity: { position: ME }, entities: { 7: steve } }

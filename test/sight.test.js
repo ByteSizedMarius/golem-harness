@@ -996,8 +996,7 @@ test('an unloaded cell between the body and a block hides the block', () => {
 // A lit room at x 0..3, z 0 and a pocket at x 0..2, z -2 that one cell of stone seals off from it.
 const besidePocket = (ores = {}) => world({ open: (x, y, z) => (y === 64 || y === 65) && ((z === 0 && x >= 0 && x <= 3) || (z === -2 && x >= 0 && x <= 2)), ores, light: () => LIT })
 
-// The narrator's console lines and the pulse reply after a zombie at cell x, 64, z joins the scene of env,
-// with a skeleton at cell [x, z] of known in it from the start.
+// The narrator's lines and pulse reply after a zombie at cell x, 64, z joins env, a skeleton already at known when given.
 function pulseWithZombie (env, x, z, known = null) {
   const lines = []
   Object.assign(env.bot, { entities: {}, health: 20, food: 20 })
