@@ -24,23 +24,10 @@ const { isDoor, doorStep, panelAcross, doorCrossing } = require('./lib/doors')
 const { stepView } = require('./lib/steps')
 const { countVerbs } = require('./lib/verbs')
 const { createChatLog } = require('./lib/chat-log')
-const { GRAVESTONE, readServerOverrides, renameBlocks, overrideRecipes, craftable } = require('./lib/server-overrides')
+const { GRAVESTONE, renameBlocks, overrideRecipes, craftable } = require('./lib/server-overrides')
 const { smeltYield, burnItems, COOK_PROBE_TICKS } = require('./lib/furnace')
 
-const HOST = process.env.MC_HOST || 'localhost'
-const PORT = parseInt(process.env.MC_PORT || '25565')
-const VERSION = process.env.MC_VERSION || '1.21.8'
-const USERNAME = process.env.MC_USER || 'Claude'
-const CTRL_PORT = parseInt(process.env.CTRL_PORT || '3000')
-const VIEW_PORT = parseInt(process.env.VIEW_PORT || String(CTRL_PORT + 1))
-// Set for a Forge 1.7.10 server behind ViaProxy: no attack charge, a sword block instead of a shield, no off-hand.
-const LEGACY_1710 = process.env.GOLEM_MC_1710 === '1'
-// On 1.7.10 a full hit lands every 10 ticks at most, and the bot attacks 11 ticks apart.
-const LEGACY_HIT_MS = 550
-const SERVER_OVERRIDES = readServerOverrides(process.env.GOLEM_SERVER_OVERRIDES)
-const SERVER_RECIPES = SERVER_OVERRIDES && SERVER_OVERRIDES.recipes
-// The server keeps a dead player's items in a gravestone.
-const GRAVES = !!SERVER_OVERRIDES && [...SERVER_OVERRIDES.blocks.values()].includes(GRAVESTONE)
+const { HOST, PORT, VERSION, USERNAME, CTRL_PORT, VIEW_PORT, LEGACY_1710, LEGACY_HIT_MS, SERVER_OVERRIDES, SERVER_RECIPES, GRAVES, ROOT } = require('./lib/bot/config')
 // The HMAC key that signs every control API request and response.
 const GOLEM_TOKEN = process.env.GOLEM_TOKEN || ''
 if (GOLEM_TOKEN.length < 32) {
@@ -2127,7 +2114,7 @@ setInterval(() => {   // low-durability alarm: once per minute max, only when a 
 bot.once('spawn', () => {
   try {
     if (bot.version === '1.21.11') {
-      const fixed = JSON.parse(fs.readFileSync(__dirname + '/sounds-1.21.11.json', 'utf8'))
+      const fixed = JSON.parse(fs.readFileSync(ROOT + '/sounds-1.21.11.json', 'utf8'))
       bot.registry.sounds = fixed
       console.log('[bot] sound table pinned: ' + Object.keys(fixed).length + ' real 1.21.11 ids')
     } else {
