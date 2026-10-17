@@ -4,7 +4,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const vm = require('node:vm')
-const { botConstant, unwrappedBotSource, functionSource, loadBotFunctions } = require('./helpers')
+const { botConstant, wiredSource, functionSource, loadBotFunctions } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const CELL = { x: 1, y: 64, z: 0 }
@@ -36,7 +36,7 @@ function session ({ host = 'example.net', port = 25565, dimension = 'overworld',
     SIGHT_MS: botConstant('SIGHT_MS'),
     console: { log () {} }
   }
-  const handlers = [...unwrappedBotSource().matchAll(/^bot\.on\('game', ([A-Za-z_$][\w$]*)\)$/gm)].filter((m) => /\bSEEN\b/.test(functionSource(m[1])))
+  const handlers = [...wiredSource().matchAll(/^bot\.on\('game', ([A-Za-z_$][\w$]*)\)$/gm)].filter((m) => /\bSEEN\b/.test(functionSource(m[1])))
   assert.ok(handlers.length, 'no game handler of bot.js touches SEEN')
   const ctx = loadBotFunctions(['loadSeen', 'seenJson', 'cellKnown', ...handlers.map((m) => m[1])], env)
   const loaded = saved === undefined ? null : ctx.loadSeen(saved)

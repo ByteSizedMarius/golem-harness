@@ -529,9 +529,19 @@ function botSource () {
   return botSrc
 }
 
-// botSource with each top-level wire* function replaced by its dedented body.
-function unwrappedBotSource () {
-  return botSource().replace(/^function wire[A-Z][\w$]* \(\) \{\r?\n([\s\S]*?)^\}\r?\n/gm, (_, body) => body.replace(/^ {2}/gm, ''))
+// The dedented bodies of the wire* pieces in the order wireEarly, then wireRuntime, calls them.
+function wiredSource () {
+  const src = botSource()
+  const body = (name) => {
+    const m = new RegExp(`^function ${name} \\(\\) \\{\\r?\\n([\\s\\S]*?)^\\}\\r?$`, 'm').exec(src)
+    if (!m) throw new Error(`no bot source declares function ${name} ()`)
+    return m[1]
+  }
+  return ['wireEarly', 'wireRuntime'].flatMap((table) => body(table).split(/\r?\n/).filter(Boolean).map((line) => {
+    const call = /^ {2}(wire[A-Z][\w$]*)\(\)$/.exec(line)
+    if (!call) throw new Error(`${table} line is no wire* call: ${line}`)
+    return body(call[1]).replace(/^ {2}/gm, '')
+  })).join('')
 }
 
 const NOT_CALLEES = new Set(['if', 'for', 'while', 'switch', 'catch', 'with', 'function', 'return', 'typeof', 'void',
@@ -808,10 +818,10 @@ function combatReflexIn (env) {
   return vm.runInContext(`(${literal})`, vm.createContext(env))
 }
 
-// Runs bot.js's top-level bot.on and bot.once lines for event over env.
+// Runs the wire pieces' bot.on and bot.once lines for event over env, in the bot's order.
 function wireListeners (env, event) {
-  const lines = [...unwrappedBotSource().matchAll(new RegExp(`^bot\\.(?:on|once)\\('${event}', ([A-Za-z_$][\\w$]*)\\)$`, 'gm'))]
-  assert.ok(lines.length, `no top-level ${event} listener in bot.js`)
+  const lines = [...wiredSource().matchAll(new RegExp(`^bot\\.(?:on|once)\\('${event}', ([A-Za-z_$][\\w$]*)\\)$`, 'gm'))]
+  assert.ok(lines.length, `no wired ${event} listener`)
   const code = lines.map((m) => m[0]).join('\n')
   vm.runInContext(code, loadBotFunctions(lines.map((m) => m[1]), env, code))
 }
@@ -1155,7 +1165,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, unwrappedBotSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
+  botSource, wiredSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild,
   buildVerbEnv, digInProblemWith, digJob

@@ -8,7 +8,7 @@ const { Vec3 } = require('vec3')
 const { ambientChange, sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
 const { GRAVESTONE } = require('../lib/server-overrides')
-const { balanced, botConstant, unwrappedBotSource, groundMemory, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn } = require('./helpers')
+const { balanced, botConstant, wiredSource, groundMemory, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4, wheat: 5, chest: 6 }
@@ -162,7 +162,7 @@ const torchAt = block('torch', 5, 'empty')
 function wireLight (env) {
   env.bot = Object.assign(new EventEmitter(), env.bot, { registry: REGISTRY })
   env.GRAVESTONE = GRAVESTONE
-  const lines = [...unwrappedBotSource().matchAll(/^bot\.on\('(?:blockUpdate|chunkColumnLoad)', (?:\(\w+\) => )?([A-Za-z_$][\w$]*)\b.*\)$/gm)]
+  const lines = [...wiredSource().matchAll(/^bot\.on\('(?:blockUpdate|chunkColumnLoad)', (?:\(\w+\) => )?([A-Za-z_$][\w$]*)\b.*\)$/gm)]
   vm.runInContext(lines.map((m) => m[0]).join('\n'), loadBotFunctions(lines.map((m) => m[1]), env))
   return env
 }
@@ -1067,7 +1067,7 @@ test('nightfall stays silent underground and fires once at the first sight of th
 // Runs the one blockUpdate handler of bot.js that names marker on env.bot.
 function wireBlockUpdate (env, marker, names) {
   env.bot = Object.assign(new EventEmitter(), env.bot)
-  const src = unwrappedBotSource()
+  const src = wiredSource()
   const handlers = [...src.matchAll(/^bot\.on\('blockUpdate', \(oldB, newB\) => /gm)]
     .map((m) => m[0] + balanced(src, m.index + m[0].length) + ')')
     .filter((h) => h.includes(marker))
