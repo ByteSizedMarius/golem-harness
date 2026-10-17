@@ -61,7 +61,7 @@ function crafter (items) {
 function craftEnv (bot, serverRecipes) {
   return {
     bot,
-    mcData,
+    shared: { mcData },
     SERVER_RECIPES: serverRecipes,
     overrideRecipes,
     craftable,
@@ -142,7 +142,7 @@ test('an overrides file without a blocks object is refused at start', (t) => {
 
 test('an item alias resolves to its 1.21 item, and an unknown name stays unknown', (t) => {
   const overrides = readServerOverrides(overridesFile(t, { ...OVERRIDES, items: { fence: 'oak_fence' } }))
-  const { resolveItem } = loadBotFunctions(['resolveItem'], { mcData, SERVER_OVERRIDES: overrides })
+  const { resolveItem } = loadBotFunctions(['resolveItem'], { shared: { mcData }, SERVER_OVERRIDES: overrides })
   assert.strictEqual(resolveItem('fence').name, 'oak_fence')
   assert.strictEqual(resolveItem('oak_fence').name, 'oak_fence')
   assert.strictEqual(resolveItem('fence_gate'), null)
@@ -150,7 +150,7 @@ test('an item alias resolves to its 1.21 item, and an unknown name stays unknown
 
 test('without an overrides file or an items map no alias applies', (t) => {
   for (const overrides of [readServerOverrides(undefined), readServerOverrides(overridesFile(t))]) {
-    const { resolveItem } = loadBotFunctions(['resolveItem'], { mcData, SERVER_OVERRIDES: overrides })
+    const { resolveItem } = loadBotFunctions(['resolveItem'], { shared: { mcData }, SERVER_OVERRIDES: overrides })
     assert.strictEqual(resolveItem('fence'), null)
     assert.strictEqual(resolveItem('oak_fence').name, 'oak_fence')
   }

@@ -47,7 +47,7 @@ function pointer ({ seen = true, sees = () => true, far = false, crouching = fal
   const { yaw, pitch } = aim(eye, crouching ? new Vec3(5.5, 64.9, 0.5) : new Vec3(far ? 45.5 : 5.5, 63.9, 0.5))
   const steve = { id: 7, type: 'player', username: 'Steve', position: pos, crouching, headYaw: yaw, yaw: yaw + 1, pitch }
   const env = {
-    ready: true,
+    shared: { ready: true },
     bot: { entity: { position: new Vec3(0.5, 64, 6.5) }, entities: { 7: steve }, blockAt: flat(crouching ? { '5,64,0': block('chest') } : {}) },
     playerNamed,
     staleEntities: new Set(),

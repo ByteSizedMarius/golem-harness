@@ -14,7 +14,7 @@ const IDS = { enchanting_table: [116], anvil: [145], chipped_anvil: [146], damag
 function stationEnv (name, seen) {
   const walks = []
   const env = {
-    ready: true,
+    shared: { ready: true },
     bot: {
       entity: { position: HERE },
       findBlocks: ({ matching }) => (matching.includes(IDS[name][0]) ? [AT] : []),
@@ -89,7 +89,7 @@ test('enchant at a seen table lists the 3 offers, and with slot commits that one
       _client: { on () {}, removeListener () {}, write: (name, data) => writes.push([name, { ...data }]) }
     })
     // setTimeout ends the wait after the commit at once.
-    Object.assign(env, { mcData: { enchantmentsArray: registry.enchantmentsArray }, emitEvent () {}, setTimeout: (fn) => setImmediate(fn) })
+    Object.assign(env, { shared: { ...env.shared, mcData: { enchantmentsArray: registry.enchantmentsArray } }, emitEvent () {}, setTimeout: (fn) => setImmediate(fn) })
     return { reply: await awaitRoute('/enchant', query, env), writes, table }
   }
   const offers = [2, 5, 9].map((levelCost, slot) => ({ slot, levelCost, lapisCost: slot + 1, enchant: 'sharpness' }))

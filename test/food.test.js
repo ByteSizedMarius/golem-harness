@@ -29,7 +29,7 @@ const fed = (food, saturation) => (bot) => setTimeout(() => {
 
 const env = (bot, extra = {}) => ({
   bot,
-  mcData: { foods: registry.foods },
+  shared: { mcData: { foods: registry.foods } },
   RISKY_FOODS: botConstant('RISKY_FOODS'),
   FOOD_UPDATE_MS,
   jobs: createJobs({ stop () {}, emit () {}, deaths: deathLedger() }),

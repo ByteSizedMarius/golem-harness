@@ -77,7 +77,7 @@ function furnaceEnv (f, seen = true) {
     seenNow: (p) => seen || !p.equals(AT),
     STATIONS: new Map(),
     ck: (x, y, z) => x + ',' + y + ',' + z,
-    ready: true,
+    shared: { ready: true },
     goals,
     Vec3,
     smeltYield,

@@ -11,9 +11,7 @@ function hurtRig () {
     bot: { health: 20, food: 20 },
     lastHp: 20,
     lastHurtEmit: 0,
-    lastHit: null,
-    lastAttrib: null,
-    swingWait: null,
+    fight: { lastHit: null, lastAttrib: null, swingWait: null },
     lowFoodWarned: false,
     bunker: { building: false },
     BIG_HIT: botConstant('BIG_HIT'),
@@ -27,7 +25,7 @@ function hurtRig () {
   const listener = vm.runInContext(`(async () => ${body})`, vm.createContext(env))
   async function hit (dmg) {
     env.bot.health -= dmg
-    env.lastAttrib = { t: Date.now(), desc: 'fall', entity: null, ranged: false, env: true }
+    env.fight.lastAttrib = { t: Date.now(), desc: 'fall', entity: null, ranged: false, env: true }
     await listener()
   }
   return { events, hit }

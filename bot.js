@@ -95,11 +95,12 @@ bot.loadPlugin(pathfinder)
 bot.loadPlugin(collectBlock)
 bot.loadPlugin(armorManager)   // auto-equip best armor (freebie for the survival ramp; no-op on Peaceful)
 
-let mcData = null
-let ready = false
+const shared = {}
+shared.mcData = null
+shared.ready = false
 const navPlaced = []   // blocks the pathfinder placed as scaffolding, awaiting /tidy cleanup
-let considerateMoves = null    // default no-dig profile (protects builds + terrain)
-let forestryMoves = null       // lumberjack profile: may break ONLY leaves+logs (built at spawn)
+shared.considerateMoves = null    // default no-dig profile (protects builds + terrain)
+shared.forestryMoves = null       // lumberjack profile: may break ONLY leaves+logs (built at spawn)
 
 // ---- collectBlock cage (07-20): mineflayer-collectblock's collect() installs ITS OWN default
 // Movements (canDig=true, dontCreateFlow=false!) into the shared pathfinder and NEVER restores
@@ -127,13 +128,13 @@ async function collectSafely (block, what, { wait = false } = {}) {
   cage.allowParkour = true
   cage.scafoldingBlocks = []
   const cant = new Set()
-  for (const blk of mcData.blocksArray) {
+  for (const blk of shared.mcData.blocksArray) {
     if (blk.id === block.type) continue
     if (/_leaves$/.test(blk.name)) continue
     cant.add(blk.id)
   }
   cage.blocksCantBreak = cant
-  mcData.blocksArray.forEach(b => { if (b.name.endsWith('_door') && !b.name.includes('iron')) cage.openable.add(b.id) })
+  shared.mcData.blocksArray.forEach(b => { if (b.name.endsWith('_door') && !b.name.includes('iron')) cage.openable.add(b.id) })
   cage.canOpenDoors = true
   bot.collectBlock.movements = cage
   let release
@@ -235,9 +236,9 @@ function knownMoves (m) {
 }
 
 bot.once('spawn', () => {
-  mcData = require('minecraft-data')(bot.version)
+  shared.mcData = require('minecraft-data')(bot.version)
   // bot.registry shares these block entries.
-  if (SERVER_OVERRIDES) renameBlocks(mcData, SERVER_OVERRIDES.blocks)
+  if (SERVER_OVERRIDES) renameBlocks(shared.mcData, SERVER_OVERRIDES.blocks)
   const moves = knownMoves(new Movements(bot))
   // ---- CONSIDERATE PLAYER: don't vandalize builds/terrain, don't litter ----
   moves.canDig = false            // NEVER break blocks to travel — protects your house AND the
@@ -259,32 +260,32 @@ bot.once('spawn', () => {
   // Wooden doors join the openable set; the executor right-clicks them in passing
   // (guarded in index.js so it never toggles an already-open door shut in my face).
   // Iron doors stay walls — they want redstone, that's the game's rule, keep it.
-  const addDoors = (m) => { mcData.blocksArray.forEach(b => { if (b.name.endsWith('_door') && !b.name.includes('iron')) m.openable.add(b.id) }); m.canOpenDoors = true }
+  const addDoors = (m) => { shared.mcData.blocksArray.forEach(b => { if (b.name.endsWith('_door') && !b.name.includes('iron')) m.openable.add(b.id) }); m.canOpenDoors = true }
   addDoors(moves)
   moves.infiniteLiquidDropdownDistance = false   // a drop into water is held to maxDropDown too
   bot.pathfinder.setMovements(moves)
   bot.pathfinder.thinkTimeout = 10000
-  considerateMoves = moves       // remember the default so /gather can restore it after forestry
+  shared.considerateMoves = moves       // remember the default so /gather can restore it after forestry
 
   // ---- FORESTRY profile: a lumberjack's legs. Same considerate base, but permitted to break
   // ONLY leaves and logs to travel — so it clears canopy to reach trunks and can always chew a
   // leaf to free itself from a foliage wedge. Every other block (stone, dirt, ore, sand, and
   // every plank/door/block of your builds) stays UNbreakable, so the no-tunnel / no-x-ray
   // fairness floor is exactly as before. Swapped in only while /gather is harvesting wood.
-  forestryMoves = knownMoves(new Movements(bot))
-  forestryMoves.canDig = true
-  forestryMoves.maxDropDown = 2          // gentler drops off trunk tops → avoid fall damage
-  forestryMoves.infiniteLiquidDropdownDistance = false
-  forestryMoves.allow1by1towers = false
-  forestryMoves.allowParkour = true
-  forestryMoves.scafoldingBlocks = []          // still zero litter — never places blocks to travel
+  shared.forestryMoves = knownMoves(new Movements(bot))
+  shared.forestryMoves.canDig = true
+  shared.forestryMoves.maxDropDown = 2          // gentler drops off trunk tops → avoid fall damage
+  shared.forestryMoves.infiniteLiquidDropdownDistance = false
+  shared.forestryMoves.allow1by1towers = false
+  shared.forestryMoves.allowParkour = true
+  shared.forestryMoves.scafoldingBlocks = []          // still zero litter — never places blocks to travel
   const cantBreak = new Set()
-  for (const blk of mcData.blocksArray) {
+  for (const blk of shared.mcData.blocksArray) {
     if (/(_log|_wood|_leaves)$/.test(blk.name)) continue   // leaves + logs are the ONLY breakables
     cantBreak.add(blk.id)
   }
-  forestryMoves.blocksCantBreak = cantBreak
-  addDoors(forestryMoves)                      // lumberjack legs get the same door manners
+  shared.forestryMoves.blocksCantBreak = cantBreak
+  addDoors(shared.forestryMoves)                      // lumberjack legs get the same door manners
 
   // ---- litter tracking: record blocks the PATHFINDER places (scaffolding) so /tidy can reclaim
   // them. Only placements made mid-navigation (pathfinder.isMoving) are tracked; deliberate builds
@@ -303,7 +304,7 @@ bot.once('spawn', () => {
     return result
   }
 
-  ready = true
+  shared.ready = true
   startReflexes()                     // start the always-on reflex loop (unstuck, +survival reflexes later)
   console.log(`[bot] spawned as ${USERNAME} on ${bot.version} at`, vecStr(bot.entity.position))
   // Seeing-layer (optional; never let it crash the bot)
@@ -474,7 +475,7 @@ function serverMessage (msg, position) {
     if (!line) return
     if (line.kind === 'death' && line.text.startsWith(bot.username + ' ')) deaths.heard(line.text)
     if (WAKE_KINDS.includes(line.kind) && serverWakes.take(Date.now())) return emitEvent('server', line.text, { kind: line.kind })
-    while (quietServer.length && quietServer[0].ev.id <= eventsServed) quietServer.shift()
+    while (quietServer.length && quietServer[0].ev.id <= streams.eventsServed) quietServer.shift()
     const folded = foldQuiet(quietServer, line.text)
     if (folded) Object.assign(folded.ev, { msg: quietText(folded), data: { ...folded.ev.data, repeats: folded.repeats, merged: folded.merged } })
     else {
@@ -491,36 +492,37 @@ const vecStr = (v) => v ? `(${v.x.toFixed(1)}, ${v.y.toFixed(1)}, ${v.z.toFixed(
 const round = (v) => v ? { x: Math.round(v.x*10)/10, y: Math.round(v.y*10)/10, z: Math.round(v.z*10)/10 } : null
 
 function resolveBlockIds(name) {
-  if (!mcData) return []
-  const exact = mcData.blocksByName[name]
+  if (!shared.mcData) return []
+  const exact = shared.mcData.blocksByName[name]
   if (exact) return [exact.id]
   // partial / fuzzy match across block names
-  return Object.values(mcData.blocksByName)
+  return Object.values(shared.mcData.blocksByName)
     .filter(b => b.name.includes(name))
     .map(b => b.id)
 }
 function resolveItem(name) {
-  if (!mcData) return null
+  if (!shared.mcData) return null
   const known = (SERVER_OVERRIDES && SERVER_OVERRIDES.items.get(name)) || name
-  return mcData.itemsByName[known] || mcData.blocksByName[known] || null
+  return shared.mcData.itemsByName[known] || shared.mcData.blocksByName[known] || null
 }
 
 // ---- event stream (interrupts for the driver: damage, death, threats, night, hunger) ----
-let eventSeq = 0
+const streams = {}
+streams.eventSeq = 0
 const eventLog = []
 // The newest event id a /tick or /events reply carried.
-let eventsServed = 0
+streams.eventsServed = 0
 // The id of the newest event that is not quiet.
-let wakeEv = 0
+streams.wakeEv = 0
 // A quiet event rides along with the next wake of wait_events and wakes nothing itself. Returns the event, null
 // when it could not be logged.
 function emitEvent(kind, msg, data, { quiet = false } = {}) {
   try {
     console.log('[event] ' + kind + ' ' + msg)   // stdout line so the log-tailing Monitor wakes the driver
-    const ev = { id: ++eventSeq, t: Date.now(), kind, msg, data: data || null, ...(quiet && { quiet }) }
+    const ev = { id: ++streams.eventSeq, t: Date.now(), kind, msg, data: data || null, ...(quiet && { quiet }) }
     eventLog.push(ev)
     if (eventLog.length > 400) eventLog.splice(0, eventLog.length - 400)
-    if (!quiet) wakeEv = ev.id
+    if (!quiet) streams.wakeEv = ev.id
     return ev
   } catch (e) { return null }
 }
@@ -529,12 +531,12 @@ function emitEvent(kind, msg, data, { quiet = false } = {}) {
 // OWN PACE via /pulse — deliberately NOT tailed by the Monitor, so it never interrupts. The narrator
 // reflex writes a line only when something salient CHANGES (day-phase, HP/food, a new hostile, a big
 // move), turning my strobe of glances into a slow film I can catch up on whenever I next look. ----
-let pulseSeq = 0
+streams.pulseSeq = 0
 const pulseLog = []
 function logPulse (msg) {
   try {
     console.log('[pulse] ' + msg)            // distinct prefix; the Monitor does NOT grep [pulse]
-    pulseLog.push({ id: ++pulseSeq, t: Date.now(), msg })
+    pulseLog.push({ id: ++streams.pulseSeq, t: Date.now(), msg })
     if (pulseLog.length > 200) pulseLog.splice(0, pulseLog.length - 200)
   } catch (e) {}
 }
@@ -565,7 +567,7 @@ let reflexTimer = null
 function startReflexes () {
   if (reflexTimer) clearInterval(reflexTimer)
   reflexTimer = setInterval(() => {
-    if (!ready || !bot.entity) return
+    if (!shared.ready || !bot.entity) return
     for (const r of reflexes) {
       if (!r.on || r.active) continue
       let hit = false
@@ -1075,7 +1077,8 @@ const waypoints = (() => {
     list() { return dict(map) }
   }
 })()
-let lastWaypoint = null   // the last waypoint I verifiably STOOD at (resets on restart — no false edges)
+const memory = {}
+memory.lastWaypoint = null   // the last waypoint I verifiably STOOD at (resets on restart — no false edges)
 function journal(step, text) {
   try { fs.appendFileSync('journal.md', '- [' + step + '] ' + text + '\n') } catch (e) {}
 }
@@ -1202,7 +1205,7 @@ function veinScan(bot) {
   try {
     const o = bot.entity.position.floored()
     const oreIds = []
-    if (mcData && mcData.blocksArray) for (const b of mcData.blocksArray) if (b.name.endsWith('_ore')) oreIds.push(b.id)
+    if (shared.mcData && shared.mcData.blocksArray) for (const b of shared.mcData.blocksArray) if (b.name.endsWith('_ore')) oreIds.push(b.id)
     if (!oreIds.length) return null
     const byType = {}
     for (const p of bot.findBlocks({ matching: oreIds, maxDistance: VEIN_SENSE_R, count: 512 })) {
@@ -2096,7 +2099,7 @@ function heldInfo() {
   if (!h) return null
   const out = { name: h.name, count: h.count }
   try {
-    const max = (mcData && mcData.items[h.type] && mcData.items[h.type].maxDurability) || null
+    const max = (shared.mcData && shared.mcData.items[h.type] && shared.mcData.items[h.type].maxDurability) || null
     if (max) { out.durability = max - (h.durabilityUsed || 0); out.maxDurability = max }
   } catch (e) {}
   return out
@@ -2311,7 +2314,8 @@ setInterval(() => {
     else if (empty >= 6) pocketsWarned = 0
   } catch (e) {}
 }, 5000)
-let lastAttrib = null            // set by the damage_event wire; read by the hurt handler above
+const fight = {}
+fight.lastAttrib = null            // set by the damage_event wire; read by the hurt handler above
 setInterval(() => {
   try {
     lastPosSafe = bot.entity.position.clone()
@@ -2338,17 +2342,17 @@ bot.on('health', async () => {
     if (bot.health < lastHp - 0.5) {
       const dmg = +(lastHp - bot.health).toFixed(1)
       const hurtDue = (ms) => dmg >= BIG_HIT || Date.now() - lastHurtEmit > ms
-      if (swingWait) {
+      if (fight.swingWait) {
         lastHp = bot.health                               // a health update during the wait counts from here
-        await swingWait
+        await fight.swingWait
       }
       // LAW AMENDED 07-14, built 07-15: hurt-FREEZE is for UNEXPLAINED damage only. When damage
       // attribution (damage_event wire below) has just named a living attacker, freezing is the
       // worst response — the combat reflex owns it; we only narrate.
-      const attrib = (lastAttrib && Date.now() - lastAttrib.t < 1500) ? lastAttrib : null
+      const attrib = (fight.lastAttrib && Date.now() - fight.lastAttrib.t < 1500) ? fight.lastAttrib : null
       // cls is the mobClass of the attacker the hit is attributed to, null for an unattributed hit and
       // for an environmental one that kept an attribution.
-      lastHit = { dmg, t: Date.now(), cls: attrib && attrib.entity && !attrib.envHit ? mobClass(attrib.entity) : null }   // feeds the reflex's ADAPTIVE tripwire (death #2 lesson)
+      fight.lastHit = { dmg, t: Date.now(), cls: attrib && attrib.entity && !attrib.envHit ? mobClass(attrib.entity) : null }   // feeds the reflex's ADAPTIVE tripwire (death #2 lesson)
       if (attrib && !attrib.env && !bunker.building) {
         // DEATH #9 (07-23): this line used to say "combat reflex has it" on attribution alone —
         // fourteen times, while the watcher was silently dropping the attacker at its distance
@@ -2444,7 +2448,7 @@ const STANCES = {
   vanguard: { fleeDist: 12, bowBand: [10, 24], chase: true,  engage: 'closers',   note: 'clear the room: run melee targets down, bow only the far ones' },
   sentinel: { fleeDist: 16, bowBand: [7, 24],  chase: false, engage: 'confirmed', note: 'work detail: ignore posturing, fight only what actually hits me' }
 }
-let stance = 'guard'
+fight.stance = 'guard'
 // One full bow cycle at target, false when nothing was loosed.
 async function drawAndLoose (target) {
   const bow = bot.inventory.items().find(i => i.name === 'bow')
@@ -2480,9 +2484,9 @@ const AGGRO_CONFIRMED = new Map()          // entityId -> {name, t} — fed by d
 const CONFIRMED_HORIZON = 48
 // How long a mob that hit the body stays confirmed.
 const CONFIRMED_MS = 45000
-let threatDebugUntil = 0                   // /threatdebug window: score players, narrate only
-let lastHit = { dmg: 0, t: 0 }             // last hit taken (size + when) — scales the disengage tripwire while FRESH
-let lastAttackT = 0                        // when the bot last attacked
+fight.threatDebugUntil = 0                   // /threatdebug window: score players, narrate only
+fight.lastHit = { dmg: 0, t: 0 }             // last hit taken (size + when) — scales the disengage tripwire while FRESH
+fight.lastAttackT = 0                        // when the bot last attacked
 // The raised guard (shield, or the 1.7.10 sword block), slot the hotbar slot it rose in, pilot set by /guard.
 const guardState = { up: false, slot: -1, pilot: false }
 // A 1.7.10 sword block ends once another hotbar slot or anything but a sword is in hand.
@@ -2500,7 +2504,7 @@ function legsMoving () {
 function itemUseCosts () {
   // The moves held back during an eat, a drink or a bow draw, else null.
   let paused = null
-  const usedOverTime = (item) => !!item && (/^(bow|potion|milk_bucket)$/.test(item.name) || !!(mcData && mcData.foods[item.type]))
+  const usedOverTime = (item) => !!item && (/^(bow|potion|milk_bucket)$/.test(item.name) || !!(shared.mcData && shared.mcData.foods[item.type]))
   const setControlState = bot.setControlState.bind(bot)
   const pause = () => {
     if (paused) return
@@ -2567,7 +2571,7 @@ function mobClass (e) {
   if (e.name === 'creeper') return 'creeper'
   if (HEAVY_MELEE.has(e.name)) return 'heavy'
   if (PROVOKABLE.has(e.name)) return 'provokable'
-  const d = mcData && mcData.entitiesByName[e.name]
+  const d = shared.mcData && shared.mcData.entitiesByName[e.name]
   if (d && (d.type === 'hostile' || d.category === 'Hostile mobs')) return 'hostile'
   return 'passive'
 }
@@ -2606,7 +2610,7 @@ const SWING_GAP_MS = 300
 // How far in radians a swinger's facing may point past the bot.
 const SWING_FACING = Math.PI / 4
 // Resolves once a sourceless hit beside a player or with an arrow in flight has its attribution.
-let swingWait = null
+fight.swingWait = null
 // The players within 4 blocks who stand no farther from the bot than hostile.
 function playersNear (hostile) {
   const here = bot.entity.position
@@ -2695,7 +2699,7 @@ bot.once('spawn', () => {
         // Every 1.7.10 hit through Via is sourceless, a mob's included.
         const sourceless = noSource && type === 'generic'
         // After the swing wait, a non-env attribution of a later hit stays in place.
-        const newer = waited && lastAttrib && !lastAttrib.env && lastAttrib.t > t
+        const newer = waited && fight.lastAttrib && !fight.lastAttrib.env && fight.lastAttrib.t > t
         const hostile = sourceless ? nearestHostile() : undefined
         // A sourceless hit is a player's when that player swung within SWING_MS of it, alone and facing
         // the bot, with no hostile closer to the bot. The swing nearest in time wins.
@@ -2705,7 +2709,7 @@ bot.once('spawn', () => {
           .sort((a, b) => Math.abs(a.s.t - t) - Math.abs(b.s.t - t))[0]
         if (swing) {
           const name = swing.e.username || 'a player'
-          if (!newer) lastAttrib = { t, desc: `no attacker named, ${name} swung nearby`, entity: null, ranged: false, env: true }
+          if (!newer) fight.lastAttrib = { t, desc: `no attacker named, ${name} swung nearby`, entity: null, ranged: false, env: true }
           console.log(`[combat] sourceless hit, ${name} swung nearby`)
           return
         }
@@ -2713,17 +2717,17 @@ bot.once('spawn', () => {
         const flying = sourceless && [...arrows.values()].some(a => !a.gone && t - a.t <= ARROW_FLIGHT_MS && arrowInRange(a))
         if ((near.length || flying) && !waited) {
           const wait = new Promise(r => setTimeout(r, flying ? ARROW_HIT_MS : SWING_MS)).then(() => {
-            if (swingWait === wait) swingWait = null
+            if (fight.swingWait === wait) fight.swingWait = null
             onDamage(packet, t, true)
           })
-          swingWait = wait
+          fight.swingWait = wait
           return
         }
         const cause = sourceless ? hostile : causeId >= 0 ? bot.entities[causeId] : null
         const direct = directId >= 0 ? bot.entities[directId] : null
         const a = arrowHitOf(t, sourceless, direct, cause)
         if (a) {
-          if (!newer) lastAttrib = a
+          if (!newer) fight.lastAttrib = a
           if (a.entity) AGGRO_CONFIRMED.set(a.entity.id, { name: a.entity.username || a.entity.name, t: Date.now(), ranged: true })
           console.log(`[combat] attributed: ${a.entity ? 'hit by ' : ''}${a.desc}`)
           return
@@ -2734,15 +2738,15 @@ bot.once('spawn', () => {
         // response must be ranged doctrine regardless of the name on the shaft.)
         const ranged = !!(direct && (!cause || direct.id !== cause.id))
         if (!cause) {
-          if (ranged) lastAttrib = { t, desc: 'projectile, shooter unseen', entity: null, ranged: true }
+          if (ranged) fight.lastAttrib = { t, desc: 'projectile, shooter unseen', entity: null, ranged: true }
           // An attacker the bot doesn't track leaves the hit unattributed.
-          else if (!noSource) lastAttrib = null
+          else if (!noSource) fight.lastAttrib = null
           // env marks a hit without a source entity. Such a hit keeps a fresh attribution to an attacker,
           // and a lava, fire or fall hit marks it envHit, so the hit can't arm the bunker.
-          else if (lastAttrib && !lastAttrib.env && Date.now() - lastAttrib.t < 1500) {
-            if (!sourceless) lastAttrib = { ...lastAttrib, envHit: true }
+          else if (fight.lastAttrib && !fight.lastAttrib.env && Date.now() - fight.lastAttrib.t < 1500) {
+            if (!sourceless) fight.lastAttrib = { ...fight.lastAttrib, envHit: true }
           } else {
-            lastAttrib = { t, desc: sourceless ? 'no attacker named, no hostile within 4' : type || 'no attacker named', entity: null, ranged: false, env: true }
+            fight.lastAttrib = { t, desc: sourceless ? 'no attacker named, no hostile within 4' : type || 'no attacker named', entity: null, ranged: false, env: true }
           }
           return
         }
@@ -2753,7 +2757,7 @@ bot.once('spawn', () => {
         const how = `${ranged ? ' (projectile)' : ''}${sourceless ? ' (nearest hostile)' : ''}`
         // ranged is STICKY per attacker: one proven arrow makes it a ranged threat for the episode
         const wasRanged = (AGGRO_CONFIRMED.get(cause.id) || {}).ranged || false
-        if (!newer) lastAttrib = { t, desc: `${who} ${dir} ~${dist}${how}`, entity: cause, ranged: ranged || wasRanged }
+        if (!newer) fight.lastAttrib = { t, desc: `${who} ${dir} ~${dist}${how}`, entity: cause, ranged: ranged || wasRanged }
         AGGRO_CONFIRMED.set(cause.id, { name: who, t: Date.now(), ranged: ranged || wasRanged })
         console.log(`[combat] attributed: hit by ${who} ${dir} ~${dist}${how}`)
       } catch (e) {}
@@ -2878,7 +2882,7 @@ const laneNarrate = (what) => {
 }
 // The [width, height] of en's hitbox on the server, half size for a baby, times its size for a slime or magma cube.
 function hitbox (en) {
-  const data = mcData && mcData.entitiesByName[en.name]
+  const data = shared.mcData && shared.mcData.entitiesByName[en.name]
   const keys = data && data.metadataKeys
   const s = Array.isArray(keys) && keys.some(k => k === 'baby' || k === 'is_baby') && babyFlag(en.metadata, keys) ? 0.5 : 1
   // Size 1 until the metadata arrives.
@@ -2922,8 +2926,8 @@ function meleeThreat () {
 // zombies meant sprint-thrash inside a ring instead of the two sword hits that kill
 // one). Floor drops to 5 there; every other stance and class keeps the old 8.
 function disengageHp (cls) {
-  const hitRef = Date.now() - lastHit.t < 20000 ? lastHit.dmg : 0
-  return Math.max(stance === 'vanguard' && cls === 'hostile' ? 5 : 8, hitRef * 2.5)
+  const hitRef = Date.now() - fight.lastHit.t < 20000 ? fight.lastHit.dmg : 0
+  return Math.max(fight.stance === 'vanguard' && cls === 'hostile' ? 5 : 8, hitRef * 2.5)
 }
 // ---- ENGAGEABLE vs WATCHED (07-21, the mansion debrief, the helmsman's diagnosis: creepers pacing
 // dark rooms OVERHEAD were air-connected and honestly perceptible, so the pack counter armed
@@ -2970,7 +2974,7 @@ function fleeWorld () {
 }
 // True while creeper e swells or burns an ignited fuse, as its metadata shows.
 function creeperSwelling (e) {
-  const keys = (mcData && mcData.entitiesByName.creeper && mcData.entitiesByName.creeper.metadataKeys) || []
+  const keys = (shared.mcData && shared.mcData.entitiesByName.creeper && shared.mcData.entitiesByName.creeper.metadataKeys) || []
   const at = (key) => (e.metadata || [])[keys.indexOf(key)]
   return at('swell_dir') > 0 || at('is_ignited') === true
 }
@@ -3206,7 +3210,7 @@ reflexes.unshift({
         const cls = mobClass(e)
         const confirmed = AGGRO_CONFIRMED.get(e.id)
         const scoreable = cls === 'hostile' || cls === 'creeper' || cls === 'heavy' || !!confirmed ||
-          (cls === 'player' && now < threatDebugUntil)
+          (cls === 'player' && now < fight.threatDebugUntil)
         if (!scoreable) continue
         // DEATH #9 (07-23): this gate ran BEFORE the confirmed bypass, so a skeleton plinking
         // from ~33 was discarded every cycle — fourteen hits, zero responses, while the hurt
@@ -3242,21 +3246,21 @@ reflexes.unshift({
         if (at) this._hist.set(e.id, h)
         // sentinel stance: posturing doesn't count — only confirmed attackers score (creeper
         // proximity still does: fleeing a lit fuse is survival, not engagement)
-        const closerAggro = STANCES[stance].engage === 'confirmed' ? false : h.closes >= 3
+        const closerAggro = STANCES[fight.stance].engage === 'confirmed' ? false : h.closes >= 3
         // A melee mob below a perch is a free target in reach.
-        const perchAggro = cls === 'hostile' && STANCES[stance].engage !== 'confirmed' && perchStrike(e) && inMeleeReach(e)
+        const perchAggro = cls === 'hostile' && STANCES[fight.stance].engage !== 'confirmed' && perchStrike(e) && inMeleeReach(e)
         const aggro = !!confirmed || closerAggro || perchAggro || (cls === 'creeper' && dist < 8)
         // A creeper from 8 out drives the legs only along a walk of at most the stance's fleeDist.
         if (aggro && cls === 'creeper' && at && dist >= 8) {
-          const routeKey = `${stance} ${at.floored()} ${here.floored()}`
+          const routeKey = `${fight.stance} ${at.floored()} ${here.floored()}`
           if (h.routeKey !== routeKey) {
             h.routeKey = routeKey
-            h.route = creeperRoute(at, STANCES[stance].fleeDist)
+            h.route = creeperRoute(at, STANCES[fight.stance].fleeDist)
           }
           if (!h.route) { watch(e, cls, dist); continue }
         }
         // A creeper the body perceives within the stance's flee distance outranks every other mob.
-        const urgent = cls === 'creeper' && dist <= STANCES[stance].fleeDist && seen
+        const urgent = cls === 'creeper' && dist <= STANCES[fight.stance].fleeDist && seen
         if (aggro && (!best || urgent > best.urgent || (urgent === best.urgent && dist < best.dist))) best = { e, cls, dist, confirmed: !!confirmed, urgent }
       }
       this._threat = best
@@ -3275,11 +3279,11 @@ reflexes.unshift({
     const narKey = t.e.id
     if (now - (this._lastNarrate.get(narKey) || 0) > 8000 && (seen || t.confirmed)) {
       this._lastNarrate.set(narKey, now)
-      if (!seen) emitEvent('threat', `something hit me [${stance}]`)
-      else emitEvent('threat', `${label} ${dir} ~${Math.round(t.dist)} ${t.confirmed ? 'CONFIRMED (it hit me)' : 'closing fast'} — ${t.cls === 'creeper' ? 'creeper doctrine' : t.cls === 'heavy' ? 'heavy doctrine (no trades)' : t.cls === 'player' ? 'debug: scoring only' : 'engaging'} [${stance}]`)
+      if (!seen) emitEvent('threat', `something hit me [${fight.stance}]`)
+      else emitEvent('threat', `${label} ${dir} ~${Math.round(t.dist)} ${t.confirmed ? 'CONFIRMED (it hit me)' : 'closing fast'} — ${t.cls === 'creeper' ? 'creeper doctrine' : t.cls === 'heavy' ? 'heavy doctrine (no trades)' : t.cls === 'player' ? 'debug: scoring only' : 'engaging'} [${fight.stance}]`)
     }
     if (t.cls === 'player') return                          // NEVER weapons on players — narrate only
-    const s = STANCES[stance]
+    const s = STANCES[fight.stance]
     // The standoff guard goes up while a melee hostile closes and drops for each swing.
     const sword = bot.inventory.items().find(i => /_sword$/.test(i.name))
     const canGuard = () => {
@@ -3368,7 +3372,7 @@ reflexes.unshift({
           // in room-clearing stance is sword work, not a rout — stand and swing. A heavy or a
           // creeper in the pack still makes it a real rout, and the HP floor still binds.)
           const packHasHeavy = packList.some(h => { const c2 = mobClass(h.e); return c2 === 'heavy' || c2 === 'creeper' })
-          const lightCommit = stance === 'vanguard' && !packHasHeavy && bot.health >= 12
+          const lightCommit = fight.stance === 'vanguard' && !packHasHeavy && bot.health >= 12
           if (!lightCommit) {
             // ALLY SUPPRESSION (the helmsman's design, 07-20, en route to the dungeon reaping):
             // a pack is only a rout if I'm ALONE in it. A partner in sight within 10 turns the math — two
@@ -3590,8 +3594,8 @@ const ORE_ANNOUNCED = new Map()   // "x,y,z" -> { t, name }
 let ORE_IDS = null
 function oreCallout () {
   try {
-    if (!ready || !bot.entity || !mcData) return
-    if (!ORE_IDS) ORE_IDS = Object.values(mcData.blocksByName)
+    if (!shared.ready || !bot.entity || !shared.mcData) return
+    if (!ORE_IDS) ORE_IDS = Object.values(shared.mcData.blocksByName)
       .filter(b => /_ore$/.test(b.name) || b.name === 'ancient_debris').map(b => b.id)
     const here = bot.entity.position
     for (const [k, ore] of ORE_ANNOUNCED) {                    // prune: >10min old or >48 away
@@ -3820,7 +3824,7 @@ const BOOT_ID = require('crypto').randomBytes(8).toString('hex')
 // after. Perception rules unchanged — same gates as /scene, just fewer trips.
 app.get('/tick', (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const chatSince = parseInt(req.query.chat || '0')
     const evSince = parseInt(req.query.ev || '0')
     const e = bot.entity
@@ -3846,10 +3850,10 @@ app.get('/tick', (req, res) => {
         ? { water: { inWater: w.inWater, submerged: w.submerged, current: w.current, buried: w.buried, oxygen: bot.oxygenLevel } } : {}),
       threats,
       chat: { cursor: chatLog.cursor, messages: chatLog.read(chatSince) },
-      events: { cursor: eventSeq, list: eventLog.filter(x => x.id > evSince) },
+      events: { cursor: streams.eventSeq, list: eventLog.filter(x => x.id > evSince) },
       jobs: jobs.list()
     }
-    eventsServed = eventSeq
+    streams.eventsServed = streams.eventSeq
     // ?delta=1 (07-21): report only what CHANGED since the last tick — fewer tokens in,
     // faster pilot decisions out. Threats/water/chat/events always report (safety and
     // cursors are never elided); pos elides under 1 block of drift; vitals elide when equal.
@@ -3869,11 +3873,11 @@ app.get('/tick', (req, res) => {
 
 // GET /cursors: reads the cursors without marking chat read or events served.
 app.get('/cursors', (req, res) => {
-  ok(res, { boot: BOOT_ID, chat: chatLog.cursor, ev: eventSeq, wakeEv })
+  ok(res, { boot: BOOT_ID, chat: chatLog.cursor, ev: streams.eventSeq, wakeEv: streams.wakeEv })
 })
 
 app.get('/state', (req, res) => {
-  if (!ready) return err(res, new Error('bot not spawned yet'))
+  if (!shared.ready) return err(res, new Error('bot not spawned yet'))
   const e = bot.entity
   ok(res, {
     pos: round(e.position),
@@ -3889,7 +3893,7 @@ app.get('/state', (req, res) => {
 })
 
 app.get('/inventory', (req, res) => {
-  if (!ready) return err(res, new Error('not ready'))
+  if (!shared.ready) return err(res, new Error('not ready'))
   const dur = (i) => (i.maxDurability > 0)
     ? { durability: i.maxDurability - (i.durabilityUsed || 0), maxDurability: i.maxDurability } : {}
   const items = bot.inventory.items().map(i => ({ name: i.name, count: i.count, slot: i.slot, ...dur(i) }))
@@ -3909,7 +3913,7 @@ app.get('/inventory', (req, res) => {
 // the whole stack. This is how the bot GIVES — the co-op other half of the helmsman handing me things.
 app.get('/toss', async (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const name = req.query.name
     if (!name) return err(res, new Error('name required'))
     const toward = req.query.to
@@ -3929,13 +3933,13 @@ app.get('/toss', async (req, res) => {
 function cropAge (b) {
   if (!b || !/^(wheat|carrots|potatoes|beetroots|nether_wart|melon_stem|pumpkin_stem|cocoa)$/.test(b.name)) return null
   const age = Number(b.getProperties().age)
-  const ages = mcData.blocks[b.type].states.find(s => s.name === 'age').num_values
+  const ages = shared.mcData.blocks[b.type].states.find(s => s.name === 'age').num_values
   return { age, mature: age === ages - 1 }
 }
 
 app.get('/find', (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const name = req.query.name
     const count = parseInt(req.query.count || '5')
     const radius = parseInt(req.query.radius || '64')
@@ -4028,7 +4032,7 @@ function playerSighting (en, fill) {
 // The block a chat line points at with "here", "there", "this" or "that": the one its speaker looks at as
 // it arrives, when the bot sees the speaker within POINT_RANGE and sees that block too. Else null.
 function chatPointer (from, msg) {
-  if (!ready || !deictic(msg)) return null
+  if (!shared.ready || !deictic(msg)) return null
   const en = playerEntity(from)
   if (!en || en.position.distanceTo(bot.entity.position) > POINT_RANGE) return null
   if (!entityPerceptible(en, reflexes.find(r => r.name === 'combat').fairFill(bot))) return null
@@ -4082,11 +4086,11 @@ function presenceTick () {
       const s = playerSighting(en, fill ??= reflexes.find(r => r.name === 'combat').fairFill(bot))
       if (s) sightings.push({ name: en.username, ...s })
     }
-    const quiet = new Set(followState ? [followState.name] : [])
+    const quiet = new Set(follow.followState ? [follow.followState.name] : [])
     for (const ev of presenceUpdate(presence, sightings, { now: Date.now(), quiet })) emitEvent('player', presenceText(ev), ev)
   } catch (e) {}
 }
-setInterval(() => { if (ready && bot.entity) presenceTick() }, 2000)
+setInterval(() => { if (shared.ready && bot.entity) presenceTick() }, 2000)
 function crumbFix (c, me) {
   const agoSec = Math.round((Date.now() - c.t) / 1000)
   const bearing = compass(c.pos.x - me.x, c.pos.z - me.z)
@@ -4128,7 +4132,7 @@ function targetSeen (en) {
 // first flock waiting). Walks into reach if needed; nearest matching entity in sight within 16.
 app.get('/useon', async (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const ename = req.query.name
     const iname = req.query.item
     const it = bot.inventory.items().find(i => i.name === iname)
@@ -4159,7 +4163,7 @@ function sprintBlock (e) {
 }
 // One 1.7.10 melee hit at e, true when it swung, false out of sight, null out of reach.
 async function meleeSwing (e, { run = false, aimY = 1.2, guard = null, seen = () => true } = {}) {
-  const wait = () => Math.max(0, lastAttackT + LEGACY_HIT_MS - Date.now(), mobHurt.wait(e))
+  const wait = () => Math.max(0, fight.lastAttackT + LEGACY_HIT_MS - Date.now(), mobHurt.wait(e))
   const sleep = (ms) => ms > 0 ? new Promise(r => setTimeout(r, ms)) : null
   const aim = () => bot.lookAt(meleeAim(e, aimY), true)
   const swing = async (note) => {
@@ -4168,7 +4172,7 @@ async function meleeSwing (e, { run = false, aimY = 1.2, guard = null, seen = ()
     if (!seen()) return false
     if (!inMeleeReach(e, aimY)) return null
     bot.attack(e)
-    lastAttackT = Date.now()
+    fight.lastAttackT = Date.now()
     console.log(`[combat] swing ${e.name || '?'} ~${e.position.distanceTo(bot.entity.position).toFixed(1)}: ${note}`)
     return true
   }
@@ -4274,7 +4278,7 @@ app.get('/strike', async (req, res) => {
   const onDead = (en) => died.add(en.id)
   let lane = null
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const ename = req.query.name
     if (!ename) return err(res, new Error('need name='))
     const iname = req.query.item || 'iron_sword'
@@ -4340,13 +4344,13 @@ app.get('/strike', async (req, res) => {
         if (!inMeleeReach(tgt, 0.6)) continue
         struckAt = tgt.position.clone()
         bot.attack(tgt)
-        lastAttackT = Date.now()
+        fight.lastAttackT = Date.now()
       }
       swings++
       // watch for the death or the despawn instead of guessing a delay (the 700ms check called a real kill a miss)
       for (let w = 0; w < 15 && !dead; w++) {
         // On 1.7.10 the watch ends when the jump before the next swing is due.
-        if (LEGACY_1710 && i < max - 1 && Date.now() + 100 > lastAttackT + LEGACY_HIT_MS - JUMP_FALL_TICKS * 50) break
+        if (LEGACY_1710 && i < max - 1 && Date.now() + 100 > fight.lastAttackT + LEGACY_HIT_MS - JUMP_FALL_TICKS * 50) break
         await new Promise(r => setTimeout(r, 100))
         dead = died.has(tgt.id) || !bot.entities[tgt.id]
       }
@@ -4374,7 +4378,7 @@ app.get('/shoot', async (req, res) => {
   const died = new Set()
   const onDead = (en) => died.add(en.id)
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const ename = req.query.name
     if (!ename) return err(res, new Error('need name='))
     // ?max=N (07-21 latency session): a bounded VOLLEY in one round trip — the assault's
@@ -4445,7 +4449,7 @@ function whereIs (name) {
 }
 app.get('/where', (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const name = req.query.name || process.env.MC_OWNER
     if (!name) return err(res, new Error('need name= (or set MC_OWNER in the environment for a default)'))
     ok(res, whereIs(name))
@@ -4457,7 +4461,7 @@ function entityLabel (en) {
 }
 app.get('/entities', (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const radius = parseInt(req.query.radius || '24')
     const here = bot.entity.position
     const fill = req.query.all === '1' ? null : reflexes.find(r => r.name === 'combat').fairFill(bot)
@@ -4559,12 +4563,12 @@ function sprintTick () {
 
 // Ahead of the pathfinder's listener, so it never steers back to a node a hop passed.
 function beforePathfinder () {
-  if (!ready || !bot.entity) return
+  if (!shared.ready || !bot.entity) return
   try { skipPassedNodes() } catch (e) { console.log('[sprint] ' + e.message) }
 }
 // After the pathfinder's listener, so these act on the control states it just set.
 function afterPathfinder () {
-  if (!ready || !bot.entity) return
+  if (!shared.ready || !bot.entity) return
   try { sprintTick() } catch (e) { console.log('[sprint] ' + e.message) }
   try { closeDoorsBehind() } catch (e) { console.log('[doors] ' + e.message) }
 }
@@ -4876,7 +4880,7 @@ function doorBeside () {
 app.get('/goto', async (req, res) => {
   let lane = null
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const q = gotoQuery(req.query)
     if (['x', 'y', 'z'].some(k => k in q && !Number.isFinite(q[k]))) return err(res, new Error('x, y and z must be numbers'))
@@ -4892,8 +4896,8 @@ app.get('/goto', async (req, res) => {
       if (door) r.door = door
     }
     if (r.arrived && q.waypoint !== undefined) {
-      if (lastWaypoint && lastWaypoint !== q.waypoint) waypoints.link(lastWaypoint, q.waypoint)
-      lastWaypoint = q.waypoint
+      if (memory.lastWaypoint && memory.lastWaypoint !== q.waypoint) waypoints.link(memory.lastWaypoint, q.waypoint)
+      memory.lastWaypoint = q.waypoint
       journal('goto', 'went to ' + q.waypoint)
     }
     const { x, y, z } = bot.entity.position.floored()
@@ -4985,7 +4989,7 @@ function enclosedHint (missed) {
 app.get('/collect', async (req, res) => {
   let lane = null
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     if (bunker.building) return err(res, new Error(BUNKER_WALK))
     const radius = parseInt(req.query.radius || '16')
     lane = claimLane('collect', 300000)
@@ -5047,7 +5051,7 @@ function arrivedStation (p, test, what) {
 
 // Crafts at a crafting table seen within 16 blocks, else in the 2x2 grid if the recipe fits, and never places a table.
 async function craftItem (item, count) {
-  const override = overrideRecipes(SERVER_RECIPES, item.name, mcData.itemsByName)
+  const override = overrideRecipes(SERVER_RECIPES, item.name, shared.mcData.itemsByName)
   const recipesAt = (table) => override
     ? craftable(override, table, (id) => bot.inventory.count(id, null))
     : bot.recipesFor(item.id, null, 1, table)
@@ -5126,7 +5130,7 @@ const RISKY_FOODS = ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfi
 const FOOD_UPDATE_MS = 1500
 // The most filling carried food outside RISKY_FOODS and skip, else undefined.
 function safeFood (skip = []) {
-  const foods = (mcData && mcData.foods) || {}
+  const foods = (shared.mcData && shared.mcData.foods) || {}
   return bot.inventory.items().filter(i => foods[i.type] && !RISKY_FOODS.includes(i.name) && !skip.includes(i.name))
     .sort((a, b) => (foods[b.type].foodPoints || 0) - (foods[a.type].foodPoints || 0))[0]
 }
@@ -5168,7 +5172,7 @@ app.get('/eat', async (req, res) => {
     if (want) food = items.find(i => i.name === want) || items.find(i => i.name.includes(want))
     if (!food) food = safeFood()
     if (!food) {
-      const foods = (mcData && mcData.foods) || {}
+      const foods = (shared.mcData && shared.mcData.foods) || {}
       const risky = [...new Set(items.filter(i => foods[i.type]).map(i => i.name))]
       return err(res, new Error(risky.length ? `no safe food in inventory, ${risky.join(', ')} only when named in food` : 'no food in inventory'))
     }
@@ -5235,7 +5239,7 @@ app.get('/hold', async (req, res) => {
   let lane = null
   let guard = null
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const sec = Math.min(HOLD_MAX_S, Math.max(1, parseInt(req.query.sec || '10')))
     const spot = perched() ? 'perch' : inChokepoint() ? 'doorway' : req.query.anywhere === '1' ? 'anywhere' : null
     if (!spot) return err(res, new Error('refused: not in a 1-wide doorway or corridor with seen walls or closed doors on both sides, nor on a perch. anywhere=1 holds here anyway'))
@@ -5273,7 +5277,7 @@ app.get('/hold', async (req, res) => {
       if (dead) { ended = 'died'; break }
       if (pilotLane.token !== lane) { ended = 'stopped'; break }
       const here = bot.entity.position
-      const fleeDist = STANCES[stance].fleeDist
+      const fleeDist = STANCES[fight.stance].fleeDist
       const combat = reflexes.find(r => r.name === 'combat')
       const near = nearHostiles(combat.fairFill(bot), fleeDist, combat._seenAt)
       if (near.some(h => mobClass(h.e) === 'creeper' && (h.at.distanceTo(here) < 8 || creeperRoute(h.at, fleeDist)))) { ended = 'creeper'; break }
@@ -5342,11 +5346,12 @@ app.get('/job_stop', (req, res) => { const stopped = jobs.stop(parseInt(req.quer
 // A 400ms watcher now runs the same drill (stop → 700ms → doorwayCommit → re-arm) whenever the
 // bot stops progressing while the target is beyond range, and quietly re-acquires the target
 // entity when it drops out of tracking (one honest event, no alarm spam).
-let followState = null
+const follow = {}
+follow.followState = null
 function stopFollow () {
-  if (!followState) return
-  try { clearInterval(followState.timer) } catch (e) {}
-  followState = null
+  if (!follow.followState) return
+  try { clearInterval(follow.followState.timer) } catch (e) {}
+  follow.followState = null
 }
 // The followed player's entity and its sighting tier while the bot sees it or its nametag, else null.
 function followTarget (st) {
@@ -5375,7 +5380,7 @@ function followHeld (now) {
 // The supervisor's 400 ms check. Only unfollow and stop end a follow: arriving, a stall, a fight or a
 // lost sight hold it, and it re-arms its goal once the legs are free. st is the follow it belongs to.
 async function followTick (st) {
-  if (followState !== st || st.drilling) return
+  if (follow.followState !== st || st.drilling) return
   const now = Date.now()
   const rest = () => { st.lastPos = bot.entity.position.clone(); st.lastT = now }
   // FOLLOW YIELDS TO COMBAT (07-21: the wedge drill held the legs still on a live creeper
@@ -5420,14 +5425,14 @@ async function followTick (st) {
     try { bot.pathfinder.setGoal(null) } catch (e) {}
     try { bot.clearControlStates() } catch (e) {}
     await new Promise(r => setTimeout(r, 700))
-    if (followState !== st || followHeld(Date.now())) return
+    if (follow.followState !== st || followHeld(Date.now())) return
     // The drill ends with this follow, and when a reflex or another walk takes the legs.
     const route = walkRoute()
     const taken = route.stopped
-    route.stopped = () => taken() || followState !== st
+    route.stopped = () => taken() || follow.followState !== st
     let crossed = false
     try { crossed = !!((await doorwayCommit(route)) || {}).through } catch (e) { console.log('[follow] drill error: ' + e.message) } finally { route.end() }
-    if (followState !== st) return
+    if (follow.followState !== st) return
     const live = !followHeld(Date.now()) && followTarget(st)
     if (live) armFollow(st, live)
     st.lastPos = bot.entity.position.clone(); st.lastT = Date.now()
@@ -5449,7 +5454,7 @@ app.get('/follow', (req, res) => {
     stopFollow()
     armFollow(st, target)
     st.timer = setInterval(() => { followTick(st).catch(e => console.log('[follow] check failed: ' + e.message)) }, 400)
-    followState = st
+    follow.followState = st
     ok(res, { following: name, range, supervised: true })
   } catch (e) { err(res, e) }
 })
@@ -5473,7 +5478,7 @@ const BUILD_WALK_CURES = ['out of reach', 'cell not known to the bot', 'no line 
 // The item name of the placeable block name stands for, after the server's aliases.
 function buildBlock (name) {
   const item = resolveItem(name)
-  if (!item || !mcData.blocksByName[item.name] || !mcData.itemsByName[item.name]) throw new Error(`unknown block: ${name}`)
+  if (!item || !shared.mcData.blocksByName[item.name] || !shared.mcData.itemsByName[item.name]) throw new Error(`unknown block: ${name}`)
   return item.name
 }
 
@@ -5494,7 +5499,7 @@ function buildHalt (run, job = null) {
     const by = taken ? legs.takenSince(run.mark) : job.takenBy
     run.stopped = by ? takenText(by) : 'stopped by the pilot'
   } else if (bunker.building) run.stopped = 'a bunker is being built'
-  else if (lastHit.t >= run.since && ['hostile', 'creeper', 'heavy', 'provokable'].includes(lastHit.cls)) run.stopped = 'a mob hit me'
+  else if (fight.lastHit.t >= run.since && ['hostile', 'creeper', 'heavy', 'provokable'].includes(fight.lastHit.cls)) run.stopped = 'a mob hit me'
   else if (meleeThreat()) run.stopped = 'a hostile is in melee reach'
   return run.stopped
 }
@@ -5619,7 +5624,7 @@ function knownGround (x, z, top) {
 app.get('/outline', async (req, res) => {
   let run = null
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const x0 = Math.floor(parseFloat(req.query.x))
     const z0 = Math.floor(parseFloat(req.query.z))
     const w = parseInt(req.query.w || '7')
@@ -5754,7 +5759,7 @@ app.get('/deposit', async (req, res) => {
 const GRAVE_SIGHT = 32
 // Refuses a cell out of lit sight before reading its block.
 function targetGrave (q) {
-  const grave = mcData && mcData.blocksByName[GRAVESTONE]
+  const grave = shared.mcData && shared.mcData.blocksByName[GRAVESTONE]
   if (!grave) throw new Error('this server has no gravestones')
   if (q.at == null) return nearestVisible([grave.id], GRAVE_SIGHT)
   const [x, y, z] = String(q.at).split(',').map(Number)
@@ -5768,7 +5773,7 @@ function targetGrave (q) {
 // took counts what reached the pockets.
 app.get('/grave', async (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const take = req.query.take
     const gb = targetGrave(req.query)
     if (!gb) return err(res, new Error(`no gravestone in sight within ${GRAVE_SIGHT}`))
@@ -5804,7 +5809,7 @@ app.get('/grave', async (req, res) => {
 app.get('/walls', async (req, res) => {
   let run = null
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const x0 = Math.floor(parseFloat(req.query.x))
     const z0 = Math.floor(parseFloat(req.query.z))
     const w = parseInt(req.query.w || '7')
@@ -5939,7 +5944,7 @@ app.get('/activate', async (req, res) => {
 // casts (an in-flight cast reels itself out on its own bite; fishing holds no pathfinder to stop).
 app.get('/fish', (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const Vec3 = require('vec3').Vec3
     const count = Math.min(32, Math.max(1, parseInt(req.query.count || '1')))
     if (!bot.inventory.items().find(i => i.name === 'fishing_rod')) return err(res, new Error('no fishing_rod in inventory'))
@@ -6172,7 +6177,7 @@ app.get('/sign', async (req, res) => {
 app.get('/roof', async (req, res) => {
   let run = null
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const x0 = Math.floor(parseFloat(req.query.x))
     const z0 = Math.floor(parseFloat(req.query.z))
     const w = parseInt(req.query.w || '7')
@@ -6198,8 +6203,8 @@ app.get('/roof', async (req, res) => {
 app.get('/events', (req, res) => {
   try {
     const since = parseInt(req.query.since || '0')
-    eventsServed = eventSeq
-    ok(res, { cursor: eventSeq, events: eventLog.filter(e => e.id > since) })
+    streams.eventsServed = streams.eventSeq
+    ok(res, { cursor: streams.eventSeq, events: eventLog.filter(e => e.id > since) })
   } catch (e) { err(res, e) }
 })
 // GET /reflexes — list the always-on reflex layer; /reflexes?name=unstuck&on=0 toggles one off/on.
@@ -6208,7 +6213,7 @@ app.get('/events', (req, res) => {
 // block while actively raised; raised = can't attack until lowered. Offhand slot is 45.
 app.get('/guard', (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     // 1.7.10 blocks with the sword in the main hand. The combat reflex shares guardState: it raises the
     // block again after a fight while the pilot's order stands, and on=0 lowers its block too.
     if (LEGACY_1710) {
@@ -6239,7 +6244,7 @@ app.get('/guard', (req, res) => {
 app.get('/threatdebug', (req, res) => {
   try {
     const secs = Math.min(300, parseInt(req.query.secs || '60'))
-    threatDebugUntil = Date.now() + secs * 1000
+    fight.threatDebugUntil = Date.now() + secs * 1000
     ok(res, { scoringPlayersFor: secs, note: 'narrate-only — weapons never target players' })
   } catch (e) { err(res, e) }
 })
@@ -6262,10 +6267,10 @@ app.get('/stance', (req, res) => {
     const want = req.query.set
     if (want) {
       if (!STANCES[want]) return err(res, new Error(`no stance '${want}' — have: ${Object.keys(STANCES).join(', ')}`))
-      stance = want
+      fight.stance = want
       emitEvent('stance', `combat posture now ${want}: ${STANCES[want].note}`)
     }
-    ok(res, { stance, ...STANCES[stance], all: Object.fromEntries(Object.entries(STANCES).map(([k, v]) => [k, v.note])) })
+    ok(res, { stance: fight.stance, ...STANCES[fight.stance], all: Object.fromEntries(Object.entries(STANCES).map(([k, v]) => [k, v.note])) })
   } catch (e) { err(res, e) }
 })
 // GET /pulse?since=N — the ambient awareness stream (pull-based, at my pace). Returns the lean
@@ -6274,7 +6279,7 @@ app.get('/stance', (req, res) => {
 app.get('/pulse', (req, res) => {
   try {
     const since = parseInt(req.query.since || '0')
-    ok(res, { cursor: pulseSeq, pulses: pulseLog.filter(p => p.id > since) })
+    ok(res, { cursor: streams.pulseSeq, pulses: pulseLog.filter(p => p.id > since) })
   } catch (e) { err(res, e) }
 })
 // GET /bridging?on=1|0 — deliberate opt-in for scaffolding. OFF by default (the bot swims/walks/
@@ -6287,9 +6292,9 @@ app.get('/bridging', (req, res) => {
     if (req.query.on != null) {
       const on = (req.query.on === '1' || req.query.on === 'true')
       const scaff = []
-      if (on && mcData && mcData.itemsByName) {
-        if (mcData.itemsByName.dirt) scaff.push(mcData.itemsByName.dirt.id)
-        if (mcData.itemsByName.cobblestone) scaff.push(mcData.itemsByName.cobblestone.id)
+      if (on && shared.mcData && shared.mcData.itemsByName) {
+        if (shared.mcData.itemsByName.dirt) scaff.push(shared.mcData.itemsByName.dirt.id)
+        if (shared.mcData.itemsByName.cobblestone) scaff.push(shared.mcData.itemsByName.cobblestone.id)
       }
       mv.scafoldingBlocks = scaff
     }
@@ -6357,7 +6362,7 @@ app.get('/waypoint', (req, res) => {
     if (req.query.rm === '1') {
       const gone = waypoints.remove(name)
       if (gone) journal('waypoint', 'removed ' + name)
-      if (lastWaypoint === name) lastWaypoint = null
+      if (memory.lastWaypoint === name) memory.lastWaypoint = null
       return ok(res, { removed: gone ? name : null })
     }
     const extra = {}
@@ -6387,8 +6392,8 @@ app.get('/waypoint', (req, res) => {
     } else {
       wp = waypoints.set(name, bot.entity.position.floored(), extra)
       from = 'current'
-      if (lastWaypoint && lastWaypoint !== name) waypoints.link(lastWaypoint, name)   // I walked here from there
-      lastWaypoint = name
+      if (memory.lastWaypoint && memory.lastWaypoint !== name) waypoints.link(memory.lastWaypoint, name)   // I walked here from there
+      memory.lastWaypoint = name
     }
     if (req.query.linkto) { const okd = waypoints.link(name, String(req.query.linkto)); if (okd) journal('waypoint', 'linked ' + name + ' <-> ' + req.query.linkto) }
     if (from !== 'stored') journal('waypoint', from + ' ' + name + ' = ' + JSON.stringify({ x: wp.x, y: wp.y, z: wp.z }))
@@ -6507,7 +6512,7 @@ function sceneEntities (here, fill) {
 // The doors and gates in sight within 16, nearest first, each named once by its lower half.
 function doorsInSight () {
   const here = bot.entity.position
-  const ids = Object.values(mcData.blocksByName).filter(b => isDoor(b.name)).map(b => b.id)
+  const ids = Object.values(shared.mcData.blocksByName).filter(b => isDoor(b.name)).map(b => b.id)
   const seen = new Set()
   const out = []
   for (const { pos } of findVisible(ids, 16, 12)) {
@@ -6676,11 +6681,7 @@ function gazeNarrate(sweep) {
   return { phrases, surfaces, openings }
 }
 
-// GET /gaze?at=x,y,z | dir=n|ne|e|se|s|sw|w|nw|up|down &dist=24 — the deliberate LOOK, in my native
-// medium. Aims the head (the VIEW_PORT viewer turns with it, so the helmsman sees where I look), sweeps a fan
-// of eye rays, and narrates what they strike: dominant surfaces, notables (ore/liquid/utility),
-// openings. Everything reported is SEEN-tier — a real ray hit it — and every swept cell feeds the
-// SEEN memory.
+// GET /gaze?at=x,y,z | dir=n|ne|e|se|s|sw|w|nw|up|down &dist=24
 // far-tier honesty (07-14, the range upgrade the helmsman and I agreed 07-13): past arm's-length
 // vision (64 blocks) a real player sees TERRAIN, not ore seams — distant hits collapse to
 // coarse classes. No ore, no container names at range; a mountain is a mountain.
@@ -7322,7 +7323,7 @@ function shelterInputs (requested, height = BUNKER_HEIGHT) {
     if (!at) continue
     const dist = at.distanceTo(here)
     if (dist > (confirmed ? CONFIRMED_HORIZON : SHELTER.HORIZON) || !entityEngageable(e)) continue
-    const data = mcData && mcData.entitiesByName[e.name]
+    const data = shared.mcData && shared.mcData.entitiesByName[e.name]
     threats.push({ name: e.name, baby: babyFlag(e.metadata, data && data.metadataKeys), dist, entity: e })
   }
   threats.sort((a, b) => a.dist - b.dist)
@@ -7353,7 +7354,7 @@ function bunkerReflexDecide () {
   const now = Date.now()
   const playerFlee = combat._fleeCls === 'player' && now - combat._fleeT < 15000
   if (bunkerHolds() || reflex._spent || playerFlee || bot.health >= BUNKER_HP) return null
-  if (now - lastHit.t >= 15000 || !['hostile', 'creeper', 'heavy', 'provokable'].includes(lastHit.cls)) return null
+  if (now - fight.lastHit.t >= 15000 || !['hostile', 'creeper', 'heavy', 'provokable'].includes(fight.lastHit.cls)) return null
   const input = shelterInputs('auto')
   if (!input.threats.length) return null
   const pick = chooseShelter(input)
@@ -7371,7 +7372,7 @@ function resetThreatState () {
   combat._fleeUntil = 0
   combat._coverUntil = 0
   combat._holdUntil = 0
-  lastHit = { dmg: 0, t: 0 }
+  fight.lastHit = { dmg: 0, t: 0 }
   reflexes.find(r => r.name === 'bunker')._spent = false
   bunker.cell = null
   Object.assign(guardState, { up: false, pilot: false })
@@ -7474,7 +7475,7 @@ async function buildBunker (mode, height) {
 // GET /bunker?mode=auto|up|down&height=N: builds the shelter above and answers once it stands.
 app.get('/bunker', async (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const mode = req.query.mode === undefined ? 'auto' : req.query.mode
     if (!BUNKER_MODES.includes(mode)) return err(res, new Error('mode must be auto, up or down'))
     const r = await buildBunker(mode, req.query.height === undefined ? BUNKER_HEIGHT : parseInt(req.query.height))
@@ -7523,7 +7524,7 @@ app.get('/gesture', async (req, res) => {
 // GET /boot: the one-call session opener with body, world, exits, tools, jobs and the chat cursor.
 app.get('/boot', (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const pos = bot.entity.position
     const oh = overheadCover()
     const around = spatial3D(bot)
@@ -7558,9 +7559,9 @@ app.get('/boot', (req, res) => {
 function gatherItems (ids) {
   const names = new Set()
   for (const id of ids) {
-    const blk = mcData.blocks[id]
-    for (const d of blk.drops) names.add(mcData.items[d].name)
-    if (mcData.itemsByName[blk.name]) names.add(blk.name)
+    const blk = shared.mcData.blocks[id]
+    for (const d of blk.drops) names.add(shared.mcData.items[d].name)
+    if (shared.mcData.itemsByName[blk.name]) names.add(blk.name)
   }
   names.delete('air')
   return names
@@ -7598,14 +7599,14 @@ app.get('/gather', (req, res) => {
       let noProgress = 0                          // consecutive iterations with no mine (circuit breaker)
       // FORESTRY: harvesting wood → walk like a lumberjack (clear leaves+logs to travel) and
       // reach the whole trunk, not just the bottom few. Restored to considerate nav in finally.
-      const isWood = ids.some(i => { const n = mcData.blocks[i] && mcData.blocks[i].name; return !!n && (n.endsWith('_log') || n.endsWith('_wood')) })
+      const isWood = ids.some(i => { const n = shared.mcData.blocks[i] && shared.mcData.blocks[i].name; return !!n && (n.endsWith('_log') || n.endsWith('_wood')) })
       const maxRise = isWood ? 24 : GATHER_MAX_RISE
-      const usingForestry = isWood && !!forestryMoves
+      const usingForestry = isWood && !!shared.forestryMoves
       const prevThink = bot.pathfinder.thinkTimeout
       // forestry pathfinding is heavier (canDig opens dig-moves at every node), so a truly
       // awkward floating log can eat the full 10s think budget before we skip it. Fail fast:
       // drop the think budget while gathering wood so unreachable targets are abandoned quickly.
-      if (usingForestry) { bot.pathfinder.setMovements(forestryMoves); bot.pathfinder.thinkTimeout = 3000; job.progress('forestry nav: may clear leaves+logs') }
+      if (usingForestry) { bot.pathfinder.setMovements(shared.forestryMoves); bot.pathfinder.thinkTimeout = 3000; job.progress('forestry nav: may clear leaves+logs') }
       try {
       while (gathered < amount) {
         if (job.cancelled) { stop = 'cancelled'; job.progress(stop); break }
@@ -7672,7 +7673,7 @@ app.get('/gather', (req, res) => {
       if (gathered <= 0) Object.assign(result, { ok: false, reason: dug ? `dug ${dug} ${resource}, nothing reached the pockets` : stop })
       return result
       } finally {
-        if (usingForestry && considerateMoves) { bot.pathfinder.setMovements(considerateMoves); bot.pathfinder.thinkTimeout = prevThink }
+        if (usingForestry && shared.considerateMoves) { bot.pathfinder.setMovements(shared.considerateMoves); bot.pathfinder.thinkTimeout = prevThink }
       }
     })
     ok(res, { job: id })
@@ -7725,7 +7726,7 @@ async function doorwayCommit (route = null) {
   if (cut()) return null
   const me = bot.entity.position.floored()
   // nearest door/gate within ~3.5 — check the walk plane and one up (upper door half)
-  const ids = Object.values(mcData.blocksByName)
+  const ids = Object.values(shared.mcData.blocksByName)
     .filter(b => /(_door|_fence_gate)$/.test(b.name) && b.name !== 'iron_door').map(b => b.id)
   const found = bot.findBlocks({ matching: ids, maxDistance: 4, count: 8 })
     .map(p => bot.blockAt(p)).filter(Boolean)
@@ -7983,7 +7984,7 @@ app.get('/build', (req, res) => {
     const d = Math.max(3, parseInt(req.query.d || '7'))
     const h = Math.max(2, parseInt(req.query.h || '3'))
     const base = Math.floor(parseFloat(req.query.base || bot.entity.position.y))
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const baseMat = buildBlock(req.query.base_name || 'cobblestone')
     const wallMat = buildBlock(req.query.name || 'oak_planks')
 
@@ -8068,7 +8069,7 @@ app.get('/build', (req, res) => {
 // window keeps nothing between opens. (Forged 07-20, the day the body learned to enchant.)
 app.get('/enchant', async (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const itemName = req.query.item
     const slot = req.query.slot === undefined ? null : parseInt(req.query.slot)
     if (!itemName) return err(res, new Error('item required'))
@@ -8102,7 +8103,7 @@ app.get('/enchant', async (req, res) => {
         throw new Error('offers never arrived — see [enchant] diag in log')
       }
       const enchName = (id) => {
-        const e = (mcData.enchantmentsArray || []).find(x => x.id === id)
+        const e = (shared.mcData.enchantmentsArray || []).find(x => x.id === id)
         return e ? e.name : (id === -1 ? '?' : `#${id}`)
       }
       const offers = (table.enchantments || []).map((e, i) => (
@@ -8138,7 +8139,7 @@ app.get('/enchant', async (req, res) => {
 // (Forged 07-21, the day the blades got names — Occam was first.)
 app.get('/rename', async (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const itemName = req.query.item
     const newName = req.query.name
     if (!itemName || !newName) return err(res, new Error('item and name required'))
@@ -8206,7 +8207,7 @@ async function furnaceCooks (furnace) {
 // GET /smelt?item=&fuel=&count= : loads the nearest furnace and returns without waiting for the burn.
 app.get('/smelt', async (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const inputName = req.query.item
     const fuelName = req.query.fuel || 'coal'
     const want = Math.max(1, parseInt(req.query.count || '1'))
@@ -8280,7 +8281,7 @@ app.get('/smelt', async (req, res) => {
 // GET /furnace?at=&take=&count= : lists a furnace's slots, or takes one slot into the pockets.
 app.get('/furnace', async (req, res) => {
   try {
-    if (!ready) return err(res, new Error('not ready'))
+    if (!shared.ready) return err(res, new Error('not ready'))
     const take = req.query.take
     if (take != null && !['input', 'fuel', 'output'].includes(take)) return err(res, new Error('take is input, fuel or output'))
     const fb = targetFurnace(req.query)

@@ -187,7 +187,7 @@ function presenceEnv (position, gate) {
     staleEntities: new Set(),
     presence: new Map(),
     playersLogged: true,
-    followState: null,
+    follow: { followState: null },
     reflexes: [{ name: 'combat', fairFill: () => ({}) }],
     entityPerceptible: () => gate.seen,
     nametagVisible: () => gate.nametag,
@@ -214,7 +214,7 @@ test('a hidden player gets no presence event, and a nametag one only a rounded d
 
 test('presence skips the followed player', () => {
   const { env, events, ctx } = presenceEnv(new Vec3(5, 64, 5), { seen: true, nametag: true })
-  env.followState = { name: 'Steve' }
+  env.follow.followState = { name: 'Steve' }
   ctx.presenceTick()
   assert.deepStrictEqual(events, [])
 })
@@ -266,12 +266,12 @@ function followHarness ({ position = new Vec3(10.5, 64, 0.5), gate = { seen: tru
     verbs: countVerbs(app),
     routeDeadline,
     swimUpUntil: 0,
-    mcData: { blocksByName: { oak_door: { id: 5, name: 'oak_door' } } },
+    shared: { mcData: { blocksByName: { oak_door: { id: 5, name: 'oak_door' } } } },
     cellKnown: () => true,
     isDoor,
     panelAcross,
     doorCrossing,
-    followState: null,
+    follow: { followState: null },
     console: { log () {} },
     setTimeout: (fn, ms) => (ms === 700 && holdPause ? pauses.push(fn) : setImmediate(fn)),
     playerEntity: (name) => (name === 'Steve' ? steve : null),
@@ -286,7 +286,7 @@ function followHarness ({ position = new Vec3(10.5, 64, 0.5), gate = { seen: tru
   const ctx = loadBotFunctions(['followTick', 'armFollow', 'followTarget', 'stopFollow'], env)
   const st = { name: 'Steve', range: 2, goal: null, lastPos: ME.clone(), lastT: Date.now(), drilling: false, lostT: 0, told: false, warnT: 0 }
   ctx.armFollow(st, ctx.followTarget(st))
-  env.followState = st
+  env.follow.followState = st
   return {
     env, bot, st, steve, events, gate, combat, job, app, routes, controls, log, pauses,
     drills: () => drills,
@@ -310,7 +310,7 @@ test('follow parked beside its player stays on with its goal, wedged far from th
     near.age(10000)
     await near.tick()
   }
-  assert.deepStrictEqual([near.drills(), near.env.followState === near.st, near.bot.pathfinder.goal === goal], [0, true, true])
+  assert.deepStrictEqual([near.drills(), near.env.follow.followState === near.st, near.bot.pathfinder.goal === goal], [0, true, true])
 
   const atRest = followHarness()
   atRest.age(10000)
@@ -334,7 +334,7 @@ test('follow holds through a lost sight without walking to the hidden player, sa
   await h.tick()
   await h.tick()
   assert.deepStrictEqual(h.events.map((e) => e.msg), ['lost sight of Steve, still following and going on once they show again'])
-  assert.strictEqual(h.env.followState, h.st)
+  assert.strictEqual(h.env.follow.followState, h.st)
   h.gate.seen = true
   await h.tick()
   assert.ok(h.bot.pathfinder.goal instanceof goals.GoalFollow)

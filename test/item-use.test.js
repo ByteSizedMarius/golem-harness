@@ -60,17 +60,16 @@ function body () {
   }
   const env = {
     bot,
-    ready: true,
+    shared: { ready: true, mcData: { foods: registry.foods } },
     LEGACY_1710: false,
     MOVES,
-    mcData: { foods: registry.foods },
     RISKY_FOODS: botConstant('RISKY_FOODS'),
     FOOD_UPDATE_MS: botConstant('FOOD_UPDATE_MS'),
     guardState: { up: false, slot: -1, pilot: false },
     reflexes: [{ name: 'combat' }, { name: 'bunker' }],
     AGGRO_CONFIRMED: new Map(),
     bunker: { building: false, cell: null },
-    lastHit: null,
+    fight: { lastHit: null },
     jobs: { list: () => [] },
     setTimeout,
     clearTimeout

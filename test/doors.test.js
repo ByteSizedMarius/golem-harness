@@ -84,7 +84,7 @@ function doorScene (wall = true) {
       findBlocks: () => ['3,64,0', '3,65,0', '0,64,6', '0,65,6'].map((k) => new Vec3(...k.split(',').map(Number))),
       time: { timeOfDay: 6000 }
     },
-    mcData: { blocksByName: { oak_door: { id: 1, name: 'oak_door' }, spruce_door: { id: 2, name: 'spruce_door' }, stone: { id: 3, name: 'stone' } } },
+    shared: { mcData: { blocksByName: { oak_door: { id: 1, name: 'oak_door' }, spruce_door: { id: 2, name: 'spruce_door' }, stone: { id: 3, name: 'stone' } } } },
     isDoor,
     ck,
     Vec3,
@@ -194,7 +194,7 @@ function farmDoor (feet, state = { facing: 'west', hinge: 'left', open: true }) 
   }
   const env = {
     bot,
-    mcData: { blocksByName: { oak_door: { id: 1, name: 'oak_door' } } },
+    shared: { mcData: { blocksByName: { oak_door: { id: 1, name: 'oak_door' } } } },
     cellKnown: () => true,
     seenNow: () => true,
     routeEnd: () => null,

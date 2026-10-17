@@ -47,9 +47,8 @@ test('the ore callout names a vein once, however many of its blocks come into vi
   const events = []
   let exposed = []
   const env = {
-    ready: true,
+    shared: { ready: true, mcData: {} },
     bot: { entity: { position: new Vec3(0.5, 40, 0.5) }, blockAt: () => ({ name: 'iron_ore' }) },
-    mcData: {},
     ORE_IDS: [1],
     ORE_ANNOUNCED: new Map(),
     Vec3,

@@ -83,7 +83,7 @@ function crafter ({ tableAt = null, needsTable = true, seen = true } = {}) {
       goals: { GoalNear: function (x, y, z, r) { Object.assign(this, { x, y, z, r }) } },
       SERVER_RECIPES: null,
       overrideRecipes,
-      mcData: { itemsByName: {} },
+      shared: { mcData: { itemsByName: {} } },
       cellKnown: (p) => seen || !tableAt || !p.equals(tableAt),
       seenNow: (p) => seen || !tableAt || !p.equals(tableAt),
       STATIONS: new Map()

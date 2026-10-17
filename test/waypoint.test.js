@@ -22,7 +22,7 @@ function waypointAt (x, y, z, position = new Vec3(-299.5, 63, 76.5)) {
     Vec3,
     cellKnown: () => true,
     journal () {},
-    lastWaypoint: null,
+    memory: { lastWaypoint: null },
     waypoints: { get: () => undefined, set: (name, at) => { stored.push({ name, at }); return at }, link () {} }
   }
   const at = x === undefined ? {} : { x: String(x), y: String(y), z: String(z) }

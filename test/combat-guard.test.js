@@ -22,6 +22,7 @@ function blockAt (extra) {
 }
 const ring = (kind, height) => (p) => Math.max(Math.abs(p.x), Math.abs(p.z)) === 4 && p.y >= 64 && p.y < 64 + height ? kind : null
 const open = () => null
+const guardFight = (over) => ({ stance: 'guard', lastHit: { dmg: 0, t: 0 }, lastAttackT: 0, ...over })
 
 // The sword-block raises and lowerings, the swings, the flee classes and the [combat] guard lines of three 1.7.10
 // fight cycles against mob, which closed 1 block in the last second and stands out of melee reach. The body
@@ -65,12 +66,10 @@ async function standoff (extra, mob, over = {}) {
     mobFamily,
     console: { log: (line) => lines.push(line) },
     STANCES: { guard: { fleeDist: 16, bowBand: [7, 24], chase: false, engage: 'closers' } },
-    stance: 'guard',
+    fight: guardFight(),
     LEGACY_1710: true,
     MOVES: botConstant('MOVES'),
     guardState: { up: false, slot: -1, pilot: false },
-    lastHit: { dmg: 0, t: 0 },
-    lastAttackT: 0,
     LEGACY_HIT_MS: botConstant('LEGACY_HIT_MS'),
     mobHurt: { wait: () => 0 },
     noCritReason: pace.noCritReason,
@@ -78,7 +77,7 @@ async function standoff (extra, mob, over = {}) {
     JUMP_TICKS: pace.JUMP_TICKS,
     AGGRO_CONFIRMED: new Map(),
     bunker: { building: false },
-    mcData: null,
+    shared: { mcData: null },
     HITBOX_1710: pace.HITBOX_1710,
     GUARD_REACH: botConstant('GUARD_REACH'),
     GUARD_STEPS: botConstant('GUARD_STEPS'),
@@ -289,7 +288,7 @@ test('a creeper the body perceives behind a zombie in reach ends the melee and i
         expireConfirmed,
         CONFIRMED_MS: botConstant('CONFIRMED_MS'),
         CONFIRMED_HORIZON: botConstant('CONFIRMED_HORIZON'),
-        threatDebugUntil: 0,
+        fight: guardFight({ threatDebugUntil: 0 }),
         liveEntities: () => Object.values(entities),
         mobClass: (e) => (e.name === 'creeper' ? 'creeper' : 'hostile'),
         entityPerceptible: (e) => e.seen !== false,
@@ -333,7 +332,7 @@ test('the vanguard reflex neither chases nor swings at a zombie that hit the bod
       env: {
         AGGRO_CONFIRMED: new Map([[7, { name: 'zombie', t: Date.now(), ranged: false }]]),
         STANCES: { vanguard: { fleeDist: 12, bowBand: [7, 24], chase: true, engage: 'closers' } },
-        stance: 'vanguard',
+        fight: guardFight({ stance: 'vanguard' }),
         entityPerceptible: () => seen,
         takeLegs (reflex, why) { legs.push(why) },
         runCells: pace.runCells,

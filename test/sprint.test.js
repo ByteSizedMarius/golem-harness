@@ -101,7 +101,7 @@ function sprintBot (path, { sprint = true, moving = true, pos = new Vec3(0.5, 64
     blockAt: world(cells)
   })
   const env = {
-    bot, ready: true, livePath: path, hopping: false, hopDir: null, jumpHeld: false, sprintSaid: { line: null, goal: null, at: 0 },
+    bot, shared: { ready: true }, livePath: path, hopping: false, hopDir: null, jumpHeld: false, sprintSaid: { line: null, goal: null, at: 0 },
     reflexes: [{ name: 'combat', active: false, _fleeUntil: 0 }], noJumpReason, passedNodes, nodeStep: step,
     console: { log: (s) => logs.push(s) }, Date: { now: () => clock.t }, closeDoorsBehind () {}
   }

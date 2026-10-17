@@ -1,5 +1,4 @@
-// Headless screenshot of a qa-harness page, rendered with swiftshader.
-//   node tools/viewer-qa/qa-snap.js [url] [outfile] [settleMs]
+// node tools/viewer-qa/qa-snap.js [url] [outfile] [settleMs]
 const path = require('path')
 const puppeteer = require('puppeteer-core')
 const fs = require('fs')

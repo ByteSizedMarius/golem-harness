@@ -111,7 +111,7 @@ function threatScene (seen = true) {
     guardState: { up: false, slot: -1, pilot: false },
     playerCrumbs: {},
     crumbDimension: 'overworld',
-    lastHit: { dmg: 3, t: Date.now() - 1000, cls: 'hostile' },
+    fight: { lastHit: { dmg: 3, t: Date.now() - 1000, cls: 'hostile' } },
     BUNKER_HP: botConstant('BUNKER_HP'),
     bunkerHolds: () => false,
     chooseShelter: shelter.chooseShelter
@@ -129,7 +129,7 @@ test('a hostile of the dimension before neither drives the bunker reflex nor tak
   assert.ok(ctx.bunkerReflexDecide(), 'control: the zombie in sight')
   assert.strictEqual(ctx.nearestHostile(), zombie, 'control: a sourceless hit is pinned on it')
   enterNether()
-  env.lastHit = { dmg: 3, t: Date.now(), cls: 'hostile' }
+  env.fight.lastHit = { dmg: 3, t: Date.now(), cls: 'hostile' }
   assert.strictEqual(ctx.bunkerReflexDecide(), null)
   assert.strictEqual(ctx.nearestHostile(), undefined)
 })

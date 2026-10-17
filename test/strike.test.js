@@ -80,7 +80,7 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
   const env = {
     bot,
     goals,
-    ready: true,
+    shared: { ready: true, mcData: null },
     LEGACY_1710: legacy,
     LEGACY_HIT_MS: 550,
     mobHurt: pace.hurtWindows(bot, clock.now),
@@ -98,8 +98,7 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
     SWING_REACH: pace.SWING_REACH,
     HITBOX_1710: pace.HITBOX_1710,
     Vec3,
-    mcData: null,
-    lastAttackT: 0,
+    fight: { lastAttackT: 0 },
     STRIKE_SWING_MS: pace.STRIKE_SWING_MS,
     STRIKE_APPROACH_MS: pace.STRIKE_APPROACH_MS,
     strikeBudgetMs: pace.strikeBudgetMs,
@@ -261,7 +260,7 @@ async function holdAt (query, walls, seen = true, legacy = true) {
     perch: { cell: null },
     guardState: { up: false, slot: -1, pilot: false },
     STANCES: { guard: { fleeDist: 16 } },
-    stance: 'guard',
+    fight: { ...env.fight, stance: 'guard' },
     nearHostiles: () => [],
     mobClass: (e) => (e.name === 'zombie' ? 'hostile' : 'passive'),
     disengageHp: () => 8,
@@ -393,7 +392,7 @@ function guardedWorld (entities) {
     reflexes: [...env.reflexes, { name: 'bunker' }],
     AGGRO_CONFIRMED: new Map(),
     bunker: { building: false, cell: null },
-    lastHit: null
+    fight: { ...env.fight, lastHit: null }
   })
   wireListeners(env, 'spawn')
   wireListeners(env, 'death')
@@ -442,9 +441,8 @@ test('a 1.7.10 strike on a zombie that hit the body swings once per hurt window,
     expireConfirmed,
     CONFIRMED_MS: botConstant('CONFIRMED_MS'),
     CONFIRMED_HORIZON: botConstant('CONFIRMED_HORIZON'),
-    threatDebugUntil: 0,
+    fight: { ...env.fight, threatDebugUntil: 0, stance: 'guard' },
     STANCES: { guard: { fleeDist: 16, bowBand: [7, 24], chase: false, engage: 'closers' } },
-    stance: 'guard',
     guardState: { up: false, slot: -1, pilot: false },
     bunker: { building: false },
     holdRun: { on: false },

@@ -13,7 +13,7 @@ function reach (feet, legacy, { crouching = false, data = null } = {}) {
     entity: { position: feet, crouching },
     blockAt: (p) => ({ name: 'air', boundingBox: 'empty', shapes: [], position: p })
   }
-  const env = { bot, Vec3, mcData: data, LEGACY_1710: legacy, HITBOX_1710: pace.HITBOX_1710, SWING_REACH: pace.SWING_REACH }
+  const env = { bot, Vec3, shared: { mcData: data }, LEGACY_1710: legacy, HITBOX_1710: pace.HITBOX_1710, SWING_REACH: pace.SWING_REACH }
   return loadBotFunctions(['inMeleeReach'], env).inMeleeReach
 }
 

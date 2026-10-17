@@ -57,9 +57,8 @@ function graveEnv (window, { hidden = false, graves = true } = {}) {
       pathfinder: { goto: async () => {} },
       openBlock: async (b) => { opened.push(b); return window }
     },
-    mcData: { blocksByName: graves ? { [GRAVESTONE]: { id: GRAVE_ID, name: GRAVESTONE } } : {} },
+    shared: { mcData: { blocksByName: graves ? { [GRAVESTONE]: { id: GRAVE_ID, name: GRAVESTONE } } : {} }, ready: true },
     seesLit: (p) => !(hidden && p.x === AT.x && p.y === AT.y && p.z === AT.z),
-    ready: true,
     goals,
     Vec3,
     GRAVESTONE,

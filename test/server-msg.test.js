@@ -91,7 +91,7 @@ function serverHarness () {
     serverLine: null,
     serverWakes: rateLimit({ max: 6, windowMs: 60000 }),
     quietServer: [],
-    eventsServed: 0,
+    streams: { eventsServed: 0 },
     emitEvent: (kind, msg, data, opts = {}) => {
       const ev = { id: events.length + 1, kind, msg, data: JSON.parse(JSON.stringify(data)), quiet: !!opts.quiet }
       events.push(ev)
@@ -133,7 +133,7 @@ test('quiet server lines merge repeats and, past the bound, later lines into the
   for (let i = 0; i < 1000; i++) say(`flood ${i}`)
   assert.strictEqual(events.length, QUIET_MAX, 'the bound holds')
   assert.strictEqual(events[QUIET_MAX - 1].msg, `line ${QUIET_MAX - 1} (1000 later server lines merged into this one)`)
-  env.eventsServed = events.length
+  env.streams.eventsServed = events.length
   say('after the reply')
   assert.deepStrictEqual([events.length, events[QUIET_MAX].msg], [QUIET_MAX + 1, 'after the reply'], 'a sent event merges nothing more')
   assert.strictEqual(events[QUIET_MAX - 1].msg, `line ${QUIET_MAX - 1} (1000 later server lines merged into this one)`)

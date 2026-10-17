@@ -32,9 +32,8 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     .slice(0, count)
   const blocks = [{ id: 1, name: 'coal_ore' }, { id: 2, name: 'iron_ore' }, { id: 4, name: 'diamond_ore' }, { id: 5, name: 'wheat', states: [{ name: 'age', num_values: 8 }] }]
   return {
-    ready: true,
+    shared: { ready: true, mcData: { blocksArray: blocks, blocksByName: Object.fromEntries(blocks.map((b) => [b.name, b])), blocks: Object.fromEntries(blocks.map((b) => [b.id, b])) } },
     bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay }, game: { minY: -64, height: 384 } },
-    mcData: { blocksArray: blocks, blocksByName: Object.fromEntries(blocks.map((b) => [b.name, b])), blocks: Object.fromEntries(blocks.map((b) => [b.id, b])) },
     ck,
     Vec3,
     SEEN: new Set(),
@@ -875,7 +874,7 @@ function pulseWithZombie (env, x, z) {
     staleEntities: new Set(),
     HOSTILE_NAMES: botConstant('HOSTILE_NAMES'),
     pulseLog: [],
-    pulseSeq: 0,
+    streams: { pulseSeq: 0 },
     console: { log: (line) => lines.push(line) }
   })
   loadBotFunctions(['airFlood', 'knownCell'], env)
@@ -969,7 +968,7 @@ function summaries (env) {
   const stubs = {
     require,
     round: (v) => v,
-    ready: true,
+    shared: { ...env.shared, ready: true },
     sceneEntities: () => ({ threats: [], groups: {} }),
     resolveBlockIds: () => [],
     veinScan: () => null,
@@ -1041,7 +1040,7 @@ test('state and scene tell the time only while the sky shows', () => {
     Object.assign(env.bot.entity, { pitch: 0, onGround: true })
     Object.assign(env.bot, { oxygenLevel: 20, game: { ...env.bot.game, dimension: 'overworld' }, registry: REGISTRY, blockAtCursor: () => null })
     const [scene] = summaries(env)
-    const state = runRoute('/state', {}, { ...env, waterState: () => null, heldInfo: () => null, round: (v) => v, ready: true })
+    const state = runRoute('/state', {}, { ...env, waterState: () => null, heldInfo: () => null, round: (v) => v, shared: { ...env.shared, ready: true } })
     return [state.timeOfDay, /"time"|day|t=6000/.test(scene)]
   }
   assert.deepStrictEqual(told(shaftToSky(15)), [NOON, true], 'control: under open sky')

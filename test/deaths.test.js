@@ -8,7 +8,7 @@ const { hookedRoute } = require('./helpers')
 function gotoEnv (walk) {
   return {
     bot: { entity: { position: new Vec3(3.5, 64, 2.5) } },
-    ready: true,
+    shared: { ready: true },
     bunker: { building: false },
     claimLane: () => ({}),
     releaseLane () {},
