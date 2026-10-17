@@ -18,6 +18,7 @@ const { stepView } = require('./lib/steps')
 const { countVerbs } = require('./lib/verbs')
 const { GRAVESTONE, renameBlocks, overrideRecipes, craftable } = require('./lib/server-overrides')
 const { smeltYield, burnItems, COOK_PROBE_TICKS } = require('./lib/furnace')
+const { takenText } = require('./lib/legs')
 
 // The HMAC key that signs every control API request and response.
 const GOLEM_TOKEN = process.env.GOLEM_TOKEN || ''
@@ -103,7 +104,7 @@ ctx.shared = shared
 shared.mcData = null
 shared.ready = false
 createLegs(ctx)
-const { navPlaced, collectSafely, collectLock, collectBusy, stopCollect, watchedWork, watchGoto, walkGaveUp, knownMoves, legs, takeLegs, closeDoorsBehind, safeStop, stopPath, freezeBody, swimUp, walkRoute, namedStop, routeEnd, walkOnce, stagedGoto, gotoQuery, doorBeside, nudgeInto, doorwayCommit } = ctx
+const { navPlaced, collectSafely, collectLock, collectBusy, watchedWork, watchGoto, walkGaveUp, knownMoves, legs, takeLegs, safeStop, stopPath, freezeBody, swimUp, walkRoute, namedStop, routeEnd, stagedGoto, gotoQuery, doorBeside, nudgeInto } = ctx
 shared.considerateMoves = null    // default no-dig profile (protects builds + terrain)
 shared.forestryMoves = null       // lumberjack profile: may break ONLY leaves+logs (built at spawn)
 
@@ -324,13 +325,13 @@ function wireConnectionEvents () {
 }
 
 createStreams(ctx)
-const { chatLog, streams, eventLog, emitEvent, pulseLog, logPulse } = ctx
+const { chatLog, streams, eventLog, emitEvent, pulseLog } = ctx
 
 createDescribe(ctx)
-const { vecStr, round, dayPhase, HOSTILE_NAMES, OPENABLE, CONTAINERS, cellText, compass, yawToCompass, spatial3D, veinScan, suffocates, waterState, glyphFor, overheadCover, skyPhrase, indoors, coverPhrase, nightfall, terrainClass } = ctx
+const { vecStr, round, HOSTILE_NAMES, OPENABLE, cellText, compass, yawToCompass, spatial3D, veinScan, suffocates, waterState, glyphFor, overheadCover, skyPhrase, indoors, coverPhrase, nightfall, terrainClass } = ctx
 
 createItems(ctx)
-const { resolveBlockIds, resolveItem, heldInfo, PICK_TIER, neededPickTier, pickFor, equipPickFor, holdDigTool, FOOD_UPDATE_MS, safeFood, foodUpdate, refuelAfterFight, holdHarvester } = ctx
+const { resolveBlockIds, resolveItem, heldInfo, PICK_TIER, neededPickTier, equipPickFor, holdDigTool, FOOD_UPDATE_MS, safeFood, foodUpdate, holdHarvester } = ctx
 
 createReflexes(ctx)
 const { reflexes, startReflexes } = ctx
@@ -342,11 +343,10 @@ createWatchReflexes(ctx)
 const { currentWatchReflex, narratorReflex, trekReflex, lavaWatchReflex } = ctx
 
 createJobBoard(ctx)
-const { deaths, jobs, yieldJob } = ctx
-const { takenText } = require('./lib/legs')
+const { deaths, jobs } = ctx
 
 createMemory(ctx)
-const { waypoints, memory, journal, SEEN, SURFACE, markSeen, markTrail, knownBlocks, nearestKnown, rememberedStation, arrivedStation } = ctx
+const { waypoints, memory, journal, SEEN, SURFACE, markTrail, knownBlocks, nearestKnown, rememberedStation, arrivedStation } = ctx
 
 // ---- MACROS subsystem helpers ----
 // how far below the bot's feet we tolerate before refusing to dig down toward a target
@@ -358,7 +358,7 @@ createPlacing(ctx)
 const { isSoftCover, clearSoftCover, macroPlaceAt, placeSpot, reachToPlace, isInteractive, sneakPlace, passageAxis, occupant, fillFrom } = ctx
 
 createSight(ctx)
-const { touchesFill, holdsWater, gridWalk, lineCell, heldLight, freshLight, seesLit, findVisible, nearestVisible, cellKnown, knownCell, outOfSight, perceived, bodyTouches, seenNow, ck, floodPassable, airFlood, showsNow, skyInSight, raySweep, losClear, entityPerceptible, nametagVisible } = ctx
+const { lineCell, freshLight, seesLit, findVisible, nearestVisible, cellKnown, knownCell, outOfSight, bodyTouches, seenNow, ck, floodPassable, airFlood, showsNow, skyInSight, raySweep, entityPerceptible } = ctx
 function wireLightPackets () {
   bot._client.on('update_light', (packet) => freshLight(packet.chunkX, packet.chunkZ))
 }
@@ -656,7 +656,7 @@ function wireBodyAlarms () {
 }
 
 createCombat(ctx)
-const { STANCES, drawAndLoose, bowLine, AGGRO_CONFIRMED, CONFIRMED_HORIZON, CONFIRMED_MS, guardState, legsMoving, mobClass, perched, perchStrike, inChokepoint, hpMelee, meleeAim, inMeleeReach, meleeThreat, disengageHp, entityEngageable, fleeWorld, creeperSwelling, creeperRoute, GUARD_STEPS, standoffGuard, fleeLog, nearHostiles, threatWhy, combatReflex, fleeToPlayerReflex, mobHurt, sprintBlock, meleeSwing, chargedSwing } = ctx
+const { STANCES, drawAndLoose, CONFIRMED_HORIZON, guardState, legsMoving, mobClass, perched, inChokepoint, meleeAim, inMeleeReach, meleeThreat, disengageHp, creeperRoute, nearHostiles, combatReflex, fleeToPlayerReflex, mobHurt, sprintBlock, meleeSwing, chargedSwing } = ctx
 fight.stance = 'guard'
 fight.threatDebugUntil = 0                   // /threatdebug window: score players, narrate only
 fight.lastHit = { dmg: 0, t: 0 }             // last hit taken (size + when) — scales the disengage tripwire while FRESH
@@ -674,7 +674,7 @@ function wireDamageTypes () {
 // Resolves once a sourceless hit beside a player or with an arrow in flight has its attribution.
 fight.swingWait = null
 createLane(ctx)
-const { pilotLane, holdRun, strikeRun, claimLane, releaseLane, clearLane, bunker, BUNKER_HALTS, BUNKER_WALK, refuseWhileBuilding, bunkerHolds, perch, perchHolds, laneBlocks, laneNarrate } = ctx
+const { pilotLane, holdRun, strikeRun, claimLane, releaseLane, clearLane, bunker, BUNKER_WALK, refuseWhileBuilding, perch } = ctx
 
 createBunker(ctx)
 const { bunkerReflex, buildBunker } = ctx
@@ -908,7 +908,7 @@ app.get('/find', (req, res) => {
 })
 
 createAwareness(ctx)
-const { liveEntities, playerEntity, playerSighting, chatPointer, nearestSeen, targetSeen, whereIs, entityLabel } = ctx
+const { liveEntities, playerEntity, playerSighting, nearestSeen, targetSeen, whereIs, entityLabel } = ctx
 // /pathdebug?secs=30 — tap the pathfinder's event stream into bot.log for N seconds.
 // Built 07-14 night for the doors-v2 hunt: stalls with no error and no movement need the
 // planner's own words — path_update statuses and especially path_reset REASONS.
@@ -3011,7 +3011,7 @@ app.get('/climb', async (req, res) => {
 })
 
 createBunkerCells(ctx)
-const { jumpPlace, BUNKER_HEIGHT, BUNKER_MAX_HEIGHT, BUNKER_HP, BUNKER_REARM_HP, BUNKER_DIG_MS, NEIGHBOURS, xyz, fillers, placeFiller, centerOnCell, digMs, digInProblem, pillarProblem, pillarHeight, liquidProblem, blockers } = ctx
+const { jumpPlace, BUNKER_HEIGHT, BUNKER_MAX_HEIGHT, NEIGHBOURS, xyz, fillers, pillarHeight, blockers } = ctx
 
 app.get('/pillar', async (req, res) => {
   try {
@@ -3047,7 +3047,7 @@ app.get('/pillar', async (req, res) => {
 })
 
 createBunkerBuild(ctx)
-const { digIn, pillarShell, onBuildHit } = ctx
+const { onBuildHit } = ctx
 
 // GET /bunker?mode=auto|up|down&height=N: builds the shelter above and answers once it stands.
 app.get('/bunker', async (req, res) => {
