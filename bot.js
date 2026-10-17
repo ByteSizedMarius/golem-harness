@@ -4,9 +4,7 @@ const mineflayer = require('mineflayer')
 const { pathfinder } = require('mineflayer-pathfinder')
 const { plugin: collectBlock } = require('mineflayer-collectblock')
 const armorManager = require('mineflayer-armor-manager')
-const express = require('express')
-const { installSecurity, chatMaxLen } = require('./lib/install')
-const { countVerbs } = require('./lib/verbs')
+const { chatMaxLen } = require('./lib/install')
 
 // The HMAC key that signs every control API request and response.
 const GOLEM_TOKEN = process.env.GOLEM_TOKEN || ''
@@ -15,6 +13,7 @@ if (GOLEM_TOKEN.length < 32) {
   process.exit(1)
 }
 const { HOST, PORT, VERSION, USERNAME, CTRL_PORT } = require('./lib/bot/config')
+const { createApp } = require('./lib/app')
 const { createContext } = require('./lib/context')
 const { createStreams, bindStreams, wireChatCapture, wireServerMessages } = require('./lib/bot/streams')
 const { createItems, bindItems } = require('./lib/bot/items')
@@ -191,10 +190,8 @@ function wireWorldSeed () {
 }
 
 // ---- HTTP control layer ----
-const app = express()
-installSecurity(app, { token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text), maxLen: chatMaxLen(process.env.GOLEM_CHAT_MAX) } })
 // The pilot routes in flight, which follow waits out. A reply says when the body died while its route ran.
-const verbs = countVerbs(app, deaths.watch)
+const { app, verbs } = createApp({ token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text), maxLen: chatMaxLen(process.env.GOLEM_CHAT_MAX) }, onRequest: deaths.watch })
 ctx.verbs = verbs
 createReply(ctx)
 createDebugRoutes(ctx)

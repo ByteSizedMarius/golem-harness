@@ -18,6 +18,7 @@ const shelter = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/legs')
 const { installSecurity } = require('../lib/install')
 const { countVerbs } = require('../lib/verbs')
+const { createApp } = require('../lib/app')
 const { createServer } = require('../mcp/server')
 const { TOOLS } = require('../mcp/tools')
 
@@ -179,11 +180,13 @@ function rawRequest (port, lines) {
   })
 }
 
-async function startApp (t, { gapMs = 30, maxDepth = 20, maxLen = 100, token = crypto.randomBytes(32).toString('hex'), bootMs, nonceMax } = {}) {
+async function startApp (t, { gapMs = 30, maxDepth = 20, maxLen = 100, token = crypto.randomBytes(32).toString('hex'), bootMs, nonceMax, createApp: viaCreateApp = false } = {}) {
+  if (viaCreateApp && (bootMs !== undefined || nonceMax !== undefined)) throw new TypeError('startApp: createApp takes no bootMs or nonceMax')
   const sends = []
   const hits = []
-  const app = express()
-  const server = http.createServer(app)
+  const onRequests = []
+  let app = viaCreateApp ? null : express()
+  const server = viaCreateApp ? http.createServer() : http.createServer(app)
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   const port = server.address().port
   t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }))
@@ -194,11 +197,16 @@ async function startApp (t, { gapMs = 30, maxDepth = 20, maxLen = 100, token = c
     return new Promise((resolve) => setTimeout(() => { sleeping--; resolve() }, ms))
   }
   const send = (text) => { sends.push({ text, t: performance.now() }) }
-  const opts = { token, port, chat: { send, sleep, maxLen, gapMs, allow: ALLOW, maxDepth } }
+  const chat = { send, sleep, maxLen, gapMs, allow: ALLOW, maxDepth }
+  const opts = { token, port, chat }
   if (bootMs !== undefined) opts.bootMs = bootMs
   if (nonceMax !== undefined) opts.nonceMax = nonceMax
   const installedAt = Date.now()
-  installSecurity(app, opts)
+  let verbs
+  if (viaCreateApp) {
+    ({ app, verbs } = createApp({ token, port, chat, onRequest: (res) => { onRequests.push(res) } }))
+    server.on('request', app)
+  } else installSecurity(app, opts)
   for (const route of DUMMY_ROUTES) {
     app.get(route, (req, res) => {
       hits.push({ route, url: req.url, query: { ...req.query } })
@@ -260,7 +268,7 @@ async function startApp (t, { gapMs = 30, maxDepth = 20, maxLen = 100, token = c
   async function drained () {
     assert.ok(await waitFor(() => sleeping === 0, 5000), 'the chat queue never drained')
   }
-  return { token, port, sends, texts, hits, routeHits, get, build, send: sendRaw, wire, drained, gapMs, installedAt }
+  return { token, port, sends, texts, hits, routeHits, get, build, send: sendRaw, wire, drained, gapMs, installedAt, verbs, onRequests }
 }
 
 async function stateControl (s) {
@@ -1165,7 +1173,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, wiredSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
+  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, groundMemory, loadBotFunctions, routeHandler, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild,
   buildVerbEnv, digInProblemWith, digJob
