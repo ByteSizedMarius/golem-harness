@@ -4,6 +4,7 @@ const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { POINT_RANGE, deictic, lookedAt } = require('../lib/deixis')
 const { playerNamed } = require('../lib/players')
+const { LEGACY_SNEAK_EYE } = require('../lib/bot/legacy-1710')
 const { loadBotFunctions } = require('./helpers')
 
 const AIR = { name: 'air' }
@@ -58,11 +59,12 @@ test('a filled cauldron stops a look', () => {
 })
 
 // chatPointer for Steve at (0.5, 64, 0.5) looking at the stone at (5, 63, 0), with the bot at (0.5, 64, 6.5).
-// A crouching Steve looks from 1.27 up at the chest at (5, 64, 0), over which a look from 1.62 up passes.
-function pointer ({ seen = true, sees = () => true, far = false, crouching = false } = {}) {
+// Each crouching aim hits the chest at (5, 64, 0) only from the eye height under test.
+function pointer ({ seen = true, sees = () => true, far = false, crouching = false, legacy = false } = {}) {
   const pos = new Vec3(far ? 40.5 : 0.5, 64, 0.5)
-  const eye = pos.offset(0, crouching ? 1.27 : 1.62, 0)
-  const { yaw, pitch } = aim(eye, crouching ? new Vec3(5.5, 64.9, 0.5) : new Vec3(far ? 45.5 : 5.5, 63.9, 0.5))
+  const eye = pos.offset(0, !crouching ? 1.62 : legacy ? LEGACY_SNEAK_EYE : 1.27, 0)
+  const chest = legacy ? new Vec3(5.2, 64.1, 0.5) : new Vec3(5.5, 64.9, 0.5)
+  const { yaw, pitch } = aim(eye, crouching ? chest : new Vec3(far ? 45.5 : 5.5, 63.9, 0.5))
   const steve = { id: 7, type: 'player', username: 'Steve', position: pos, crouching, headYaw: yaw, yaw: yaw + 1, pitch }
   const env = {
     shared: { ready: true },
@@ -74,7 +76,9 @@ function pointer ({ seen = true, sees = () => true, far = false, crouching = fal
     seesLit: (p) => sees(p),
     deictic,
     lookedAt,
-    POINT_RANGE
+    POINT_RANGE,
+    LEGACY_1710: legacy,
+    LEGACY_SNEAK_EYE
   }
   return (msg) => JSON.parse(JSON.stringify(loadBotFunctions(['chatPointer'], env).chatPointer('Steve', msg)))
 }
@@ -86,6 +90,10 @@ test('a chat line from a visible speaker points at the block they look at, by th
 
 test('a crouching speaker looks from the crouched eye', () => {
   assert.deepStrictEqual(pointer({ crouching: true })('put it here'), { block: 'chest', x: 5, y: 64, z: 0 })
+})
+
+test('a crouching speaker on 1.7.10 looks from the 1.7.10 sneaking eye', () => {
+  assert.deepStrictEqual(pointer({ crouching: true, legacy: true })('put it here'), { block: 'chest', x: 5, y: 64, z: 0 })
 })
 
 test('a hidden speaker, one past the range, or a block the bot cannot see attaches nothing', () => {

@@ -58,7 +58,7 @@ test('digat leaves the hand alone when it holds a harvester or none is carried',
 })
 
 // /digat on blockName in reach, with hotbar holding item names (null for an empty slot) and slot held selected.
-async function digWith (blockName, hotbar, held) {
+async function digWith (blockName, hotbar, held, legacy = false) {
   const block = Block.fromStateId(registry.blocksByName[blockName].defaultState, 0)
   block.position = new Vec3(2, 64, 0)
   const slots = new Array(45).fill(null)
@@ -82,7 +82,8 @@ async function digWith (blockName, hotbar, held) {
     require,
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     PICK_TIER: botConstant('PICK_TIER'),
-    DIG_TOOL: botConstant('DIG_TOOL')
+    DIG_TOOL: botConstant('DIG_TOOL'),
+    LEGACY_1710: legacy
   }
   const reply = await awaitRoute('/digat', { x: '2', y: '64', z: '0' }, env)
   return { reply, bot }
@@ -100,6 +101,14 @@ test('digat digs a log with an axe, dirt with a shovel, ore with the lowest pick
   assert.deepStrictEqual(crop.bot.equips, [], 'a crop')
   assert.strictEqual(crop.bot.dugWith, null)
   assert.strictEqual(crop.reply.with, null)
+})
+
+test('digat digs hay and leaves with a hoe, but bare-handed on 1.7.10, where a hoe speeds no dig', async () => {
+  const hotbar = ['stone_axe', 'iron_hoe', null]
+  for (const name of ['hay_block', 'oak_leaves']) {
+    assert.strictEqual((await digWith(name, hotbar, 2)).bot.dugWith, 'iron_hoe', name)
+    assert.strictEqual((await digWith(name, hotbar, 2, true)).bot.dugWith, null, `${name} on 1.7.10`)
+  }
 })
 
 test('digat answers a cave air cell as already air', async () => {
