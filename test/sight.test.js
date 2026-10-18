@@ -22,7 +22,7 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     const p = pos.floored()
     const name = ores[ck(p.x, p.y, p.z)] || (open(p.x, p.y, p.z) ? 'air' : 'stone')
     const air = name === 'air'
-    return { name, type: IDS[name], boundingBox: air ? 'empty' : 'block', position: new Vec3(p.x, p.y, p.z), light: air ? light(p.x, p.z) : 0, skyLight: air ? skyLight(p.x, p.z) : 0 }
+    return { name, type: IDS[name], boundingBox: air ? 'empty' : 'block', shapes: air ? [] : [[0, 0, 0, 1, 1, 1]], position: new Vec3(p.x, p.y, p.z), light: air ? light(p.x, p.z) : 0, skyLight: air ? skyLight(p.x, p.z) : 0 }
   }
   const position = new Vec3(at + 0.5, 64, 0.5)
   const findBlocks = ({ matching, maxDistance, count }) => Object.keys(ores)
@@ -658,6 +658,48 @@ test('passages calls a pocket closed only when the bot has seen its walls', () =
   assert.strictEqual(runRoute('/passages', { radius: '8' }, room()).summary, 'no exit in sight within 8 blocks')
 })
 
+// A dug staircase 1 wide and 3 high at z 0 east from x 0, its floor rising by rise a cell from x 1 to 8 and level
+// from there to x 14, with room a 5-high room at x -3..0, z -2..2 around its top. The bot has seen every block
+// within 1 of them but hide.
+function staircase (rise, { light = LIT, hide = null, room = false } = {}) {
+  const feet = (x) => 64 + rise * Math.min(x, 8)
+  const inRoom = (x, y, z) => room && x >= -3 && x <= 0 && Math.abs(z) <= 2 && y >= 64 && y <= 68
+  const env = world({ open: (x, y, z) => inRoom(x, y, z) || (z === 0 && x >= 0 && x <= 14 && y >= feet(x) && y <= feet(x) + 2), light: () => light })
+  for (let x = -4; x <= 15; x++) for (let y = 50; y <= 80; y++) for (let z = -3; z <= 3; z++) if (ck(x, y, z) !== hide) env.SEEN.add(ck(x, y, z))
+  return env
+}
+const stairExits = (env) => runRoute('/passages', { radius: '12' }, env)
+
+test('passages says which way a dug staircase slopes', () => {
+  const down = stairExits(staircase(-1))
+  assert.strictEqual(down.exits.E.slope, 'down')
+  assert.strictEqual(down.summary, 'air continues E sloping down (around y56–58, walk-to 12,56,0)')
+  const up = stairExits(staircase(1))
+  assert.strictEqual(up.exits.E.slope, 'up')
+  assert.strictEqual(up.summary, 'air continues E sloping up (around y72–74, walk-to 12,72,0)')
+})
+
+test('passages says a dug staircase slopes when it starts in a room taller than its steps', () => {
+  assert.strictEqual(stairExits(staircase(-1, { room: true })).exits.E.slope, 'down')
+})
+
+test('passages gives no slope to a level corridor or a hillside under the open sky', () => {
+  assert.strictEqual(stairExits(staircase(-1)).exits.E.slope, 'down', 'control: a dug staircase')
+  const level = runRoute('/passages', { radius: '8' }, corridor(LIT))
+  assert.ok(level.exits.E && !('slope' in level.exits.E))
+  const hill = runRoute('/passages', { radius: '8' }, world({ open: (x, y, z) => Math.abs(z) <= 3 && y >= 64 - Math.min(Math.max(x, 0), 8), light: () => LIT, skyLight: () => 15 }))
+  assert.ok(hill.exits.E, 'the hillside leads east')
+  assert.ok(Object.values(hill.exits).every((g) => !('slope' in g)))
+  assert.doesNotMatch(hill.summary, /sloping/)
+})
+
+test('passages gives no slope to a staircase with a floor block the bot has not seen', () => {
+  const remembered = (hide) => stairExits(staircase(-1, { light: DARK, hide })).exits.E
+  assert.strictEqual(remembered(null).slope, 'down', 'control: every block seen')
+  const hidden = remembered(ck(4, 59, 0))
+  assert.ok(hidden && !('slope' in hidden))
+})
+
 // The walk into reach moves the body to walkTo.
 function withHands (env, walkTo = null) {
   const base = env.bot.blockAt
@@ -1172,17 +1214,51 @@ test('map draws a floor changed out of sight as last seen, and the new block onc
 // An open column above the body at 0,64,0 holding sky light sky.
 const shaftToSky = (sky, timeOfDay = NOON) => world({ open: (x, y, z) => x === 0 && z === 0 && y >= 64, light: () => LIT, skyLight: () => sky, timeOfDay })
 
+// The state reply over env, the senses besides sight and the sky stubbed.
+function stateOf (env) {
+  Object.assign(env.bot.entity, { pitch: 0, onGround: true })
+  Object.assign(env.bot, { health: 20, food: 20, experience: { level: 0 }, oxygenLevel: 20, game: { ...env.bot.game, dimension: 'overworld' }, registry: REGISTRY, blockAtCursor: () => null })
+  return runRoute('/state', {}, { ...env, waterState: () => null, heldInfo: () => null, round: (v) => v, shared: { ...env.shared, ready: true } })
+}
+
 test('state and scene tell the time only while the sky shows', () => {
   const told = (env) => {
-    Object.assign(env.bot.entity, { pitch: 0, onGround: true })
-    Object.assign(env.bot, { oxygenLevel: 20, game: { ...env.bot.game, dimension: 'overworld' }, registry: REGISTRY, blockAtCursor: () => null })
+    const state = stateOf(env)
     const [scene] = summaries(env)
-    const state = runRoute('/state', {}, { ...env, waterState: () => null, heldInfo: () => null, round: (v) => v, shared: { ...env.shared, ready: true } })
     return [state.timeOfDay, /"time"|day|t=6000/.test(scene)]
   }
   assert.deepStrictEqual(told(shaftToSky(15)), [NOON, true], 'control: under open sky')
   const capped = world({ open: (x, y, z) => x === 0 && z === 0 && y >= 64 && y < 80, light: () => LIT })
   assert.deepStrictEqual(told(capped), [undefined, false])
+})
+
+// A lit room at x -3..3, z -3..3, y 64..65.
+const litRoom = (open = () => true, light = LIT) => world({ open: (x, y, z) => (y === 64 || y === 65) && Math.abs(x) <= 3 && Math.abs(z) <= 3 && open(x, y, z), light: () => light })
+
+test('state names a block the body is stuck inside, and has no inside key while the body stands free', () => {
+  const walled = litRoom()
+  const plain = walled.bot.blockAt
+  walled.bot.blockAt = (p) => {
+    const b = plain(p)
+    return ck(b.position.x, b.position.y, b.position.z) === '0,64,0' ? { ...b, name: 'cobblestone_wall', boundingBox: 'block', shapes: [[0.25, 0, 0.25, 0.75, 1.5, 0.75]] } : b
+  }
+  assert.deepStrictEqual(stateOf(walled).inside, { name: 'cobblestone_wall', x: 0, y: 64, z: 0 })
+  assert.ok(!('inside' in stateOf(litRoom())))
+})
+
+test('state never names a block the body overlaps out of sight, also one seen before', () => {
+  // A stone block at 1,64,1 the body at 0.8,64,0.8 overlaps by its corner.
+  const post = () => {
+    const env = litRoom((x, y, z) => !(x === 1 && y === 64 && z === 1))
+    env.bot.entity.position = new Vec3(0.8, 64, 0.8)
+    return env
+  }
+  assert.deepStrictEqual(stateOf(post()).inside, { name: 'stone', x: 1, y: 64, z: 1 }, 'control: in sight')
+  const unseen = post()
+  unseen.SEEN.add(ck(1, 64, 1))
+  const reply = stateOf({ ...unseen, seesLit: () => false })
+  assert.ok(!('inside' in reply))
+  assert.doesNotMatch(JSON.stringify(reply), /stone/)
 })
 
 test('nightfall stays silent underground and fires once at the first sight of the sky', () => {

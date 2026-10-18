@@ -449,6 +449,8 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     routeDeadline,
     legs: legLedger(),
     WALK_HINTS: {},
+    wayHint: () => null,
+    insideBlock: () => null,
     WALK_FAILED: botConstant('WALK_FAILED'),
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     waypoints: { get: () => null },
@@ -663,6 +665,31 @@ test('a walk wedged at a door the drill could not cross replies door, naming the
   assert.match(r.hint, /oak_door at -308,63,81 did not let me through from the west after 2 tries/)
   const through = await goto({ x: 5, z: 5 }, { answer, over: { doorwayCommit: async () => ({ ...stuck, through: true }) } })
   assert.strictEqual(through.reason, 'stalled', 'control: a door the drill crossed')
+})
+
+const HINTS = { 'no-path': 'no known way there', 'unseen-way': 'the way there runs through cells I have not seen', stalled: 'goal is likely unreachable without digging', 'boxed-in': 'dig out deliberately' }
+
+test('a /goto that found no way replies what blocks it, else the general hint', async () => {
+  const dark = 'too dark for me past 2,64,0: a torch there would light the way'
+  const asked = []
+  const wayHint = (r, edge) => { asked.push(edge && { ...edge }); return dark }
+  const noPath = (over) => goto({ x: 5, z: 5 }, { answer: update('noPath'), over: { WALK_HINTS: HINTS, ...over } })
+  assert.strictEqual((await noPath({})).hint, HINTS['no-path'], 'control: nothing to name')
+  assert.strictEqual((await noPath({ wayHint })).hint, dark)
+  const pillar = (bot) => { bot.blockAt = (p) => (p.y <= 63 || (p.x === 1 && p.z === 0) ? STONE : AIR) }
+  const unseen = (over) => goto({ x: 1, y: 40, z: 0 }, { setup: pillar, over: { WALK_HINTS: HINTS, cellKnown: (p) => p.y >= 60, ...over } })
+  assert.strictEqual((await unseen({})).hint, HINTS['unseen-way'], 'control: nothing to name')
+  const r = await unseen({ wayHint })
+  assert.deepStrictEqual([r.reason, r.hint, asked[asked.length - 1]], ['unseen-way', dark, r.edge])
+})
+
+test('a stalled or boxed-in /goto whose body is inside a block names it', async () => {
+  const insideBlock = () => ({ name: 'cobblestone_wall', x: 0, y: 64, z: 0 })
+  const inside = 'I am inside the cobblestone_wall at 0,64,0: step or dig out of it'
+  const stalled = (over) => goto({ x: 5, z: 5 }, { answer: update('success', [{ x: 1, y: 64, z: 0 }]), over: { WALK_HINTS: HINTS, ...over } })
+  const boxed = (over) => goto({ x: 5, z: 5 }, { over: { WALK_HINTS: HINTS, hasLegalMove: () => false, ...over } })
+  assert.deepStrictEqual([(await stalled({})).hint, (await boxed({})).hint], [HINTS.stalled, HINTS['boxed-in']], 'control: free of blocks')
+  assert.deepStrictEqual([(await stalled({ insideBlock })).hint, (await boxed({ insideBlock })).hint], [inside, inside])
 })
 
 test('a reflex that takes the legs ends the route as stopped and keeps its goal, mid-hop and mid-walk', async () => {

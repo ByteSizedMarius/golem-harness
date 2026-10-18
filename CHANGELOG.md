@@ -28,6 +28,17 @@ back to the substring otherwise, and each reply entry names the item it moved. C
 and the chest-full error name both cells of a double chest. `dig_stair` takes `steps` (1 to
 24), so the pilot no longer polls and stops the job, which overshot by a step or two.
 
+Walk hints. Live, `goto` answered no-path again and again at an open door, on a lit stair
+and at the foot of a ladder shaft, and each time the pilot found the fix by trial. A no-path
+or unseen-way reply now names what blocks the way from where the bot stands: an open door
+with unseen cells behind it, a ladder in sight when the goal lies above, or the last cell
+before the bot's sight goes dark, where a torch would light the way. A follow that finds no
+way says the same. The pilot also started a session inside a cobblestone wall and got
+"unreachable without digging": `state` now names a block the body is stuck in, and the stall
+reply says so. `passages` marks an exit that slopes up or down, so a dug staircase shows as
+one. A `placeitem` that would walk more than 16 blocks, or drop more than 3 at once,
+refuses instead of walking the bot out over a ravine.
+
 ## 2026-10-15: live-play fixes
 
 Busy body. A client that moves a tool call running past 10 s into the background lets the

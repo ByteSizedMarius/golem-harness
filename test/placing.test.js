@@ -8,6 +8,8 @@ const Block = require('prismarine-block')(registry)
 const shelter = require('../lib/shelter')
 const { overrideRecipes } = require('../lib/server-overrides')
 const { deathLedger } = require('../lib/deaths')
+const { summarizePlan, DROP_MAX } = require('../lib/plan')
+const { goals } = require('mineflayer-pathfinder')
 const { loadBotFunctions, botConstant, awaitRoute, hookedRoute, routeHandler, buildVerbEnv, groundMemory } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty' }
@@ -49,15 +51,80 @@ test('place picks a cell beside the feet that the body does not overlap', () => 
   assert.strictEqual(loadBotFunctions(['placeSpot'], placingEnv(body(0.8, 64, 0.5), boxed)).placeSpot(), null, 'the only open cell holds part of the body')
 })
 
-test('placeitem refuses a cell the body overlaps after its walk, the head cell included', async () => {
-  const walks = []
+// reachToPlace from a body at (0.5, 64, 0.5) over the floor, every cell known. planPath answers a successful search
+// along the cell centres in path (answering status instead when given), or null with the route ended for ended.
+// log records plans, route ends and walks.
+function reacher ({ path = [], ended = null, status = 'success' } = {}) {
+  const log = []
   const env = placingEnv(body(0.5, 64, 0.5), ground(), {
-    bot: { pathfinder: { goto: async (g) => { walks.push(g) } } },
-    env: { goals: { GoalNear: function (x, y, z, r) { Object.assign(this, { x, y, z, r }) } } }
+    bot: { pathfinder: { goto: async (g) => { log.push(`walk ${g.x},${g.y},${g.z} within ${Math.sqrt(g.rangeSq)}`) } } },
+    env: {
+      goals,
+      walkRoute: () => ({ end () { log.push('end') } }),
+      planPath: async (g) => {
+        log.push(`plan ${g.x},${g.y},${g.z}`)
+        return path && { status, path: path.map(([x, y, z]) => new Vec3(x + 0.5, y, z + 0.5)) }
+      },
+      routeEnd: () => ended,
+      knownCell: () => true,
+      summarizePlan,
+      DROP_MAX,
+      PLACE_WALK_MAX: botConstant('PLACE_WALK_MAX')
+    }
   })
-  const { reachToPlace } = loadBotFunctions(['reachToPlace'], env)
-  await reachToPlace(new Vec3(1, 64, 0))
-  assert.deepStrictEqual({ ...walks[0] }, { x: 1, y: 64, z: 0, r: 3 }, 'control: a free cell beside the body')
+  return { log, reachToPlace: loadBotFunctions(['reachToPlace'], env).reachToPlace }
+}
+
+// The cells from x 1 to x on y 64, z 0.
+const lane = (x) => Array.from({ length: x }, (_, i) => [i + 1, 64, 0])
+
+test('placeitem walks to a cell in reach without planning', async () => {
+  const near = reacher()
+  await near.reachToPlace(new Vec3(1, 64, 0))
+  assert.deepStrictEqual(near.log, ['walk 1,64,0 within 3'])
+})
+
+test('placeitem walks a short plan to a cell out of reach, its route ended before the walk', async () => {
+  const short = reacher({ path: lane(9) })
+  await short.reachToPlace(new Vec3(10, 64, 0))
+  assert.deepStrictEqual(short.log, ['plan 10,64,0', 'end', 'walk 10,64,0 within 3'])
+})
+
+test('placeitem refuses a planned walk longer than 16 blocks', async () => {
+  const far = reacher({ path: lane(19) })
+  await assert.rejects(far.reachToPlace(new Vec3(20, 64, 0)), { message: 'refusing to walk 19 blocks to place at 20,64,0: goto closer first' })
+  assert.deepStrictEqual(far.log, ['plan 20,64,0', 'end'])
+})
+
+test('placeitem refuses a planned walk that drops more than 3 blocks at once', async () => {
+  const three = reacher({ path: [[1, 64, 0], [2, 64, 0], [3, 61, 0], [4, 61, 0]] })
+  await three.reachToPlace(new Vec3(6, 61, 0))
+  assert.strictEqual(three.log.at(-1), 'walk 6,61,0 within 3', 'control: a drop of 3 walks')
+  const four = reacher({ path: [[1, 64, 0], [2, 64, 0], [3, 60, 0], [4, 60, 0]] })
+  await assert.rejects(four.reachToPlace(new Vec3(6, 60, 0)), { message: 'refusing to walk to place at 6,60,0: the way drops 4 blocks at once' })
+  assert.deepStrictEqual(four.log, ['plan 6,60,0', 'end'])
+})
+
+test('placeitem refuses a walk whose route ended while it planned, naming why', async () => {
+  const taken = reacher({ path: null, ended: 'stopped' })
+  await assert.rejects(taken.reachToPlace(new Vec3(10, 64, 0)), { message: 'refusing to walk to place at 10,64,0: the walk ended (stopped)' })
+  assert.deepStrictEqual(taken.log, ['plan 10,64,0', 'end'])
+})
+
+test('placeitem refuses a failed plan, however short its path, and walks a successful one', async () => {
+  const noPath = reacher({ path: [], status: 'noPath' })
+  await assert.rejects(noPath.reachToPlace(new Vec3(10, 64, 0)), { message: 'refusing to walk to place at 10,64,0: no known way there (noPath)' })
+  assert.deepStrictEqual(noPath.log, ['plan 10,64,0', 'end'])
+  const timeout = reacher({ path: lane(5), status: 'timeout' })
+  await assert.rejects(timeout.reachToPlace(new Vec3(10, 64, 0)), { message: 'refusing to walk to place at 10,64,0: no known way there (timeout)' })
+  assert.deepStrictEqual(timeout.log, ['plan 10,64,0', 'end'])
+  const found = reacher({ path: lane(9), status: 'success' })
+  await found.reachToPlace(new Vec3(10, 64, 0))
+  assert.deepStrictEqual(found.log, ['plan 10,64,0', 'end', 'walk 10,64,0 within 3'])
+})
+
+test('placeitem refuses a cell the body overlaps after its walk, the head cell included', async () => {
+  const { reachToPlace } = reacher()
   for (const cell of [new Vec3(0, 64, 0), new Vec3(0, 65, 0)]) {
     await assert.rejects(reachToPlace(cell), /my body overlaps that cell/, key(cell))
   }
@@ -371,7 +438,7 @@ function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen 
       async placeBlock (ref, face) { place(ref, face) },
       async _placeBlockWithOptions (ref, face) { place(ref, face) }
     },
-    env: { require, goals: { GoalNear: function () {} }, cellKnown: (p) => !hidden.includes(key(p)), seenNow: (p) => !hidden.includes(key(p)) && !unseen.includes(key(p)), clearSoftCover: async () => {}, stampOwnEdit () {} }
+    env: { require, goals, cellKnown: (p) => !hidden.includes(key(p)), seenNow: (p) => !hidden.includes(key(p)) && !unseen.includes(key(p)), clearSoftCover: async () => {}, stampOwnEdit () {} }
   })
   return { log, env }
 }
@@ -479,7 +546,7 @@ function heldPlatformRig (roofed) {
     env: {
       require,
       ck: (x, y, z) => `${x},${y},${z}`,
-      goals: { GoalNear: function () {} },
+      goals,
       SEEN: new Set(['0,64,-2']),
       SIGHT_MEMO: { t: 0, cells: new Map() },
       SIGHT_MS: botConstant('SIGHT_MS'),

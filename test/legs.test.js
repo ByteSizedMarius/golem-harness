@@ -6,6 +6,9 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const { QUIET_MS, LONG_QUIET_MS, legLedger, takenText, laneBlocks } = require('../lib/leg-ledger')
 const { routeDeadline } = require('../lib/walk')
+const { isDoor, doorCrossing } = require('../lib/doors')
+const { entityInCell } = require('../lib/shelter')
+const Block = require('prismarine-block')('1.21.11')
 const { loadBotFunctions, combatReflexIn, awaitRoute } = require('./helpers')
 
 const KLASSES = ['discretionary', 'interrupt', 'emergency']
@@ -194,4 +197,153 @@ test('a melee fight ends the running job but leaves a walk its legs, and a chase
   assert.deepStrictEqual(await meleeSwing({ chase: false, goal: walk }), { takes: [melee], goal: walk })
   assert.deepStrictEqual(await meleeSwing({ chase: true, goal: walk }), { takes: [melee, ['legs', 'combat', 'fight in melee range']], goal: null })
   assert.deepStrictEqual(await meleeSwing({ chase: true, goal: null }), { takes: [melee], goal: null }, 'no goal to take')
+})
+
+const LADDER_ID = 65
+
+// wayHint and insideBlock for a body at pos over stone up to y 63 plus cells ('x,y,z' -> [name, properties]). lit says
+// which cells the bot sees lit, and ladders the ladder cells it sees, or with ladder true the one at -2,64,1.
+function senses ({ pos = new Vec3(0.5, 64, 0.5), cells = {}, lit = () => true, ladder = false, ladders = ladder ? [new Vec3(-2, 64, 1)] : [] } = {}) {
+  const bot = {
+    entity: { position: pos, width: 0.6, height: 1.8 },
+    blockAt (p) {
+      const c = new Vec3(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z))
+      const [name, props] = cells[`${c.x},${c.y},${c.z}`] || [c.y <= 63 ? 'stone' : 'air', {}]
+      const b = Block.fromProperties(name, props, 0)
+      b.position = c
+      return b
+    }
+  }
+  const ctx = loadBotFunctions(['wayHint', 'insideBlock'], {
+    bot,
+    Vec3,
+    isDoor,
+    doorCrossing,
+    entityInCell,
+    cellKnown: lit,
+    knownCell: lit,
+    seenNow: (p) => ctx.bodyTouches(p) || lit(p),
+    resolveBlockIds: (name) => (name === 'ladder' ? [LADDER_ID] : []),
+    // Nearest first, as findBlocks hands them out.
+    findVisible: (ids, maxDist, count) => (ids.includes(LADDER_ID) && maxDist === 16 ? ladders : [])
+      .map((p) => ({ pos: p, dist: pos.distanceTo(p) })).sort((a, b) => a.dist - b.dist).slice(0, count)
+  })
+  return { bot, wayHint: ctx.wayHint, insideBlock: ctx.insideBlock, lit, touches: ctx.bodyTouches }
+}
+
+// The x,y,z cells a hint names.
+const namedCells = (hint) => [...(hint || '').matchAll(/(-?\d+),(-?\d+),(-?\d+)/g)].map((m) => new Vec3(+m[1], +m[2], +m[3]))
+
+const EAST = { cell: new Vec3(10, 64, 0) }
+const openDoor = (half) => ['oak_door', { open: true, half, facing: 'east', hinge: 'left' }]
+
+test('a walk that found no way names the last lit cell short of the dark, one a torch can be placed in', () => {
+  assert.strictEqual(senses().wayHint(EAST), null, 'control: every cell lit')
+  const s = senses({ lit: (p) => p.x <= 2 })
+  const hint = s.wayHint(EAST)
+  assert.strictEqual(hint, 'too dark for me past 2,64,0: a torch there would light the way')
+  const [cell] = namedCells(hint)
+  assert.ok(s.lit(cell), 'the named cell is known')
+  const floor = [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]].map(([dx, dy, dz]) => cell.offset(dx, dy, dz))
+  assert.ok(floor.some((n) => s.lit(n) && s.bot.blockAt(n).boundingBox === 'block'), 'a seen solid block below or beside it')
+})
+
+test('a dark hint names no dark cell behind the bot', () => {
+  const s = senses({ lit: (p) => p.x >= -1 })
+  assert.match(s.wayHint({ cell: new Vec3(-10, 64, 0) }) || '', /^too dark for me past /, 'control: the goal lies past the dark')
+  assert.strictEqual(s.wayHint(EAST), null)
+})
+
+test('an unseen way gets a dark hint only when its edge lies within 6 blocks', () => {
+  const s = senses({ lit: (p) => p.x <= 2 })
+  assert.match(s.wayHint(EAST, { x: 6, y: 64, z: 0 }) || '', /^too dark for me past /, 'control: an edge 6 away')
+  assert.strictEqual(s.wayHint(EAST, { x: 7, y: 64, z: 0 }), null)
+})
+
+test('a dark hint never names a cell that already holds a torch', () => {
+  const cells = { '2,64,0': ['torch', {}], '2,65,1': ['stone', {}] }
+  const hint = senses({ cells, lit: (p) => p.x <= 2 }).wayHint(EAST)
+  assert.match(hint || '', /^too dark for me past /, 'control: another cell can hold one')
+  assert.ok(!namedCells(hint).some((c) => c.equals(new Vec3(2, 64, 0))), hint)
+})
+
+test('a dark hint never names the cells the body stands in', () => {
+  const hint = senses({ cells: { '-1,65,0': ['stone', {}] }, lit: (p) => p.x <= 0 }).wayHint(EAST)
+  assert.ok(!namedCells(hint).some((c) => c.x === 0 && c.z === 0 && c.y >= 64 && c.y <= 65), hint)
+})
+
+test('a walk that found no way names an open door seen now whose far side is unknown', () => {
+  const cells = { '1,64,0': openDoor('lower'), '1,65,0': openDoor('upper') }
+  assert.strictEqual(senses({ cells }).wayHint(EAST), null, 'control: both sides of the door known')
+  assert.match(senses({ cells, lit: (p) => p.x <= 1 }).wayHint(EAST), /^the way runs through the door at 1,64,0: gaze through it/)
+  const shut = { '1,64,0': ['oak_door', { open: false, half: 'lower', facing: 'east', hinge: 'left' }], '1,65,0': ['oak_door', { open: false, half: 'upper', facing: 'east', hinge: 'left' }] }
+  assert.doesNotMatch(senses({ cells: shut, lit: (p) => p.x <= 1 }).wayHint(EAST) || '', /door/, 'a closed door')
+})
+
+test('a door hint looks only past the door along its passage, never at the frame beside it', () => {
+  const frame = { '1,64,1': ['stone', {}], '1,65,1': ['stone', {}], '1,64,-1': ['stone', {}], '1,65,-1': ['stone', {}] }
+  const cells = { ...frame, '1,64,0': openDoor('lower'), '1,65,0': openDoor('upper') }
+  const pos = new Vec3(2.5, 64, 0.5)
+  assert.match(senses({ pos, cells, lit: (p) => p.x >= 1 }).wayHint({ cell: new Vec3(-10, 64, 0) }) || '', /^the way runs through the door at 1,64,0: gaze through it/, 'control: the cell the bot came from unknown')
+  assert.strictEqual(senses({ pos, cells, lit: (p) => !(p.x === 1 && p.z !== 0) }).wayHint(EAST), null)
+})
+
+test('a walk that found no way names a ladder in sight when the goal lies 2 or more above the feet or its y is unknown', () => {
+  const climb = 'ladder at -2,64,1: walk to it and climb it'
+  assert.strictEqual(senses().wayHint({ cell: new Vec3(10, 70, 0) }), null, 'control: no ladder in sight')
+  const s = senses({ ladder: true })
+  assert.strictEqual(s.wayHint({ cell: new Vec3(10, 66, 0) }), climb)
+  assert.strictEqual(s.wayHint({ toward: { x: 40, y: undefined, z: 0 } }), climb, 'a goal y unknown')
+  assert.strictEqual(s.wayHint({ cell: new Vec3(10, 65, 0) }), null, '1 above')
+  assert.strictEqual(s.wayHint({ cell: new Vec3(10, 60, 0) }), null, 'a goal below')
+})
+
+test('a ladder hint names no ladder below the feet', () => {
+  const shaft = [60, 61, 62, 63].map((y) => new Vec3(1, y, 0))
+  const up = { cell: new Vec3(10, 70, 0) }
+  assert.strictEqual(senses({ ladders: shaft }).wayHint(up), null)
+  assert.strictEqual(senses({ ladders: [...shaft, new Vec3(-3, 64, 2)] }).wayHint(up), 'ladder at -3,64,2: walk to it and climb it', 'control: one at the feet')
+})
+
+test('the way hints come door first, then the ladder, then the dark', () => {
+  const cells = { '1,64,0': openDoor('lower'), '1,65,0': openDoor('upper') }
+  const hint = senses({ cells, lit: (p) => p.x <= 1, ladder: true }).wayHint({ cell: new Vec3(10, 70, 0) })
+  assert.match(hint, /^the way runs through the door at 1,64,0: gaze through it\. ladder at -2,64,1: walk to it and climb it\. too dark for me past -?\d+,\d+,-?\d+: a torch there would light the way$/)
+})
+
+test('a way hint never names a cell the bot does not know', () => {
+  // An open door at 2,64,1 and the cells past x 2 are hidden.
+  const cells = { '2,64,1': openDoor('lower'), '2,65,1': openDoor('upper') }
+  const hidden = (p) => p.x > 2 || (p.x === 2 && p.z === 1 && p.y >= 64)
+  for (const pos of [new Vec3(0.5, 64, 0.5), new Vec3(0.5, 64, 2.5), new Vec3(0.5, 64, -0.5)]) {
+    const s = senses({ pos, cells, lit: (p) => !hidden(p) })
+    for (const r of [EAST, { cell: new Vec3(9, 64, 1) }, { toward: { x: 30, y: undefined, z: 30 } }]) {
+      const hint = s.wayHint(r)
+      assert.ok(hint, `control: a hint from ${pos} toward ${JSON.stringify(r)}`)
+      for (const c of namedCells(hint)) assert.ok(!hidden(c) || s.touches(c), `${hint} from ${pos}`)
+      assert.doesNotMatch(hint, /door/, `the hidden door, from ${pos}`)
+    }
+  }
+})
+
+test('insideBlock names a block whose collision box the body is inside, and nothing it rests on or presses against', () => {
+  const inside = (pos, cells) => {
+    const r = senses({ pos, cells }).insideBlock()
+    return r && JSON.parse(JSON.stringify(r))
+  }
+  const face = { '10,64,0': ['stone', {}], '10,65,0': ['stone', {}] }
+  assert.deepStrictEqual(inside(new Vec3(9.8, 64, 0.5), face), { name: 'stone', x: 10, y: 64, z: 0 }, 'control: 0.1 into the stone')
+  assert.strictEqual(inside(new Vec3(9.7, 64, 0.5), face), null, 'pressed against its face')
+  assert.strictEqual(inside(new Vec3(0.5, 64.0625, 0.5), { '0,64,0': ['white_carpet', {}] }), null, 'on carpet')
+  assert.strictEqual(inside(new Vec3(0.5, 64.5, 0.5), { '0,64,0': ['stone_slab', { type: 'bottom' }] }), null, 'on a slab')
+  const wall = { '0,64,0': ['cobblestone_wall', { up: true }] }
+  assert.strictEqual(inside(new Vec3(0.5, 65.5, 0.5), wall), null, 'on top of a wall')
+  assert.deepStrictEqual(inside(new Vec3(0.5, 64, 0.5), wall), { name: 'cobblestone_wall', x: 0, y: 64, z: 0 })
+})
+
+test('insideBlock never names a diagonal cell the body overlaps in the dark', () => {
+  const cells = { '1,64,1': ['stone', {}] }
+  const pos = new Vec3(0.8, 64, 0.8)
+  assert.strictEqual(senses({ pos, cells }).insideBlock().name, 'stone', 'control: in the light')
+  assert.strictEqual(senses({ pos, cells, lit: () => false }).insideBlock(), null)
 })

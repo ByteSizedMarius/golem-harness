@@ -329,7 +329,9 @@ function followHarness ({ position = new Vec3(10.5, 64, 0.5), gate = { seen: tru
     nametagGoal,
     ck: (x, y, z) => x + ',' + y + ',' + z,
     emitEvent: (kind, msg) => events.push({ kind, msg }),
-    stopPath: () => { bot.pathfinder.goal = null }
+    stopPath: () => { bot.pathfinder.goal = null },
+    wayHint: () => null,
+    WALK_HINTS: { 'no-path': 'no known way there' }
   }
   if (!door) env.doorwayCommit = async () => { drills++; return false }
   const ctx = loadBotFunctions(['followTick', 'armFollow', 'followTarget', 'stopFollow'], env)
@@ -341,6 +343,7 @@ function followHarness ({ position = new Vec3(10.5, 64, 0.5), gate = { seen: tru
     drills: () => drills,
     setMoving: (m) => { moving = m },
     tick: () => ctx.followTick(st),
+    arm: () => ctx.armFollow(st, ctx.followTarget(st)),
     // What /stop and /unfollow do to a follow.
     stop: () => { env.legs.take(null); ctx.stopFollow(); env.stopPath(); bot.clearControlStates(); log.push(['stop']) },
     unfollow: () => { ctx.stopFollow(); bot.pathfinder.goal = null; bot.clearControlStates(); log.push(['stop']) },
@@ -372,6 +375,48 @@ test('follow parked beside its player stays on with its goal, wedged far from th
   await wedged.tick()
   assert.strictEqual(wedged.drills(), 1, 'control: moving without progress')
   assert.ok(wedged.bot.pathfinder.goal instanceof goals.GoalFollow, 're-armed after the drill')
+})
+
+test('a follow whose search found no way says what blocks it, once per 30 s, while the player is out of range', async () => {
+  const ladder = 'ladder at -2,64,1: walk to it and climb it'
+  for (const status of ['noPath', 'timeout']) {
+    const h = followHarness()
+    const asked = []
+    h.env.wayHint = (r) => { asked.push(r.cell && [r.cell.x, r.cell.y, r.cell.z]); return ladder }
+    await h.tick()
+    assert.deepStrictEqual(h.events, [], `${status}: control, no search failed yet`)
+    h.bot.emit('path_update', { status, path: [] })
+    await h.tick()
+    await h.tick()
+    assert.deepStrictEqual(h.events, [{ kind: 'follow', msg: `no way found to Steve: ${ladder}` }], status)
+    assert.deepStrictEqual(asked, [[10, 64, 0]], `${status}: the way toward the player in sight`)
+    h.st.warnT -= 30001
+    await h.tick()
+    assert.strictEqual(h.events.length, 2, `${status}: again after 30 s`)
+  }
+  const plain = followHarness()
+  plain.bot.emit('path_update', { status: 'noPath', path: [] })
+  await plain.tick()
+  assert.deepStrictEqual(plain.events.map((e) => e.msg), ['no way found to Steve: no known way there'], 'nothing to name')
+  const near = followHarness({ position: new Vec3(2.5, 64, 0.5) })
+  near.bot.emit('path_update', { status: 'noPath', path: [] })
+  await near.tick()
+  assert.deepStrictEqual(near.events, [], 'the player in range')
+  const found = followHarness()
+  found.bot.emit('path_update', { status: 'success', path: [] })
+  await found.tick()
+  assert.deepStrictEqual(found.events, [], 'a search that found a way')
+})
+
+test('a follow holds one path listener, a re-arm forgets the last search, and unfollow removes the listener', () => {
+  const h = followHarness()
+  assert.strictEqual(h.bot.listenerCount('path_update'), 1)
+  h.bot.emit('path_update', { status: 'noPath', path: [] })
+  assert.strictEqual(h.st.pathStatus, 'noPath', 'control: the search for the armed goal')
+  h.arm()
+  assert.deepStrictEqual([h.bot.listenerCount('path_update'), h.st.pathStatus], [1, null])
+  h.unfollow()
+  assert.strictEqual(h.bot.listenerCount('path_update'), 0)
 })
 
 test('follow holds through a lost sight without walking to the hidden player, says so once, and resumes when they show', async () => {
