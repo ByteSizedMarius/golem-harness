@@ -2,8 +2,15 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { digJob, facings } = require('./helpers')
+const { ROUTE_BOUNDS } = require('../lib/bounds')
 
 const UP_EAST = { dir: 'e', up: '1', steps: '2', torch: '0' }
+
+test('dig_stair carves at most the 24 steps its tool schema allows', async () => {
+  assert.deepStrictEqual(ROUTE_BOUNDS['/dig_stair'].steps, [1, 24])
+  const r = await digJob('/dig_stair', { ...UP_EAST, steps: '30' })
+  assert.deepStrictEqual([r.name, r.climbed], ['dig_stair up e x24', 24])
+})
 
 test('dig_stair carves its steps up or down and fills a missing step from filler', async () => {
   const up = await digJob('/dig_stair', UP_EAST)

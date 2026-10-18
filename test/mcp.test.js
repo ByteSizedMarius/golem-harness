@@ -26,12 +26,12 @@ const radiusTool = () => {
 
 // ---- the tool table ----
 
-test('no tool takes a URL, path, route, raw query or step list', () => {
+test('no tool takes a URL, path, route, raw query or step list, and an int step count is no list', () => {
   assert.ok(TOOLS.length > 0)
   const banned = ['url', 'uri', 'path', 'route', 'endpoint', 'raw', 'do', 'step', 'steps', 'query', 'qs', 'querystring']
-  for (const t of TOOLS) {
-    for (const k of Object.keys(t.params)) assert.ok(!banned.includes(k.toLowerCase()), `${t.name}.${k}`)
-  }
+  const refused = (params) => Object.entries(params).filter(([k, spec]) => spec.type !== 'int' && banned.includes(k.toLowerCase())).map(([k]) => k)
+  assert.deepStrictEqual(refused({ steps: { type: 'str' }, step: { type: 'str' }, Steps: { type: 'int' } }), ['steps', 'step'], 'control')
+  for (const t of TOOLS) assert.deepStrictEqual(refused(t.params), [], t.name)
 })
 
 test('tools/list lists exactly the table, then wait_events and manual, and no forbidden tool or route', async () => {
@@ -492,6 +492,13 @@ test('a tool with timeoutMs is not cut at the request timeout', { timeout: 10000
   assert.strictEqual(calls.length, 1)
   assert.ok(textOf(out).includes('REPLYOK'))
   assert.ok(ms >= 3 * REQUEST_TIMEOUT - 20, `answered after ${ms} ms, before the reply was sent`)
+})
+
+test('withdraw and deposit wait for the walk, the chest opening and a window wait for each of 8 names', () => {
+  const floor = 60000 + 8 * 20000
+  for (const name of ['withdraw', 'deposit']) {
+    assert.ok(toolNamed(name).timeoutMs > floor, `${name} timeoutMs ${toolNamed(name).timeoutMs} is not above ${floor}`)
+  }
 })
 
 // ---- manual ----

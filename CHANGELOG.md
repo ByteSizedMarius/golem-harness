@@ -21,6 +21,13 @@ also took an explosion heard at ~55 for one near the owner. The perception manua
 the hearing ranges: most sounds reach about 16 blocks, explosions about 64, and a sound gives
 a distance and a direction, not who caused it.
 
+Exact chest names and double chests. Live, depositing "wheat" while carrying wheat and wheat
+seeds put the seeds away, and the pilot dug one half of two double chests because the chest
+list showed each as one cell. `deposit` now moves the exact name when it is carried and falls
+back to the substring otherwise, and each reply entry names the item it moved. Chest lists
+and the chest-full error name both cells of a double chest. `dig_stair` takes `steps` (1 to
+24), so the pilot no longer polls and stops the job, which overshot by a step or two.
+
 ## 2026-10-15: live-play fixes
 
 Busy body. A client that moves a tool call running past 10 s into the background lets the

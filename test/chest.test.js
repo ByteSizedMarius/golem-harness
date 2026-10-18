@@ -6,7 +6,7 @@ const { Vec3 } = require('vec3')
 const { awaitRoute, routeHandler, botConstant } = require('./helpers')
 
 const CHEST_ID = 54
-const IDS = { stone: 1, cobblestone: 4, diamond: 264 }
+const IDS = { stone: 1, cobblestone: 4, diamond: 264, wheat_seeds: 295, wheat: 296, cobbled_deepslate: 1101 }
 const NAMES = Object.fromEntries(Object.entries(IDS).map(([n, id]) => [id, n]))
 const CHEST_SLOTS = 27
 const HERE = new Vec3(0.5, 64, 0.5)
@@ -16,6 +16,9 @@ const FAR = new Vec3(-7, 64, 3)
 const HIDDEN = new Vec3(0, 64, -3)
 
 const stack = (name, count) => ({ name, type: IDS[name], count })
+// A chest facing north pairs its left half with the cell east of it and its right half with the cell west.
+const LEFT = { type: 'left', facing: 'north' }
+const RIGHT = { type: 'right', facing: 'north' }
 
 // A single chest whose deposit fills partial stacks, then empty slots, then fails like mineflayer's.
 function chestWindow (items) {
@@ -44,15 +47,16 @@ function chestWindow (items) {
   return window
 }
 
-// windows maps a chest's x,y,z to its window.
-function chestEnv (chests, windows, pockets = []) {
+// windows and states are keyed by a chest's x,y,z.
+function chestEnv (chests, windows, pockets = [], states = {}) {
   const at = (p) => `${p.x},${p.y},${p.z}`
   const cells = new Set(chests.map(at))
   const opened = []
+  const chest = (p) => ({ name: 'chest', type: CHEST_ID, position: p, getProperties: () => states[at(p)] || { type: 'single', facing: 'north' } })
   const env = {
     bot: {
       entity: { position: HERE },
-      blockAt: (p) => (cells.has(at(p)) ? { name: 'chest', type: CHEST_ID, position: p } : { name: 'air', type: 0, position: p }),
+      blockAt: (p) => (cells.has(at(p)) ? chest(p) : { name: 'air', type: 0, position: p }),
       findBlocks: ({ matching, maxDistance }) => (matching.includes(CHEST_ID) ? chests.filter((p) => HERE.distanceTo(p) <= maxDistance) : []),
       pathfinder: { goto: async () => {} },
       openContainer: async (b) => { opened.push(at(b.position)); return windows[at(b.position)] },
@@ -96,9 +100,32 @@ test('chest radius bounds the list', async () => {
   assert.deepStrictEqual((await awaitRoute('/chest', { radius: '6' }, env)).chests, [{ at: { x: 5, y: 64, z: 0 }, dist: 5 }])
 })
 
-test('chest lists a double chest once, by its nearer half', async () => {
-  const { env } = chestEnv([new Vec3(6, 64, 0), NEAR, FAR], { '5,64,0': chestWindow([]) })
-  assert.deepStrictEqual((await awaitRoute('/chest', {}, env)).chests.map((c) => c.at), [{ x: 5, y: 64, z: 0 }, { x: -7, y: 64, z: 3 }])
+test('chest lists a double chest once with both cells, and two single chests side by side apart', async () => {
+  const beside = new Vec3(6, 64, 0)
+  const double = chestEnv([beside, NEAR, FAR], { '5,64,0': chestWindow([]) }, [], { '5,64,0': LEFT, '6,64,0': RIGHT })
+  assert.deepStrictEqual((await awaitRoute('/chest', {}, double.env)).chests, [
+    { at: { x: 5, y: 64, z: 0 }, pair: { x: 6, y: 64, z: 0 }, dist: 5 },
+    { at: { x: -7, y: 64, z: 3 }, dist: 7.6 }
+  ])
+  const singles = chestEnv([beside, NEAR], { '5,64,0': chestWindow([]) })
+  assert.deepStrictEqual((await awaitRoute('/chest', {}, singles.env)).chests, [
+    { at: { x: 5, y: 64, z: 0 }, dist: 5 },
+    { at: { x: 6, y: 64, z: 0 }, dist: 6 }
+  ])
+})
+
+test('a chest whose other half is unseen lists no pair and never names that cell', async () => {
+  // Its other half is HIDDEN, the cell west of it.
+  const half = new Vec3(1, 64, -3)
+  const windows = { '1,64,-3': chestWindow([]), '-7,64,3': chestWindow([]) }
+  const { env } = chestEnv([half, HIDDEN, FAR], windows, [], { '1,64,-3': RIGHT, '0,64,-3': LEFT })
+  assert.deepStrictEqual((await awaitRoute('/chest', {}, env)).chests, [
+    { at: { x: 1, y: 64, z: -3 }, dist: 3.2 },
+    { at: { x: -7, y: 64, z: 3 }, dist: 7.6 }
+  ])
+  const miss = await refusal('/withdraw', { name: 'diamond', x: '-7', y: '64', z: '3' }, env)
+  assert.match(miss, /other chests seen within 12: 1,64,-3 \(3\.2 away\)$/)
+  assert.doesNotMatch(miss, /0,64,-3/)
 })
 
 test('chest refuses when every chest in range is unseen, without naming or opening it', async () => {
@@ -168,7 +195,7 @@ test('deposit puts every matching stack into the nearest seen chest and reports 
   const windows = { '5,64,0': chestWindow([stack('cobblestone', 10)]), '0,64,-3': chestWindow([]) }
   const pockets = [stack('cobblestone', 20), stack('stone', 3), stack('cobblestone', 5)]
   const { env, opened } = chestEnv([NEAR, FAR, HIDDEN], windows, pockets)
-  assert.deepStrictEqual(await awaitRoute('/deposit', { name: 'cobble' }, env), { deposited: [{ item: 'cobble', count: 25, inChestNow: 35 }] })
+  assert.deepStrictEqual(await awaitRoute('/deposit', { name: 'cobble' }, env), { deposited: [{ item: 'cobblestone', count: 25, inChestNow: 35 }] })
   assert.deepStrictEqual(windows['5,64,0'].containerItems(), [stack('cobblestone', 35)])
   assert.deepStrictEqual(opened, ['5,64,0'])
 })
@@ -178,12 +205,27 @@ test('deposit of several names opens the chest once, closes it, and lists the un
   const pockets = [stack('cobblestone', 20), stack('diamond', 2)]
   const { env, opened } = chestEnv([NEAR], windows, pockets)
   assert.deepStrictEqual(await awaitRoute('/deposit', { name: 'cobble|emerald|diamond' }, env), {
-    deposited: [{ item: 'cobble', count: 20, inChestNow: 30 }, { item: 'diamond', count: 2, inChestNow: 2 }],
+    deposited: [{ item: 'cobblestone', count: 20, inChestNow: 30 }, { item: 'diamond', count: 2, inChestNow: 2 }],
     missing: ['emerald']
   })
   assert.deepStrictEqual(windows['5,64,0'].containerItems(), [stack('cobblestone', 30), stack('diamond', 2)])
   assert.deepStrictEqual(opened, ['5,64,0'])
   assert.ok(windows['5,64,0'].closed, 'the window stays open')
+})
+
+test('deposit of an exact item name moves only that item and counts only it in the chest', async () => {
+  const windows = { '5,64,0': chestWindow([stack('wheat_seeds', 3)]) }
+  const { env } = chestEnv([NEAR], windows, [stack('wheat_seeds', 7), stack('wheat', 5)])
+  assert.deepStrictEqual(await awaitRoute('/deposit', { name: 'wheat' }, env), { deposited: [{ item: 'wheat', count: 5, inChestNow: 5 }] })
+  assert.deepStrictEqual(windows['5,64,0'].containerItems(), [stack('wheat_seeds', 3), stack('wheat', 5)])
+})
+
+test('deposit of a name that matches several items replies per item and shares count among them', async () => {
+  const windows = { '5,64,0': chestWindow([stack('cobblestone', 10)]) }
+  const { env } = chestEnv([NEAR], windows, [stack('cobblestone', 20), stack('cobbled_deepslate', 4)])
+  assert.deepStrictEqual(await awaitRoute('/deposit', { name: 'cobble', count: '22' }, env), {
+    deposited: [{ item: 'cobblestone', count: 20, inChestNow: 30 }, { item: 'cobbled_deepslate', count: 2, inChestNow: 2 }]
+  })
 })
 
 test('deposit of several names that fails partway closes the window and names what already moved', async () => {
@@ -195,6 +237,18 @@ test('deposit of several names that fails partway closes the window and names wh
   assert.match(error, /other chests seen within 12: -7,64,3 \(7\.6 away\)$/)
   assert.deepStrictEqual(opened, ['5,64,0'])
   assert.ok(windows['5,64,0'].closed, 'the window stays open')
+})
+
+test('deposit into a full half of a double chest names neither of its cells and another double by both', async () => {
+  const full = Array.from({ length: CHEST_SLOTS }, () => stack('stone', 64))
+  const windows = { '6,64,0': chestWindow(full) }
+  const states = { '5,64,0': LEFT, '6,64,0': RIGHT, '-8,64,3': LEFT, '-7,64,3': RIGHT }
+  const { env, opened } = chestEnv([NEAR, new Vec3(6, 64, 0), FAR, new Vec3(-8, 64, 3)], windows, [stack('diamond', 5)], states)
+  const error = await refusal('/deposit', { name: 'diamond', x: '6', y: '64', z: '0' }, env)
+  assert.match(error, /^deposited 0 then failed \(chest full\?\): destination full; diamond in chest now 0; /)
+  assert.match(error, /other chests seen within 12: -7,64,3 and -8,64,3 \(7\.6 away\)$/)
+  assert.doesNotMatch(error, /5,64,0|6,64,0/)
+  assert.deepStrictEqual(opened, ['6,64,0'])
 })
 
 test('a failing chest, withdraw or deposit names the other seen chests and no unseen one', async () => {
