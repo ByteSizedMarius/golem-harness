@@ -6,6 +6,13 @@ the point, not just the diff. Dates are play-sessions, not releases. Full commit
 carry more detail (`git log`). The pilot's text (`DRIVING.md`, `manual/`) states the rules
 and leaves the stories here.
 
+## 2026-10-18: live-play fixes
+
+Chest batches. Live, the pilot moved several item kinds one call each, so the chest opened
+and its sound played once per kind. `withdraw` and `deposit` now take up to 8 names
+separated by `|` and move them all with one open. The reply lists each kind moved, plus
+`missing` for names that matched nothing, and `count` applies to each name.
+
 ## 2026-10-15: live-play fixes
 
 Busy body. A client that moves a tool call running past 10 s into the background lets the

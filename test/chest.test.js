@@ -116,19 +116,85 @@ test('withdraw takes the named item, matched as a substring, from the nearest se
     '0,64,-3': chestWindow([stack('cobblestone', 64)])
   }
   const { env, opened } = chestEnv([NEAR, FAR, HIDDEN], windows)
-  assert.deepStrictEqual(await awaitRoute('/withdraw', { name: 'cobble', count: '4' }, env), { withdrew: 'cobblestone', count: 4 })
+  assert.deepStrictEqual(await awaitRoute('/withdraw', { name: 'cobble', count: '4' }, env), { withdrew: [{ item: 'cobblestone', count: 4 }] })
   assert.deepStrictEqual(windows['5,64,0'].containerItems(), [stack('stone', 64), stack('cobblestone', 6)])
-  assert.deepStrictEqual(await awaitRoute('/withdraw', { name: 'diamond', x: '-7', y: '64', z: '3' }, env), { withdrew: 'diamond', count: 3 })
+  assert.deepStrictEqual(await awaitRoute('/withdraw', { name: 'diamond', x: '-7', y: '64', z: '3' }, env), { withdrew: [{ item: 'diamond', count: 3 }] })
   assert.deepStrictEqual(opened, ['5,64,0', '-7,64,3'])
+})
+
+test('withdraw of several names opens the chest once, closes it, and lists the unknown ones as missing', async () => {
+  const windows = { '5,64,0': chestWindow([stack('cobblestone', 10), stack('diamond', 3)]) }
+  const { env, opened } = chestEnv([NEAR], windows)
+  const reply = await awaitRoute('/withdraw', { name: ' cobble | diamond |', count: '4' }, env)
+  assert.deepStrictEqual(reply, { withdrew: [{ item: 'cobblestone', count: 4 }, { item: 'diamond', count: 3 }] })
+  assert.deepStrictEqual(windows['5,64,0'].containerItems(), [stack('cobblestone', 6), stack('diamond', 0)])
+  assert.deepStrictEqual(opened, ['5,64,0'])
+  assert.ok(windows['5,64,0'].closed, 'the window stays open')
+
+  const partial = { '5,64,0': chestWindow([stack('cobblestone', 10)]) }
+  const second = chestEnv([NEAR], partial)
+  assert.deepStrictEqual(await awaitRoute('/withdraw', { name: 'cobble|emerald', count: '2' }, second.env), {
+    withdrew: [{ item: 'cobblestone', count: 2 }],
+    missing: ['emerald']
+  })
+  assert.deepStrictEqual(second.opened, ['5,64,0'])
+  assert.ok(partial['5,64,0'].closed, 'the window stays open')
+})
+
+test('withdraw of several names that fails partway closes the window and names what already moved', async () => {
+  const windows = { '5,64,0': chestWindow([stack('cobblestone', 10), stack('diamond', 3)]) }
+  const real = windows['5,64,0'].withdraw
+  windows['5,64,0'].withdraw = async (type, metadata, count) => {
+    if (type === IDS.diamond) throw new Error('destination full')
+    return real(type, metadata, count)
+  }
+  const { env, opened } = chestEnv([NEAR], windows)
+  assert.strictEqual(await refusal('/withdraw', { name: 'cobble|diamond' }, env), 'withdrew cobblestone 10; then diamond: destination full')
+  assert.deepStrictEqual(opened, ['5,64,0'])
+  assert.ok(windows['5,64,0'].closed, 'the window stays open')
+})
+
+test('withdraw and deposit refuse more than 8 names before walking or opening anything', async () => {
+  const names = 'a|b|c|d|e|f|g|h|i'
+  const { env, opened } = chestEnv([NEAR], { '5,64,0': chestWindow([]) }, [stack('cobblestone', 1)])
+  let walked = false
+  env.bot.pathfinder.goto = async () => { walked = true }
+  assert.match(await refusal('/withdraw', { name: names }, env), /at most 8 names/)
+  assert.match(await refusal('/deposit', { name: names }, env), /at most 8 names/)
+  assert.deepStrictEqual([opened, walked], [[], false])
 })
 
 test('deposit puts every matching stack into the nearest seen chest and reports the count now in it', async () => {
   const windows = { '5,64,0': chestWindow([stack('cobblestone', 10)]), '0,64,-3': chestWindow([]) }
   const pockets = [stack('cobblestone', 20), stack('stone', 3), stack('cobblestone', 5)]
   const { env, opened } = chestEnv([NEAR, FAR, HIDDEN], windows, pockets)
-  assert.deepStrictEqual(await awaitRoute('/deposit', { name: 'cobble' }, env), { deposited: 25, item: 'cobble', inChestNow: 35 })
+  assert.deepStrictEqual(await awaitRoute('/deposit', { name: 'cobble' }, env), { deposited: [{ item: 'cobble', count: 25, inChestNow: 35 }] })
   assert.deepStrictEqual(windows['5,64,0'].containerItems(), [stack('cobblestone', 35)])
   assert.deepStrictEqual(opened, ['5,64,0'])
+})
+
+test('deposit of several names opens the chest once, closes it, and lists the unknown ones as missing', async () => {
+  const windows = { '5,64,0': chestWindow([stack('cobblestone', 10)]) }
+  const pockets = [stack('cobblestone', 20), stack('diamond', 2)]
+  const { env, opened } = chestEnv([NEAR], windows, pockets)
+  assert.deepStrictEqual(await awaitRoute('/deposit', { name: 'cobble|emerald|diamond' }, env), {
+    deposited: [{ item: 'cobble', count: 20, inChestNow: 30 }, { item: 'diamond', count: 2, inChestNow: 2 }],
+    missing: ['emerald']
+  })
+  assert.deepStrictEqual(windows['5,64,0'].containerItems(), [stack('cobblestone', 30), stack('diamond', 2)])
+  assert.deepStrictEqual(opened, ['5,64,0'])
+  assert.ok(windows['5,64,0'].closed, 'the window stays open')
+})
+
+test('deposit of several names that fails partway closes the window and names what already moved', async () => {
+  const full = [...Array.from({ length: CHEST_SLOTS - 2 }, () => stack('stone', 64)), stack('cobblestone', 50)]
+  const windows = { '5,64,0': chestWindow(full) }
+  const { env, opened } = chestEnv([NEAR, FAR], windows, [stack('diamond', 5), stack('stone', 70)])
+  const error = await refusal('/deposit', { name: 'diamond|stone' }, env)
+  assert.match(error, /^deposited diamond 5; then stone: deposited 0 then failed \(chest full\?\): destination full; /)
+  assert.match(error, /other chests seen within 12: -7,64,3 \(7\.6 away\)$/)
+  assert.deepStrictEqual(opened, ['5,64,0'])
+  assert.ok(windows['5,64,0'].closed, 'the window stays open')
 })
 
 test('a failing chest, withdraw or deposit names the other seen chests and no unseen one', async () => {

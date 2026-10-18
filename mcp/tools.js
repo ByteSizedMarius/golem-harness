@@ -28,6 +28,8 @@ const Y = { type: 'num', min: -64, max: 319 }
 const XYZ = { x: required(X), y: required(Y), z: required(X) }
 const AT = { x: X, y: Y, z: X }
 const NAME = { type: 'str', maxLen: 64 }
+// Up to 8 names of NAME's length and the 7 separators between them.
+const CHEST_NAMES = required({ type: 'str', maxLen: 519 })
 const PLAYER = { type: 'str', maxLen: 32 }
 const WAYPOINT = { type: 'str', maxLen: 64 }
 const POINT = { type: 'str', maxLen: 64, desc: 'x,y,z' }
@@ -107,8 +109,9 @@ const TOOLS = [
   { name: 'toss', route: '/toss', body: true, description: 'Drop items, or throw them toward a player with to. Walk away afterwards or you pick them up again.', params: { name: required(NAME), count: COUNT, to: PLAYER }, timeoutMs: EVENT },
   { name: 'fish', route: '/fish', body: true, description: 'Job: cast the fishing rod count times, at seen water (x, y and z together) or ahead. Each catch arrives as an event.', params: { count: { type: 'int', min: 1, max: 32 }, ...AT } },
   { name: 'chest', route: '/chest', body: true, description: 'List the chest at x, y and z together. Without them, list every chest seen within radius (default 12), nearest first, and the items of the nearest.', params: { ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
-  { name: 'withdraw', route: '/withdraw', body: true, description: 'Take items from the chest at x, y and z together, or the nearest seen within radius (default 12). name matches as a substring.', params: { name: required(NAME), count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
-  { name: 'deposit', route: '/deposit', body: true, description: 'Put items into the chest at x, y and z together, or the nearest seen within radius (default 12). name matches as a substring. When the chest fills, the error names the other chests seen.', params: { name: required(NAME), count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
+  // The walk and one window wait per name.
+  { name: 'withdraw', route: '/withdraw', body: true, description: 'Take items from the chest at x, y and z together, or the nearest seen within radius (default 12). name is one item name or up to 8 separated by |, all taken with one chest open. Each name matches as a substring. count applies to each name.', params: { name: CHEST_NAMES, count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + 8 * EVENT },
+  { name: 'deposit', route: '/deposit', body: true, description: 'Put items into the chest at x, y and z together, or the nearest seen within radius (default 12). name is one item name or up to 8 separated by |, all put in with one chest open. Each name matches as a substring. count applies to each name. When the chest fills, the error names the other chests seen.', params: { name: CHEST_NAMES, count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + 8 * EVENT },
   // The walk, the window and one withdraw per item kind.
   { name: 'grave', route: '/grave', body: true, description: 'List the gravestone at x,y,z or the nearest in sight. take: all or an item name.', params: { at: POINT, take: NAME }, timeoutMs: LONGEST },
 
