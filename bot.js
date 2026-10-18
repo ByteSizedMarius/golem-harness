@@ -61,6 +61,7 @@ const bot = mineflayer.createBot({
   // reset heartbeat cursor.
 })
 
+// Connection hardening adapted from Mindcraft's mcdata.js (MIT, https://github.com/kolbytn/mindcraft).
 // Move packets go out at most once per 50 ms. A PartialReadError the client emits is logged and dropped.
 function wireConnectionHardening () {
   try {
