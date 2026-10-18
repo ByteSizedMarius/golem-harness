@@ -1,10 +1,5 @@
 // Golem — a Mineflayer body for language-model pilots
 // Structured perception and actions over a small HMAC-signed HTTP API.
-const mineflayer = require('mineflayer')
-const { pathfinder } = require('mineflayer-pathfinder')
-const { plugin: collectBlock } = require('mineflayer-collectblock')
-const armorManager = require('mineflayer-armor-manager')
-const { chatMaxLen } = require('./lib/install')
 
 // The control API's HMAC key.
 const GOLEM_TOKEN = process.env.GOLEM_TOKEN || ''
@@ -12,6 +7,13 @@ if (GOLEM_TOKEN.length < 32) {
   console.error('[bot] GOLEM_TOKEN is missing or shorter than 32 characters, refusing to start')
   process.exit(1)
 }
+delete process.env.GOLEM_TOKEN   // before any module loads
+
+const mineflayer = require('mineflayer')
+const { pathfinder } = require('mineflayer-pathfinder')
+const { plugin: collectBlock } = require('mineflayer-collectblock')
+const armorManager = require('mineflayer-armor-manager')
+const { chatMaxLen } = require('./lib/install')
 const { HOST, PORT, VERSION, USERNAME, CTRL_PORT } = require('./lib/bot/config')
 const { createApp } = require('./lib/app')
 const { createContext } = require('./lib/context')

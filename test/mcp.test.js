@@ -11,7 +11,7 @@ const { ROUTE_BOUNDS } = require('../lib/bounds')
 const {
   HUNG, PORT, MCP_TOKEN, proofOver, timed, delay, rawReply, mcpServer, manualFixture, call, rpc, callReq, isToolError, isRpcError, assertOk,
   textOf, errorText, LOCAL_TOOLS, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
-  baseEnv, assertEntryServes, assertEntryRefuses, fakeBot, runEntry, tickFrom, tickReply, chatLine, botProcess, missing
+  baseEnv, assertEntryServes, assertEntryRefuses, fakeBot, runEntry, tickFrom, tickReply, chatLine, botProcess, missing, codeOnly
 } = require('./helpers')
 
 const FORBIDDEN_ROUTES = ['/snapshot', '/record', '/pov', '/threatdebug', '/pathdebug', '/stream', '/batch']
@@ -584,6 +584,14 @@ test('the entry point serves initialize with GOLEM_TOKEN in env and exits non-ze
   await assertEntryServes(t, PORT)
   await assertEntryRefuses(t, [String(PORT)], baseEnv())
   await assertEntryRefuses(t, [String(PORT), MCP_TOKEN], baseEnv())
+})
+
+// ASVS 13.3.1
+test('the entry point deletes GOLEM_TOKEN from the environment in the statement after its length check', () => {
+  const code = codeOnly(fs.readFileSync(path.join(__dirname, '..', 'mcp', 'server.js'), 'utf8'))
+  const check = /^[ \t]*if\s*\(\s*token\.length\s*<\s*TOKEN_MIN\s*\)\s*fail\([^()\n]*\)[ \t;]*\r?\n/m
+  assert.match(code, check, 'control: the length check is found')
+  assert.match(code, new RegExp(check.source + /[ \t]*delete\s+process\.env\.GOLEM_TOKEN[ \t;]*\r?$/.source, 'm'))
 })
 
 test('onToolCall gets the tool name and the sorted names of its params the call passed, never their values', async () => {

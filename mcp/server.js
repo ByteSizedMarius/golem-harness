@@ -806,6 +806,7 @@ function main () {
   }
   const token = process.env.GOLEM_TOKEN || ''
   if (token.length < TOKEN_MIN) fail(`GOLEM_TOKEN is missing or shorter than ${TOKEN_MIN} characters`)
+  delete process.env.GOLEM_TOKEN
   // A restarted server resumes from the last frontier the wake log holds.
   let start
   let onWaitStart

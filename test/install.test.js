@@ -6,7 +6,7 @@ const express = require('express')
 const { installSecurity, chatMaxLen } = require('../lib/install')
 const { ROUTE_BOUNDS } = require('../lib/bounds')
 const {
-  ALLOW, PORT, UNAUTHORIZED, stripLead, assertSafeChunks, startApp, stateControl, referenceApp, proofOver, otherKey
+  ALLOW, PORT, UNAUTHORIZED, stripLead, assertSafeChunks, startApp, stateControl, referenceApp, proofOver, otherKey, toolNamed
 } = require('./helpers')
 
 const enc = encodeURIComponent
@@ -271,6 +271,28 @@ test('/sign text over 90 characters and /rename names over 35 get 400', async (t
   assert.strictEqual((await s.get('/rename?item=iron_sword&name=' + 'a'.repeat(36))).status, 400, 'a 36-character name')
   assert.strictEqual(s.routeHits('/sign').length, 1)
   assert.strictEqual(s.routeHits('/rename').length, 1)
+})
+
+// ASVS 2.2.1
+test('/grave take at its schema maxLen passes, one character more gets 400 and the route does not run', async (t) => {
+  const { maxLen } = toolNamed('grave').params.take
+  const s = await startApp(t)
+  assert.strictEqual((await s.get('/grave?take=' + 'a'.repeat(maxLen))).status, 200, `control: ${maxLen} characters`)
+  const r = await s.get('/grave?take=' + 'a'.repeat(maxLen + 1))
+  assert.strictEqual(r.status, 400)
+  assert.strictEqual(s.routeHits('/grave').length, 1)
+})
+
+// ASVS 2.2.1
+test('/grave take with a control character gets 400 and the route does not run, chat text keeps its tab', async (t) => {
+  const s = await startApp(t)
+  assert.strictEqual((await s.get('/grave?take=a')).status, 200, 'control: take=a')
+  const r = await s.get('/grave?take=a%01')
+  assert.strictEqual(r.status, 400)
+  assert.strictEqual(s.routeHits('/grave').length, 1)
+  const chat = await s.get('/chat?msg=a%09b')
+  assert.strictEqual(chat.status, 200)
+  assertQueuedCount(chat, 1)
 })
 
 // ---- /chat ----

@@ -2,7 +2,9 @@
 // Requiring bot.js connects to a server.
 const test = require('node:test')
 const assert = require('node:assert')
-const { botSource, codeOnly, balanced } = require('./helpers')
+const fs = require('node:fs')
+const path = require('node:path')
+const { ROOT, botSource, codeOnly, balanced } = require('./helpers')
 
 const src = botSource()
 const code = codeOnly(src)
@@ -31,4 +33,22 @@ test('bot.js reads its settings from the process environment with no .env loader
   assert.doesNotMatch(src, /['"`/]\.env\b/)
   assert.doesNotMatch(src, /loadEnvFile/)
   assert.doesNotMatch(src, /dotenv/)
+})
+
+// ASVS 13.3.1
+test('bot.js deletes GOLEM_TOKEN from process.env before it requires any module', () => {
+  const bot = codeOnly(fs.readFileSync(path.join(ROOT, 'bot.js'), 'utf8'))
+  const read = /^const\s+GOLEM_TOKEN\s*=\s*process\.env\.GOLEM_TOKEN\s*\|\|\s*(['"])\1[ \t;]*\r?\n/m
+  // The gate's body lines are indented or blank.
+  const gate = /if\s*\(\s*GOLEM_TOKEN\.length\s*<[^)]*\)\s*\{\r?\n(?:[ \t].*\r?\n|\r?\n)*?\}[ \t;]*\r?\n/
+  const del = /delete\s+process\.env\.GOLEM_TOKEN[ \t;]*\r?$/
+  // codeOnly blanks comment lines to whitespace.
+  const gap = /(?:[ \t]*\r?\n)*[ \t]*/.source
+  assert.match(bot, read, 'control: the token read is found')
+  assert.match(bot, new RegExp('^' + gate.source, 'm'), 'control: the gate is found')
+  const trio = new RegExp(read.source + gap + gate.source + gap + del.source, 'm').exec(bot)
+  assert.ok(trio, 'the token read, the gate and the delete are not consecutive statements')
+  const first = bot.search(/\brequire\s*\(/)
+  const end = trio.index + trio[0].length
+  assert.ok(first < 0 || first > end, `bot.js:${bot.slice(0, first).split('\n').length} requires a module before the delete`)
 })
