@@ -7,7 +7,6 @@ node_modules/
 
 # environment / per-session state
 .env
-heartbeat_cursor.txt
 stop.flag
 *.log
 
@@ -16,24 +15,10 @@ seen.json
 waypoints.json
 journal.md
 
-# camera output
-snapshot.png
-snapshot-crop.png
-screenshots/
-
 # local backups
 backups/
 
-# private logs of the first crew — not part of the harness
-journal-entries/
-chronicles/
-
-# internal migration notes
-MIGRATION.md
-npm-install.log
 __pycache__/
-recordings/
-tools/ffmpeg/
 
 # entity-registry: upstream clone + regenerable bulk outputs (report.md IS committed)
 tools/entity-registry/bedrock-samples/

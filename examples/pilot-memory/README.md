@@ -4,7 +4,7 @@ The harness gives the **bot** memory: `waypoints.json`, the SEEN mask, the on-di
 world persists. But the **pilot** — the language model driving — dies at the end of every context
 window. Next session, a fresh instance wakes with no idea that it promised to free anyone, that
 the west tunnel flooded, or that it already learned (the hard way) not to chase item drops near
-lava. DRIVING.md law 23 names the wound: *the world persists, your context doesn't.*
+lava. That is the wound: *the world persists, your context doesn't.*
 
 This directory is the treatment, exactly as the first crew runs it: a **tiered memory graph** the
 pilot maintains about itself, living wherever your agent harness persists notes between sessions
