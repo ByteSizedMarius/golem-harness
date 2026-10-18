@@ -13,6 +13,14 @@ and its sound played once per kind. `withdraw` and `deposit` now take up to 8 na
 separated by `|` and move them all with one open. The reply lists each kind moved, plus
 `missing` for names that matched nothing, and `count` applies to each name.
 
+Lava or fizz. Live, the pilot heard "LAVA W ~6" by the base where the only thing around was
+a zombie, and reported lava. On 1.7.10 the only lava sound is the fizz of lava meeting water,
+and a burning mob going out makes the same fizz. On a 1.7.10 server the hear event, `listen`
+and the scene's Hear: line now say `lava or fizz`, still a throttled hear event. The pilot
+also took an explosion heard at ~55 for one near the owner. The perception manual now gives
+the hearing ranges: most sounds reach about 16 blocks, explosions about 64, and a sound gives
+a distance and a direction, not who caused it.
+
 ## 2026-10-15: live-play fixes
 
 Busy body. A client that moves a tool call running past 10 s into the background lets the

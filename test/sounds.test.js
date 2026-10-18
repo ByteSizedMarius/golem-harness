@@ -81,9 +81,10 @@ test('thunder from both names gives thunder', () => {
   }
 })
 
-// The bot's onSound for a body at the origin on a 1.7.10 server, and the types of the events it raised.
+// The bot's onSound for a body at the origin on a 1.7.10 server, the types of the events it raised and their texts.
 function ears (extra = {}) {
   const raised = []
+  const texts = []
   const { onSound } = loadBotFunctions(['onSound'], {
     ...extra,
     bot: { entity: { position: new Vec3(0.5, 64, 0.5) } },
@@ -93,9 +94,9 @@ function ears (extra = {}) {
     dangerHeard: {},
     lastThunder: 0,
     lastThunderPos: null,
-    emitEvent: (type) => raised.push(type)
+    emitEvent: (type, text) => { raised.push(type); texts.push(text) }
   })
-  return { onSound, raised }
+  return { onSound, raised, texts }
 }
 
 test('the explosion 1.7.10 lightning plays where its thunder struck raises no hear event, one elsewhere does', () => {
@@ -138,9 +139,18 @@ test('a danger sound raises at most one hear event per category within the throt
   assert.strictEqual(heard(lava), 1, 'lava again once the window has passed')
 })
 
-test('extinguish_fire gives lava under legacy1710 only', () => {
-  assert.strictEqual(classify('minecraft:entity.generic.extinguish_fire', LEGACY), 'lava')
-  assert.notStrictEqual(classify('minecraft:entity.generic.extinguish_fire', MODERN), 'lava')
+test('extinguish_fire gives lava or fizz under legacy1710 only', () => {
+  const name = 'minecraft:entity.generic.extinguish_fire'
+  assert.strictEqual(classify(name, LEGACY), 'lava or fizz')
+  assert.notStrictEqual(classify(name, MODERN), 'lava')
+  assert.notStrictEqual(classify(name, MODERN), 'lava or fizz')
+})
+
+test('a 1.7.10 extinguish_fire raises one hear event that reads lava or fizz', () => {
+  const { onSound, raised, texts } = ears()
+  onSound('minecraft:entity.generic.extinguish_fire', new Vec3(-5.5, 64, 0.5))
+  assert.deepStrictEqual(raised, ['hear'])
+  assert.ok(texts[0].startsWith('LAVA OR FIZZ '), texts[0])
 })
 
 test('a music_disc name is never filed as lava', () => {
