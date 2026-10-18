@@ -8,7 +8,7 @@ A block shows only when a player standing where you stand could see it: exposed 
 
 ## Light
 
-How far you see a block or a mob depends on the light where it is, block light or sky light, whichever is brighter:
+How far you see a block or a mob depends on the light where it is, block or sky light, whichever is brighter:
 
 | Light | You see it up to |
 |---|---|
@@ -21,7 +21,7 @@ How far you see a block or a mob depends on the light where it is, block light o
 | 6 | 24 |
 | 7 and up | any distance |
 
-Sky light falls with the time of day, to 4 at midnight, so at midnight blocks, ore and mobs on open ground show about 12 blocks out, while `map` and the lay of the land in `scene` show the open surface at any hour. A dark cave shows the 2 blocks around you until you light it. A torch you place shows its surroundings at once.
+Sky light falls to 4 at midnight, so blocks, ore and mobs on open ground show about 12 blocks out. A dark cave shows the 2 blocks around you until lit. A placed torch shows its surroundings at once.
 
 ## Two tiers of knowing
 
@@ -33,13 +33,13 @@ Speak the tiers back. Navigate by structure and mine what is seen.
 ## Which sense
 
 - `scene` is the default glance. Call it constantly. Its `steps` grid shows how far each cell around you lies up or down, the check before a jump or a climb. Overhead it counts the cover and names its top only when the sky shows. Under rock it gives the first solid you see and leaves the rest unknown.
-- `gaze` is the deliberate look, where a person would turn their head. It feeds the seen set and draws `map`. Past the reach of the light it says too dark instead of naming what is there. When a far reading surprises you, check it with `find` before building a theory on it.
+- `gaze` is the deliberate look, where a person would turn their head. It feeds the seen set and draws `map`. Past the reach of the light it says too dark. When a far reading surprises you, check it with `find` before building a theory on it.
 - `section` is the cave tool. It shows the vertical structure `map` cannot.
 - `passages` answers which ways this space goes.
 - `map`: a small radius (8 to 12) for a quick local read, larger to survey. `@` is you, `T` tree, log or leaves, `#` stone, `~` water or lava, `.` ground, `=` built blocks (planks, bricks, glass, furnace, chest), a space air or open, `·` unexplored. It shows the top block of each column from 4 above your feet to 19 below. Row 0 is north, left is west. Underground it says it is a slice.
 - `listen` hears through walls. Danger sounds (lava, fuse, explosion) also arrive as hear events, throttled so a noisy area cannot flood you. Most sounds reach about 16 blocks, explosions about 64. A sound gives a distance and a direction, not who caused it.
 - `entities` looks 24 out, and `radius` takes it to 128, where the server stops tracking. Within about 20 it also finds mobs and players joined to you by air you have seen or open surface.
-- Players: in sight you know where they are, but an invisible player stays unseen. A player who neither sneaks nor is invisible shows a nametag through walls within 64 blocks, which gives a bearing and a distance rounded to 5. `where`, `goto(player: ...)` and `follow` use the same tiers, and a `player` event tells when someone comes into view or goes out of sight. Toward a nametag alone, `goto` and `follow` head for the centre of its 5-block cube until the player comes into sight.
+- Players: in sight you know where they are, except an invisible one. A player who neither sneaks nor is invisible shows a nametag through walls within 64 blocks, giving a bearing and a distance rounded to 5. `where`, `goto(player: ...)` and `follow` use the same tiers, and a `player` event marks someone coming into or going out of sight. Toward a nametag alone, `goto` and `follow` head for the centre of its 5-block cube until the player is in sight.
 
 ## Scout tower
 
