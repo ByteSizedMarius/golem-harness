@@ -5,6 +5,7 @@ const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const rules = require('../lib/combat-rules')
+const legacy1710 = require('../lib/bot/legacy-1710')
 const { isDoor } = require('../lib/doors')
 const { expireConfirmed } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
@@ -100,13 +101,13 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
     noCritReason: rules.noCritReason,
     noRunReason: rules.noRunReason,
     runCells: rules.runCells,
-    RUN_COAST: rules.RUN_COAST,
+    RUN_COAST: legacy1710.RUN_COAST,
     JUMP_FALL_TICKS: rules.JUMP_FALL_TICKS,
     JUMP_TICKS: rules.JUMP_TICKS,
     RUN_MAX: rules.RUN_MAX,
     RUN_TICKS: rules.RUN_TICKS,
     SWING_REACH: rules.SWING_REACH,
-    HITBOX_1710: rules.HITBOX_1710,
+    HITBOX_1710: legacy1710.HITBOX_1710,
     Vec3,
     fight: { lastAttackT: 0 },
     STRIKE_SWING_MS: rules.STRIKE_SWING_MS,

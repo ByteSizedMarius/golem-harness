@@ -296,7 +296,7 @@ test('water high over open ground on a modern server holds the sky light that re
 // 0,60,0, open to the sky until a roof is laid at 0,64,0. The chunk holds the sky light a 1.7.10 server sends there.
 function pool1710 (roofed) {
   const roof = new Set()
-  const env = wireLight({ ...world({ open: (x, y, z) => (y >= 64 && !roof.has(ck(x, y, z))) || (x === 0 && y === 60 && z === 0), light: () => 0 }), LEGACY_1710: true })
+  const env = wireLight({ ...world({ open: (x, y, z) => (y >= 64 && !roof.has(ck(x, y, z))) || (x === 0 && y === 60 && z === 0), light: () => 0 }), LEGACY_1710: true, LEGACY_WATER_FILTER: botConstant('LEGACY_WATER_FILTER') })
   env.bot.game = { minY: 0, height: 256, dimension: 'overworld' }
   const ground = env.bot.blockAt
   const sent = { 63: 12, 62: 9, 61: 6, 60: 5 }

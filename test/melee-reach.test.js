@@ -3,6 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const rules = require('../lib/combat-rules')
+const { HITBOX_1710, LEGACY_SNEAK_EYE } = require('../lib/bot/legacy-1710')
 const { loadBotFunctions } = require('./helpers')
 
 const mcData = require('minecraft-data')('1.21.11')
@@ -13,7 +14,7 @@ function reach (feet, legacy, { crouching = false, data = null } = {}) {
     entity: { position: feet, crouching },
     blockAt: (p) => ({ name: 'air', boundingBox: 'empty', shapes: [], position: p })
   }
-  const env = { bot, Vec3, shared: { mcData: data }, LEGACY_1710: legacy, HITBOX_1710: rules.HITBOX_1710, SWING_REACH: rules.SWING_REACH }
+  const env = { bot, Vec3, shared: { mcData: data }, LEGACY_1710: legacy, HITBOX_1710, LEGACY_SNEAK_EYE, SWING_REACH: rules.SWING_REACH }
   return loadBotFunctions(['inMeleeReach'], env).inMeleeReach
 }
 

@@ -6,6 +6,7 @@ const { goals } = require('mineflayer-pathfinder')
 const { routeWithin } = require('../lib/flee')
 const { mobFamily, expireConfirmed } = require('../lib/shelter')
 const rules = require('../lib/combat-rules')
+const legacy1710 = require('../lib/bot/legacy-1710')
 const { loadBotFunctions, combatReflexIn, botConstant, laneAt } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
@@ -78,7 +79,7 @@ async function standoff (extra, mob, over = {}) {
     AGGRO_CONFIRMED: new Map(),
     bunker: { building: false },
     shared: { mcData: null },
-    HITBOX_1710: rules.HITBOX_1710,
+    HITBOX_1710: legacy1710.HITBOX_1710,
     GUARD_REACH: botConstant('GUARD_REACH'),
     GUARD_STEPS: botConstant('GUARD_STEPS'),
     CREEPER_DROP: botConstant('CREEPER_DROP'),
@@ -381,7 +382,7 @@ test('the vanguard reflex neither chases nor swings at a zombie that hit the bod
         entityPerceptible: () => seen,
         takeLegs (reflex, why) { legs.push(why) },
         runCells: rules.runCells,
-        RUN_COAST: rules.RUN_COAST,
+        RUN_COAST: legacy1710.RUN_COAST,
         RUN_TICKS: rules.RUN_TICKS,
         ...env
       }
@@ -396,7 +397,7 @@ test('the vanguard reflex neither chases nor swings at a zombie that hit the bod
     assert.deepStrictEqual(await fight(false, 5.5, { sprintBlock }), NONE, `a chase behind the wall, run ${sprintBlock()}`)
   }
   for (const legacy of [true, false]) {
-    const reach = { ...IN_REACH, LEGACY_1710: legacy, meleeAim: undefined, HITBOX_1710: rules.HITBOX_1710 }
+    const reach = { ...IN_REACH, LEGACY_1710: legacy, meleeAim: undefined, HITBOX_1710: legacy1710.HITBOX_1710 }
     assert.ok((await fight(true, 3.5, reach)).swings > 0, `control: no swing in sight, 1.7.10 ${legacy}`)
     assert.deepStrictEqual(await fight(false, 3.5, reach), NONE, `a swing behind the wall, 1.7.10 ${legacy}`)
   }
