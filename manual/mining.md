@@ -9,6 +9,7 @@
 - A walk wedged for about 10 s gets the unstuck reflex: it replans, steps back, opens a door or jumps a step, and breaks the block in the way only when the same block is in your pockets to put back. When none of that frees you, it stops the walk and its event names where you are stuck, against what, and what it tried. Dig out yourself from there.
 - When something else holds the hand, `digat` puts a carried tool that harvests the block back in it, or refuses the dig.
 - A nearly broken tool raises a wear event.
+- Every dug block costs the pick about 1 durability. A bulk dig with `dig_tunnel`, such as a room, needs a spare pick or a few stone picks (3 cobblestone and 2 sticks each).
 
 ## Pockets
 
