@@ -750,7 +750,7 @@ async function walkingBody (t, pos, cells = {}) {
       return b
     }
   })
-  const ctx = { bot, knownMoves: (m) => m, navPlaced: [], startReflexes () {}, vecStr: (p) => `${p.x},${p.y},${p.z}`, startViewer () {} }
+  const ctx = { bot, knownMoves: (m) => m, navPlaced: [], startReflexes () {}, vecStr: (p) => `${p.x},${p.y},${p.z}` }
   createConnection(ctx)
   bindConnection(ctx)
   wireConnectionSpawn()

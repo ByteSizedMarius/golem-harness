@@ -23,16 +23,13 @@
   },
   "type": "commonjs",
   "dependencies": {
-    "canvas": "^3.2.3",
     "express": "^5.2.1",
     "minecraft-data": "^3.111.0",
     "minecraft-protocol": "^1.66.2",
     "mineflayer": "^4.37.1",
     "mineflayer-armor-manager": "^2.0.1",
     "mineflayer-collectblock": "^1.6.0",
-    "mineflayer-pathfinder": "^2.4.5",
-    "prismarine-viewer": "^1.33.0",
-    "puppeteer-core": "^23.11.1"
+    "mineflayer-pathfinder": "^2.4.5"
   },
   "devDependencies": {
     "patch-package": "^8.0.1"

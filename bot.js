@@ -38,7 +38,6 @@ const { createBunker, bindBunker, wireThreatReset } = require('./lib/bot/bunker'
 const { createSenses, bindSenses, wireSoundTablePin, wireHearing, wireOwnEditStamps, wireWorldChangeNotes, wireWorldChangeEvents, wireOreCallout } = require('./lib/bot/senses')
 const { createAlarms, bindAlarms, wireWearAlarm, wirePocketAlarm, wireTrailMarks, wireBodyAlarms } = require('./lib/bot/alarms')
 const { createConnection, bindConnection, wireConnectionSpawn, wireConnectionEvents, wireLookPaceGoto } = require('./lib/bot/connection')
-const { createViewer, bindViewer } = require('./lib/bot/viewer')
 const { createReply, bindReply } = require('./lib/routes/reply')
 const { createDebugRoutes, bindDebugRoutes } = require('./lib/routes/debug')
 const { createSocialRoutes, bindSocialRoutes } = require('./lib/routes/social')
@@ -110,7 +109,6 @@ wireEarly()
 
 createLegs(ctx)
 
-createViewer(ctx)
 createConnection(ctx)
 
 createStreams(ctx)
@@ -264,7 +262,6 @@ function bindAll () {
   bindSenses(ctx)
   bindAlarms(ctx)
   bindConnection(ctx)
-  bindViewer(ctx)
   bindReply(ctx)
   bindDebugRoutes(ctx)
   bindSocialRoutes(ctx)

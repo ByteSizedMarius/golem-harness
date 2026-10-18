@@ -1,8 +1,7 @@
 .claude/
 /claude.md
 
-# dependencies (patches/ re-applies our fixes via postinstall; the 1.21.11 viewer
-# bundles are a GitHub Release asset — see install-viewer.sh)
+# dependencies (patches/ re-applies our fixes via postinstall)
 node_modules/
 
 # environment / per-session state
@@ -19,9 +18,3 @@ journal.md
 backups/
 
 __pycache__/
-
-# entity-registry: upstream clone + regenerable bulk outputs (report.md IS committed)
-tools/entity-registry/bedrock-samples/
-tools/entity-registry/out/converted.json
-tools/entity-registry/out/merged-entities.json
-tools/viewer-qa/*.png

@@ -36,7 +36,6 @@ function eventRig (t, { entityPerceptible = () => true } = {}) {
     reflexes: [{ name: 'combat', fairFill: () => null }],
     liveEntities: () => [],
     nightfall: (fired) => fired,
-    startViewer () {},
     bunker: { building: false },
     freezeBody () {},
     waypoints: { set () {} },
