@@ -63,6 +63,7 @@ function craftEnv (bot, serverRecipes) {
     bot,
     shared: { mcData },
     SERVER_RECIPES: serverRecipes,
+    LEGACY_1710: false,
     overrideRecipes,
     craftable,
     resolveItem: (name) => mcData.itemsByName[name] || null,
@@ -77,12 +78,35 @@ function craftEnv (bot, serverRecipes) {
 const cellsOf = (recipe) => recipe.inShape.map((row) => row.map((cell) => (cell.id === -1 ? null : mcData.items[cell.id].name)))
 
 test('an overridden oak_fence takes 6 sticks at a table and yields 2 per craft', (t) => {
+  assert.strictEqual(recipesOf(t).get('oak_fence').length, 1)
   const [fence] = overrideRecipes(recipesOf(t), 'oak_fence', mcData.itemsByName)
   assert.deepStrictEqual(cellsOf(fence), [['stick', 'stick', 'stick'], ['stick', 'stick', 'stick']])
   assert.strictEqual(fence.result.count, 2)
   assert.strictEqual(fence.requiresTable, true)
   assert.deepStrictEqual(craftable([fence], TABLE, (itemId) => (itemId === id('stick') ? 5 : 0)), [])
   assert.deepStrictEqual(craftable([fence], TABLE, (itemId) => (itemId === id('stick') ? 6 : 0)), [fence])
+})
+
+test('several entries for one item each give their own recipes, their id, name and metadata keys ignored', (t) => {
+  const spec = {
+    ingredients: {
+      oak: { items: ['oak_planks'], metadata: 0 },
+      birch: { items: ['birch_planks'], metadata: 2 }
+    },
+    recipes: [
+      { item: 'oak_boat', id: 333, name: 'boat', count: 1, inShape: [['oak', null, 'oak'], ['oak', 'oak', 'oak']] },
+      { item: 'oak_boat', id: 4099, name: 'birch_boat', count: 1, inShape: [['birch', null, 'birch'], ['birch', 'birch', 'birch']] }
+    ],
+    blocks: {}
+  }
+  const recipes = recipesOf(t, spec)
+  assert.strictEqual(recipes.get('oak_boat').length, 2)
+  const boats = overrideRecipes(recipes, 'oak_boat', mcData.itemsByName)
+  assert.deepStrictEqual(boats.map(cellsOf), [
+    [['oak_planks', null, 'oak_planks'], ['oak_planks', 'oak_planks', 'oak_planks']],
+    [['birch_planks', null, 'birch_planks'], ['birch_planks', 'birch_planks', 'birch_planks']]
+  ])
+  assert.deepStrictEqual(craftable(boats, TABLE, (itemId) => (itemId === id('birch_planks') ? 5 : 0)), [boats[1]])
 })
 
 test('craft counts made items by the override yield', async (t) => {

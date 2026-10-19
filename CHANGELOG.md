@@ -67,6 +67,16 @@ nearest empty one and replies with the item the frame shows after the server's u
 empty frame, which a strike would knock off. Bone meal aimed at the soil under a seen crop
 or sapling clicks the plant and replies its age or stage.
 
+Crafts count what the server made. Live on 1.7.10, `craft(ladder, 3)` answered made 3 while
+the used sticks still showed, and birch planks turned into an oak button the reply never
+named. On 1.7.10 a table craft now waits for the server's inventory update (at most 500 ms),
+counts the item after it, and says `unconfirmed` when none came. A pass the server makes
+nothing from ends the craft with a note. A request under a 1.21 wood name the server knows
+as one item, such as `birch_button`, crafts that item and says so. Every 1.21 `<wood>_fence`
+maps to the one 1.7.10 fence, `oak_fence`. A 2x2 recipe whose seen table is out of reach
+crafts in the inventory grid and says so. Recipe overrides take several entries for one
+item.
+
 ## 2026-10-18: live-play fixes
 
 Chest batches. Live, the pilot moved several item kinds one call each, so the chest opened
