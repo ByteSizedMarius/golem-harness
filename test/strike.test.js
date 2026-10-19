@@ -485,6 +485,7 @@ function combatIn (world, foe) {
     AGGRO_CONFIRMED: new Map([[foe.id, { name: foe.name, t: 0 }]]),
     expireConfirmed,
     CONFIRMED_MS: botConstant('CONFIRMED_MS'),
+    CONFIRMED_COOL_MS: botConstant('CONFIRMED_COOL_MS'),
     CONFIRMED_HORIZON: botConstant('CONFIRMED_HORIZON'),
     fight: { ...env.fight, threatDebugUntil: 0, stance: 'guard' },
     STANCES: { guard: { fleeDist: 16, bowBand: [7, 24], chase: false, engage: 'closers' } },

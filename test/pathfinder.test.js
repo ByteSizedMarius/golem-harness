@@ -7,6 +7,7 @@ const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
 const { Physics } = require('prismarine-physics')
 const { GRAVESTONE } = require('../lib/server-overrides')
+const { CREEPER_ZONE_SLACK, inCreeperZone, zoneCrossed } = require('../lib/plan')
 const { botConstant, groundMemory, loadBotFunctions, walkingBody } = require('./helpers')
 
 const WALL_ARM = ['cobblestone_wall', { up: 'false', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
@@ -412,4 +413,63 @@ test('the walk and a collect drop 3 blocks off a pillar and not 4, the forestry 
     [3, 'success', 'success', 'noPath'],
     [4, 'noPath', 'noPath', 'noPath']
   ])
+})
+
+// body() whose moves keep out of the zone of a creeper at `at` that the combat reflex watches, through bot.js's creeperZones.
+async function zonedBody (pos, cells, at, radius) {
+  const b = await body(pos, cells)
+  const zone = { id: 9, at, radius }
+  const env = {
+    bot: { entity: b.bot.entity, pathfinder: { movements: b.moves } },
+    reflexes: [{ name: 'combat', watchedCreepers: () => [zone] }],
+    routeEnd: () => null,
+    inCreeperZone
+  }
+  const zones = loadBotFunctions(['creeperZones'], env).creeperZones({})
+  return { ...b, zones, crossed: (path) => zoneCrossed([zone], path, zones.bounds) }
+}
+
+// The plan for goal with the zones off, then on.
+function bothWays (b, goal) {
+  b.zones.on = false
+  const open = b.plan(goal)
+  b.zones.on = true
+  return { open, zoned: b.plan(goal) }
+}
+
+test('a walk past a creeper zone routes round it on flat ground, across a parkour gap and past a drop that lands in it', async () => {
+  const flat = await zonedBody(START, {}, new Vec3(5.5, 64, 0.5), 3)
+  const plain = bothWays(flat, new goals.GoalBlock(10, 64, 0))
+  assert.ok(flat.crossed(plain.open.path), 'control: the straight way runs through the zone')
+  assert.deepStrictEqual([plain.zoned.status, flat.crossed(plain.zoned.path)], ['success', null], 'flat ground')
+  // A trench at x 3 too deep to drop into.
+  const trench = {}
+  for (let z = -10; z <= 10; z++) for (let y = 40; y <= 63; y++) trench[`3,${y},${z}`] = ['air', {}]
+  const gap = await zonedBody(START, trench, new Vec3(4.5, 64, 0.5), 3)
+  gap.moves.allowParkour = true
+  const jump = bothWays(gap, new goals.GoalBlock(8, 64, 0))
+  assert.ok(gap.crossed(jump.open.path), 'control: the jump straight across lands in the zone')
+  assert.deepStrictEqual([jump.zoned.status, gap.crossed(jump.zoned.path), jump.zoned.path.some((n) => n.parkour)], ['success', null, true], 'the gap')
+  // A ledge 3 high at x 2 and west of it.
+  const ledge = {}
+  for (let x = -5; x <= 2; x++) for (let z = -10; z <= 10; z++) for (let y = 64; y <= 66; y++) ledge[`${x},${y},${z}`] = STONE
+  const high = await zonedBody(new Vec3(0.5, 67, 0.5), ledge, new Vec3(4.5, 64, 0.5), 3)
+  const drop = bothWays(high, new goals.GoalBlock(8, 64, 0))
+  assert.ok(high.crossed(drop.open.path), 'control: the drop straight off the ledge lands in the zone')
+  assert.deepStrictEqual([drop.zoned.status, high.crossed(drop.zoned.path)], ['success', null], 'the drop')
+})
+
+test('a walk that passes a creeper at fleeDist + 1 runs through its zone and is no way', async () => {
+  const fleeDist = 8
+  // A sealed corridor at z 0 from x 0 to 20 that passes 9 from the creeper.
+  const cells = {}
+  for (let x = -1; x <= 21; x++) {
+    for (const y of [64, 65]) {
+      for (const z of [-1, 1]) cells[`${x},${y},${z}`] = STONE
+      if (x === -1 || x === 21) cells[`${x},${y},0`] = STONE
+    }
+  }
+  const b = await zonedBody(START, cells, new Vec3(10.5, 64, 9.5), fleeDist + CREEPER_ZONE_SLACK)
+  const { open, zoned } = bothWays(b, new goals.GoalBlock(20, 64, 0))
+  assert.deepStrictEqual([open.status, zoned.status], ['success', 'noPath'])
 })

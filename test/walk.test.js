@@ -7,10 +7,12 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const walk = require('../lib/walk')
 const { playerNamed, playersAround } = require('../lib/players')
-const { summarizePlan, planRisk } = require('../lib/plan')
+const { summarizePlan, planRisk, inCreeperZone, zoneCrossed, CREEPER_ZONE_SLACK } = require('../lib/plan')
 const { legLedger } = require('../lib/leg-ledger')
 const { createDescribe } = require('../lib/bot/describe')
-const { loadBotFunctions, botConstant, startApp, fakeClock } = require('./helpers')
+const { expireConfirmed } = require('../lib/shelter')
+const { STANCES } = require('../lib/bot/stances')
+const { loadBotFunctions, botConstant, startApp, fakeClock, combatReflexIn } = require('./helpers')
 
 const { UNLOADED, UNKNOWN, standCell, targetKind, resolveTarget, crumbCentre, arrivedAt, watchProgress, walkAttempt, routeDeadline } = walk
 
@@ -473,6 +475,8 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     planPath: async (g) => ({ status: 'success', path: [new Vec3(g.x + 0.5, g.y, g.z + 0.5)] }),
     summarizePlan,
     planRisk,
+    inCreeperZone,
+    zoneCrossed,
     ...over
   })
   return { env, bot, ctx: loadBotFunctions(['walkRoute', 'stagedGoto', 'collectDrops'], env) }
@@ -1094,4 +1098,231 @@ test('a player known only by the nametag gets no plan, so neither a preview nor 
   assert.deepStrictEqual(r, { arrived: false, kind: 'player', target: { player: 'Steve' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: 10, reason: 'unresolved', hint: r.hint, bearing: 'E', plan: null })
   const walked = await plannedGoto({ player: 'Steve' }, {}, { setup, over: tagged, answer: update('noPath') })
   assert.deepStrictEqual([walked.r.reason, planned], ['no-path', 1], 'the walk toward a nametag plans nothing up front')
+})
+
+// Movements offering the moves from the start cell east onto 1,64,0 and north onto 0,64,-1.
+class OfferedMoves {
+  getNeighbors () { return [{ x: 1, y: 64, z: 0 }, { x: 0, y: 64, z: -1 }] }
+}
+class EastMoves {
+  getNeighbors () { return [{ x: 1, y: 64, z: 0 }] }
+}
+const offered = (moves) => moves.getNeighbors({ x: 0, y: 64, z: 0 }).map((m) => `${m.x},${m.z}`)
+// A creeper the combat reflex watches 4 east of the body, which bounds its zone at 4.
+const WATCHED = { id: 31, at: new Vec3(4.5, 64, 0.5), radius: 11 }
+const pathNode = (x, y, z) => new Vec3(x + 0.5, y, z + 0.5)
+const STRAIGHT = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((x) => pathNode(x, 64, 0))
+// North to z -4, east past the creeper, south onto 10,64,0.
+const ROUND = [
+  ...[-1, -2, -3, -4].map((z) => pathNode(0, 64, z)),
+  ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((x) => pathNode(x, 64, -4)),
+  ...[-3, -2, -1, 0].map((z) => pathNode(10, 64, z))
+]
+// The search over moves: STRAIGHT while the move east is offered, round when only the move north is, else none.
+const searchOver = (moves, round = ROUND) => async () => {
+  const cells = offered(moves)
+  if (cells.includes('1,0')) return { status: 'success', path: STRAIGHT }
+  if (cells.includes('0,-1')) return { status: 'success', path: round }
+  return { status: 'noPath', path: [] }
+}
+
+// plannedGoto over moves, the combat reflex watching the creepers in watched, or without watchedCreepers when watched is undefined.
+function watchedGoto (q, walkOpts, { moves, watched, round, answer = arrive, search = searchOver(moves, round) } = {}) {
+  const reflexes = [{ name: 'combat', fairFill: () => ({}), ...(watched && { watchedCreepers: () => watched }) }]
+  const setup = (bot) => { bot.pathfinder.movements = moves }
+  return plannedGoto(q, walkOpts, { setup, answer, over: { reflexes, planPath: search } })
+}
+
+test('a goto plans, previews and walks round the zone of a creeper the combat reflex watches, and refuses a risk on that plan', async () => {
+  const moves = new OfferedMoves()
+  const during = []
+  const answer = (bot, g) => { during.push(offered(moves)); arrive(bot, g) }
+  const walked = await watchedGoto({ x: 10, z: 0 }, {}, { moves, watched: [WATCHED], answer })
+  assert.deepStrictEqual([walked.walks, walked.r.arrived, during], [1, true, [['0,-1']]], 'the walk keeps the zone too')
+  const round = { reaches: true, length: 18, rise: 0, drop: 0, end: { x: 10, y: 64, z: 0 }, unseen: false }
+  const preview = await watchedGoto({ x: 10, z: 0 }, { preview: true }, { moves, watched: [WATCHED] })
+  assert.deepStrictEqual([preview.walks, preview.r.plan], [0, round])
+  const straight = await watchedGoto({ x: 10, z: 0 }, { preview: true }, { moves })
+  assert.strictEqual(straight.r.plan.length, 10, 'control: no creeper watched')
+  const cliff = ROUND.map((n) => (n.x === 5.5 ? n.offset(0, -5, 0) : n))
+  const risky = await watchedGoto({ x: 10, z: 0 }, {}, { moves, watched: [WATCHED], round: cliff })
+  assert.deepStrictEqual([risky.walks, risky.r.reason, risky.r.risk, risky.r.plan.length], [0, 'risky', 'it drops 5 blocks at once', 18])
+})
+
+test('a goto with no way round a watched creeper replies creeper with the creeper cell and walks nothing', async () => {
+  const blocked = {
+    arrived: false, kind: 'coordinate', target: { x: 10, y: 64, z: 0 }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: 10, reason: 'creeper',
+    hint: 'a creeper at 4,64,0 blocks the way: wait for it to move, pick another point, or walk anyway with accept'
+  }
+  const walked = await watchedGoto({ x: 10, z: 0 }, {}, { moves: new EastMoves(), watched: [WATCHED] })
+  assert.deepStrictEqual([walked.walks, walked.r], [0, blocked])
+  const preview = await watchedGoto({ x: 10, z: 0 }, { preview: true }, { moves: new EastMoves(), watched: [WATCHED] })
+  assert.deepStrictEqual([preview.walks, preview.r], [0, { ...blocked, plan: null }])
+  // Neither search finds a way, so the walk runs as without a creeper.
+  const none = { getNeighbors: () => [] }
+  const lost = await watchedGoto({ x: 10, z: 0 }, {}, { moves: none, watched: [WATCHED], answer: update('noPath') })
+  assert.deepStrictEqual([lost.walks, lost.r.reason], [1, 'no-path'])
+  // The unzoned search fails too, and the partial path it leaves runs into the zone.
+  const east = new EastMoves()
+  const partial = async () => ({ status: 'noPath', path: offered(east).length ? STRAIGHT.slice(0, 5) : [] })
+  const wandered = await watchedGoto({ x: 10, z: 0 }, {}, { moves: east, watched: [WATCHED], search: partial, answer: update('noPath') })
+  assert.deepStrictEqual([wandered.walks, wandered.r.reason], [1, 'no-path'], 'a failed search blames no creeper')
+})
+
+test('a goto with accept walks past a watched creeper on the moves as they are', async () => {
+  const moves = new OfferedMoves()
+  const during = []
+  const answer = (bot, g) => { during.push([offered(moves), Object.hasOwn(moves, 'getNeighbors')]); arrive(bot, g) }
+  const { r, walks } = await watchedGoto({ x: 10, z: 0 }, { accept: true }, { moves, watched: [WATCHED], answer })
+  assert.deepStrictEqual([walks, r.arrived, during], [1, true, [[['1,0', '0,-1'], false]]])
+})
+
+test('a goto with no creeper watched replies as one without the zone sense', async () => {
+  for (const [label, answer, walkOpts] of [['arrival', arrive, {}], ['no path', update('noPath'), {}], ['preview', arrive, { preview: true }]]) {
+    const moves = new OfferedMoves()
+    let own = false
+    const seen = (bot, g) => { own = own || Object.hasOwn(moves, 'getNeighbors'); answer(bot, g) }
+    const without = await watchedGoto({ x: 10, z: 0 }, walkOpts, { moves, answer: seen })
+    const empty = await watchedGoto({ x: 10, z: 0 }, walkOpts, { moves, watched: [], answer: seen })
+    assert.deepStrictEqual(empty, without, label)
+    assert.strictEqual(own, false, `${label}: the moves stay unwrapped`)
+  }
+})
+
+test('a zoned goto gives the moves their own getNeighbors back after an arrival, a stop and a reflex take', async () => {
+  const stopBy = (reflex) => (bot, g, env) => {
+    env.legs.take(reflex, reflex && 'creeper')
+    bot.emit('path_stop')
+  }
+  const own = () => new OfferedMoves().getNeighbors()
+  for (const [label, answer] of [['arrival', arrive], ['pilot stop', stopBy(null)], ['reflex take', stopBy('combat')]]) {
+    for (const moves of [new OfferedMoves(), { getNeighbors: own }]) {
+      const before = moves.getNeighbors
+      const hadOwn = Object.hasOwn(moves, 'getNeighbors')
+      let zoned = null
+      await watchedGoto({ x: 10, z: 0 }, {}, { moves, watched: [WATCHED], answer: (bot, g, env) => { zoned = offered(moves); answer(bot, g, env) } })
+      assert.deepStrictEqual([zoned, moves.getNeighbors === before, Object.hasOwn(moves, 'getNeighbors')], [['0,-1'], true, hadOwn],
+        `${label}, ${hadOwn ? 'own' : 'inherited'} getNeighbors`)
+    }
+  }
+  const swapped = new OfferedMoves()
+  const other = () => []
+  await watchedGoto({ x: 10, z: 0 }, {}, { moves: swapped, watched: [WATCHED], answer: (bot, g) => { swapped.getNeighbors = other; arrive(bot, g) } })
+  assert.strictEqual(swapped.getNeighbors, other, 'a getNeighbors set during the goto stays')
+})
+
+test('a flee the combat reflex plans during the retry pause of a zoned goto sees every move', async () => {
+  const moves = new OfferedMoves()
+  const seen = {}
+  const answer = (bot, g, env) => {
+    seen.walk = offered(moves)
+    env.setTimeout = (fn) => {
+      env.legs.take('combat', 'creeper')
+      seen.flee = offered(moves)
+      setImmediate(fn)
+    }
+    bot.emit('path_stop')
+  }
+  const { r } = await watchedGoto({ x: 10, z: 0 }, {}, { moves, watched: [WATCHED], answer })
+  assert.deepStrictEqual([r.reason, seen], ['stopped', { walk: ['0,-1'], flee: ['1,0', '0,-1'] }])
+})
+
+test('a zoned search that times out is planned once and walks as one with no creeper watched', async () => {
+  for (const walkOpts of [{}, { preview: true }]) {
+    const moves = new EastMoves()
+    let planned = 0
+    // The search succeeds through the zone and times out round it.
+    const search = async () => {
+      planned++
+      return offered(moves).length ? { status: 'success', path: STRAIGHT } : { status: 'timeout', path: [] }
+    }
+    const { r, walks } = await watchedGoto({ x: 10, z: 0 }, walkOpts, { moves, watched: [WATCHED], search })
+    assert.deepStrictEqual([planned, walks, r.reason], [1, walkOpts.preview ? 0 : 1, null], walkOpts.preview ? 'preview' : 'walk')
+  }
+})
+
+test('a zoned goto that ends under a newer zoned goto leaves no filter behind once both end', async () => {
+  const moves = new OfferedMoves()
+  let release = null
+  const firstDone = new Promise((resolve) => { release = resolve })
+  let second = null
+  const answer = (bot, g) => {
+    // The preview's search waits for the first goto to end.
+    const search = async () => { await firstDone; return searchOver(moves)() }
+    second = watchedGoto({ x: 10, z: 0 }, { preview: true }, { moves, watched: [WATCHED], search })
+    arrive(bot, g)
+  }
+  const first = await watchedGoto({ x: 10, z: 0 }, {}, { moves, watched: [WATCHED], answer })
+  release()
+  const preview = await second
+  assert.deepStrictEqual([first.r.arrived, preview.r.plan.length], [true, 18], 'control: both kept the zone')
+  assert.deepStrictEqual(offered(moves), ['1,0', '0,-1'])
+})
+
+// The real combat reflex over bot after one check pass, watching creeper ({ at, seen }) 8 or more out with no walk to
+// the body, or none when creeper is null. The creeper hit the body and was last seen at `at`, and routes collects the
+// walks from it the reflex looked for.
+function creeperWatcher (bot, creeper) {
+  const routes = []
+  const env = {
+    bot,
+    Vec3,
+    fight: { stance: 'guard', threatDebugUntil: 0 },
+    STANCES,
+    CREEPER_ZONE_SLACK,
+    AGGRO_CONFIRMED: new Map(),
+    expireConfirmed,
+    bunker: { building: false },
+    holdRun: { on: false },
+    console: { log () {} },
+    liveEntities: () => Object.values(bot.entities),
+    mobClass: () => 'creeper',
+    airFlood: () => ({}),
+    knownCell: () => true,
+    entityPerceptible: (e) => e.seen,
+    entityEngageable: () => true,
+    inMeleeReach: () => false,
+    perchStrike: () => false,
+    creeperRoute: (from) => { routes.push(from); return null },
+    emitEvent () {},
+    ...Object.fromEntries(['CONFIRMED_HORIZON', 'CONFIRMED_MS', 'CONFIRMED_COOL_MS'].map((name) => [name, botConstant(name)]))
+  }
+  const combat = combatReflexIn(env)
+  if (creeper) {
+    bot.entities[9] = { id: 9, name: 'creeper', seen: creeper.seen, position: creeper.at }
+    env.AGGRO_CONFIRMED.set(9, { name: 'creeper', t: Date.now() })
+    combat._seenAt.set(9, creeper.at.clone())
+  }
+  assert.strictEqual(combat.check(bot), false, 'the creeper is watched, not fled')
+  return { combat, routes }
+}
+
+// A preview onto 10,64,0 over moves with creeperWatcher's reflex as the combat reflex, the walk perceiving the creeper
+// as the reflex does.
+async function reflexGoto (moves, creeper) {
+  const reflexes = []
+  let routes = null
+  const setup = (bot) => {
+    bot.pathfinder.movements = moves
+    const w = creeperWatcher(bot, creeper)
+    reflexes.push(w.combat)
+    routes = w.routes
+  }
+  const { r } = await plannedGoto({ x: 10, z: 0 }, { preview: true }, { setup, over: { reflexes, planPath: searchOver(moves), entityPerceptible: (e) => e.seen } })
+  return { r, routes: routes.length }
+}
+
+test('a creeper the combat reflex watches out of sight leaves the goto reply as with no creeper', async () => {
+  const at = new Vec3(9.5, 64, 0.5)
+  for (const Moves of [OfferedMoves, EastMoves]) {
+    const none = await reflexGoto(new Moves(), null)
+    const hidden = await reflexGoto(new Moves(), { at, seen: false })
+    const seen = await reflexGoto(new Moves(), { at, seen: true })
+    assert.deepStrictEqual([none.routes, hidden.routes, seen.routes], [0, 1, 1], `${Moves.name}: control, the walk to the body looked for`)
+    assert.deepStrictEqual(hidden.r, none.r, Moves.name)
+    const control = Moves === OfferedMoves ? [null, 18] : ['creeper', null]
+    assert.deepStrictEqual([seen.r.reason, seen.r.plan && seen.r.plan.length], control, `${Moves.name}: control, the creeper in sight`)
+  }
+  const blocked = await reflexGoto(new EastMoves(), { at, seen: true })
+  assert.match(blocked.r.hint, /^a creeper at 9,64,0 blocks the way/)
 })

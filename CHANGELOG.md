@@ -24,6 +24,19 @@ used it, so it is gone.
 Cleanup. The upstream leftovers are gone (`BLUEPRINT.md`, `MINDCRAFT-SALVAGE.md`,
 `backup.sh`, the vault tool), and the README is rewritten for a newcomer.
 
+Confirmed threats lapse. Live, dig_stair stalled while the combat reflex stayed engaged
+against a spider 27 blocks off across a ravine, and its events kept calling it "CONFIRMED (it
+hit me)" long after it had moved off. A mob that hit the body now stays confirmed for 20 s
+after its last hit, longer only while the body sees it in melee reach. A new hit confirms it
+again at once.
+
+Walks round a watched creeper. Live, a creeper by the base kept dragging the bot back: each
+`goto home` planned straight past it, came into flee range, and the flee pulled the bot 15 to
+25 blocks back onto ravine edges, three times in a row. A goto now plans and walks around a
+creeper the reflex only watches, keeping outside the stance's flee distance plus 3 and never
+closing in on one it already stands within. When the only way runs past it, the reply's reason
+is `creeper` and the hint names the creeper's cell. `accept` walks the way anyway.
+
 ## 2026-10-18: live-play fixes
 
 Chest batches. Live, the pilot moved several item kinds one call each, so the chest opened

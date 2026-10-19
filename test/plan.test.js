@@ -2,7 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
-const { summarizePlan, planRisk, END_SLACK, DROP_MAX } = require('../lib/plan')
+const { summarizePlan, planRisk, inCreeperZone, zoneCrossed, END_SLACK, DROP_MAX } = require('../lib/plan')
 const { loadBotFunctions } = require('./helpers')
 
 // A pathfinder node: feet at y, x and z at the cell centre.
@@ -45,6 +45,32 @@ test(`a plan is risky when it ends more than ${END_SLACK} off the y asked or dro
   assert.strictEqual(planRisk(plan(58, 0, { reaches: null }), 64), null, 'the end of a plan not known to reach is not judged')
   assert.strictEqual(planRisk(plan(64, 4), 64), 'it drops 4 blocks at once')
   assert.strictEqual(planRisk(plan(60, 5), 64), 'it ends 4 below the y asked and it drops 5 blocks at once')
+})
+
+test('a cell lies in a creeper zone when its floor centre is nearer the creeper than the bound', () => {
+  const zone = { id: 1, at: new Vec3(10.5, 64, 0.5), radius: 11 }
+  assert.strictEqual(inCreeperZone(zone, { x: 0, y: 64, z: 0 }, 11), true, '10 off')
+  assert.strictEqual(inCreeperZone(zone, { x: -1, y: 64, z: 0 }, 11), false, '11 off, on the bound')
+  assert.strictEqual(inCreeperZone(zone, { x: 10, y: 74, z: 0 }, 11), true, '10 above')
+  assert.strictEqual(inCreeperZone(zone, { x: 10, y: 76, z: 0 }, 11), false, '12 above')
+  // A body 10 off, inside the radius, keeps its bound at 10.
+  assert.strictEqual(inCreeperZone(zone, { x: 0, y: 64, z: 0 }, 10), false, 'the distance the body stands at')
+  assert.strictEqual(inCreeperZone(zone, { x: 1, y: 64, z: 0 }, 10), true, 'a step nearer')
+})
+
+test('zoneCrossed names the first zone a path enters and its creeper cell, each zone by its own bound', () => {
+  const ahead = { id: 1, at: new Vec3(20.3, 64, 4.7), radius: 11 }
+  const beside = { id: 2, at: new Vec3(6.5, 64, 6.5), radius: 11 }
+  const east = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((x) => node(x, 64, 0))
+  const crossed = (zones, bounds) => {
+    const c = zoneCrossed(zones, east, new Map(bounds))
+    return c && [c.zone.id, c.cell.x, c.cell.y, c.cell.z]
+  }
+  assert.deepStrictEqual(crossed([ahead, beside], [[1, 11], [2, 11]]), [2, 6, 64, 6], 'the zone beside the start comes first along the path')
+  // A body 6 off the creeper beside it may pass at 6.
+  assert.deepStrictEqual(crossed([ahead, beside], [[1, 11], [2, 6]]), [1, 20, 64, 4])
+  assert.strictEqual(crossed([ahead, beside], [[1, 10], [2, 6]]), null)
+  assert.strictEqual(crossed([], []), null)
 })
 
 // planPath of bot.js over a search that answers partial before its last result, ending the route after endAfter ticks.
