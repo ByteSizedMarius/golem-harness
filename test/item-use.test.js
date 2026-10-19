@@ -155,7 +155,7 @@ test('a bow release that throws hands the walk its legs back and the error to th
   assert.deepStrictEqual(log, ['forward true', 'sprint true', 'forward false', 'sprint false', 'use bow', 'forward true', 'sprint true', 'forward false'])
 })
 
-test('a 1.21 shield comes down before a walk or a sprint, and a moving body raises none', () => {
+test('a 1.21.11 shield comes down before a walk or a sprint, and a moving body raises none', () => {
   const { bot, env, log } = body()
   assert.deepStrictEqual(runRoute('/guard', { on: '1' }, env), { guarding: true })
   bot.setControlState('forward', true)

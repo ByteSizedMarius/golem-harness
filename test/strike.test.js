@@ -311,7 +311,7 @@ async function holdAt (query, walls, seen = true, legacy = true) {
   return { res, did: world.did, hits: world.hits }
 }
 
-test('hold strikes a zombie it sees step into reach in a 1-wide doorway, and refuses in the open without anywhere', async () => {
+test('hold on 1.7.10 strikes a zombie it sees step into reach in a 1-wide doorway, and refuses in the open without anywhere', async () => {
   const doorway = (p) => p.z === 0 && Math.abs(p.x) === 1 && (p.y === 64 || p.y === 65)
   const held = await holdAt({ sec: '3' }, doorway)
   assert.strictEqual(held.res.error, undefined, held.res.error && held.res.error.message)
@@ -327,7 +327,7 @@ test('hold strikes a zombie it sees step into reach in a 1-wide doorway, and ref
   assert.strictEqual(anywhere.res.body && anywhere.res.body.spot, 'anywhere')
 })
 
-test('hold on a server with an attack cooldown swings without a jump, a full sword charge apart', async () => {
+test('hold on 1.21.11 swings without a jump, a full sword charge apart', async () => {
   const doorway = (p) => p.z === 0 && Math.abs(p.x) === 1 && (p.y === 64 || p.y === 65)
   const held = await holdAt({ sec: '5' }, doorway, true, false)
   assert.ok(held.hits.length >= 2, `control: ${held.hits.length} swings`)
@@ -362,7 +362,7 @@ async function sprintOpener (step) {
   return { reply: res.body, cells: [...cells], ticks }
 }
 
-test('a sprint opener keeps to the checked line once its zombie steps off it', async () => {
+test('a 1.7.10 sprint opener keeps to the checked line once its zombie steps off it', async () => {
   const line = (cells) => cells.every((c) => c.endsWith(',0'))
   const still = await sprintOpener(() => {})
   assert.strictEqual(still.reply.swings, 1, 'control: a sprint hit')
@@ -371,20 +371,20 @@ test('a sprint opener keeps to the checked line once its zombie steps off it', a
   assert.ok(line(aside.cells), `ran off the checked line over ${aside.cells.join(' ')}`)
 })
 
-test('a sprint opener stops once its zombie goes out of sight', async () => {
+test('a 1.7.10 sprint opener stops once its zombie goes out of sight', async () => {
   const hidden = await sprintOpener((z, tick) => { if (tick === 3) z.seen = false })
   assert.strictEqual(hidden.ticks, 3, 'ran on after the zombie went out of sight')
   assert.strictEqual(hidden.reply.reason, 'lost sight')
 })
 
-test('a sprint opener needs food above 6 and names hunger when it is not', () => {
+test('a 1.7.10 sprint opener needs food above 6 and names hunger when it is not', () => {
   const blockAt = (p) => (p.y < 64 ? { name: 'stone', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' })
   const flat = { from: new Vec3(0.5, 64, 0.5), to: new Vec3(4.5, 64, 0.5), blockAt, known: () => true }
   assert.strictEqual(rules.noRunReason({ ...flat, food: 7 }), null, 'control: a fed body runs')
   assert.strictEqual(rules.noRunReason({ ...flat, food: 6 }), 'too hungry')
 })
 
-test('a sprint opener refuses a run through fire or a cobweb', () => {
+test('a 1.7.10 sprint opener refuses a run through fire or a cobweb', () => {
   const run = (hazard) => rules.noRunReason({
     from: new Vec3(0.5, 64, 0.5),
     to: new Vec3(4.5, 64, 0.5),
@@ -400,7 +400,7 @@ test('a sprint opener refuses a run through fire or a cobweb', () => {
   assert.strictEqual(run('fire'), 'blocked on the way')
 })
 
-test('a strike swing waits out the hurt window of its target, from its last hurt animation', async () => {
+test('a 1.7.10 strike swing waits out the hurt window of its target, from its last hurt animation', async () => {
   const world = verbWorld([zombie(2.5)], { legacy: true })
   let hurtAt = null
   const attack = world.bot.attack

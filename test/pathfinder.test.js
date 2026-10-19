@@ -352,7 +352,7 @@ async function lit (pos, cells, ground, sky) {
   return { ...b, place }
 }
 
-test('a corridor built in the air on a modern server, which sends no sky light that high, walks up its stairs', async () => {
+test('a corridor built in the air on a 1.21.11 server, which sends no sky light that high, walks up its stairs', async () => {
   // A 1.21.11 server sends sky light only up to the section above a column's highest block and no light update
   // after a block change, so the client holds 0 in every section above the ground at y 120.
   const { build, ground } = course(200, 120)
@@ -362,7 +362,7 @@ test('a corridor built in the air on a modern server, which sends no sky light t
   assert.strictEqual(result.status, 'success', `${result.path.length} nodes`)
 })
 
-test('a corridor built in the air on a modern server walks from its ladder top through the roofed water past it', async () => {
+test('a corridor built in the air on a 1.21.11 server walks from its ladder top through the roofed water past it', async () => {
   const statusOf = async (sky) => {
     const { build, ground } = course(200, 120)
     const { plan, place } = await lit(new Vec3(8.5, 206, 40.5), new Map(), ground, sky)
@@ -385,7 +385,7 @@ test('a corridor built in the air on a 1.7.10 server walks to the foot of its la
 })
 
 test('a corridor built in the air walks from past its door straight through its closed fence gate', async () => {
-  for (const [server, y0, top, sky] of [['1.7.10', 150, 70, (p) => (p.y > 70 ? 15 : 0)], ['modern', 200, 120, (p) => (p.y < 144 ? 15 : 0)]]) {
+  for (const [server, y0, top, sky] of [['1.7.10', 150, 70, (p) => (p.y > 70 ? 15 : 0)], ['1.21.11', 200, 120, (p) => (p.y < 144 ? 15 : 0)]]) {
     const { build, ground } = course(y0, top)
     const { plan, place } = await lit(new Vec3(24.5, y0 + 6, 40.5), new Map(), ground, sky)
     for (const [key, block] of build) place(key, block)

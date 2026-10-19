@@ -7,6 +7,7 @@ const { HITBOX_1710, LEGACY_SNEAK_EYE } = require('../lib/bot/legacy-1710')
 const { loadBotFunctions } = require('./helpers')
 
 const mcData = require('minecraft-data')('1.21.11')
+const version = (legacy) => (legacy ? '1.7.10' : '1.21.11')
 
 // The bot.js inMeleeReach of a body with its feet at feet, in open air.
 function reach (feet, legacy, { crouching = false, data = null } = {}) {
@@ -31,8 +32,8 @@ test('melee reach takes a hitbox whose near edge sits 2.95 along the look ray an
   for (const legacy of [false, true]) {
     const inReach = reach(new Vec3(0.5, 64, 0.5), legacy)
     // Aimed at eye height, the ray runs level and meets the box 0.4 short of the zombie's centre.
-    assert.strictEqual(inReach(mob('zombie', 0.6, 1.95, 3.85), 1.62), true, `edge at 2.95, 1.7.10 ${legacy}`)
-    assert.strictEqual(inReach(mob('zombie', 0.6, 1.95, 3.95), 1.62), false, `edge at 3.05, 1.7.10 ${legacy}`)
+    assert.strictEqual(inReach(mob('zombie', 0.6, 1.95, 3.85), 1.62), true, `edge at 2.95 on ${version(legacy)}`)
+    assert.strictEqual(inReach(mob('zombie', 0.6, 1.95, 3.95), 1.62), false, `edge at 3.05 on ${version(legacy)}`)
   }
 })
 
@@ -49,9 +50,9 @@ test('melee reach scales a slime hitbox by its size', () => {
     const inReach = reach(new Vec3(0.5, 64, 0.5), legacy, { data: mcData })
     // Centred 3.6 out, a size-4 box (2.08 wide on 1.21.11, 2.4 on 1.7.10) starts within 2.5 and a size-1 box at
     // 3.2 or more.
-    assert.strictEqual(inReach(slime(4, 4.1)), true, `size 4, 1.7.10 ${legacy}`)
-    assert.strictEqual(inReach(slime(1, 4.1)), false, `control: size 1, 1.7.10 ${legacy}`)
-    assert.strictEqual(inReach(slime(undefined, 4.1)), false, `no size metadata, 1.7.10 ${legacy}`)
+    assert.strictEqual(inReach(slime(4, 4.1)), true, `size 4 on ${version(legacy)}`)
+    assert.strictEqual(inReach(slime(1, 4.1)), false, `control: size 1 on ${version(legacy)}`)
+    assert.strictEqual(inReach(slime(undefined, 4.1)), false, `no size metadata on ${version(legacy)}`)
   }
 })
 
@@ -60,7 +61,7 @@ test('melee reach looks from the lowered eye of a sneaking body', () => {
   // from the 1.7.10 sneaking eye at 1.54, and 3.09 and 2.85 out from 1.62 and 1.27 on 1.21.11.
   for (const [legacy, x] of [[true, 2.225], [false, 2.4]]) {
     const zombie = mob('zombie', 0.6, 1.95, x)
-    assert.strictEqual(reach(new Vec3(0.5, 67, 0.5), legacy)(zombie), false, `standing, 1.7.10 ${legacy}`)
-    assert.strictEqual(reach(new Vec3(0.5, 67, 0.5), legacy, { crouching: true })(zombie), true, `sneaking, 1.7.10 ${legacy}`)
+    assert.strictEqual(reach(new Vec3(0.5, 67, 0.5), legacy)(zombie), false, `standing on ${version(legacy)}`)
+    assert.strictEqual(reach(new Vec3(0.5, 67, 0.5), legacy, { crouching: true })(zombie), true, `sneaking on ${version(legacy)}`)
   }
 })

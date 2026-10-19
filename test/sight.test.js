@@ -167,7 +167,7 @@ function wireLight (env) {
   return env
 }
 
-test('a gravestone placed on a 1.7.10 server lights nothing, an end_rod on a modern one does', () => {
+test('a gravestone placed on a 1.7.10 server lights nothing, an end_rod on 1.21.11 does', () => {
   // The server overrides show the 1.7.10 gravestone under the end_rod block type.
   const lightBeside = (name) => {
     const env = wireLight(tunnel(11, DARK))
@@ -260,8 +260,8 @@ test('a roof laid over a room takes away the open sky its held light still shows
   assert.strictEqual(skyInside(1), false)
 })
 
-test('a roof laid high over open ground on a modern server leaves the cells below it the sky light of a covered cell', () => {
-  // A modern server sends sky light for this column only up to y 79.
+test('a roof laid high over open ground on a 1.21.11 server leaves the cells below it the sky light of a covered cell', () => {
+  // A 1.21.11 server sends sky light for this column only up to y 79.
   const roof = new Set()
   const env = wireLight(world({ open: (x, y, z) => y >= 64 && !roof.has(ck(x, y, z)), light: () => 0 }))
   env.bot.game.dimension = 'overworld'
@@ -276,8 +276,8 @@ test('a roof laid high over open ground on a modern server leaves the cells belo
   assert.deepStrictEqual([sky(99), sky(70)], [14, 14])
 })
 
-test('water high over open ground on a modern server holds the sky light that reaches it through the water above', () => {
-  // A stone basin at y 97 to 100 holds water three deep, above y 79, the highest a modern server sent sky light for.
+test('water high over open ground on a 1.21.11 server holds the sky light that reaches it through the water above', () => {
+  // A stone basin at y 97 to 100 holds water three deep, above y 79, the highest a 1.21.11 server sent sky light for.
   const basin = (x, y, z) => Math.abs(x) <= 1 && Math.abs(z) <= 1 && y >= 97 && y <= 100
   const pool = (x, y, z) => x === 0 && z === 0 && y >= 98 && y <= 100
   const env = wireLight(world({ open: (x, y, z) => y >= 64 && !basin(x, y, z), light: () => 0 }))
@@ -319,8 +319,8 @@ test('water on a 1.7.10 server dims sky light by 3 a cell, and a cell below it b
   assert.deepStrictEqual([63, 62, 61].map(pool1710(true)), [11, 8, 5], 'under a roof')
 })
 
-test('air under one cell of water on a modern server takes sky light at least 1 below the water', () => {
-  // A stone pocket at y 98 to 100 above y 79, the highest a modern server sent sky light for, water at 0,100,0 over air at 0,99,0.
+test('air under one cell of water on a 1.21.11 server takes sky light at least 1 below the water', () => {
+  // A stone pocket at y 98 to 100 above y 79, the highest a 1.21.11 server sent sky light for, water at 0,100,0 over air at 0,99,0.
   const pocket = (x, y, z) => Math.abs(x) <= 1 && Math.abs(z) <= 1 && y >= 98 && y <= 100 && !(x === 0 && z === 0 && y === 99)
   const env = wireLight(world({ open: (x, y, z) => y >= 64 && !pocket(x, y, z), light: () => 0 }))
   env.bot.game.dimension = 'overworld'
@@ -335,7 +335,7 @@ test('air under one cell of water on a modern server takes sky light at least 1 
 })
 
 test('a fence, gate or wall on open ground lets the sky through to the floor beneath it', () => {
-  // A modern server sends no sky light this high and marks these blocks opaque, though light crosses them undimmed.
+  // 1.21 data marks fences, gates and walls opaque, though light crosses them undimmed.
   const beneath = (name) => {
     const env = world({ open: (x, y) => y >= 64, light: () => 0 })
     env.bot.game.dimension = 'overworld'

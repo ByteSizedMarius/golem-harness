@@ -88,7 +88,7 @@ test('a chat line from a visible speaker points at the block they look at, by th
   assert.strictEqual(pointer()('hello'), null, 'no deictic word')
 })
 
-test('a crouching speaker looks from the crouched eye', () => {
+test('a crouching speaker on 1.21.11 looks from the crouched eye', () => {
   assert.deepStrictEqual(pointer({ crouching: true })('put it here'), { block: 'chest', x: 5, y: 64, z: 0 })
 })
 

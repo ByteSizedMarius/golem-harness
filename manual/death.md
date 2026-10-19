@@ -2,7 +2,7 @@
 
 ## Key rules
 
-- After a death, `goto(waypoint: "lastdeath")`, then `grave(take: "all")` empties the nearest gravestone in sight into your pockets.
+- On a server with graves, `goto(waypoint: "lastdeath")` after a death, then `grave(take: "all")` empties the nearest gravestone in sight into your pockets.
 - Only you can take all the items from your gravestone. Anyone else takes one item.
 - A gravestone holding items cannot be broken.
 

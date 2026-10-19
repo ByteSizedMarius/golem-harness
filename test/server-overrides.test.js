@@ -140,7 +140,7 @@ test('an overrides file without a blocks object is refused at start', (t) => {
   assert.throws(() => readServerOverrides(overridesFile(t, spec)), /GOLEM_SERVER_OVERRIDES .*blocks/)
 })
 
-test('an item alias resolves to its 1.21 item, and an unknown name stays unknown', (t) => {
+test('an item alias resolves to its 1.21.11 item, and an unknown name stays unknown', (t) => {
   const rows = [
     ['an items map', readServerOverrides(overridesFile(t, { ...OVERRIDES, items: { fence: 'oak_fence' } })), 'oak_fence'],
     ['no overrides file', readServerOverrides(undefined), null],

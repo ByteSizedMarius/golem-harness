@@ -10,6 +10,7 @@ const legacy1710 = require('../lib/bot/legacy-1710')
 const { loadBotFunctions, combatReflexIn, botConstant, laneAt } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
+const version = (legacy) => (legacy ? '1.7.10' : '1.21.11')
 const HERE = new Vec3(0.5, 64, 0.5)
 const FULL = [[0, 0, 0, 1, 1, 1]]
 const FENCE = [[0, 0, 0.375, 1, 1.5, 0.625]]
@@ -135,7 +136,7 @@ const IN_REACH = { inMeleeReach: () => true }
 const REACH_RULE = { inMeleeReach: undefined, SWING_REACH: rules.SWING_REACH }
 const skeleton = (x) => ({ id: 8, name: 'skeleton', position: new Vec3(x, 64, 0.5) })
 
-test('a closing zombie raises the sword block only when it can walk to the body over seen cells', async () => {
+test('a closing zombie raises the 1.7.10 sword block only when it can walk to the body over seen cells', async () => {
   const inside = await standoff(ring('stone', 3), zombie(3.5))
   assert.ok(inside.raises > 0, 'control: a zombie in the same room')
   assert.match(inside.lines[0], /^\[combat\] guard up vs zombie ~3: closing\b/)
@@ -147,7 +148,7 @@ test('a closing zombie raises the sword block only when it can walk to the body 
   }
 })
 
-test('a skeleton raises the sword block only in line of sight within 15, and holds it steady with no bow', async () => {
+test('a skeleton raises the 1.7.10 sword block only in line of sight within 15, and holds it steady with no bow', async () => {
   const seen = await standoff(open, skeleton(10.5))
   assert.deepStrictEqual({ raises: seen.raises, lowers: seen.lowers }, { raises: 1, lowers: 1 }, 'a skeleton in sight 10 off over three cycles')
   assert.match(seen.lines[0], /^\[combat\] guard up vs skeleton ~10: a skeleton in sight within 15$/)
@@ -156,24 +157,24 @@ test('a skeleton raises the sword block only in line of sight within 15, and hol
   assert.strictEqual((await standoff(open, skeleton(20.5))).raises, 0, 'a skeleton 20 off')
 })
 
-test('a body on a walk raises no shield or sword block against a skeleton in sight', async () => {
+test('a body on a walk raises no 1.21.11 shield or 1.7.10 sword block against a skeleton in sight', async () => {
   const shield = (controlState) => standoff(open, skeleton(10.5), {
     bot: { controlState, inventory: { items: () => [{ name: 'iron_sword' }], slots: { 45: { name: 'shield' } } } },
     env: { LEGACY_1710: false }
   })
-  assert.ok((await shield({})).raises > 0, 'control: a 1.21 body standing still')
-  assert.strictEqual((await shield({ forward: true })).raises, 0, '1.21 shield')
+  assert.ok((await shield({})).raises > 0, 'control: a 1.21.11 body standing still')
+  assert.strictEqual((await shield({ forward: true })).raises, 0, '1.21.11 shield')
   const sword = await standoff(open, skeleton(10.5), { bot: { controlState: { forward: true } } })
   assert.strictEqual(sword.raises, 0, '1.7.10 sword block')
 })
 
-test('a zombie in melee reach raises the sword block only in sight or with a walk to the body', async () => {
+test('a zombie in melee reach raises the 1.7.10 sword block only in sight or with a walk to the body', async () => {
   assert.ok((await standoff(open, zombie(3.5), { env: IN_REACH })).raises > 0, 'control: a zombie in sight 3 off')
   const wall = (p) => p.x === 2 && p.y >= 64 && p.y < 67 ? 'stone' : null
   assert.strictEqual((await standoff(wall, zombie(3.5), { env: IN_REACH })).raises, 0, 'a zombie behind a wall 3 off')
 })
 
-test('a zombie in melee reach out of sight holds the sword block by where the body last saw it', async () => {
+test('a zombie in melee reach out of sight holds the 1.7.10 sword block by where the body last saw it', async () => {
   const wall = (p) => p.x === 2 && p.y >= 64 && p.y < 67 ? 'stone' : null
   const env = { ...IN_REACH, entityPerceptible: () => false }
   const beside = await standoff(wall, zombie(3.5), { env, seenAt: new Vec3(-1.5, 64, 0.5) })
@@ -204,7 +205,7 @@ test('the bow never draws on a zombie out of sight', async () => {
   assert.strictEqual((await run(false)).lowers, 0)
 })
 
-test('a bow with no line of sight to its target leaves the sword block up', async () => {
+test('a bow with no line of sight to its target leaves the 1.7.10 sword block up', async () => {
   const items = [{ name: 'iron_sword' }, { name: 'bow' }, { name: 'arrow' }]
   const raised = { up: true, slot: 0, pilot: true }
   const wall = (p) => p.x === 5 && p.y >= 64 && p.y < 67 ? 'stone' : null
@@ -237,7 +238,7 @@ test('a body on its pillar top at disengage health strikes a zombie out of sight
   assert.deepStrictEqual(below.fled, [], 'control: last seen below the pillar')
 })
 
-test('a body on its pillar top over a pack of three swings without a jump and keeps the perch', async () => {
+test('a 1.7.10 body on its pillar top over a pack of three swings without a jump and keeps the perch', async () => {
   const cell = new Vec3(0, 66, 0)
   const perch = { cell }
   const pack = [zombie(1.5), { ...zombie(-0.5), id: 8 }, { ...zombie(2.5), id: 9 }]
@@ -398,8 +399,8 @@ test('the vanguard reflex neither chases nor swings at a zombie that hit the bod
   }
   for (const legacy of [true, false]) {
     const reach = { ...IN_REACH, LEGACY_1710: legacy, meleeAim: undefined, HITBOX_1710: legacy1710.HITBOX_1710 }
-    assert.ok((await fight(true, 3.5, reach)).swings > 0, `control: no swing in sight, 1.7.10 ${legacy}`)
-    assert.deepStrictEqual(await fight(false, 3.5, reach), NONE, `a swing behind the wall, 1.7.10 ${legacy}`)
+    assert.ok((await fight(true, 3.5, reach)).swings > 0, `control: no swing in sight on ${version(legacy)}`)
+    assert.deepStrictEqual(await fight(false, 3.5, reach), NONE, `a swing behind the wall on ${version(legacy)}`)
   }
 })
 

@@ -9,6 +9,7 @@ const mcData = require('minecraft-data')('1.21.11')
 const LEGACY = { legacy1710: true }
 const MODERN = { legacy1710: false }
 const BOTH = [LEGACY, MODERN]
+const version = (opts) => (opts.legacy1710 ? '1.7.10' : '1.21.11')
 
 const ENTITY_NAMES = new Set(Object.keys(mcData.entitiesByName))
 const FIXED = new Set(['witch', 'slime', 'zombified_piglin', 'fall', 'player', 'thunder', 'lava', 'fuse', 'explosion', 'water'])
@@ -23,61 +24,61 @@ const stepCategory = (opts) => classify('minecraft:block.stone.step', opts)
 
 function assertAllowed (input, r, opts) {
   if (r === null) return
-  assert.notStrictEqual(r, input, 'never the input itself')
+  assert.notStrictEqual(r, input, `never the input itself on ${version(opts)}`)
   const ok = FIXED.has(r) || ENTITY_NAMES.has(r) || r === stepCategory(opts)
-  assert.ok(ok, `category ${JSON.stringify(r)} for ${JSON.stringify(input).slice(0, 80)} is not a fixed category`)
+  assert.ok(ok, `category ${JSON.stringify(r)} for ${JSON.stringify(input).slice(0, 80)} on ${version(opts)} is not a fixed category`)
 }
 
 test('a namespace prefix does not change the species', () => {
   for (const opts of BOTH) {
     for (const name of ['minecraft_1.21:entity.zombie.hurt', 'entity.zombie.hurt']) {
-      assert.strictEqual(classify(name, opts), 'zombie', name)
+      assert.strictEqual(classify(name, opts), 'zombie', `${name} on ${version(opts)}`)
     }
   }
 })
 
 test('the species comes from entity.<species>.*', () => {
   for (const opts of BOTH) {
-    assert.strictEqual(classify('minecraft:entity.skeleton.ambient', opts), 'skeleton')
-    assert.strictEqual(classify('minecraft:entity.magma_cube.squish_small', opts), 'magma_cube')
+    assert.strictEqual(classify('minecraft:entity.skeleton.ambient', opts), 'skeleton', version(opts))
+    assert.strictEqual(classify('minecraft:entity.magma_cube.squish_small', opts), 'magma_cube', version(opts))
   }
 })
 
 test('a verbatim mob.witch name gives witch', () => {
-  for (const opts of BOTH) assert.strictEqual(classify('mob.witch.idle', opts), 'witch')
+  for (const opts of BOTH) assert.strictEqual(classify('mob.witch.idle', opts), 'witch', version(opts))
 })
 
 test('zombie_pigman gives zombified_piglin', () => {
-  for (const opts of BOTH) assert.strictEqual(classify('entity.zombie_pigman.ambient', opts), 'zombified_piglin')
+  for (const opts of BOTH) assert.strictEqual(classify('entity.zombie_pigman.ambient', opts), 'zombified_piglin', version(opts))
 })
 
 test('big and small falls give fall, never hostile', () => {
   for (const opts of BOTH) {
     for (const name of ['minecraft:entity.hostile.big_fall', 'minecraft:entity.player.small_fall']) {
-      assert.strictEqual(classify(name, opts), 'fall', name)
+      assert.strictEqual(classify(name, opts), 'fall', `${name} on ${version(opts)}`)
     }
   }
 })
 
 test('player hurt and death give player', () => {
   for (const opts of BOTH) {
-    assert.strictEqual(classify('minecraft:entity.player.hurt', opts), 'player')
-    assert.strictEqual(classify('minecraft:entity.player.death', opts), 'player')
+    assert.strictEqual(classify('minecraft:entity.player.hurt', opts), 'player', version(opts))
+    assert.strictEqual(classify('minecraft:entity.player.death', opts), 'player', version(opts))
   }
 })
 
 test('splashes, boats and cave ambience are dropped', () => {
   for (const opts of BOTH) {
     for (const name of ['minecraft:entity.generic.splash', 'minecraft:entity.boat.paddle_water', 'minecraft:ambient.cave']) {
-      assert.strictEqual(classify(name, opts), null, name)
+      assert.strictEqual(classify(name, opts), null, `${name} on ${version(opts)}`)
     }
   }
 })
 
 test('thunder from both names gives thunder', () => {
   for (const opts of BOTH) {
-    assert.strictEqual(classify('minecraft:entity.lightning_bolt.thunder', opts), 'thunder')
-    assert.strictEqual(classify('ambient.weather.thunder', opts), 'thunder')
+    assert.strictEqual(classify('minecraft:entity.lightning_bolt.thunder', opts), 'thunder', version(opts))
+    assert.strictEqual(classify('ambient.weather.thunder', opts), 'thunder', version(opts))
   }
 })
 
@@ -139,7 +140,7 @@ test('a danger sound raises at most one hear event per category within the throt
   assert.strictEqual(heard(lava), 1, 'lava again once the window has passed')
 })
 
-test('extinguish_fire gives lava or fizz under legacy1710 only', () => {
+test('extinguish_fire gives lava or fizz on 1.7.10 only', () => {
   const name = 'minecraft:entity.generic.extinguish_fire'
   assert.strictEqual(classify(name, LEGACY), 'lava or fizz')
   assert.notStrictEqual(classify(name, MODERN), 'lava')
@@ -155,14 +156,14 @@ test('a 1.7.10 extinguish_fire raises one hear event that reads lava or fizz', (
 
 test('a music_disc name is never filed as lava', () => {
   for (const opts of BOTH) {
-    assert.strictEqual(classify('minecraft:block.lava.ambient', opts), 'lava', 'control: a lava sound')
-    assert.notStrictEqual(classify('minecraft:music_disc.lava_chicken', opts), 'lava')
+    assert.strictEqual(classify('minecraft:block.lava.ambient', opts), 'lava', `control: a lava sound on ${version(opts)}`)
+    assert.notStrictEqual(classify('minecraft:music_disc.lava_chicken', opts), 'lava', version(opts))
   }
 })
 
 test('names a 1.7.10 server sends give their category, and a block sound only a fixed one', () => {
   for (const opts of BOTH) {
-    assert.strictEqual(classify('minecraft:entity.donkey.hurt', opts), 'donkey', 'mob.horse.donkey.hit')
+    assert.strictEqual(classify('minecraft:entity.donkey.hurt', opts), 'donkey', `mob.horse.donkey.hit on ${version(opts)}`)
     assertAllowed('minecraft:block.stone.break', classify('minecraft:block.stone.break', opts), opts)
   }
 })
@@ -172,7 +173,7 @@ test('names a 1.7.10 server sends give their category, and a block sound only a 
 test('prototype keys give null', () => {
   const names = ['__proto__', 'entity.constructor.ambient']
   for (const opts of BOTH) {
-    for (const name of names) assert.strictEqual(classify(name, opts), null, name)
+    for (const name of names) assert.strictEqual(classify(name, opts), null, `${name} on ${version(opts)}`)
   }
 })
 
@@ -184,7 +185,7 @@ test('an unknown species is never echoed', () => {
     'entity.notzombie.ambient'
   ]
   for (const opts of BOTH) {
-    for (const name of names) assert.strictEqual(classify(name, opts), null, name)
+    for (const name of names) assert.strictEqual(classify(name, opts), null, `${name} on ${version(opts)}`)
   }
 })
 
@@ -198,8 +199,8 @@ test('non-string input gives null and does not throw', () => {
   for (const opts of BOTH) {
     for (const input of inputs) {
       let r
-      assert.doesNotThrow(() => { r = classifySound(input, opts) }, String(typeof input))
-      assert.strictEqual(r, null, String(typeof input))
+      assert.doesNotThrow(() => { r = classifySound(input, opts) }, `${typeof input} on ${version(opts)}`)
+      assert.strictEqual(r, null, `${typeof input} on ${version(opts)}`)
     }
   }
 })

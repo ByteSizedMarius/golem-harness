@@ -10,7 +10,7 @@ const line = serverLines(registry.language)
 const chat = (json) => ChatMessage.fromNotch(JSON.stringify(json))
 const tr = (translate, ...args) => ({ translate, with: args.map((a) => (typeof a === 'string' ? { text: a } : a)) })
 
-test('deaths, joins, leaves and achievements are server lines by their 1.21 translate keys', () => {
+test('deaths, joins, leaves and achievements are server lines by their 1.21.11 translate keys', () => {
   assert.deepStrictEqual(line(chat(tr('death.attack.mob', 'Steve', tr('entity.minecraft.zombie')))), { kind: 'death', text: 'Steve was slain by Zombie' })
   assert.deepStrictEqual(line(chat(tr('death.fell.accident.generic', 'Steve'))), { kind: 'death', text: 'Steve fell from a high place' })
   assert.deepStrictEqual(line(chat(tr('multiplayer.player.joined', 'Steve'))), { kind: 'joined', text: 'Steve joined the game' })

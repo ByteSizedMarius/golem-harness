@@ -106,7 +106,7 @@ test('digat digs a log with an axe, dirt with a shovel, ore with the lowest pick
 test('digat digs hay and leaves with a hoe, but bare-handed on 1.7.10, where a hoe speeds no dig', async () => {
   const hotbar = ['stone_axe', 'iron_hoe', null]
   for (const name of ['hay_block', 'oak_leaves']) {
-    assert.strictEqual((await digWith(name, hotbar, 2)).bot.dugWith, 'iron_hoe', name)
+    assert.strictEqual((await digWith(name, hotbar, 2)).bot.dugWith, 'iron_hoe', `${name} on 1.21.11`)
     assert.strictEqual((await digWith(name, hotbar, 2, true)).bot.dugWith, null, `${name} on 1.7.10`)
   }
 })
