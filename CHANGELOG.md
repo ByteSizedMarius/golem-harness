@@ -6,6 +6,24 @@ the point, not just the diff. Dates are play-sessions, not releases. Full commit
 carry more detail (`git log`). The pilot's text (`DRIVING.md`, `manual/`) states the rules
 and leaves the stories here.
 
+## 2026-10-19: version split and live-play fixes
+
+Two versions. The bot speaks 1.21.11 and defaults to it (`MC_VERSION`). `GOLEM_MC_1710=1`
+switches it to 1.7.10 rules for a Forge server behind ViaProxy, and every 1.7.10 value lives
+in `lib/bot/legacy-1710.js`. Rules that had been applied on both versions now apply per
+version: the hoe digs leaves, hay, sculk and moss on 1.21.11 and stays in the pocket on
+1.7.10, the sneak eye height and a creeper's eye follow the server, an explosion right after
+nearby thunder counts as lightning only on 1.7.10, where lightning makes one, and a chat line
+defaults to 256 characters on 1.21.11 and stays at 100 on 1.7.10. Tests and tool texts name
+the version they serve.
+
+No viewer. The prismarine-viewer listened on all interfaces with no token, and its socket fed
+raw chunks and every entity position, an x-ray of the world, to anyone who connected. Nothing
+used it, so it is gone.
+
+Cleanup. The upstream leftovers are gone (`BLUEPRINT.md`, `MINDCRAFT-SALVAGE.md`,
+`backup.sh`, the vault tool), and the README is rewritten for a newcomer.
+
 ## 2026-10-18: live-play fixes
 
 Chest batches. Live, the pilot moved several item kinds one call each, so the chest opened

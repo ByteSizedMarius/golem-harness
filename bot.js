@@ -14,7 +14,7 @@ const { pathfinder } = require('mineflayer-pathfinder')
 const { plugin: collectBlock } = require('mineflayer-collectblock')
 const armorManager = require('mineflayer-armor-manager')
 const { chatMaxLen } = require('./lib/install')
-const { HOST, PORT, VERSION, USERNAME, CTRL_PORT } = require('./lib/bot/config')
+const { HOST, PORT, VERSION, USERNAME, CTRL_PORT, LEGACY_1710 } = require('./lib/bot/config')
 const { createApp } = require('./lib/app')
 const { createContext } = require('./lib/context')
 const { createStreams, bindStreams, wireChatCapture, wireServerMessages } = require('./lib/bot/streams')
@@ -158,7 +158,7 @@ installReflexes()
 
 // ---- HTTP control layer ----
 // Follow waits while a pilot route runs.
-const { app, verbs } = createApp({ token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text), maxLen: chatMaxLen(process.env.GOLEM_CHAT_MAX) }, onRequest: deaths.watch })
+const { app, verbs } = createApp({ token: GOLEM_TOKEN, port: CTRL_PORT, chat: { send: (text) => bot.chat(text), maxLen: chatMaxLen(process.env.GOLEM_CHAT_MAX, LEGACY_1710) }, onRequest: deaths.watch })
 ctx.verbs = verbs
 createReply(ctx)
 createDebugRoutes(ctx)

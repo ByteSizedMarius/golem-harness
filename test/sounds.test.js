@@ -3,6 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { classifySound } = require('../lib/sounds')
+const { LEGACY_STRIKE_MS, LEGACY_STRIKE_RANGE } = require('../lib/bot/legacy-1710')
 const { loadBotFunctions, functionSource } = require('./helpers')
 const mcData = require('minecraft-data')('1.21.11')
 
@@ -82,12 +83,10 @@ test('thunder from both names gives thunder', () => {
   }
 })
 
-// The bot's onSound for a body at the origin on a 1.7.10 server, the types of the events it raised and their texts.
 function ears (extra = {}) {
   const raised = []
   const texts = []
   const { onSound } = loadBotFunctions(['onSound'], {
-    ...extra,
     bot: { entity: { position: new Vec3(0.5, 64, 0.5) } },
     classifySound,
     LEGACY_1710: true,
@@ -95,7 +94,10 @@ function ears (extra = {}) {
     dangerHeard: {},
     lastThunder: 0,
     lastThunderPos: null,
-    emitEvent: (type, text) => { raised.push(type); texts.push(text) }
+    LEGACY_STRIKE_MS,
+    LEGACY_STRIKE_RANGE,
+    emitEvent: (type, text) => { raised.push(type); texts.push(text) },
+    ...extra
   })
   return { onSound, raised, texts }
 }
@@ -115,6 +117,14 @@ test('the explosion 1.7.10 lightning plays where its thunder struck raises no he
   elsewhere.onSound(thunder, strike)
   elsewhere.onSound(explode, strike.offset(0, 0, 3))
   assert.deepStrictEqual(elsewhere.raised, ['hear'], 'an explosion 3 from the strike')
+})
+
+test('on 1.21.11 an explosion where thunder just struck raises its hear event', () => {
+  const strike = new Vec3(20.5, 64, 0.5)
+  const { onSound, raised } = ears({ LEGACY_1710: false })
+  onSound('minecraft:entity.lightning_bolt.thunder', strike)
+  onSound('minecraft:entity.generic.explode', strike.offset(1, 0, 0))
+  assert.deepStrictEqual(raised, ['hear'])
 })
 
 test('a danger sound raises at most one hear event per category within the throttle window', () => {

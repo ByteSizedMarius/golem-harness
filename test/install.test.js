@@ -364,12 +364,16 @@ test('at a line length of 256, a 256-unit msg is one line and a 257-unit msg spl
   assert.deepStrictEqual(s.texts().slice(1), ['b'.repeat(200), 'c'.repeat(56)])
 })
 
-test('chatMaxLen gives 100 when unset or empty and takes 100 to 256', () => {
-  assert.strictEqual(chatMaxLen(undefined), 100)
-  assert.strictEqual(chatMaxLen(''), 100)
-  assert.strictEqual(chatMaxLen('100'), 100)
-  assert.strictEqual(chatMaxLen('256'), 256)
-  for (const bad of ['99', '257', '1e2', ' 200', '200 ', '0x100', '-100', '256.0', '0256']) {
-    assert.throws(() => chatMaxLen(bad), TypeError, JSON.stringify(bad))
+test('chatMaxLen gives 256 on 1.21.11 and 100 on 1.7.10 when unset or empty, and takes 100 to 256 on both', () => {
+  for (const legacy of [false, true]) {
+    const version = legacy ? '1.7.10' : '1.21.11'
+    const unset = legacy ? 100 : 256
+    assert.strictEqual(chatMaxLen(undefined, legacy), unset, version)
+    assert.strictEqual(chatMaxLen('', legacy), unset, version)
+    assert.strictEqual(chatMaxLen('100', legacy), 100, version)
+    assert.strictEqual(chatMaxLen('256', legacy), 256, version)
+    for (const bad of ['99', '257', '1e2', ' 200', '200 ', '0x100', '-100', '256.0', '0256']) {
+      assert.throws(() => chatMaxLen(bad, legacy), TypeError, `${JSON.stringify(bad)} on ${version}`)
+    }
   }
 })

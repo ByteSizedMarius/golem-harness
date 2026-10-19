@@ -100,8 +100,8 @@ shield, no off-hand, and the old hitboxes, sounds and underwater light. Every 1.
 - `GOLEM_SERVER_OVERRIDES` names a JSON file of recipe overrides and block renames, for a server
   whose recipes or blocks differ from what the bot knows. A block renamed to `gravestone` turns on
   the `grave` tool. `.env.example` shows the format.
-- `GOLEM_CHAT_MAX` (100 to 256, default 100) raises the longest chat line the bot sends. It only
-  helps when the proxy lets longer lines through.
+- `GOLEM_CHAT_MAX` (100 to 256) sets the longest chat line the bot sends, by default 100 here and
+  256 on 1.21.11. Raising it only helps when the proxy lets longer lines through.
 
 ## Install
 
