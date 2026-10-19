@@ -12,6 +12,11 @@ const { legLedger, takenText } = require('../lib/leg-ledger')
 const { createLane } = require('../lib/bot/lane')
 const vm = require('node:vm')
 const { routeHandler, runRoute, awaitRoute, fakeClock, toolNamed, botConstant, botSource, balanced, loadBotFunctions, combatReflexIn, wireListeners } = require('./helpers')
+const mcData = require('minecraft-data')('1.21.11')
+const registry = require('prismarine-registry')('1.21.11')
+const loadItem = require('prismarine-item')
+const Item = loadItem(registry)
+const FRAME_ITEM = mcData.entitiesByName.item_frame.metadataKeys.indexOf('item')
 
 // seen says whether the body perceives the zombie.
 const zombie = (x, seen = true) => ({ id: 7, name: 'zombie', width: 0.6, height: 1.95, seen, position: new Vec3(x, 64, 0.5) })
@@ -222,6 +227,125 @@ test('a useon whose zombie goes out of sight on the walk uses nothing and gives 
   assert.strictEqual(res.error, undefined, res.error && res.error.message)
   assert.deepStrictEqual({ ...res.body }, { used: null, on: 'zombie', reason: 'lost sight', note: 'lost sight of it' })
   assert.deepStrictEqual(world.did, ['walk'])
+})
+
+// An empty frame has no item key, as a 1.21.11 server sends it.
+function frame (id, x, item, seen = true) {
+  const metadata = []
+  if (item) metadata[FRAME_ITEM] = Item.toNotch(new Item(registry.itemsByName[item].id, 1))
+  return { id, name: 'item_frame', width: 0.5, height: 0.5, seen, position: new Vec3(x, 65, 0.5), metadata }
+}
+
+// hold(en, item) is the server changing what frame en holds, sent as an entity update.
+function frameWorld (frames, opts) {
+  const world = verbWorld(frames, opts)
+  const { bot, env } = world
+  bot.registry = registry
+  Object.assign(env, { shared: { ready: true, mcData }, loadItem })
+  const items = bot.inventory.items
+  bot.inventory.items = () => [...items(), { name: 'wheat' }]
+  const equip = bot.equip
+  bot.equip = async (item) => {
+    world.did.push(`equip ${item.name}`)
+    return equip(item)
+  }
+  world.hold = (en, item) => setImmediate(() => {
+    en.metadata[FRAME_ITEM] = Item.toNotch(item ? new Item(registry.itemsByName[item].id, 1) : null)
+    bot.emit('entityUpdate', en)
+  })
+  return world
+}
+
+// framedBy(en) names the item the server frames after the click, undefined for no update.
+async function frameWheat (frames, framedBy = () => undefined) {
+  const world = frameWorld(frames)
+  world.bot.useOn = async (en) => {
+    world.did.push(`use ${en.id}`)
+    const item = framedBy(en)
+    if (item !== undefined) world.hold(en, item)
+  }
+  const res = await drive('/useon', { name: 'item_frame', item: 'wheat' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  return { reply: { ...res.body }, did: world.did }
+}
+
+test('useon puts the item into an empty frame and names what the frame holds after the server update', async () => {
+  const framed = await frameWheat([frame(20, 2.5, null)], () => 'wheat')
+  assert.deepStrictEqual(framed.reply, { used: 'wheat', on: 'item_frame', at: { x: 2.5, y: 65, z: 0.5 }, framed: 'wheat' })
+  assert.deepStrictEqual(framed.did, ['equip wheat', 'use 20'])
+  const other = await frameWheat([frame(20, 2.5, null)], () => 'iron_sword')
+  assert.deepStrictEqual([other.reply.ok, other.reply.framed], [false, 'iron_sword'])
+  assert.match(other.reply.reason, /iron_sword/)
+})
+
+test('useon picks the nearest empty frame past a filled one', async () => {
+  const empty = frame(21, 4.5, null)
+  empty.metadata[FRAME_ITEM] = Item.toNotch(null)
+  const { reply, did } = await frameWheat([frame(20, 2.5, 'stick'), empty], () => 'wheat')
+  assert.deepStrictEqual([reply.ok, reply.at, reply.framed], [undefined, { x: 4.5, y: 65, z: 0.5 }, 'wheat'])
+  assert.ok(did.includes('use 21'), did.join(', '))
+})
+
+test('useon with only filled frames in sight walks, equips and clicks nothing, and names what the nearest holds', async () => {
+  const { reply, did } = await frameWheat([frame(20, 4.5, 'stick'), frame(21, 6.5, 'wheat'), frame(22, 2.5, null, false)], () => 'wheat')
+  assert.deepStrictEqual([reply.ok, reply.used, reply.on, reply.at, reply.framed], [false, null, 'item_frame', { x: 4.5, y: 65, z: 0.5 }, 'stick'])
+  assert.strictEqual(typeof reply.reason, 'string')
+  assert.deepStrictEqual(did, [])
+  const none = await drive('/useon', { name: 'item_frame', item: 'wheat' }, frameWorld([]))
+  const hidden = await drive('/useon', { name: 'item_frame', item: 'wheat' }, frameWorld([frame(20, 2.5, 'stick', false)]))
+  assert.strictEqual(hidden.error && hidden.error.message, none.error.message)
+})
+
+test('useon without a frame update within 500 ms confirms nothing', async () => {
+  const { reply } = await frameWheat([frame(20, 2.5, null)])
+  assert.deepStrictEqual([reply.ok, reply.used, reply.framed], [false, 'wheat', null])
+  assert.match(reply.reason, /500 ms/)
+})
+
+test('a strike on a frame swings once at the nearest filled frame whatever max says, and walks to the dropped item', async () => {
+  for (const legacy of [false, true]) {
+    const world = frameWorld([frame(21, 2.5, null), frame(20, 3.5, 'wheat')], { legacy })
+    const sprints = []
+    const control = world.bot.setControlState
+    world.bot.setControlState = (c, s) => {
+      if (c === 'sprint' && s) sprints.push(c)
+      control.call(world.bot, c, s)
+    }
+    world.bot.attack = (en) => {
+      world.did.push(`swing ${en.id}`)
+      world.hold(en, null)
+    }
+    const res = await drive('/strike', { name: 'item_frame', item: 'iron_sword', max: '3' }, world)
+    assert.strictEqual(res.error, undefined, res.error && res.error.message)
+    const { swings, killed, dropped, at, note } = res.body
+    assert.deepStrictEqual({ swings, killed, dropped, at }, { swings: 1, killed: false, dropped: 'wheat', at: { x: 3.5, y: 65, z: 0.5 } }, `1.7.10 ${legacy}`)
+    assert.strictEqual(typeof note, 'string')
+    assert.deepStrictEqual(world.did.filter((d) => !d.startsWith('jump')), ['equip iron_sword', 'swing 20', 'walk'], `1.7.10 ${legacy}`)
+    assert.deepStrictEqual(sprints, [], `1.7.10 ${legacy}`)
+  }
+})
+
+test('a 1.7.10 strike on a frame counts the frame update the server sends during the swing', async () => {
+  const world = frameWorld([frame(20, 2.5, 'wheat')], { legacy: true })
+  world.env.meleeSwing = async (en) => {
+    world.did.push(`swing ${en.id}`)
+    en.metadata[FRAME_ITEM] = Item.toNotch(null)
+    world.bot.emit('entityUpdate', en)
+    return true
+  }
+  const res = await drive('/strike', { name: 'item_frame', item: 'iron_sword' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual([res.body.swings, res.body.dropped], [1, 'wheat'], res.body.note)
+})
+
+test('a strike refuses when every frame in sight is empty', async () => {
+  const world = frameWorld([frame(21, 2.5, null), frame(20, 3.5, 'wheat', false)])
+  const res = await drive('/strike', { name: 'item_frame', item: 'iron_sword' }, world)
+  assert.ok(res.error, 'a strike at an empty frame')
+  assert.match(res.error.message, /holds an item/)
+  assert.deepStrictEqual(world.did, [])
+  const seenOnly = await drive('/strike', { name: 'item_frame', item: 'iron_sword' }, frameWorld([frame(21, 2.5, null)]))
+  assert.strictEqual(res.error.message, seenOnly.error.message)
 })
 
 test('a shot counts only once an arrow is loosed, and a kill only once the body sees the target die', async () => {

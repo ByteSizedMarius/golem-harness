@@ -59,6 +59,14 @@ refused, a ladder the server rejects names its wall, and the reply carries the s
 facing and the wall it hangs on, with the wanted wall beside it when they differ. sign walks
 like placeitem, refusing a walk over 16 blocks or a drop over 3.
 
+Item frames and bone meal answer from the server. Live, the pilot framed wheat with `useon`
+and was told "used wheat" while it believed the frame got its sword, and bone meal clicked
+on the farmland under a crop said ok and grew nothing. `useon` on a frame now picks the
+nearest empty one and replies with the item the frame shows after the server's update.
+`strike` on a frame knocks the item out with one swing, walks to the drop and refuses an
+empty frame, which a strike would knock off. Bone meal aimed at the soil under a seen crop
+or sapling clicks the plant and replies its age or stage.
+
 ## 2026-10-18: live-play fixes
 
 Chest batches. Live, the pilot moved several item kinds one call each, so the chest opened

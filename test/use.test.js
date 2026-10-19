@@ -4,11 +4,15 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
-const { awaitRoute } = require('./helpers')
+const { awaitRoute, routeHandler } = require('./helpers')
 
 const AT = { x: '1', y: '64', z: '0' }
 const AIR = { name: 'air', stateId: 0 }
-const block = (state, position) => ({ ...state, position, getProperties: () => (state.age === undefined ? {} : { age: String(state.age) }) })
+const block = (state, position) => ({
+  ...state,
+  position,
+  getProperties: () => Object.fromEntries(['age', 'stage'].filter((k) => state[k] !== undefined).map((k) => [k, String(state[k])]))
+})
 
 // A body beside a seen cell at 1,64,0 holding state, with held in hand. The server answers a block
 // click once the click returns, with an update to the state click(state) gives.
@@ -88,6 +92,70 @@ test('bone meal fails on a fully grown crop and works on a growing one', async (
   const ripe = await awaitRoute('/use', AT, useCell({ name: 'wheat', stateId: 7, age: 7 }, 'bone_meal', grow))
   assert.strictEqual(ripe.ok, false)
   assert.strictEqual(typeof ripe.reason, 'string')
+})
+
+// Farmland at 1,64,0 under plant, and each click on the plant grows it to grow(plant).
+function farmland (plant, grow, seen = () => true) {
+  const soil = new Vec3(1, 64, 0)
+  const up = soil.offset(0, 1, 0)
+  const cells = { [soil]: { name: 'farmland', stateId: 30 }, [up]: plant }
+  const clicked = []
+  const bot = Object.assign(new EventEmitter(), {
+    entity: { position: new Vec3(0.5, 64, 0.5) },
+    heldItem: { name: 'bone_meal' },
+    inventory: { items: () => [] },
+    blockAt: (at) => block(cells[at] || AIR, at),
+    pathfinder: { goto: async () => {} },
+    lookAt: async () => {},
+    activateBlock: async (b) => {
+      clicked.push(b.position)
+      setImmediate(() => {
+        const old = block(cells[b.position], b.position)
+        if (b.position.equals(up)) cells[up] = grow(cells[up])
+        bot.emit('blockUpdate', old, block(cells[b.position], b.position))
+      })
+    }
+  })
+  const env = { bot, Vec3, seesLit: seen, cellKnown: () => true, goals: {}, round: (v) => v, setTimeout, clearTimeout, ok: (res, body) => { res.body = { ok: true, ...body } } }
+  return { env, clicked }
+}
+
+test('bone meal on farmland clicks the crop above it and replies the age the server sent', async () => {
+  const { env, clicked } = farmland({ name: 'wheat', stateId: 1, age: 0 }, () => ({ name: 'wheat', stateId: 5, age: 4 }))
+  const reply = await awaitRoute('/use', AT, env)
+  assert.deepStrictEqual([reply.ok, reply.on, reply.at, reply.age], [true, 'wheat', { x: 1, y: 65, z: 0 }, 4])
+  assert.deepStrictEqual(clicked, [new Vec3(1, 65, 0)])
+})
+
+test('bone meal on farmland whose cell above is out of sight is refused alike for a crop and for air, and clicks nothing', async () => {
+  const replies = []
+  for (const above of [{ name: 'wheat', stateId: 1, age: 0 }, AIR]) {
+    const { env, clicked } = farmland(above, (s) => s, (p) => p.y === 64)
+    const { handle, res } = routeHandler('/use', env)
+    await handle({ query: AT }, res)
+    replies.push({ body: res.body, error: res.error && res.error.message })
+    assert.deepStrictEqual(clicked, [], `${above.name} above`)
+  }
+  assert.match(replies[0].error, /not in my sight/)
+  assert.deepStrictEqual(replies[1], replies[0])
+})
+
+test('bone meal that uses up the last one names bone_meal as used', async () => {
+  const env = useCell({ name: 'wheat', stateId: 1, age: 0 }, 'bone_meal', () => ({ name: 'wheat', stateId: 5, age: 4 }))
+  const click = env.bot.activateBlock
+  env.bot.activateBlock = async (b) => {
+    env.bot.heldItem = null
+    return click(b)
+  }
+  const reply = await awaitRoute('/use', AT, env)
+  assert.deepStrictEqual([reply.ok, reply.used, reply.age], [true, 'bone_meal', 4])
+})
+
+test('bone meal on a sapling the server left as it was replies ok with its stage', async () => {
+  const sapling = { name: 'oak_sapling', stateId: 40, stage: 0 }
+  const reply = await awaitRoute('/use', AT, useCell(sapling, 'bone_meal', (s) => s))
+  assert.deepStrictEqual([reply.ok, reply.on, reply.stage], [true, 'oak_sapling', 0])
+  assert.strictEqual(typeof reply.note, 'string')
 })
 
 test('a bucket on grass, a flower or a torch uses the item, other items click the block', async () => {

@@ -16,6 +16,7 @@
 - Place, `blockat`, correct. `then: "blockat"` on `placeitem` and `digat` puts the check in the reply, also when the call reports a false failure because the block update arrived late.
 - Stairs: place one with `face`, `blockat` it to check the facing, then place the rest.
 - Ladders on 1.7.10: `face: "N"` hangs the ladder on the wall north of the cell. Without `face` it follows the ladder below, else the first solid wall. The reply's `wall` and `facing` are the ones the server set.
+- Item frames: `useon` puts an item into an empty frame. `strike` with any carried item knocks the item out (it drops below the frame) and refuses an empty frame.
 - `craft` in small explicit batches, or let a teammate craft at a real table while you lay blocks.
 - `build` lays a whole cabin as a job. `outline`, `walls` and `roof` run at once and suit smaller, precise work.
 - A gap crossing: `bridging(on: "1")`, cross, `bridging(on: "0")`, then `tidy` to take the scaffold back. The pathfinder places nothing on its own.
