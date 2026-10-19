@@ -135,6 +135,7 @@ function fleeIn (w, threat, ally = null, over = {}) {
     takeLegs: (reflex, why) => legs.take(reflex, why),
     stopPath () {},
     emitEvent: (kind, msg) => events.push({ kind, msg }),
+    LEGACY_1710: false,
     ...over
   }
   loadBotFunctions(['fleeWorld', 'fleeLog', 'threatWhy', 'creeperSwelling'], env)
@@ -293,6 +294,16 @@ test('a swelling creeper is fled to a seen corner within a few steps that hides 
   far(plateau(), swelling())
   far(plateau({ ...corner, unknown: column }), swelling())
   far(corner, swelling(false))
+})
+
+test('a 1.7.10 creeper, 0.1 taller than a 1.21.11 one, sees over cover that hides the body from the 1.21.11 one', () => {
+  const metadata = []
+  metadata[MC_DATA.entitiesByName.creeper.metadataKeys.indexOf('swell_dir')] = 1
+  // The creeper on a block 7 east, a stone pillar two high 5 east.
+  const w = plateau({ solid: (x, y, z) => plateau().solid(x, y, z) || (z === 0 && ((x === 7 && y === 64) || (x === 5 && y <= 65))) })
+  const goal = (legacy) => fleeIn(w, { ...creeper(7.5, 65, 0.5), metadata }, null, { LEGACY_1710: legacy }).goal
+  assert.deepStrictEqual(goal(false), { x: 3, y: 64, z: 0 })
+  assert.deepStrictEqual(goal(true), { x: 4, y: 64, z: 0 })
 })
 
 test('a creeper back within 3 of the cover is fled again 1 s after the cover move, a far flee holds its legs for 6 s', async () => {
