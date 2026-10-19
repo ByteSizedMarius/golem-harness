@@ -1,11 +1,12 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const registry = require('prismarine-registry')('1.21.11')
 const Block = require('prismarine-block')(registry)
 const Item = require('prismarine-item')(registry)
-const { loadBotFunctions, botConstant, awaitRoute } = require('./helpers')
+const { loadBotFunctions, botConstant, routeHandler, fakeClock } = require('./helpers')
 
 const SWORD = { name: 'iron_sword', type: 1 }
 const WOOD_PICK = { name: 'wooden_pickaxe', type: 2 }
@@ -57,23 +58,49 @@ test('digat leaves the hand alone when it holds a harvester or none is carried',
   assert.strictEqual(dirt.bot.equips, 0, 'a block any hand harvests')
 })
 
-// /digat on blockName in reach, with hotbar holding item names (null for an empty slot) and slot held selected.
-async function digWith (blockName, hotbar, held, legacy = false) {
-  const block = Block.fromStateId(registry.blocksByName[blockName].defaultState, 0)
-  block.position = new Vec3(2, 64, 0)
-  const slots = new Array(45).fill(null)
-  hotbar.forEach((name, i) => { if (name) slots[36 + i] = new Item(registry.itemsByName[name].id, 1) })
-  const bot = {
+const CELL = new Vec3(2, 64, 0)
+const cellBlock = (name) => Object.assign(Block.fromStateId(registry.blocksByName[name].defaultState, 0), { position: CELL })
+
+// hotbar entries are a name, [name, damage] or null. during is block names, after and slot are [ms, name] updates.
+async function digRun (blockName, hotbar, held, legacy, { during = [], after = [[20, 'air']], slot = [] } = {}, query = {}) {
+  const clock = fakeClock()
+  let cell = cellBlock(blockName)
+  const slots = new Array(46).fill(null)
+  hotbar.forEach((spec, i) => {
+    if (!spec) return
+    const [name, damage] = [].concat(spec)
+    slots[36 + i] = Object.assign(new Item(registry.itemsByName[name].id, 1), { slot: 36 + i })
+    if (damage) slots[36 + i].durabilityUsed = damage
+  })
+  const bot = Object.assign(new EventEmitter(), {
     entity: { position: new Vec3(0.5, 64, 0.5) },
-    inventory: { slots, hotbarStart: 36, items: () => slots.filter(Boolean) },
+    inventory: Object.assign(new EventEmitter(), { slots, hotbarStart: 36, items: () => slots.filter(Boolean) }),
     quickBarSlot: held,
-    get heldItem () { return slots[36 + this.quickBarSlot] },
     setQuickBarSlot (i) { this.quickBarSlot = i },
     equips: [],
     async equip (item) { this.equips.push(item.name); this.quickBarSlot = slots.indexOf(item) - 36 },
-    blockAt: () => block,
-    async dig () { this.dugWith = this.heldItem ? this.heldItem.name : null }
-  }
+    blockAt: () => cell,
+    targetDigBlock: null,
+    async dig (b) {
+      this.dugWith = this.heldItem ? this.heldItem.name : null
+      const update = (name) => { const old = cell; cell = cellBlock(name); this.emit(`blockUpdate:${CELL}`, old, cell) }
+      this.targetDigBlock = b
+      during.forEach(update)
+      this.targetDigBlock = null
+      // mineflayer's own air write at the end of its timer.
+      update('air')
+      for (const [ms, name] of after) clock.setTimeout(() => update(name), ms)
+      const s = 36 + this.quickBarSlot
+      for (const [ms, name] of slot) {
+        clock.setTimeout(() => {
+          const old = slots[s]
+          slots[s] = name && Object.assign(new Item(registry.itemsByName[name].id, 1), { slot: s })
+          this.inventory.emit('updateSlot', s, old, slots[s])
+        }, ms)
+      }
+    }
+  })
+  Object.defineProperty(bot, 'heldItem', { get () { return slots[36 + this.quickBarSlot] } })
   const env = {
     bot,
     bunker: { building: false },
@@ -83,10 +110,29 @@ async function digWith (blockName, hotbar, held, legacy = false) {
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     PICK_TIER: botConstant('PICK_TIER'),
     DIG_TOOL: botConstant('DIG_TOOL'),
-    LEGACY_1710: legacy
+    LEGACY_HAND_DIG: botConstant('LEGACY_HAND_DIG'),
+    LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
+    LEGACY_1710: legacy,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    Date: { now: clock.now }
   }
-  const reply = await awaitRoute('/digat', { x: '2', y: '64', z: '0' }, env)
-  return { reply, bot }
+  const { handle, res } = routeHandler('/digat', env)
+  const done = handle({ query: { x: '2', y: '64', z: '0', ...query } }, res)
+  while (res.body === undefined && res.error === undefined && clock.now() < 10000) {
+    await new Promise(setImmediate)
+    clock.advance(1)
+  }
+  await done
+  assert.strictEqual(bot.listenerCount(`blockUpdate:${CELL}`), 0, 'a block listener outlived the reply')
+  assert.strictEqual(bot.inventory.listenerCount('updateSlot'), 0, 'a slot listener outlived the reply')
+  return { reply: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error, ms: clock.now(), bot }
+}
+
+async function digWith (blockName, hotbar, held, legacy = false) {
+  const r = await digRun(blockName, hotbar, held, legacy)
+  assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  return r
 }
 
 const TOOLS = ['wooden_pickaxe', 'stone_axe', 'wooden_shovel', 'iron_pickaxe', 'stone_pickaxe', null]
@@ -115,4 +161,78 @@ test('digat answers a cave air cell as already air', async () => {
   const r = await digWith('cave_air', TOOLS, 0)
   assert.deepStrictEqual(r.reply, { already: 'air', at: { x: 2, y: 64, z: 0 } })
   assert.strictEqual(r.bot.dugWith, undefined)
+})
+
+function wrappedDigTime (legacy, held) {
+  const bot = Object.assign(new EventEmitter(), {
+    heldItem: new Item(registry.itemsByName[held].id, 1),
+    game: { gameMode: 'survival' },
+    entity: { onGround: true, effects: {} },
+    _getBlockAtEyeLevel: () => null
+  })
+  bot.digTime = (b) => b.digTime(bot.heldItem.type, false, false, false, [], {})
+  loadBotFunctions(['wireLegacyDigTime'], { bot, LEGACY_1710: legacy, LEGACY_HAND_DIG: botConstant('LEGACY_HAND_DIG') }).wireLegacyDigTime()
+  bot.emit('inject_allowed')
+  return bot.digTime
+}
+
+test('on 1.7.10 an axe digs a ladder at hand speed, and on 1.21.11 at axe speed', () => {
+  const ladder = cellBlock('ladder')
+  const hand = ladder.digTime(null, false, false, false)
+  const axe = ladder.digTime(registry.itemsByName.iron_axe.id, false, false, false)
+  assert.ok(axe < hand)
+  assert.strictEqual(wrappedDigTime(true, 'iron_axe')(ladder), hand)
+  assert.strictEqual(wrappedDigTime(false, 'iron_axe')(ladder), axe)
+  const stone = cellBlock('stone')
+  assert.strictEqual(wrappedDigTime(true, 'stone_pickaxe')(stone), stone.digTime(registry.itemsByName.stone_pickaxe.id, false, false, false))
+})
+
+const AT = { x: 2, y: 64, z: 0 }
+
+test('digat digs a ladder bare-handed on 1.7.10 and with an axe on 1.21.11', async () => {
+  const hotbar = ['iron_axe', null]
+  const modern = await digWith('ladder', hotbar, 0)
+  assert.deepStrictEqual(modern.reply, { dug: 'ladder', at: AT, with: 'iron_axe' })
+  const legacy = await digWith('ladder', hotbar, 0, true)
+  assert.strictEqual(legacy.bot.dugWith, null)
+  assert.deepStrictEqual(legacy.reply, { dug: 'ladder', at: AT, with: null })
+})
+
+test('on 1.7.10 digat answers on the server\'s block update', async () => {
+  const r = await digRun('stone', [['stone_pickaxe']], 0, true, { after: [[40, 'air']] })
+  assert.deepStrictEqual(r.reply, { dug: 'stone', at: AT, with: 'stone_pickaxe' })
+  assert.ok(r.ms >= 40 && r.ms < botConstant('LEGACY_DIG_CONFIRM_MS'), `replied at ${r.ms} ms`)
+})
+
+test('on 1.7.10 digat calls a dig unconfirmed when only its own air write reached the cell', async () => {
+  const r = await digRun('stone', [['stone_pickaxe']], 0, true, { after: [] })
+  assert.strictEqual(r.reply.dug, 'stone')
+  assert.match(r.reply.unconfirmed, /^no block update from the server within \d+ ms$/)
+})
+
+test('on 1.7.10 digat waits past a resent block for the server\'s break', async () => {
+  const r = await digRun('ladder', [null], 0, true, { after: [[10, 'ladder'], [600, 'air']] })
+  assert.deepStrictEqual(r.reply, { dug: 'ladder', at: AT, with: null })
+})
+
+test('on 1.7.10 digat fails when the server resends the block and never breaks it', async () => {
+  const r = await digRun('ladder', [null], 0, true, { after: [[10, 'ladder']] })
+  assert.strictEqual(r.reply, undefined)
+  assert.match(r.error.message, /^the server resent the ladder at 2,64,0 and had not broken it after \d+ ms$/)
+})
+
+test('on 1.7.10 digat counts the server\'s update during the dig and names a block that filled the cell', async () => {
+  const during = await digRun('stone', [['stone_pickaxe']], 0, true, { during: ['air'], after: [] })
+  assert.deepStrictEqual(during.reply, { dug: 'stone', at: AT, with: 'stone_pickaxe' })
+  const fell = await digRun('stone', [['stone_pickaxe']], 0, true, { after: [[20, 'gravel']] }, { then: 'blockat' })
+  assert.deepStrictEqual(fell.reply, { dug: 'stone', at: AT, with: 'stone_pickaxe', now: 'gravel', verify: { name: 'gravel', at: AT } })
+})
+
+test('on 1.7.10 digat reports a tool that broke on its last use', async () => {
+  const max = registry.itemsByName.stone_pickaxe.maxDurability
+  const last = await digRun('stone', [['stone_pickaxe', max]], 0, true, { after: [[20, 'air']], slot: [[80, null]] })
+  assert.deepStrictEqual(last.reply, { dug: 'stone', at: AT, with: 'stone_pickaxe', toolBroke: true })
+  const worn = await digRun('stone', [['stone_pickaxe', max - 1]], 0, true, { after: [[20, 'air']], slot: [[80, 'stone_pickaxe']] })
+  assert.deepStrictEqual(worn.reply, { dug: 'stone', at: AT, with: 'stone_pickaxe' })
+  assert.ok(worn.ms < 80, 'waited for the slot of a tool with uses left')
 })

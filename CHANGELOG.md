@@ -37,6 +37,28 @@ creeper the reflex only watches, keeping outside the stance's flee distance plus
 closing in on one it already stands within. When the only way runs past it, the reply's reason
 is `creeper` and the hint names the creeper's cell. `accept` walks the way anyway.
 
+Digs wait for the server. Live on 1.7.10, ladders dug with an axe never dropped, and a later
+placeitem found the cell "occupied by ladder" while blockat had said air. mineflayer timed
+the ladder at about 100 ms with the axe, but the 1.7.10 server breaks it at about 575 ms
+whatever the tool, so it resent the ladder, and a second early finish while one was pending
+kept the block for good, after digat had already answered "dug" on mineflayer's own air
+write. A stone pick at 1 durability also dug twice more, because 1.7.10 breaks a tool on the
+use that takes its damage past the maximum. On 1.7.10 a ladder now digs at hand speed with
+any tool, digat answers once the server's block update arrives, fails with ok:false when the
+server keeps the block, says unconfirmed when no update comes within 1.5 s, and reports
+toolBroke when a tool's last use empties its slot. durability counts the uses a tool has
+left, the one that breaks it included.
+
+Ladders hang where asked. Live on 1.7.10, placeitem's face did nothing for a ladder, and the
+wall it landed on depended on the block below: over a solid block or a ladder the bot
+clicked the top face and the server hung the ladder on whatever wall it picked first, so a
+shaft left its wall at the first placement. A 1.7.10 ladder now goes against the side of a
+wall: the one face names (N hangs it on the wall north of the cell), else the wall of the
+ladder below, else the first solid wall, never the block below. A cell without that wall is
+refused, a ladder the server rejects names its wall, and the reply carries the server's
+facing and the wall it hangs on, with the wanted wall beside it when they differ. sign walks
+like placeitem, refusing a walk over 16 blocks or a drop over 3.
+
 ## 2026-10-18: live-play fixes
 
 Chest batches. Live, the pilot moved several item kinds one call each, so the chest opened

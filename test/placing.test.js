@@ -156,7 +156,8 @@ function crafter ({ tableAt = null, needsTable = true, seen = true, unreachable 
       shared: { mcData: { itemsByName: {} } },
       cellKnown: (p) => seen || !tableAt || !p.equals(tableAt),
       seenNow: (p) => seen || !tableAt || !p.equals(tableAt),
-      STATIONS: new Map()
+      STATIONS: new Map(),
+      LEGACY_1710: false
     }
   })
   return { log, ctx: loadBotFunctions(['craftItem'], env) }
@@ -418,17 +419,31 @@ test('build answers not ready before it reads the body position', async () => {
 })
 
 // placeitem by a body at (-1.5, 64, 0.5) carrying name over the floor plus extra, blind to the cells in hidden,
-// remembering the cells in unseen without seeing them now.
-// A click leaves placedAs (default a block of name) in the target. log records looks, sneaks and places.
-function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen = [] } = {}) {
+// remembering the cells in unseen without seeing them now, on 1.7.10 when legacy is true.
+// A click leaves placedAs (default a block of name) in the target, or with refused times out on the block update.
+// With path the body stands at (-19.5, 64, 0.5) and its walk plans along the cell centres in path.
+// log records looks, sneaks and places, clicks each clicked face as 'x,y,z face dx,dy,dz'.
+function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen = [], legacy = false, refused = false, path = null } = {}) {
   const log = []
+  const clicks = []
   const world = { ...extra }
   let sneaking = false
   const place = (ref, face) => {
     log.push(`place against ${ref.name} sneaking=${sneaking}`)
+    clicks.push(`${key(ref.position)} face ${key(face)}`)
+    if (refused) throw new Error(`Event blockUpdate:${ref.position.plus(face)} did not fire within timeout of 5000ms`)
     world[key(ref.position.plus(face))] = placedAs || { name, boundingBox: 'block' }
   }
-  const env = placingEnv(body(-1.5, 64, 0.5), ground(world), {
+  const walk = path && {
+    walkRoute: () => ({ end () {} }),
+    planPath: async () => ({ status: 'success', path: path.map(([x, y, z]) => new Vec3(x + 0.5, y, z + 0.5)) }),
+    routeEnd: () => null,
+    knownCell: () => true,
+    summarizePlan,
+    DROP_MAX,
+    PLACE_WALK_MAX: botConstant('PLACE_WALK_MAX')
+  }
+  const env = placingEnv(path ? body(-19.5, 64, 0.5) : body(-1.5, 64, 0.5), ground(world), {
     items: [{ name, count: 1 }],
     bot: {
       pathfinder: { goto: async () => {} },
@@ -438,9 +453,19 @@ function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen 
       async placeBlock (ref, face) { place(ref, face) },
       async _placeBlockWithOptions (ref, face) { place(ref, face) }
     },
-    env: { require, goals, cellKnown: (p) => !hidden.includes(key(p)), seenNow: (p) => !hidden.includes(key(p)) && !unseen.includes(key(p)), clearSoftCover: async () => {}, stampOwnEdit () {} }
+    env: {
+      require,
+      goals,
+      LEGACY_1710: legacy,
+      cellKnown: (p) => !hidden.includes(key(p)),
+      seenNow: (p) => !hidden.includes(key(p)) && !unseen.includes(key(p)),
+      clearSoftCover: async () => {},
+      stampOwnEdit () {},
+      send: (res, body) => { res.sent = body },
+      ...walk
+    }
   })
-  return { log, env }
+  return { log, clicks, env }
 }
 
 const FENCE_NS = { '1,64,-1': { name: 'oak_fence', boundingBox: 'block' }, '1,64,1': { name: 'oak_fence', boundingBox: 'block' } }
@@ -552,6 +577,7 @@ function heldPlatformRig (roofed) {
       SIGHT_MS: botConstant('SIGHT_MS'),
       ESTIMATED_LIGHT: new Map(),
       ...groundMemory(),
+      LEGACY_1710: false,
       clearSoftCover: async () => {},
       stampOwnEdit () {}
     }
@@ -577,4 +603,79 @@ test('placeitem and sign answer a remembered support out of sight the same whate
   assert.strictEqual(await placeitem({}), await placeitem(dug))
   const sign = (extra) => signRefusal(placeitemRig('oak_sign', { extra, unseen: ['1,63,0'] }))
   assert.strictEqual(await sign({}), await sign(dug))
+})
+
+test('sign refuses a planned walk longer than 16 blocks or one that drops more than 3 at once', async () => {
+  const short = placeitemRig('oak_sign', { path: Array.from({ length: 16 }, (_, i) => [i - 19, 64, 0]) })
+  short.env.bot.updateSign = async () => {}
+  await awaitRoute('/sign', SIGN_AT, short.env)
+  assert.deepStrictEqual(short.log.filter((l) => l.startsWith('place')), ['place against stone sneaking=true'], 'control: a 16 block walk places')
+  const long = placeitemRig('oak_sign', { path: Array.from({ length: 19 }, (_, i) => [i - 19, 64, 0]) })
+  assert.strictEqual(await signRefusal(long), 'refusing to walk 19 blocks to place at 1,64,0: goto closer first')
+  const deep = placeitemRig('oak_sign', { path: [[-19, 64, 0], [-18, 64, 0], [-17, 60, 0], [-16, 60, 0]] })
+  assert.strictEqual(await signRefusal(deep), 'refusing to walk to place at 1,64,0: the way drops 4 blocks at once')
+})
+
+const ladder = (facing) => ({ name: 'ladder', boundingBox: 'block', getProperties: () => ({ facing }) })
+const LADDER_AT = { x: '1', y: '64', z: '0', name: 'ladder' }
+const WALL = { east: '2,64,0', west: '0,64,0', south: '1,64,1', north: '1,64,-1' }
+const walls = (...sides) => Object.fromEntries(sides.map((s) => [WALL[s], STONE]))
+
+async function ladderRefusal (query, rig) {
+  const { handle, res } = routeHandler('/placeitem', rig.env)
+  await handle({ query }, res)
+  assert.ok(res.error, 'placeitem did not refuse')
+  assert.deepStrictEqual(rig.clicks, [])
+  return res.error.message
+}
+
+test('a 1.7.10 ladder with face clicks the side of that wall, never the block below, and names the wall and facing the server set', async () => {
+  const north = placeitemRig('ladder', { legacy: true, extra: walls('east', 'north'), placedAs: ladder('south') })
+  const placed = await awaitRoute('/placeitem', { ...LADDER_AT, face: 'N' }, north.env)
+  assert.deepStrictEqual([placed.wall, placed.facing], ['north', 'south'])
+  assert.deepStrictEqual(north.clicks, ['1,64,-1 face 0,0,1'])
+  const off = placeitemRig('ladder', { legacy: true, extra: walls('north'), placedAs: ladder('west') })
+  const moved = await awaitRoute('/placeitem', { ...LADDER_AT, face: 'N' }, off.env)
+  assert.deepStrictEqual([moved.wall, moved.facing], ['east, wanted north', 'west'])
+})
+
+test('a 1.7.10 ladder refuses a face whose wall is missing, and one out of sight alike', async () => {
+  const missing = await ladderRefusal({ ...LADDER_AT, face: 'N' }, placeitemRig('ladder', { legacy: true, extra: walls('east', 'south') }))
+  assert.strictEqual(missing, 'no solid wall north of the cell for a ladder')
+  const unseen = placeitemRig('ladder', { legacy: true, extra: walls('east', 'north'), unseen: [WALL.north] })
+  assert.strictEqual(await ladderRefusal({ ...LADDER_AT, face: 'N' }, unseen), missing)
+})
+
+test('a 1.7.10 ladder over a ladder hangs on the wall the one below hangs on', async () => {
+  const rig = placeitemRig('ladder', { legacy: true, extra: { ...walls('east', 'south'), '1,63,0': ladder('north') }, placedAs: ladder('north') })
+  await awaitRoute('/placeitem', LADDER_AT, rig.env)
+  assert.deepStrictEqual(rig.clicks, ['1,64,1 face 0,0,-1'])
+})
+
+test('a 1.7.10 ladder without face over a solid block hangs on the first wall of +x, -x, +z, -z', async () => {
+  const rig = placeitemRig('ladder', { legacy: true, extra: walls('west', 'south'), placedAs: ladder('east') })
+  const placed = await awaitRoute('/placeitem', LADDER_AT, rig.env)
+  assert.deepStrictEqual(rig.clicks, ['0,64,0 face 1,0,0'])
+  assert.deepStrictEqual([placed.wall, placed.facing], ['west', 'east'])
+  assert.strictEqual(await ladderRefusal(LADDER_AT, placeitemRig('ladder', { legacy: true })), 'a ladder needs a solid wall beside the cell')
+})
+
+test('a 1.7.10 ladder the server refuses names the wall, and then=blockat still reads the cell', async () => {
+  const refused = () => placeitemRig('ladder', { legacy: true, extra: walls('south'), refused: true })
+  const plain = routeHandler('/placeitem', refused().env)
+  await plain.handle({ query: LADDER_AT }, plain.res)
+  assert.strictEqual(plain.res.error && plain.res.error.message, 'the server refused the ladder on the south wall')
+  const checked = routeHandler('/placeitem', refused().env)
+  await checked.handle({ query: { ...LADDER_AT, then: 'blockat' } }, checked.res)
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(checked.res.sent || null)), {
+    ok: false, error: 'the server refused the ladder on the south wall', verify: { name: 'air', at: { x: 1, y: 64, z: 0 } }
+  })
+})
+
+test('a ladder on 1.21.11 goes on the block below, with face or without', async () => {
+  for (const face of ['', 'N']) {
+    const rig = placeitemRig('ladder', { extra: walls('south') })
+    await awaitRoute('/placeitem', { ...LADDER_AT, face }, rig.env)
+    assert.deepStrictEqual(rig.clicks, ['1,63,0 face 0,1,0'], `face ${face}`)
+  }
 })
