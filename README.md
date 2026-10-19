@@ -112,7 +112,8 @@ npm install
 ```
 
 The install applies `patches/` with patch-package: fixes to mineflayer-pathfinder's door, wall and
-farmland handling, and to how mineflayer and minecraft-protocol decode velocity from 1.21.9 on.
+farmland handling, to how mineflayer and minecraft-protocol decode velocity from 1.21.9 on, and to
+how prismarine-chunk reads and writes chunk light.
 
 ## Running it
 

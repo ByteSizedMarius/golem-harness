@@ -77,6 +77,18 @@ maps to the one 1.7.10 fence, `oak_fence`. A 2x2 recipe whose seen table is out 
 crafts in the inventory grid and says so. Recipe overrides take several entries for one
 item.
 
+Light by the right cell. Live on the 1.7.10 server, `gaze` called a torch-lit stair too dark
+to see, and one more torch fixed it. prismarine-chunk 1.40.0 read the server's light arrays
+as big-endian longs, so in every 16-block row the bot took each cell's light from another
+cell of the row, x 0 from x 14 and x 2 from x 12, on 1.21.11 as on 1.7.10. In a sealed stair
+that read open daylight. `patches/prismarine-chunk+1.40.0.patch` reads and writes them as
+plain nibble bytes, and the bot's light now matches the server's in every cell, in a 1.21.11
+tunnel and in a 1.7.10 stair before and after a relog. A 1.7.10 server sends no light after
+a single block change, so on 1.7.10 the bot now relights for itself: a torch picked up
+beside another leaves the other's light, a block laid in a lit tunnel shades the cells past
+it, and a wall dug into a dark tunnel lets the light on down it. Underground on 1.7.10,
+cells no longer read open sky they never had.
+
 ## 2026-10-18: live-play fixes
 
 Chest batches. Live, the pilot moved several item kinds one call each, so the chest opened

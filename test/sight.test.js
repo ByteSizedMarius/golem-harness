@@ -211,6 +211,47 @@ test('a cell opened beside a lit one takes its light, one level down', () => {
   assert.deepStrictEqual({ ...env.heldLight(at, env.bot.blockAt(at)) }, { light: 4, skyLight: 0 })
 })
 
+function litRow (legacy, light, walls = new Set()) {
+  return wireLight({ ...world({ open: (x, y, z) => z === 0 && y === 64 && x >= 0 && x < 20 && !walls.has(x), light }), LEGACY_1710: legacy })
+}
+const falloff = (...torches) => (x) => Math.max(0, ...torches.map((t) => 14 - Math.abs(x - t)))
+const rowLight = (env) => Array.from({ length: 20 }, (_, x) => env.heldLight(new Vec3(x, 64, 0), env.bot.blockAt(new Vec3(x, 64, 0))).light)
+const row = (f) => Array.from({ length: 20 }, (_, x) => f(x))
+
+test('a torch taken from beside another on a 1.7.10 server leaves the light the other gives, on 1.21.11 it darkens the cells it could have lit', () => {
+  const taken = (legacy) => {
+    const env = litRow(legacy, falloff(5, 15))
+    env.bot.emit('blockUpdate', { ...torchAt([15, 64, 0]), light: 14 }, airAt([15, 64, 0]))
+    return rowLight(env)
+  }
+  assert.deepStrictEqual(taken(true), row(falloff(5)))
+  assert.deepStrictEqual(taken(false), row((x) => (x < 10 ? falloff(5)(x) : 0)))
+})
+
+test('a stone laid in a lit tunnel on a 1.7.10 server takes away the light that reached past it only through its cell, on 1.21.11 the block light stays', () => {
+  const laid = (legacy) => {
+    const walls = new Set()
+    const env = litRow(legacy, falloff(2, 19), walls)
+    walls.add(8)
+    env.bot.emit('blockUpdate', { ...airAt([8, 64, 0]), light: 8 }, stoneAt([8, 64, 0]))
+    return rowLight(env)
+  }
+  assert.deepStrictEqual(laid(true), row((x) => (x < 8 ? falloff(2, 19)(x) : x === 8 ? 0 : falloff(19)(x))))
+  assert.deepStrictEqual(laid(false), row((x) => (x === 8 ? 0 : falloff(2, 19)(x))))
+})
+
+test('a wall dug between a lit room and a dark tunnel on a 1.7.10 server lets the light on down the tunnel, on 1.21.11 only the opened cell takes it', () => {
+  const dug = (legacy) => {
+    const walls = new Set([10])
+    const env = litRow(legacy, (x) => (x < 10 ? 12 : 0), walls)
+    walls.delete(10)
+    env.bot.emit('blockUpdate', stoneAt([10, 64, 0]), airAt([10, 64, 0]))
+    return rowLight(env)
+  }
+  assert.deepStrictEqual(dug(true), row((x) => (x < 10 ? 12 : 21 - x)))
+  assert.deepStrictEqual(dug(false), row((x) => (x < 10 ? 12 : x === 10 ? 11 : 0)))
+})
+
 test('a cell opened under open sky takes the full sky light, one under a roof a level less', () => {
   const skyAfterDig = (roof) => {
     const env = wireLight(world({ open: (x, y, z) => y >= 64 && !(roof && x === 0 && z === 0 && y === 70), light: () => 0, skyLight: () => 15 }))

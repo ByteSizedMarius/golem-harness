@@ -1,0 +1,45 @@
+diff --git a/node_modules/prismarine-chunk/src/pc/1.18/ChunkColumn.js b/node_modules/prismarine-chunk/src/pc/1.18/ChunkColumn.js
+index 88163f2..280a7d4 100644
+--- a/node_modules/prismarine-chunk/src/pc/1.18/ChunkColumn.js
++++ b/node_modules/prismarine-chunk/src/pc/1.18/ChunkColumn.js
+@@ -270,16 +270,12 @@ module.exports = (Block, mcData) => {
+           emptyMask.set(y, isEmpty)
+           lightMask.set(y, 1 - isEmpty)
+ 
+-          const bitArray = new BitArray({
++          // Light arrays come as plain nibble bytes, not as big-endian longs
++          sections[y] = new BitArray({
+             bitsPerValue: 4,
+-            capacity: 4096
++            capacity: 4096,
++            data: isEmpty ? undefined : new Int8Array(data[currentSectionIndex++]).buffer
+           })
+-          sections[y] = bitArray
+-
+-          if (!isEmpty) {
+-            const sectionReader = Buffer.from(data[currentSectionIndex++])
+-            bitArray.readBuffer(SmartBuffer.fromBuffer(sectionReader))
+-          }
+         }
+       }
+ 
+@@ -341,17 +337,13 @@ module.exports = (Block, mcData) => {
+ 
+       this.skyLightSections.forEach((section, index) => {
+         if (section !== null && this.skyLightMask.get(index)) {
+-          const smartBuffer = new SmartBuffer()
+-          section.writeBuffer(smartBuffer)
+-          skyLight.push(Uint8Array.from(smartBuffer.toBuffer()))
++          skyLight.push(new Uint8Array(section.data.buffer.slice(0)))
+         }
+       })
+ 
+       this.blockLightSections.forEach((section, index) => {
+         if (section !== null && this.blockLightMask.get(index)) {
+-          const smartBuffer = new SmartBuffer()
+-          section.writeBuffer(smartBuffer)
+-          blockLight.push(Uint8Array.from(smartBuffer.toBuffer()))
++          blockLight.push(new Uint8Array(section.data.buffer.slice(0)))
+         }
+       })
+ 
