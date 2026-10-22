@@ -3,7 +3,8 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
-const { awaitRoute, routeHandler, botConstant } = require('./helpers')
+const { awaitRoute, routeHandler, botConstant, loadBotFunctions } = require('./helpers')
+const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 
 const CHEST_ID = 54
 const IDS = { stone: 1, cobblestone: 4, diamond: 264, wheat_seeds: 295, wheat: 296, cobbled_deepslate: 1101 }
@@ -15,32 +16,46 @@ const FAR = new Vec3(-7, 64, 3)
 // Nearer than NEAR and FAR.
 const HIDDEN = new Vec3(0, 64, -3)
 
-const stack = (name, count) => ({ name, type: IDS[name], count })
+const stack = (name, count) => ({ name, type: IDS[name], count, stackSize: 64 })
 // A chest facing north pairs its left half with the cell east of it and its right half with the cell west.
 const LEFT = { type: 'left', facing: 'north' }
 const RIGHT = { type: 'right', facing: 'north' }
 
-// A single chest whose deposit fills partial stacks, then empty slots, then fails like mineflayer's.
+const pocketItems = (pockets, from) => pockets.flatMap((s, i) => (s.count ? [{ ...s, slot: from + i }] : []))
+
+// A single chest whose deposit and withdraw throw mineflayer's errors.
 function chestWindow (items) {
   const slots = items.map((s) => ({ ...s }))
   const window = {
     closed: false,
+    pockets: [],
     containerItems: () => slots.map((s) => ({ ...s })),
+    items: () => pocketItems(window.pockets, CHEST_SLOTS),
     async deposit (type, metadata, count) {
       while (count > 0) {
+        const from = window.pockets.find((p) => p.type === type && p.count)
+        if (!from) throw new Error(`Can't find ${NAMES[type]} in slots [${CHEST_SLOTS} - ${CHEST_SLOTS + 36}], (item id: ${type})`)
         let s = slots.find((x) => x.type === type && x.count < 64)
         if (!s) {
           if (slots.length >= CHEST_SLOTS) throw new Error('destination full')
-          s = { name: NAMES[type], type, count: 0 }
+          s = stack(NAMES[type], 0)
           slots.push(s)
         }
-        const n = Math.min(count, 64 - s.count)
+        const n = Math.min(count, 64 - s.count, from.count)
         s.count += n
+        from.count -= n
         count -= n
       }
     },
     async withdraw (type, metadata, count) {
-      slots.find((x) => x.type === type).count -= count
+      while (count > 0) {
+        const s = slots.find((x) => x.type === type)
+        if (!s) throw new Error(`Can't find ${NAMES[type]} in slots [0 - ${CHEST_SLOTS}], (item id: ${type})`)
+        const n = Math.min(count, s.count)
+        s.count -= n
+        count -= n
+        if (!s.count) slots.splice(slots.indexOf(s), 1)
+      }
     },
     close () { window.closed = true }
   }
@@ -52,6 +67,16 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
   const at = (p) => `${p.x},${p.y},${p.z}`
   const cells = new Set(chests.map(at))
   const opened = []
+  const live = pockets.map((s) => ({ ...s }))
+  // Like mineflayer's, bot.inventory takes the pockets of an open window only once it closes.
+  let inventory = pocketItems(live, 9)
+  for (const w of Object.values(windows)) {
+    w.pockets = live
+    const close = w.close
+    w.close = () => { close(); inventory = pocketItems(live, 9) }
+  }
+  const fight = { busy: false }
+  const timers = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) }
   const chest = (p) => ({ name: 'chest', type: CHEST_ID, position: p, getProperties: () => states[at(p)] || { type: 'single', facing: 'north' } })
   const env = {
     bot: {
@@ -59,9 +84,21 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
       blockAt: (p) => (cells.has(at(p)) ? chest(p) : { name: 'air', type: 0, position: p }),
       findBlocks: ({ matching, maxDistance }) => (matching.includes(CHEST_ID) ? chests.filter((p) => HERE.distanceTo(p) <= maxDistance) : []),
       pathfinder: { goto: async () => {} },
-      openContainer: async (b) => { opened.push(at(b.position)); return windows[at(b.position)] },
-      inventory: { items: () => pockets }
+      _client: { write () {} },
+      // mineflayer opens a chest with a block_place.
+      openContainer: async (b) => {
+        opened.push(at(b.position))
+        env.bot._client.write('block_place', {})
+        env.bot.currentWindow = windows[at(b.position)]
+        return env.bot.currentWindow
+      },
+      inventory: { items: () => inventory }
     },
+    guardState: { hand: null },
+    reflexes: [{ name: 'combat', fightBusy: () => fight.busy, _threat: null }],
+    bunkerHolds: () => false,
+    ...timers,
+    stackPause: async () => {},
     cellKnown: (p) => !p.equals(HIDDEN),
     seenNow: (p) => !p.equals(HIDDEN),
     STATIONS: new Map(),
@@ -72,7 +109,8 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
     goals,
     CHEST_RADIUS: botConstant('CHEST_RADIUS')
   }
-  return { env, opened }
+  loadBotFunctions(['wireHandLease'], { bot: env.bot, guardState: env.guardState, ...timers }).wireHandLease()
+  return { env, opened, fight }
 }
 
 async function refusal (route, query, env) {
@@ -80,6 +118,36 @@ async function refusal (route, query, env) {
   await handle({ query }, res)
   assert.ok(res.error, `${route} answered ${JSON.stringify(res.body)}`)
   return res.error.message
+}
+
+// The route with the real stack pause, on t's mock clock stepped 5 ms at a time.
+async function pacedRoute (t, route, query, env) {
+  let settled = false
+  const reply = awaitRoute(route, query, { ...env, stackPause }).finally(() => { settled = true })
+  for (let i = 0; i < 1000 && !settled; i++) {
+    await new Promise(setImmediate)
+    t.mock.timers.tick(5)
+  }
+  assert.ok(settled, `${route} never answered`)
+  return reply
+}
+
+// Records [count, time] for each call of window's method.
+function recorded (window, method) {
+  const calls = []
+  const real = window[method]
+  window[method] = async (type, metadata, count) => {
+    calls.push([count, Date.now()])
+    return real(type, metadata, count)
+  }
+  return calls
+}
+
+function assertStackGaps (calls) {
+  for (let i = 1; i < calls.length; i++) {
+    const gap = calls[i][1] - calls[i - 1][1]
+    assert.ok(gap >= STACK_GAP_MS && gap <= STACK_GAP_MS + STACK_JITTER_MS + 5, `gap ${gap} ms`)
+  }
 }
 
 test('chest without x,y,z lists every seen chest nearest first with the items of the nearest, and no unseen one', async () => {
@@ -154,7 +222,7 @@ test('withdraw of several names opens the chest once, closes it, and lists the u
   const { env, opened } = chestEnv([NEAR], windows)
   const reply = await awaitRoute('/withdraw', { name: ' cobble | diamond |', count: '4' }, env)
   assert.deepStrictEqual(reply, { withdrew: [{ item: 'cobblestone', count: 4 }, { item: 'diamond', count: 3 }] })
-  assert.deepStrictEqual(windows['5,64,0'].containerItems(), [stack('cobblestone', 6), stack('diamond', 0)])
+  assert.deepStrictEqual(windows['5,64,0'].containerItems(), [stack('cobblestone', 6)])
   assert.deepStrictEqual(opened, ['5,64,0'])
   assert.ok(windows['5,64,0'].closed, 'the window stays open')
 
@@ -237,6 +305,85 @@ test('deposit of several names that fails partway closes the window and names wh
   assert.match(error, /other chests seen within 12: -7,64,3 \(7\.6 away\)$/)
   assert.deepStrictEqual(opened, ['5,64,0'])
   assert.ok(windows['5,64,0'].closed, 'the window stays open')
+})
+
+test('withdraw and deposit move one stack per mineflayer call, a stack pause apart', async (t) => {
+  const chest = chestWindow([stack('cobblestone', 64), stack('cobblestone', 64), stack('cobblestone', 10)])
+  const withdrawn = recorded(chest, 'withdraw')
+  const deposited = recorded(chest, 'deposit')
+  const { env } = chestEnv([NEAR], { '5,64,0': chest }, [stack('stone', 64), stack('stone', 20)])
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 })
+  assert.deepStrictEqual(await pacedRoute(t, '/withdraw', { name: 'cobblestone', count: '100' }, env), { withdrew: [{ item: 'cobblestone', count: 100 }] })
+  assert.deepStrictEqual(withdrawn.map(([count]) => count), [64, 36])
+  assertStackGaps(withdrawn)
+  assert.deepStrictEqual(await pacedRoute(t, '/deposit', { name: 'stone' }, env), { deposited: [{ item: 'stone', count: 84, inChestNow: 84 }] })
+  assert.deepStrictEqual(deposited.map(([count]) => count), [64, 20])
+  assertStackGaps(deposited)
+})
+
+test('a chest closed during the stack pause stops withdraw and deposit, and the error names what moved', async () => {
+  const chest = chestWindow([stack('cobblestone', 64), stack('cobblestone', 64)])
+  const { env } = chestEnv([NEAR], { '5,64,0': chest }, [stack('stone', 64), stack('stone', 20)])
+  env.stackPause = async () => { env.bot.currentWindow = null }
+  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone', count: '128' }, env), 'withdrew cobblestone 64; then cobblestone: the chest closed')
+  assert.deepStrictEqual(chest.containerItems(), [stack('cobblestone', 64)])
+  const error = await refusal('/deposit', { name: 'stone' }, env)
+  assert.match(error, /^deposited 64 then failed: the chest closed; stone in chest now 64; /)
+  assert.ok(chest.closed, 'the window stays open')
+})
+
+test('withdraw and deposit refuse during a fight before walking or opening anything', async () => {
+  const { env, opened, fight } = chestEnv([NEAR], { '5,64,0': chestWindow([stack('cobblestone', 10)]) }, [stack('stone', 5)])
+  let walked = false
+  env.bot.pathfinder.goto = async () => { walked = true }
+  fight.busy = true
+  assert.match(await refusal('/withdraw', { name: 'cobblestone' }, env), /^refused: fighting something, /)
+  assert.match(await refusal('/deposit', { name: 'stone' }, env), /^refused: fighting something, /)
+  assert.deepStrictEqual([opened, walked], [[], false])
+})
+
+test('a fight starting during the walk or a stack pause stops withdraw and deposit before their next click, and the chest closes before the hand lease ends', async () => {
+  const chest = chestWindow([stack('cobblestone', 64), stack('cobblestone', 64)])
+  const { env, fight } = chestEnv([NEAR], { '5,64,0': chest }, [stack('stone', 64), stack('stone', 20)])
+  const clicks = []
+  for (const method of ['withdraw', 'deposit']) {
+    const real = chest[method]
+    chest[method] = async (type, metadata, count) => {
+      clicks.push([method, count, env.guardState.hand !== null])
+      return real(type, metadata, count)
+    }
+  }
+  const leased = []
+  const close = chest.close
+  chest.close = () => { leased.push(env.guardState.hand !== null); close() }
+  env.stackPause = async () => { fight.busy = true }
+
+  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone', count: '128' }, env), 'withdrew cobblestone 64; then cobblestone: a fight started')
+  fight.busy = false
+  assert.match(await refusal('/deposit', { name: 'stone' }, env), /^deposited 64 then failed: a fight started; stone in chest now 64; /)
+  assert.deepStrictEqual(clicks, [['withdraw', 64, true], ['deposit', 64, true]])
+  assert.deepStrictEqual([leased, env.guardState.hand], [[true, true], null])
+
+  fight.busy = false
+  env.bot.pathfinder.goto = async () => { fight.busy = true }
+  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone' }, env), 'a fight started')
+  assert.strictEqual(clicks.length, 2)
+})
+
+test('withdraw moves what a chest stack holds after the stack pause', async () => {
+  const chest = chestWindow([stack('cobblestone', 64), stack('cobblestone', 64)])
+  const { env } = chestEnv([NEAR], { '5,64,0': chest })
+  const take = chest.withdraw
+  env.stackPause = () => take(IDS.cobblestone, null, 54)
+  assert.deepStrictEqual(await awaitRoute('/withdraw', { name: 'cobblestone', count: '128' }, env), { withdrew: [{ item: 'cobblestone', count: 74 }] })
+  assert.deepStrictEqual(chest.containerItems(), [])
+})
+
+test('deposit moves what a pocket stack holds after the stack pause', async () => {
+  const chest = chestWindow([])
+  const { env } = chestEnv([NEAR], { '5,64,0': chest }, [stack('stone', 64), stack('stone', 20)])
+  env.stackPause = async () => { chest.pockets[1].count = 5 }
+  assert.deepStrictEqual(await awaitRoute('/deposit', { name: 'stone' }, env), { deposited: [{ item: 'stone', count: 69, inChestNow: 69 }] })
 })
 
 test('deposit into a full half of a double chest names neither of its cells and another double by both', async () => {

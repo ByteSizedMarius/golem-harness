@@ -243,7 +243,11 @@ function stationEnv (name) {
     Vec3,
     GRAVESTONE,
     GRAVE_SIGHT: 32,
-    round: (v) => ({ x: v.x, y: v.y, z: v.z })
+    round: (v) => ({ x: v.x, y: v.y, z: v.z }),
+    reflexes: [{ name: 'combat', fightBusy: () => false }],
+    guardState: { hand: null },
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (id) => clearTimeout(id)
   }
 }
 

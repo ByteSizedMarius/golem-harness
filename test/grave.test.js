@@ -4,7 +4,8 @@ const assert = require('node:assert')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const { GRAVESTONE } = require('../lib/server-overrides')
-const { awaitRoute, routeHandler } = require('./helpers')
+const { awaitRoute, routeHandler, loadBotFunctions } = require('./helpers')
+const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 
 const GRAVE_ID = 7
 const IDS = { iron_pickaxe: 1, cobblestone: 2, bread: 3, torch: 4 }
@@ -49,14 +50,28 @@ function graveWindow (items, pockets = []) {
 function graveEnv (window, { hidden = false, graves = true } = {}) {
   const grave = { name: GRAVESTONE, type: GRAVE_ID, position: AT }
   const opened = []
+  const fight = { busy: false }
+  const timers = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) }
   const env = {
     bot: {
       entity: { position: new Vec3(0.5, 64, 0.5) },
       blockAt: (p) => (p.equals(AT) ? grave : { name: 'air', type: 0, position: p }),
       findBlocks: ({ matching }) => (matching.includes(GRAVE_ID) ? [AT] : []),
       pathfinder: { goto: async () => {} },
-      openBlock: async (b) => { opened.push(b); return window }
+      _client: { write () {} },
+      // mineflayer opens a block with a block_place.
+      openBlock: async (b) => {
+        opened.push(b)
+        env.bot._client.write('block_place', {})
+        env.bot.currentWindow = window
+        return window
+      }
     },
+    guardState: { hand: null },
+    reflexes: [{ name: 'combat', fightBusy: () => fight.busy, _threat: null }],
+    bunkerHolds: () => false,
+    ...timers,
+    stackPause: async () => {},
     shared: { mcData: { blocksByName: graves ? { [GRAVESTONE]: { id: GRAVE_ID, name: GRAVESTONE } } : {} }, ready: true },
     seesLit: (p) => !(hidden && p.x === AT.x && p.y === AT.y && p.z === AT.z),
     goals,
@@ -65,7 +80,8 @@ function graveEnv (window, { hidden = false, graves = true } = {}) {
     GRAVE_SIGHT: 32,
     round: (v) => ({ x: v.x, y: v.y, z: v.z })
   }
-  return { env, opened }
+  loadBotFunctions(['wireHandLease'], { bot: env.bot, guardState: env.guardState, ...timers }).wireHandLease()
+  return { env, opened, fight }
 }
 
 async function refusal (query, env) {
@@ -107,6 +123,81 @@ test('grave reports what it took before full pockets stopped it', async () => {
   assert.deepStrictEqual(reply.took, ['64 cobblestone'])
   assert.match(reply.stopped, /full/)
   assert.deepStrictEqual(reply.items, [{ name: 'bread', count: 5 }])
+})
+
+test('grave take moves one source slot per mineflayer call, a stack pause apart', async (t) => {
+  const g = graveWindow([stack('cobblestone', 64), stack('cobblestone', 10), stack('bread', 5)])
+  const calls = []
+  const real = g.window.withdraw
+  g.window.withdraw = async (type, metadata, count) => {
+    calls.push([type, count, Date.now()])
+    return real(type, metadata, count)
+  }
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 })
+  let settled = false
+  const reply = awaitRoute('/grave', { take: 'all' }, { ...graveEnv(g.window).env, stackPause }).finally(() => { settled = true })
+  for (let i = 0; i < 1000 && !settled; i++) {
+    await new Promise(setImmediate)
+    t.mock.timers.tick(5)
+  }
+  assert.deepStrictEqual((await reply).took, ['74 cobblestone', '5 bread'])
+  assert.deepStrictEqual(calls.map(([type, count]) => [type, count]), [[IDS.cobblestone, 64], [IDS.cobblestone, 10], [IDS.bread, 5]])
+  for (let i = 1; i < calls.length; i++) {
+    const gap = calls[i][2] - calls[i - 1][2]
+    assert.ok(gap >= STACK_GAP_MS && gap <= STACK_GAP_MS + STACK_JITTER_MS + 5, `gap ${gap} ms`)
+  }
+})
+
+test('a grave closed during the stack pause stops the take and reports what moved', async () => {
+  const g = graveWindow([stack('cobblestone', 64), stack('cobblestone', 10), stack('bread', 5)])
+  const { env } = graveEnv(g.window)
+  env.stackPause = async () => { env.bot.currentWindow = null }
+  const reply = await awaitRoute('/grave', { take: 'all' }, env)
+  assert.deepStrictEqual(reply, {
+    at: { x: 5, y: 64, z: 0 },
+    took: ['64 cobblestone'],
+    stopped: 'the grave closed',
+    items: [{ name: 'cobblestone', count: 10 }, { name: 'bread', count: 5 }]
+  })
+})
+
+test('grave refuses during a fight before walking or opening anything', async () => {
+  const g = graveWindow([stack('bread', 5)])
+  const { env, opened, fight } = graveEnv(g.window)
+  let walked = false
+  env.bot.pathfinder.goto = async () => { walked = true }
+  fight.busy = true
+  assert.match(await refusal({ take: 'all' }, env), /^refused: fighting something, /)
+  assert.deepStrictEqual([opened, walked], [[], false])
+})
+
+test('a fight starting during the walk or a stack pause stops the take before its next click, and the grave closes before the hand lease ends', async () => {
+  const g = graveWindow([stack('cobblestone', 64), stack('cobblestone', 10), stack('bread', 5)])
+  const { env, fight } = graveEnv(g.window)
+  const clicks = []
+  const real = g.window.withdraw
+  g.window.withdraw = async (type, metadata, count) => {
+    clicks.push([count, env.guardState.hand !== null])
+    return real(type, metadata, count)
+  }
+  const leased = []
+  const close = g.window.close
+  g.window.close = () => { leased.push(env.guardState.hand !== null); close() }
+  env.stackPause = async () => { fight.busy = true }
+
+  assert.deepStrictEqual(await awaitRoute('/grave', { take: 'all' }, env), {
+    at: { x: 5, y: 64, z: 0 },
+    took: ['64 cobblestone'],
+    stopped: 'a fight started',
+    items: [{ name: 'cobblestone', count: 10 }, { name: 'bread', count: 5 }]
+  })
+  assert.deepStrictEqual(clicks, [[64, true]])
+  assert.deepStrictEqual([leased, env.guardState.hand], [[true], null])
+
+  fight.busy = false
+  env.bot.pathfinder.goto = async () => { fight.busy = true }
+  assert.strictEqual(await refusal({ take: 'all' }, env), 'took nothing: a fight started')
+  assert.strictEqual(clicks.length, 1)
 })
 
 test('grave refuses a gravestone out of lit sight without naming it or opening it', async () => {

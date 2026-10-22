@@ -6,6 +6,20 @@ the point, not just the diff. Dates are play-sessions, not releases. Full commit
 carry more detail (`git log`). The pilot's text (`DRIVING.md`, `manual/`) states the rules
 and leaves the stories here.
 
+## 2026-10-22: chest moves at a player's pace
+
+In the 2026-10-22 play session the owner watched the bot empty a chest and called it inhuman:
+every stack moved in the same tick as the one before. Placements were already spaced, chest
+moves were not.
+
+`withdraw`, `deposit` and `grave` now move at most one stack per mineflayer call and wait
+300 ms plus up to 150 ms between two calls. The pause sits between calls, never inside one. A
+mineflayer transfer is a chain of clicks with an item on the cursor, and a pause there would
+let a combat equip swap the cursor item or send the rest of the chain to a window the server
+already closed. When the chest or grave closes during a pause, the move stops and the reply
+names what it took. A fight that starts stops the move the same way, and the three routes
+refuse while one runs. A `withdraw` count now also reaches past the first matching stack.
+
 ## 2026-10-22: follow wakes on a stop
 
 In the 2026-10-22 play session the pilot answered "lead the way, I'll follow you in" with
