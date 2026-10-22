@@ -7,7 +7,8 @@ const { goals } = require('mineflayer-pathfinder')
 const rules = require('../lib/combat-rules')
 const legacy1710 = require('../lib/bot/legacy-1710')
 const { isDoor } = require('../lib/doors')
-const { expireConfirmed } = require('../lib/shelter')
+const { routeWithin, walkersTo, groundCell, walkFlood } = require('../lib/flee')
+const { expireConfirmed, babyFlag } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const { createLane } = require('../lib/bot/lane')
 const vm = require('node:vm')
@@ -16,6 +17,7 @@ const mcData = require('minecraft-data')('1.21.11')
 const registry = require('prismarine-registry')('1.21.11')
 const loadItem = require('prismarine-item')
 const Item = loadItem(registry)
+const Block = require('prismarine-block')(registry)
 const FRAME_ITEM = mcData.entitiesByName.item_frame.metadataKeys.indexOf('item')
 
 // seen says whether the body perceives the zombie.
@@ -96,11 +98,25 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
   const env = {
     bot,
     goals,
-    shared: { ready: true, mcData: null },
+    shared: { ready: true, mcData },
+    babyFlag,
+    HEAVY_MELEE: botConstant('HEAVY_MELEE'),
+    PROVOKABLE: botConstant('PROVOKABLE'),
     LEGACY_1710: legacy,
     LEGACY_HIT_MS: 550,
     mobHurt,
     knownCell: () => true,
+    cellKnown: () => true,
+    ck: (x, y, z) => x + ',' + y + ',' + z,
+    isDoor,
+    routeWithin,
+    walkersTo,
+    groundCell,
+    walkFlood,
+    WALK_MEMO: botConstant('WALK_MEMO'),
+    REACH_MEMO: botConstant('REACH_MEMO'),
+    WALK_STEPS: botConstant('WALK_STEPS'),
+    WALK_CAP: botConstant('WALK_CAP'),
     perch: { cell: null },
     console: { log () {} },
     noCritReason: rules.noCritReason,
@@ -215,6 +231,225 @@ test('strike, shoot and useon answer a zombie behind a wall as they answer no zo
     assert.strictEqual(refused.error && refused.error.message, none.error.message, `${route} behind a wall`)
     assert.deepStrictEqual(hidden.did, [], `${route} behind a wall`)
   }
+})
+
+// A 2-high wall around the floor from (x0, z0) to (x1, z1), with door.kind at the door cell.
+const room = (x0, z0, x1, z1, door = null) => (p) => {
+  if (p.y > 65 || p.x < x0 - 1 || p.x > x1 + 1 || p.z < z0 - 1 || p.z > z1 + 1) return null
+  if (door && p.x === door.x && p.z === door.z) return door.kind
+  return p.x === x0 - 1 || p.x === x1 + 1 || p.z === z0 - 1 || p.z === z1 + 1 ? 'stone' : null
+}
+
+// A door's upper half reads closed, as a 1.7.10 server sends it.
+function roomWorld (entities, blocks) {
+  const world = verbWorld(entities)
+  const { bot } = world
+  const floor = bot.blockAt
+  bot.blockAt = (p) => {
+    const kind = p.y >= 64 && blocks(p)
+    if (kind === 'stone') return { name: 'stone', boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 1]], position: p }
+    if (!kind) return floor(p)
+    const half = p.y === 65 ? 'upper' : 'lower'
+    return { name: 'oak_door', boundingBox: 'block', position: p, getProperties: () => ({ half, facing: 'west', hinge: 'left', open: half === 'lower' && kind === 'open door' }) }
+  }
+  const attack = bot.attack
+  bot.attack = (en) => {
+    attack()
+    world.did.push(`hit ${en.id}`)
+  }
+  return world
+}
+
+test('a strike refuses a zombie in sight behind a wall it has no walk around', async () => {
+  const world = roomWorld([zombie(3.5)], room(-1, -1, 1, 1))
+  const res = await drive('/strike', { name: 'zombie' }, world)
+  assert.match(res.error ? res.error.message : `no refusal, did ${world.did.join(', ')}`, /^zombie at 3,64,0 has no walk to me, behind a wall or a closed door$/)
+  assert.deepStrictEqual(world.did, [])
+})
+
+test('a strike passes a nearer zombie behind a wall for one with a walk to the body', async () => {
+  const reachable = { ...zombie(0), id: 8, position: new Vec3(-2.5, 64, -3.5) }
+  const world = roomWorld([zombie(2.5), reachable], room(-6, -6, 0, 2))
+  const res = await drive('/strike', { name: 'zombie' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(world.did, ['walk', 'swing', 'hit 8'])
+})
+
+test('a strike walks and swings over open ground and through an open door, and refuses one behind a closed door', async () => {
+  const field = roomWorld([zombie(6.5)], () => null)
+  const fieldRes = await drive('/strike', { name: 'zombie' }, field)
+  assert.strictEqual(fieldRes.error, undefined, fieldRes.error && fieldRes.error.message)
+  assert.deepStrictEqual(field.did, ['walk', 'swing', 'hit 7'], 'open ground')
+  const open = roomWorld([zombie(4.5)], room(-1, -1, 1, 1, { x: 2, z: 0, kind: 'open door' }))
+  const openRes = await drive('/strike', { name: 'zombie' }, open)
+  assert.strictEqual(openRes.error, undefined, openRes.error && openRes.error.message)
+  assert.deepStrictEqual(open.did, ['walk', 'swing', 'hit 7'], 'an open door')
+  const closed = roomWorld([zombie(4.5)], room(-1, -1, 1, 1, { x: 2, z: 0, kind: 'door' }))
+  const closedRes = await drive('/strike', { name: 'zombie' }, closed)
+  assert.match(closedRes.error ? closedRes.error.message : `no refusal, did ${closed.did.join(', ')}`, /^zombie at 4,64,0 has no walk to me/)
+  assert.deepStrictEqual(closed.did, [], 'a closed door')
+})
+
+test('a strike walks to a zombie across unseen ground on the surface, and refuses one across ground it knows nothing of', async () => {
+  const unseen = (p) => p.y === 63 && p.x >= 1 && p.x <= 6
+  const surface = roomWorld([zombie(6.5)], () => null)
+  surface.env.cellKnown = (p) => !unseen(p)
+  const res = await drive('/strike', { name: 'zombie' }, surface)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(surface.did, ['walk', 'swing', 'hit 7'], 'unseen ground on the surface')
+  const unknown = roomWorld([zombie(6.5)], () => null)
+  unknown.env.cellKnown = unknown.env.knownCell = (p) => !unseen(p)
+  const refused = await drive('/strike', { name: 'zombie' }, unknown)
+  assert.match(refused.error ? refused.error.message : `no refusal, did ${unknown.did.join(', ')}`, /^zombie at 6,64,0 has no walk to me$/)
+  assert.deepStrictEqual(unknown.did, [])
+})
+
+test('a strike refuses a zombie behind a wall the body has not seen, naming no wall', async () => {
+  const world = roomWorld([zombie(3.5)], room(-1, -1, 1, 1))
+  world.env.cellKnown = world.env.knownCell = (p) => !(p.y >= 64 && (Math.abs(p.x) === 2 || Math.abs(p.z) === 2))
+  const res = await drive('/strike', { name: 'zombie' }, world)
+  assert.match(res.error ? res.error.message : `no refusal, did ${world.did.join(', ')}`, /^zombie at 3,64,0 has no walk to me$/)
+  assert.deepStrictEqual(world.did, [])
+})
+
+// verbWorld over real 1.21.11 blocks from cell, a GoalBlock walk ending on its cell and any other at near(goal) when given.
+function realWorld (entities, cell, near = null) {
+  const world = verbWorld(entities)
+  const { bot } = world
+  bot.blockAt = (p) => {
+    const [name, props] = cell(p.x, p.y, p.z) || [p.y < 64 ? 'stone' : 'air', {}]
+    return Object.assign(Block.fromProperties(name, props, 0), { position: p })
+  }
+  const walk = bot.pathfinder.goto
+  bot.pathfinder.goto = async (goal) => {
+    if (!(goal instanceof goals.GoalBlock) && !near) return walk(goal)
+    world.did.push('walk')
+    bot.entity.position = goal instanceof goals.GoalBlock ? new Vec3(goal.x + 0.5, goal.y, goal.z + 0.5) : near(goal)
+  }
+  return world
+}
+
+test('a strike walks to the fence of a pen and swings at a sheep inside it', async () => {
+  // Oak fences round the floor from (5, -2) to (7, 2).
+  const pen = (x, y, z) => y === 64 && x >= 4 && x <= 8 && Math.abs(z) <= 3 && (x === 4 || x === 8 || Math.abs(z) === 3) ? ['oak_fence', {}] : null
+  const sheep = { id: 9, name: 'sheep', width: 0.9, height: 1.3, seen: true, position: new Vec3(5.5, 64, 0.5) }
+  const world = realWorld([sheep], pen, () => new Vec3(3.5, 64, 0.5))
+  const res = await drive('/strike', { name: 'sheep' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(world.did, ['walk', 'swing'])
+})
+
+test('a useon walks to the fence of a pen and shears a sheep inside it', async () => {
+  // Oak fences round the floor from (5, -2) to (7, 2).
+  const pen = (x, y, z) => y === 64 && x >= 4 && x <= 8 && Math.abs(z) <= 3 && (x === 4 || x === 8 || Math.abs(z) === 3) ? ['oak_fence', {}] : null
+  const sheep = { id: 9, name: 'sheep', width: 0.9, height: 1.3, seen: true, position: new Vec3(5.5, 64, 0.5) }
+  const world = realWorld([sheep], pen, () => new Vec3(3.5, 64, 0.5))
+  const res = await drive('/useon', { name: 'sheep', item: 'shears' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(world.did, ['walk', 'use'])
+})
+
+test('a zombie 2 off behind a stone wall or a closed door is out of melee reach', () => {
+  const reach = (cell) => {
+    const world = realWorld([zombie(2.5)], (x, y, z) => x === 1 && z === 0 && (y === 64 || y === 65) ? cell(y) : null)
+    return loadBotFunctions(['inMeleeReach'], { ...world.env }).inMeleeReach(world.bot.entities[7])
+  }
+  const door = (open) => (y) => ['oak_door', { half: y === 64 ? 'lower' : 'upper', open, facing: 'east', hinge: 'left' }]
+  assert.strictEqual(reach(() => ['air', {}]), true, 'control: open ground')
+  assert.strictEqual(reach(() => ['stone', {}]), false, 'a stone wall')
+  assert.strictEqual(reach(door(false)), false, 'a closed door')
+})
+
+// A pit from (3, -1) to (4, 1), its floor at y 61.
+const pit = (x, y, z) => x >= 3 && x <= 4 && Math.abs(z) <= 1 && (y === 62 || y === 63) ? ['air', {}] : null
+
+test('a strike refuses a zombie 2 deep in a pit out of melee reach', async () => {
+  const world = realWorld([{ ...zombie(0), position: new Vec3(3.5, 62, 0.5) }], pit)
+  const res = await drive('/strike', { name: 'zombie' }, world)
+  assert.match(res.error ? res.error.message : `no refusal, did ${world.did.join(', ')}`, /^zombie at 3,62,0 has no walk to me/)
+  assert.deepStrictEqual(world.did, [])
+})
+
+test('a strike refuses a zombie in a water hole outside a sealed room', async () => {
+  // Stone walls 3 high round the floor from (-1, -1) to (1, 1), a 1-deep water hole at (4, 63, 0).
+  const sealed = (x, y, z) => {
+    if (x === 4 && y === 63 && z === 0) return ['water', { level: 0 }]
+    return y >= 64 && y <= 66 && Math.max(Math.abs(x), Math.abs(z)) === 2 ? ['stone', {}] : null
+  }
+  const world = realWorld([{ ...zombie(0), position: new Vec3(4.5, 63, 0.5) }], sealed)
+  const res = await drive('/strike', { name: 'zombie' }, world)
+  assert.match(res.error ? res.error.message : `no refusal, did ${world.did.join(', ')}`, /^zombie at 4,63,0 has no walk to me, behind a wall or a closed door$/)
+  assert.deepStrictEqual(world.did, [])
+})
+
+test('a strike swings in place at a zombie over a fence already in melee reach', async () => {
+  // Oak fences round the floor from (5, -2) to (7, 2).
+  const pen = (x, y, z) => y === 64 && x >= 4 && x <= 8 && Math.abs(z) <= 3 && (x === 4 || x === 8 || Math.abs(z) === 3) ? ['oak_fence', {}] : null
+  const world = realWorld([zombie(5.5)], pen)
+  world.bot.entity.position = new Vec3(3.5, 64, 0.5)
+  const res = await drive('/strike', { name: 'zombie' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(world.did, ['swing'])
+})
+
+test('a kill walks to the drops over open ground, and not out of a closed room or into a pit', async () => {
+  // killed, note and did after a strike that kills the zombie in sight.
+  const kill = async (world) => {
+    world.bot.attack = () => { world.did.push('swing'); delete world.bot.entities[7] }
+    const res = await drive('/strike', { name: 'zombie' }, world)
+    assert.strictEqual(res.error, undefined, res.error && res.error.message)
+    return { killed: res.body.killed, note: res.body.note, did: world.did }
+  }
+  const field = await kill(realWorld([zombie(2.5)], () => null))
+  assert.deepStrictEqual(field, { killed: true, note: 'walked to drops', did: ['swing', 'walk'] }, 'control: open ground')
+  // A room from (-1, -1) to (1, 1) with 3-high walls, a 1-high window at (2, 65, 0) and a stone block outside it at (3, 64, 0).
+  const shut = (x, y, z) => {
+    if (x === 3 && y === 64 && z === 0) return ['stone', {}]
+    if (y < 64 || y > 66 || Math.max(Math.abs(x), Math.abs(z)) !== 2) return null
+    return x === 2 && y === 65 && z === 0 ? null : ['stone', {}]
+  }
+  const room = realWorld([{ ...zombie(0), position: new Vec3(3.5, 65, 0.5) }], shut)
+  room.bot.entity.position = new Vec3(1.5, 64, 0.5)
+  const out = 'the drops lie out of walking reach, left them'
+  assert.deepStrictEqual(await kill(room), { killed: true, note: out, did: ['swing'] }, 'through the window')
+  const rim = realWorld([{ ...zombie(0), position: new Vec3(3.5, 62, 0.5) }], pit)
+  rim.bot.entity.position = new Vec3(2.5, 64, 0.5)
+  assert.deepStrictEqual(await kill(rim), { killed: true, note: out, did: ['swing'] }, 'into the pit')
+})
+
+test('a strike refuses a zombie on a ledge 3 or 4 high in sight but out of reach, naming no wall', async () => {
+  for (const high of [3, 4]) {
+    const ledge = (x, y, z) => x >= 3 && x <= 8 && Math.abs(z) <= 3 && y >= 64 && y < 64 + high ? ['stone', {}] : null
+    const world = realWorld([{ ...zombie(0), position: new Vec3(3.5, 64 + high, 0.5) }], ledge)
+    const res = await drive('/strike', { name: 'zombie' }, world)
+    assert.match(res.error ? res.error.message : `no refusal, did ${world.did.join(', ')}`, new RegExp(`^zombie at 3,${64 + high},0 has no walk to me$`), `${high} high`)
+    assert.deepStrictEqual(world.did, [], `${high} high`)
+  }
+})
+
+test('a kill struck from the rim of a ditch 1 deep walks down to the drops, also after a swing at a jump', async () => {
+  // A ditch from (3, -1) to (4, 1), its floor at y 62.
+  const ditch = (x, y, z) => x >= 3 && x <= 4 && Math.abs(z) <= 1 && y === 63 ? ['air', {}] : null
+  for (const y of [63, 64.25]) {
+    const world = realWorld([{ ...zombie(0), position: new Vec3(3.5, y, 0.5) }], ditch)
+    world.bot.entity.position = new Vec3(2.5, 64, 0.5)
+    world.bot.attack = () => { world.did.push('swing'); delete world.bot.entities[7] }
+    const res = await drive('/strike', { name: 'zombie' }, world)
+    assert.strictEqual(res.error, undefined, res.error && res.error.message)
+    const got = { note: res.body.note, did: world.did, at: world.bot.entity.position }
+    assert.deepStrictEqual(got, { note: 'walked to drops', did: ['swing', 'walk'], at: new Vec3(3.5, 63, 0.5) }, `struck at y ${y}`)
+  }
+})
+
+test('nearestSeen checks its candidates nearest first and stops at the first that passes', () => {
+  const world = verbWorld([6.5, 2.5, 4.5, 8.5].map((x, i) => ({ ...zombie(x), id: 10 + i })))
+  const { nearestSeen } = loadBotFunctions(['nearestSeen'], { ...world.env })
+  const checked = []
+  const found = nearestSeen('zombie', 16, (en) => {
+    checked.push(en.id)
+    return en.id !== 11
+  })
+  assert.deepStrictEqual({ found: found && found.id, checked }, { found: 12, checked: [11, 12] })
 })
 
 test('a useon whose zombie goes out of sight on the walk uses nothing and gives no position', async () => {

@@ -4,10 +4,13 @@ const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const MC_DATA = require('minecraft-data')('1.21.11')
-const { fleeHeading, planFlee, creeperCover, routeWithin } = require('../lib/flee')
+const Block = require('prismarine-block')(require('prismarine-registry')('1.21.11'))
+const { fleeHeading, planFlee, creeperCover, routeWithin, walkersTo, walkFlood, groundCell } = require('../lib/flee')
+const { isDoor } = require('../lib/doors')
 const { expireConfirmed } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const vm = require('node:vm')
+const { EventEmitter } = require('node:events')
 const { loadBotFunctions, combatReflexIn, botConstant, botSource, balanced, reflexIn, fakeClock, laneAt } = require('./helpers')
 
 const HERE = new Vec3(0, 64, 0)
@@ -48,7 +51,9 @@ test('a hostile the body does not perceive never enters the flee', () => {
     AGGRO_CONFIRMED: new Map(),
     staleEntities: new Set(),
     entityPerceptible: (e) => e.seen,
-    entityEngageable: () => true
+    entityEngageable: () => true,
+    walksToBody: () => true,
+    CREEPER_DROP
   }
   const { nearHostiles } = loadBotFunctions(['nearHostiles'], env)
   const seenAt = new Map()
@@ -119,6 +124,18 @@ function fleeIn (w, threat, ally = null, over = {}) {
     ck,
     planFlee,
     creeperCover,
+    routeWithin,
+    walkersTo,
+    groundCell,
+    isDoor,
+    WALK_MEMO: botConstant('WALK_MEMO'),
+    WALK_STEPS: botConstant('WALK_STEPS'),
+    WALK_CAP: botConstant('WALK_CAP'),
+    CREEPER_DROP: botConstant('CREEPER_DROP'),
+    RANGED: botConstant('RANGED'),
+    AGGRO_CONFIRMED: new Map(),
+    STANCES: { guard: { fleeDist: 16, bowBand: [7, 24], chase: false, engage: 'closers' } },
+    fight: { stance: 'guard' },
     shared: { mcData: MC_DATA },
     console: { log: (line) => logs.push(line) },
     setTimeout () {},
@@ -133,12 +150,12 @@ function fleeIn (w, threat, ally = null, over = {}) {
     entityPerceptible: (e) => e.seen !== false,
     takenText,
     takeLegs: (reflex, why) => legs.take(reflex, why),
-    stopPath () {},
+    stopPath () { bot.pathfinder.setGoal(null) },
     emitEvent: (kind, msg) => events.push({ kind, msg }),
     LEGACY_1710: false,
     ...over
   }
-  loadBotFunctions(['fleeWorld', 'fleeLog', 'threatWhy', 'creeperSwelling'], env)
+  loadBotFunctions(['fleeWorld', 'fleeLog', 'threatWhy', 'creeperSwelling', 'walksToBody', 'rangedInSight'], env)
   const combat = combatReflexIn(env)
   // The body last perceived threat where it stands.
   combat._seenAt.set(threat.id, threat.position.clone())
@@ -212,11 +229,11 @@ test('a flee never ends under water, and wades across water one deep', () => {
 })
 
 test('with no safe cell in reach the body holds its ground', () => {
-  // A one-block pinnacle 24 above the ground.
-  const w = plateau({ solid: (x, y, z) => y < 40 || (x === 0 && z === 0 && y < 64) })
+  // A ridge one block wide from the body to the creeper, 24 above the ground.
+  const w = plateau({ solid: (x, y, z) => y < 40 || (x >= 0 && x <= 3 && z === 0 && y < 64) })
   const r = fleeIn(w, creeper(3.5, 64, 0.5))
   assert.strictEqual(r.held, 'held')
-  assert.strictEqual(r.goal, null, 'a goal off the pinnacle')
+  assert.strictEqual(r.goal, null, 'a goal off the ridge')
   assert.ok(r.logs.some((l) => l.startsWith('[flee]')), 'no [flee] line')
   const stand = 'the combat reflex took the legs to stand still, no safe cell to flee to: creeper E ~3, same level'
   assert.strictEqual(r.takenBy, stand)
@@ -370,9 +387,9 @@ test('a flee from a threat the body does not perceive names no mob', () => {
   assert.ok(r.goal, 'control: the flee found a goal')
   assert.strictEqual(r.takenBy, 'the combat reflex took the legs to flee')
   assert.deepStrictEqual(r.combatEvents, ['the combat reflex took the legs to flee'])
-  const pinnacle = fleeIn(plateau({ solid: (x, y, z) => y < 40 || (x === 0 && z === 0 && y < 64) }), creeper(3.5, 64, 0.5, false))
-  assert.strictEqual(pinnacle.takenBy, 'the combat reflex took the legs to stand still, no safe cell to flee to')
-  assert.deepStrictEqual(pinnacle.combatEvents, [pinnacle.takenBy])
+  const ridge = fleeIn(plateau({ solid: (x, y, z) => y < 40 || (x >= 0 && x <= 3 && z === 0 && y < 64) }), creeper(3.5, 64, 0.5, false))
+  assert.strictEqual(ridge.takenBy, 'the combat reflex took the legs to stand still, no safe cell to flee to')
+  assert.deepStrictEqual(ridge.combatEvents, [ridge.takenBy])
 })
 
 test('a flee from a threat out of sight runs from where the body last saw it, and one never seen is held', () => {
@@ -545,7 +562,7 @@ test('the reflex flees a creeper within 16 on guard, 12 on vanguard and 8 on ski
 async function hitNarration (seen) {
   const events = []
   const zombie = { id: 4, name: 'zombie', position: new Vec3(6.5, 64, 0.5) }
-  const solid = (p) => p.y < 64 || (p.x === -2 && p.y < 67)
+  const solid = (p) => p.y < 64 || (p.x === -2 && p.z === 0 && p.y < 67)
   const bot = {
     entity: { position: new Vec3(0.5, 64, 0.5) },
     entities: { 4: zombie },
@@ -565,6 +582,10 @@ async function hitNarration (seen) {
     bunker: { building: false },
     airFlood: () => ({}),
     knownCell: () => true,
+    cellKnown: () => true,
+    ck,
+    isDoor,
+    walkFlood,
     entityPerceptible: (e) => e !== zombie || seen,
     strikeRun: { lane: null },
     laneBlocks: () => false,
@@ -572,7 +593,7 @@ async function hitNarration (seen) {
     stopPath () {},
     emitEvent: (kind, msg) => events.push(msg)
   }
-  loadBotFunctions(['compass', 'losClear', 'threatWhy'], env)
+  loadBotFunctions(['compass', 'losClear', 'threatWhy', 'fleeWorld'], env)
   const combat = combatReflexIn(env)
   // Off skips the melee loop.
   combat.on = false
@@ -699,6 +720,10 @@ function coverFrom ({ moved = null, known = () => true, kelp = () => false }) {
     inMeleeReach: () => false,
     airFlood: () => ({}),
     knownCell: (p) => known(p),
+    cellKnown: (p) => known(p),
+    ck,
+    isDoor,
+    walkFlood,
     entityPerceptible: (e) => e !== skeleton || inSight,
     entityEngageable: () => true,
     laneBlocks: () => false,
@@ -707,7 +732,7 @@ function coverFrom ({ moved = null, known = () => true, kelp = () => false }) {
     stopPath () {},
     emitEvent () {}
   }
-  loadBotFunctions(['compass', 'losClear', 'threatWhy'], env)
+  loadBotFunctions(['compass', 'losClear', 'threatWhy', 'fleeWorld'], env)
   const combat = combatReflexIn(env)
   assert.strictEqual(combat.check(bot), true, 'control: the watch pass scores the skeleton')
   if (moved) { skeleton.position = moved; inSight = false }
@@ -744,4 +769,369 @@ test('cover is never a cell holding kelp', () => {
   const r = coverFrom({ kelp: (p) => p.x === 0 && p.y === 64 && p.z === 1 })
   assert.notDeepStrictEqual(r.cell, { x: 0, y: 64, z: 1 }, 'cover in the kelp')
   assert.strictEqual(r.fromEast, false, `the cover ${JSON.stringify(r.cell)} stands in the sightline`)
+})
+
+// Stone walls 3 high around the floor from (x0, z0) to (x1, z1), open wherever gap is true.
+const walledRoom = (x0, z0, x1, z1, gap = () => false) => plateau({
+  solid: (x, y, z) => plateau().solid(x, y, z) || (y >= 64 && y <= 66 && !gap(x, y, z) &&
+    (((x === x0 - 1 || x === x1 + 1) && z >= z0 - 1 && z <= z1 + 1) || ((z === z0 - 1 || z === z1 + 1) && x >= x0 - 1 && x <= x1 + 1)))
+})
+// A window at eye height in the east wall at x 3, too high for a walk through it.
+const WINDOW = (x, y, z) => x === 3 && y === 65 && z === 0
+// The body stands at (0, 64, 0) inside this room.
+const HALL = walledRoom(-12, -7, 2, 7, WINDOW)
+const zombieAt = (x) => ({ id: 4, name: 'zombie', position: new Vec3(x, 64, 0.5) })
+const HOSTILE = { mobClass: () => 'hostile' }
+
+test('a zombie seen through the window of a closed room is held against, not fled, and a second pass narrates nothing new', () => {
+  const said = []
+  const r = fleeIn(HALL, zombieAt(4.5), null, { ...HOSTILE, emitEvent: (kind, msg) => said.push(msg) })
+  const stand = 'the combat reflex held, no flee, it has no walk to me: zombie E ~4, same level'
+  assert.deepStrictEqual([r.held, r.goal, said], ['held', null, [stand]])
+  assert.deepStrictEqual(r.logs.filter((l) => l.startsWith('[flee]')), ['[flee] from zombie at (4,64,0): no walk to the body, holding'])
+  assert.strictEqual(r.combat.fleeFrom(r.bot, zombieAt(4.5), null, 'emergency'), 'held', 'the next pass')
+  assert.deepStrictEqual([r.bot.pathfinder.goal, said], [null, [stand]], 'the next pass')
+})
+
+test('a pilot walk goes on while a creeper idles behind the wall within 8', () => {
+  const r = fleeIn(HALL, creeper(4.5, 64, 0.5))
+  assert.strictEqual(r.held, 'held', 'control: held, no flee')
+  const walk = new goals.GoalBlock(-10, 64, 5)
+  r.bot.pathfinder.setGoal(walk)
+  for (let pass = 1; pass <= 3; pass++) {
+    assert.strictEqual(r.combat.fleeFrom(r.bot, creeper(4.5, 64, 0.5), null, 'emergency'), 'held', `pass ${pass}`)
+    assert.strictEqual(r.bot.pathfinder.goal, walk, `pass ${pass}`)
+  }
+  assert.ok(!r.takenBy, `the hold took the legs: ${r.takenBy}`)
+})
+
+test('a zombie inside the room is fled', () => {
+  const r = fleeIn(HALL, zombieAt(2.5), null, HOSTILE)
+  assert.strictEqual(r.held, undefined)
+  assert.ok(r.bot.pathfinder.goal instanceof goals.GoalBlock, `no flee goal, ${JSON.stringify(r.logs)}`)
+})
+
+test('a skeleton behind the wall that shot the body is fled', () => {
+  const skeleton = { id: 5, name: 'skeleton', position: new Vec3(4.5, 64, 0.5) }
+  const r = fleeIn(HALL, skeleton, null, { ...HOSTILE, AGGRO_CONFIRMED: new Map([[5, { name: 'skeleton', t: Date.now(), ranged: true }]]) })
+  assert.strictEqual(r.held, undefined)
+  assert.ok(r.bot.pathfinder.goal instanceof goals.GoalBlock, `no flee goal, ${JSON.stringify(r.logs)}`)
+})
+
+// The hostiles within 16 of a body at (0.5, 64, 0.5) in w, every mob perceived and none of them confirmed.
+function hostilesIn (w, mobs) {
+  const env = {
+    bot: { entity: { position: new Vec3(0.5, 64, 0.5) }, entities: Object.fromEntries(mobs.map((m) => [m.id, m])), blockAt: blockAt(w) },
+    Vec3,
+    ck,
+    isDoor,
+    routeWithin,
+    walkersTo,
+    groundCell,
+    cellKnown: () => true,
+    WALK_MEMO: botConstant('WALK_MEMO'),
+    WALK_STEPS: botConstant('WALK_STEPS'),
+    WALK_CAP: botConstant('WALK_CAP'),
+    CREEPER_DROP,
+    RANGED: botConstant('RANGED'),
+    mobClass: (e) => e.name === 'creeper' ? 'creeper' : 'hostile',
+    shared: { mcData: MC_DATA },
+    AGGRO_CONFIRMED: new Map(),
+    staleEntities: new Set(),
+    entityPerceptible: () => true,
+    entityEngageable: () => true
+  }
+  return loadBotFunctions(['nearHostiles'], env).nearHostiles({}, 16, new Map())
+}
+const mob = (id, name, x, z) => ({ id, name, position: new Vec3(x, 64, z) })
+
+test('zombies behind the wall make no pack with the one inside the room, so no outnumbered flee', async () => {
+  const inside = [mob(1, 'zombie', -3.5, 0.5), mob(2, 'zombie', -3.5, 3.5), mob(3, 'zombie', -3.5, -2.5)]
+  const all = hostilesIn(HALL, inside)
+  assert.strictEqual(all.length, 3, 'control: three inside')
+  assert.strictEqual((await meleePass({ pack: all })).fled.length, 1, 'control: three inside make a withdrawal')
+  const walled = hostilesIn(HALL, [inside[0], mob(2, 'zombie', 5.5, 3.5), mob(3, 'zombie', 5.5, -2.5)])
+  assert.deepStrictEqual(Array.from(walled, (h) => h.e.id), [1])
+  assert.deepStrictEqual((await meleePass({ pack: walled })).fled, [])
+})
+
+test('a swelling creeper behind the wall with no walk is a near hostile, the same creeper not swelling is not', () => {
+  const metadata = []
+  metadata[MC_DATA.entitiesByName.creeper.metadataKeys.indexOf('swell_dir')] = 1
+  const behind = creeper(5.5, 64, 0.5)
+  assert.deepStrictEqual(Array.from(hostilesIn(HALL, [{ ...behind, metadata }]), (h) => h.e.id), [behind.id])
+  assert.deepStrictEqual(Array.from(hostilesIn(HALL, [behind]), (h) => h.e.id), [], 'control: not swelling')
+})
+
+test('skeletons in sight through a slit window make a pack of 3 with the zombie inside, and the withdrawal stays inside the room', async () => {
+  // A slit at eye height along the east wall, too high for a walk through it.
+  const slit = walledRoom(-12, -7, 2, 7, (x, y, z) => x === 3 && y === 65 && Math.abs(z) <= 3)
+  const zombie = mob(1, 'zombie', 2.5, 0.5)
+  const pack = hostilesIn(slit, [zombie, mob(2, 'skeleton', 6.5, 2.5), mob(3, 'skeleton', 6.5, -1.5)])
+  assert.deepStrictEqual(Array.from(pack, (h) => h.e.id), [1, 2, 3])
+  const { fled } = await meleePass({ pack })
+  assert.strictEqual(fled.length, 1)
+  assert.match(fled[0], /^OUTNUMBERED 3 /)
+  const others = pack.filter((h) => h.e.id !== zombie.id)
+  const r = fleeIn(slit, zombie, null, { ...HOSTILE, nearHostiles: () => others })
+  assert.ok(r.goal, `no flee goal, ${JSON.stringify(r.logs)}`)
+  assert.ok(r.goal.x >= -12 && r.goal.x <= 2 && Math.abs(r.goal.z) <= 7, `the flee left the room for ${JSON.stringify(r.goal)}`)
+})
+
+test('a withdrawal from a mob at a slit window flees while two zombies inside the room walk to the body', () => {
+  const slit = walledRoom(-12, -7, 2, 7, (x, y, z) => x === 3 && y === 65 && Math.abs(z) <= 3)
+  const inside = hostilesIn(slit, [mob(3, 'zombie', 0.5, 5.5), mob(4, 'zombie', 0.5, -4.5)])
+  assert.strictEqual(inside.length, 2, 'control: both zombies walk to the body')
+  for (const name of ['skeleton', 'zombie']) {
+    const r = fleeIn(slit, mob(2, name, 6.5, 0.5), null, { ...HOSTILE, nearHostiles: () => inside })
+    assert.strictEqual(r.held, undefined, `${name}: ${JSON.stringify(r.logs)}`)
+    assert.ok(r.bot.pathfinder.goal instanceof goals.GoalBlock, `${name}: no flee goal, ${JSON.stringify(r.logs)}`)
+  }
+})
+
+test('a low-HP disengage from a skeleton at the window that never hit the body flees with nothing else around', () => {
+  const r = fleeIn(HALL, mob(5, 'skeleton', 6.5, 0.5), null, HOSTILE)
+  assert.strictEqual(r.held, undefined, JSON.stringify(r.logs))
+  assert.ok(r.bot.pathfinder.goal instanceof goals.GoalBlock, `no flee goal, ${JSON.stringify(r.logs)}`)
+})
+
+test('a zombie at the window is fled while a swelling creeper with no walk is near', () => {
+  // nearHostiles keeps a swelling creeper whatever its walk.
+  const swelling = mob(9, 'creeper', 5.5, 3.5)
+  const r = fleeIn(HALL, zombieAt(4.5), null, { ...HOSTILE, nearHostiles: () => [{ e: swelling, at: swelling.position }] })
+  assert.strictEqual(r.held, undefined, JSON.stringify(r.logs))
+  assert.ok(r.bot.pathfinder.goal instanceof goals.GoalBlock, `no flee goal, ${JSON.stringify(r.logs)}`)
+})
+
+test('a skeleton behind a wall the body never saw is in sight, behind a seen wall it is not', () => {
+  const pillar = plateau({ solid: (x, y, z) => plateau().solid(x, y, z) || (x === 3 && z === 0 && y >= 64 && y <= 66) })
+  const inSight = (wallSeen) => loadBotFunctions(['rangedInSight'], {
+    bot: { entity: { position: new Vec3(0.5, 64, 0.5) }, blockAt: blockAt(pillar) },
+    Vec3,
+    ck,
+    isDoor,
+    RANGED: botConstant('RANGED'),
+    cellKnown: (p) => wallSeen || p.x !== 3
+  }).rangedInSight({ name: 'skeleton' }, new Vec3(6.5, 64, 0.5))
+  assert.deepStrictEqual({ unseen: inSight(false), seen: inSight(true) }, { unseen: true, seen: false })
+})
+
+test('a creeper 2 outside the wall with a walk of 15 through the door is fled within a flee distance of 16, held within 8', () => {
+  const doored = walledRoom(-12, -7, 2, 7, (x, y, z) => WINDOW(x, y, z) || (x === 3 && z === 6 && y <= 65))
+  const flee = (stance, fleeDist) => fleeIn(doored, creeper(5.5, 64, 0.5), null, { fight: { stance }, STANCES: { [stance]: { fleeDist } } })
+  const guard = flee('guard', 16)
+  assert.strictEqual(guard.held, undefined, 'guard')
+  assert.ok(guard.bot.pathfinder.goal instanceof goals.GoalBlock, `guard: no flee goal, ${JSON.stringify(guard.logs)}`)
+  const skirmish = flee('skirmish', 8)
+  assert.deepStrictEqual([skirmish.held, skirmish.goal], ['held', null], 'skirmish')
+})
+
+test('a creeper within the flee distance over ground the body has not seen is fled, not held', () => {
+  const dark = plateau({ unknown: (x, y, z) => y === 63 && x >= 1 && x <= 10 })
+  const r = fleeIn(dark, creeper(10.5, 64, 0.5))
+  assert.strictEqual(r.held, undefined, JSON.stringify(r.logs))
+  assert.ok(r.bot.pathfinder.goal instanceof goals.GoalBlock, `no flee goal, ${JSON.stringify(r.logs)}`)
+})
+
+test('cover from a skeleton shooting through a window stays inside the room, never in a hidden cell beyond its wall', () => {
+  // A window runs the length of the east wall at eye height, and a stone post 2 high stands at (2, 2).
+  const room = walledRoom(0, -2, 2, 2, (x, y, z) => x === 3 && y === 65 && Math.abs(z) <= 2)
+  const w = plateau({ solid: (x, y, z) => room.solid(x, y, z) || (x === 2 && z === 2 && y >= 64 && y <= 65) })
+  const skeleton = { id: 5, name: 'skeleton', position: new Vec3(6.5, 64, 0.5) }
+  const bot = {
+    entity: { position: new Vec3(0.5, 64, 0.5) },
+    entities: { 5: skeleton },
+    blockAt: blockAt(w),
+    pathfinder: { goal: null, setGoal (g) { this.goal = g } }
+  }
+  const env = {
+    bot,
+    Vec3,
+    goals,
+    ck,
+    isDoor,
+    walkFlood,
+    airFlood: () => ({}),
+    knownCell: () => true,
+    cellKnown: () => true,
+    entityPerceptible: () => true,
+    laneBlocks: () => false,
+    laneNarrate () {},
+    takeLegs () {},
+    stopPath () {},
+    emitEvent () {}
+  }
+  loadBotFunctions(['compass', 'losClear', 'threatWhy', 'fleeWorld'], env)
+  const eye =skeleton.position.offset(0, 1.62, 0)
+  assert.strictEqual(env.losClear(eye, new Vec3(-1.5, 65.62, 0.5)), false, 'control: the cell 2 west, beyond the wall, is hidden')
+  combatReflexIn(env).takeCover(bot, skeleton, 'skeleton E ~6')
+  const g = bot.pathfinder.goal
+  assert.deepStrictEqual(g && { x: g.x, y: g.y, z: g.z }, { x: 1, y: 64, z: 2 })
+})
+
+// A real 1.21.11 block: cell(x, y, z) as [name, properties], stone below y 64 and air above where it gives null.
+const realBlockAt = (cell) => (p) => {
+  const [name, props] = cell(p.x, p.y, p.z) || [p.y < 64 ? 'stone' : 'air', {}]
+  return Object.assign(Block.fromProperties(name, props, 0), { position: p })
+}
+
+function walkCheck (cell, body) {
+  const env = {
+    bot: { entity: { position: body }, blockAt: realBlockAt(cell) },
+    Vec3,
+    ck,
+    isDoor,
+    walkersTo,
+    groundCell,
+    cellKnown: () => true,
+    WALK_MEMO: botConstant('WALK_MEMO'),
+    WALK_STEPS: botConstant('WALK_STEPS'),
+    WALK_CAP: botConstant('WALK_CAP')
+  }
+  const { walksToBody, walkBudget } = loadBotFunctions(['walksToBody', 'walkBudget'], env)
+  return (at, drop = 3) => walksToBody(at, { steps: walkBudget(at), drop })
+}
+
+const CREEPER_DROP = botConstant('CREEPER_DROP')
+
+test('a zombie on the bed of a moat three deep walks to the body', () => {
+  // Water from y 61 to 63 in the column x 3, stone banks up to y 63 on either side.
+  const moat = (x, y) => (x === 3 && y >= 61 && y <= 63 ? ['water', { level: 0 }] : null)
+  const walks = walkCheck(moat, new Vec3(0.5, 64, 0.5))
+  const zombie = new Vec3(3.5, 61, 0.5)
+  assert.deepStrictEqual([walks(zombie, 3), walks(zombie, CREEPER_DROP)], [true, true])
+})
+
+test('every hostile walks to a body swimming in deep water, at any depth', () => {
+  // A pool 7 wide, water from y 60 to 63.
+  const pool = (x, y, z) => (Math.abs(x) <= 3 && Math.abs(z) <= 3 && y >= 60 && y <= 63 ? ['water', { level: 0 }] : null)
+  const zombie = new Vec3(6.5, 64, 0.5)
+  for (const y of [62.4, 61.4, 60.4]) {
+    const walks = walkCheck(pool, new Vec3(0.5, y, 0.5))
+    assert.deepStrictEqual([walks(zombie, 3), walks(zombie, CREEPER_DROP)], [true, true], `the body's feet at y ${y}`)
+  }
+})
+
+test('a mob walking along the shore of a deep ocean walks to the body anywhere within the walk budget', () => {
+  // Land for x below 3, water 25 deep beyond it.
+  const ocean = (x, y) => (x >= 3 && y >= 39 && y <= 63 ? ['water', { level: 0 }] : null)
+  const walks = walkCheck(ocean, new Vec3(0.5, 64, 0.5))
+  for (const z of [28, 29, 40]) assert.strictEqual(walks(new Vec3(2.5, 64, z + 0.5), CREEPER_DROP), true, `${z} along the shore`)
+})
+
+test('a zombie on carpet under a ceiling 2 high walks to the body', () => {
+  // Carpet on the floor at y 64, a stone ceiling at y 66.
+  const hall = (x, y) => (y === 64 ? ['white_carpet', {}] : y === 66 ? ['stone', {}] : null)
+  const walks = walkCheck(hall, new Vec3(0.5, 64.0625, 0.5))
+  assert.strictEqual(walks(new Vec3(3.5, 64.0625, 0.5)), true)
+})
+
+test('a zombie walks to a body in the air above its floor', () => {
+  const zombie = new Vec3(3.5, 64, 0.5)
+  for (const y of [66.5, 74.5]) assert.strictEqual(walkCheck(() => null, new Vec3(0.5, y, 0.5))(zombie), true, `the body at y ${y}`)
+})
+
+test('a mob outside a closed room has no walk to the body inside it, airborne or on carpet', () => {
+  // Stone walls 3 high round the floor from (-2, -2) to (2, 2), carpet inside, and a door at (3, 0) when door is set.
+  const room = (door) => (x, y, z) => {
+    if (y < 64 || y > 66 || Math.abs(x) > 3 || Math.abs(z) > 3) return null
+    if (door && x === 3 && z === 0 && y <= 65) return ['oak_door', { half: y === 64 ? 'lower' : 'upper', open: door === 'open', facing: 'east', hinge: 'left' }]
+    if (Math.abs(x) === 3 || Math.abs(z) === 3) return ['stone', {}]
+    return y === 64 ? ['white_carpet', {}] : null
+  }
+  for (const [label, at] of [['zombie', new Vec3(5.5, 64, 0.5)], ['skeleton', new Vec3(0.5, 64, 5.5)]]) {
+    for (const body of [new Vec3(0.5, 64.0625, 0.5), new Vec3(0.5, 67, 0.5)]) {
+      assert.strictEqual(walkCheck(room('open'), body)(new Vec3(5.5, 64, 0.5)), true, `control: through the open door, the body at y ${body.y}`)
+      assert.strictEqual(walkCheck(room(null), body)(at, CREEPER_DROP), false, `a ${label}, the body at y ${body.y}`)
+      assert.strictEqual(walkCheck(room('closed'), body)(at, CREEPER_DROP), false, `a ${label} past the closed door, the body at y ${body.y}`)
+    }
+  }
+})
+
+test('a zombie in a water hole outside a sealed room has no walk to the body inside it', () => {
+  // A 1-deep water hole at (5, 63, 0) and, with walls, stone walls 3 high round the floor from (-2, -2) to (2, 2).
+  const field = (walls) => (x, y, z) => {
+    if (x === 5 && y === 63 && z === 0) return ['water', { level: 0 }]
+    return walls && y >= 64 && y <= 66 && Math.max(Math.abs(x), Math.abs(z)) === 3 ? ['stone', {}] : null
+  }
+  const zombie = new Vec3(5.5, 63, 0.5)
+  assert.strictEqual(walkCheck(field(false), new Vec3(0.5, 64, 0.5))(zombie), true, 'control: no walls')
+  assert.strictEqual(walkCheck(field(true), new Vec3(0.5, 64, 0.5))(zombie, CREEPER_DROP), false)
+})
+
+test('a door that opens gives the mob behind it and the body walks on the next check, with no clock advance', () => {
+  // Stone walls 3 high round the floor from (-2, -2) to (2, 2), an oak door at (3, 0) shut until opened.
+  let opened = false
+  const door = (y) => ['oak_door', { half: y === 64 ? 'lower' : 'upper', open: opened, facing: 'east', hinge: 'left' }]
+  const cell = (x, y, z) => {
+    if (y < 64 || y > 66 || Math.max(Math.abs(x), Math.abs(z)) !== 3) return null
+    return x === 3 && z === 0 && y <= 65 ? door(y) : ['stone', {}]
+  }
+  const bot = Object.assign(new EventEmitter(), { entity: { position: new Vec3(0.5, 64, 0.5) }, blockAt: realBlockAt(cell) })
+  const env = {
+    bot,
+    Vec3,
+    ck,
+    isDoor,
+    walkersTo,
+    walkFlood,
+    groundCell,
+    cellKnown: () => true,
+    knownCell: () => true,
+    Date: { now: () => 5000 },
+    reflexes: [{ name: 'combat', _fill: null }],
+    touchesFill: () => false,
+    WALK_MEMO: botConstant('WALK_MEMO'),
+    REACH_MEMO: botConstant('REACH_MEMO'),
+    WALK_STEPS: botConstant('WALK_STEPS'),
+    WALK_CAP: botConstant('WALK_CAP')
+  }
+  const { walksToBody, bodyWalksTo, walkBudget, wireFloodDrops } = loadBotFunctions(['walksToBody', 'bodyWalksTo', 'walkBudget', 'wireFloodDrops'], env)
+  wireFloodDrops()
+  const zombie = new Vec3(5.5, 64, 0.5)
+  const walks = () => ({ mob: walksToBody(zombie, { steps: walkBudget(zombie), drop: 3 }), body: bodyWalksTo(zombie, walkBudget(zombie)) })
+  assert.deepStrictEqual(walks(), { mob: false, body: false }, 'control: the door shut')
+  const shut = bot.blockAt(new Vec3(3, 64, 0))
+  opened = true
+  bot.emit('blockUpdate', shut, bot.blockAt(new Vec3(3, 64, 0)))
+  assert.deepStrictEqual(walks(), { mob: true, body: true })
+})
+
+test('cover from a skeleton lies through an open door', () => {
+  // Stone walls 3 high round the body's cell at (0, 64, 0), an open door in the west wall.
+  const cell = (x, y, z) => {
+    if (y < 64 || y > 66 || Math.abs(x) > 1 || Math.abs(z) > 1 || (x === 0 && z === 0)) return null
+    if (x === -1 && z === 0 && y <= 65) return ['oak_door', { half: y === 64 ? 'lower' : 'upper', open: true, facing: 'west', hinge: 'left' }]
+    return ['stone', {}]
+  }
+  const skeleton = { id: 5, name: 'skeleton', position: new Vec3(6.5, 64, 0.5) }
+  const bot = {
+    entity: { position: new Vec3(0.5, 64, 0.5) },
+    entities: { 5: skeleton },
+    blockAt: realBlockAt(cell),
+    pathfinder: { goal: null, setGoal (g) { this.goal = g } }
+  }
+  const env = {
+    bot,
+    Vec3,
+    goals,
+    ck,
+    isDoor,
+    walkFlood,
+    airFlood: () => ({}),
+    knownCell: () => true,
+    cellKnown: () => true,
+    entityPerceptible: () => true,
+    laneBlocks: () => false,
+    laneNarrate () {},
+    takeLegs () {},
+    stopPath () {},
+    emitEvent () {}
+  }
+  loadBotFunctions(['compass', 'losClear', 'threatWhy', 'fleeWorld'], env)
+  const combat = combatReflexIn(env)
+  combat.fleeFrom = () => {}
+  combat.takeCover(bot, skeleton, 'skeleton E ~6')
+  const g = bot.pathfinder.goal
+  assert.deepStrictEqual(g && { x: g.x, y: g.y, z: g.z }, { x: -2, y: 64, z: 0 })
 })

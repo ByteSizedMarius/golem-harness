@@ -3,12 +3,14 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
-const { routeWithin, planFlee, creeperCover } = require('../lib/flee')
+const { routeWithin, walkersTo, planFlee, creeperCover, walkFlood, groundCell } = require('../lib/flee')
 const { mobFamily, expireConfirmed } = require('../lib/shelter')
+const { isDoor } = require('../lib/doors')
 const { takenText } = require('../lib/leg-ledger')
 const rules = require('../lib/combat-rules')
 const legacy1710 = require('../lib/bot/legacy-1710')
 const { loadBotFunctions, fakeClock, combatReflexIn, botConstant, botObject, laneAt, routeHandler, runRoute } = require('./helpers')
+const Block = require('prismarine-block')(require('prismarine-registry')('1.21.11'))
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const version = (legacy) => (legacy ? '1.7.10' : '1.21.11')
@@ -75,6 +77,9 @@ function standoffFight (extra, mob, over = {}) {
     goals,
     ck,
     routeWithin,
+    walkersTo,
+    groundCell,
+    walkFlood,
     mobFamily,
     console: { log: (line) => lines.push(line) },
     STANCES: { guard: { fleeDist: 16, bowBand: [7, 24], chase: false, engage: 'closers' } },
@@ -93,6 +98,13 @@ function standoffFight (extra, mob, over = {}) {
     GUARD_REACH: botConstant('GUARD_REACH'),
     GUARD_STEPS: botConstant('GUARD_STEPS'),
     CREEPER_DROP: botConstant('CREEPER_DROP'),
+    SWING_REACH: rules.SWING_REACH,
+    WALK_MEMO: botConstant('WALK_MEMO'),
+    REACH_MEMO: botConstant('REACH_MEMO'),
+    WALK_STEPS: botConstant('WALK_STEPS'),
+    WALK_CAP: botConstant('WALK_CAP'),
+    RANGED: botConstant('RANGED'),
+    isDoor,
     cellKnown: () => true,
     knownCell: () => true,
     headFree: () => true,
@@ -126,7 +138,7 @@ function standoffFight (extra, mob, over = {}) {
   }
   env.guardState = Object.assign(botObject('guardState', env), over.guard)
   const load = Object.entries(over.env || {}).filter(([, v]) => v === undefined).map(([k]) => k)
-  loadBotFunctions(['standoffGuard', 'fleeWorld', 'creeperRoute', 'meleeSwing', 'chargedSwing', 'legsMoving', ...load], env)
+  loadBotFunctions(['standoffGuard', 'fleeWorld', 'creeperRoute', 'walksToBody', 'bodyWalksTo', 'walkBudget', 'rangedInSight', 'meleeSwing', 'chargedSwing', 'legsMoving', ...load], env)
   const combat = combatReflexIn(env)
   const flee = combat.fleeFrom
   combat.fleeFrom = (b, e, why, klass) => {
@@ -145,6 +157,24 @@ const IN_REACH = { inMeleeReach: () => true }
 // The bot.js melee reach rule in place of the stub.
 const REACH_RULE = { inMeleeReach: undefined, SWING_REACH: rules.SWING_REACH }
 const skeleton = (x) => ({ id: 8, name: 'skeleton', position: new Vec3(x, 64, 0.5) })
+
+// A 2-high wall around the floor from (x0, z0) to (x1, z1), with door.kind at the door cell.
+const room = (x0, z0, x1, z1, door = null) => (p) => {
+  if (p.y > 65 || p.x < x0 - 1 || p.x > x1 + 1 || p.z < z0 - 1 || p.z > z1 + 1) return null
+  if (door && p.x === door.x && p.z === door.z) return door.kind
+  return p.x === x0 - 1 || p.x === x1 + 1 || p.z === z0 - 1 || p.z === z1 + 1 ? 'stone' : null
+}
+
+// A door's upper half reads closed, as a 1.7.10 server sends it.
+function roomBlockAt (blocks) {
+  const plain = blockAt((p) => (blocks(p) === 'stone' ? 'stone' : null))
+  return (p) => {
+    const kind = p.y >= 64 && blocks(p)
+    if (kind !== 'door' && kind !== 'open door') return plain(p)
+    const half = p.y === 65 ? 'upper' : 'lower'
+    return { name: 'oak_door', boundingBox: 'block', position: p, getProperties: () => ({ half, open: half === 'lower' && kind === 'open door' }) }
+  }
+}
 
 test('a closing zombie raises the 1.7.10 sword block only when it can walk to the body over seen cells', async () => {
   const inside = await standoff(ring('stone', 3), zombie(3.5))
@@ -368,40 +398,217 @@ test('a creeper the body perceives behind a zombie in reach ends the melee and i
   assert.deepStrictEqual({ fled: walled.fled, picked: walled.picked }, { fled: [], picked: [] })
 })
 
+// confirmed holds the ids of the mobs that hit the body. body replaces entries of the bot.
+function scored (blocks, mobs, confirmed = [], over = {}, body = {}) {
+  const events = []
+  const entities = Object.fromEntries(mobs.map((m) => [m.id, m]))
+  const fight = standoffFight(open, mobs[0], {
+    bot: { entities, blockAt: roomBlockAt(blocks), ...body },
+    env: {
+      AGGRO_CONFIRMED: new Map(confirmed.map((id) => [id, { name: entities[id].name, t: Date.now(), ranged: false }])),
+      expireConfirmed,
+      CONFIRMED_MS: botConstant('CONFIRMED_MS'),
+      CONFIRMED_COOL_MS: botConstant('CONFIRMED_COOL_MS'),
+      CONFIRMED_HORIZON: botConstant('CONFIRMED_HORIZON'),
+      fight: guardFight({ threatDebugUntil: 0 }),
+      liveEntities: () => Object.values(entities),
+      entityPerceptible: (e) => e.seen !== false,
+      entityEngageable: () => true,
+      emitEvent (kind, line) { if (kind === 'threat') events.push(line) },
+      ...over
+    }
+  })
+  const { bot, combat } = fight
+  for (const m of mobs) combat._hist.set(m.id, { d: m.position.distanceTo(HERE) + 1, t: Date.now() - 1000, closes: 3, logT: 0 })
+  const fires = combat.check(bot)
+  return { fires, threat: combat._threat ? combat._threat.e.name : null, watched: events.filter((l) => l.startsWith('watched:')), events, fight }
+}
+
+test('the reflex watches a skeleton outside the wall of a closed room and scores a farther zombie at the open door', () => {
+  // The skeleton stands in sight behind the east wall, the zombie outside the open door in the west wall.
+  const r = scored(room(-2, -3, 0, 3, { x: -3, z: 0, kind: 'open door' }), [zombie(-4.5), skeleton(2.5)])
+  assert.deepStrictEqual({ fires: r.fires, threat: r.threat }, { fires: true, threat: 'zombie' })
+  assert.strictEqual(r.watched.length, 1, JSON.stringify(r.watched))
+  assert.match(r.watched[0], /^watched: skeleton beyond ~2\b/)
+})
+
+test('the reflex scores a zombie outside the wall of a closed room once it hit the body, in sight or not', () => {
+  const closed = room(-2, -3, 0, 3)
+  const unproven = scored(closed, [zombie(2.5)])
+  assert.deepStrictEqual({ fires: unproven.fires, threat: unproven.threat }, { fires: false, threat: null }, 'control: a zombie that never hit the body')
+  for (const seen of [true, false]) {
+    const r = scored(closed, [{ ...zombie(2.5), seen }], [7])
+    assert.deepStrictEqual({ fires: r.fires, threat: r.threat, watched: r.watched }, { fires: true, threat: 'zombie', watched: [] }, `seen ${seen}`)
+  }
+})
+
+test('the reflex scores a zombie closing over ground the body has not seen', () => {
+  const r = scored(() => null, [zombie(5.5)], [], { cellKnown: (p) => !(p.y === 63 && p.x >= 1 && p.x <= 5) })
+  assert.deepStrictEqual({ fires: r.fires, threat: r.threat, watched: r.watched }, { fires: true, threat: 'zombie', watched: [] })
+})
+
+test('the reflex scores and strikes a zombie in reach below a pillar top with no walk to the body', async () => {
+  const pillar = (p) => p.x === 0 && p.z === 0 && p.y < 66 ? 'stone' : null
+  const top = { entity: { position: new Vec3(0.5, 66, 0.5), onGround: true } }
+  const perch = { perch: { cell: null }, perchStrike: undefined, ...REACH_RULE, PERCH_MELEE: botConstant('PERCH_MELEE'), PERCH_DROP: botConstant('PERCH_DROP') }
+  const r = scored(pillar, [zombie(1.5)], [], perch, top)
+  assert.strictEqual(r.fight.env.walksToBody(new Vec3(1.5, 64, 0.5), { steps: 12, drop: botConstant('CREEPER_DROP') }), false, 'control: a walk to the body')
+  assert.deepStrictEqual({ fires: r.fires, threat: r.threat, watched: r.watched }, { fires: true, threat: 'zombie', watched: [] })
+  await r.fight.combat.act(r.fight.bot)
+  assert.ok(r.fight.result().swings > 0, 'no swing from the pillar top')
+})
+
+// A closed room from (-1, -1) to (1, 1) with 3-high walls, and with window a 1-high gap at eye height in its east wall.
+const shutRoom = (window) => (p) => {
+  if (p.y > 66 || Math.max(Math.abs(p.x), Math.abs(p.z)) !== 2) return null
+  return window && p.x === 2 && p.z === 0 && p.y === 65 ? null : 'stone'
+}
+
+test('the vanguard reflex scores a skeleton at the window of a closed room as in shooting range and stays inside', async () => {
+  const sk = { ...skeleton(5.5), width: 0.6, height: 1.99 }
+  const chases = []
+  const vanguard = {
+    STANCES: { vanguard: { fleeDist: 12, bowBand: [7, 24], chase: true, engage: 'closers' } },
+    fight: guardFight({ stance: 'vanguard', threatDebugUntil: 0 }),
+    sprintBlock: () => 'beyond 8'
+  }
+  const pathfinder = { goal: null, isMoving: () => false, setGoal (g) { this.goal = g; if (g) chases.push(g) } }
+  const r = scored(shutRoom(true), [sk], [], vanguard, { pathfinder })
+  assert.deepStrictEqual({ fires: r.fires, threat: r.threat, watched: r.watched }, { fires: true, threat: 'skeleton', watched: [] })
+  await r.fight.combat.act(r.fight.bot)
+  assert.deepStrictEqual(r.events, ['skeleton E ~5 in sight, shooting range [vanguard]'])
+  assert.deepStrictEqual(chases, [])
+  const walled = scored(shutRoom(false), [sk], [], vanguard, { pathfinder })
+  assert.deepStrictEqual({ fires: walled.fires, threat: walled.threat }, { fires: false, threat: null }, 'a skeleton with no clear line')
+  assert.match(walled.watched[0] || '', /^watched: skeleton beyond ~5\b/)
+})
+
+// Lava at the feet over the ring 3 to 4 out, open ground beyond it.
+const lavaRing = (p) => p.y === 64 && [3, 4].includes(Math.max(Math.abs(p.x), Math.abs(p.z)))
+  ? { name: 'lava', boundingBox: 'empty', shapes: [], position: p }
+  : blockAt(open)(p)
+
+test('the reflex scores and counts in the pack a ranged mob with no walk in sight within its range', () => {
+  // Whether the reflex scores mob and whether the pack counts it, on blocks.
+  const ranged = (mob, at) => {
+    const r = scored(open, [mob], [], { nearHostiles: undefined }, { blockAt: at })
+    return { fires: r.fires, threat: r.threat, pack: Array.from(r.fight.env.nearHostiles({}, 16, new Map()), (h) => h.e.name) }
+  }
+  const across = (name, x, over = {}) => ({ id: 9, name, width: 0.6, height: 1.8, position: new Vec3(x, 64, 0.5), ...over })
+  const fenced = blockAt(ring('fence', 1))
+  assert.deepStrictEqual(ranged(across('zombie', 6.5), lavaRing), { fires: false, threat: null, pack: [] }, 'control: a zombie across the lava')
+  assert.deepStrictEqual(ranged(across('blaze', 6.5), lavaRing), { fires: true, threat: 'blaze', pack: ['blaze'] }, 'a blaze across the lava')
+  assert.deepStrictEqual(ranged(across('pillager', 6.5), fenced), { fires: true, threat: 'pillager', pack: ['pillager'] }, 'a pillager behind a fence')
+  assert.deepStrictEqual(ranged(across('pillager', 10.5), fenced), { fires: false, threat: null, pack: [] }, 'a pillager 10 off, beyond its 8')
+  const trident = { heldItem: { name: 'trident' } }
+  assert.deepStrictEqual(ranged(across('drowned', 6.5, trident), lavaRing), { fires: true, threat: 'drowned', pack: ['drowned'] }, 'a drowned with a trident')
+  assert.deepStrictEqual(ranged(across('drowned', 6.5), lavaRing), { fires: false, threat: null, pack: [] }, 'a drowned with no trident')
+})
+
+test('a zombie on a ledge 6 high is watched and left out of the pack, a creeper there scores and counts', () => {
+  // Each edge of the ledge is a drop of 6.
+  const ledge = (p) => p.x >= 3 && p.y <= 69 ? 'stone' : null
+  const mobClass = (e) => (e.name === 'creeper' ? 'creeper' : 'hostile')
+  const on = (name) => {
+    const r = scored(ledge, [{ id: 9, name, width: 0.6, height: 1.8, position: new Vec3(4.5, 70, 0.5) }], [], { nearHostiles: undefined, mobClass })
+    return { fires: r.fires, watched: r.watched, pack: Array.from(r.fight.env.nearHostiles({}, 16, new Map()), (h) => h.e.name) }
+  }
+  assert.deepStrictEqual(on('creeper'), { fires: true, watched: [], pack: ['creeper'] }, 'a creeper')
+  const zombie = on('zombie')
+  assert.deepStrictEqual({ fires: zombie.fires, pack: zombie.pack }, { fires: false, pack: [] }, 'a zombie')
+  assert.match(zombie.watched[0] || '', /^watched: zombie above ~7\b/)
+})
+
+test('the reflex recomputes the walk flood to the body once a second has passed', () => {
+  const clock = fakeClock()
+  let floods = 0
+  const r = scored(open, [zombie(5.5)], [], { Date: { now: clock.now }, walkersTo: (...a) => { floods++; return walkersTo(...a) } })
+  assert.strictEqual(floods, 1, 'control: the first check')
+  clock.advance(500)
+  r.fight.combat.check(r.fight.bot)
+  assert.strictEqual(floods, 1, 'a flood recomputed within the second')
+  clock.advance(1000)
+  r.fight.combat.check(r.fight.bot)
+  assert.strictEqual(floods, 2)
+})
+
+test('one check pass floods once per drop limit for ten zombies outside a closed room', () => {
+  const drops = []
+  const zombies = Array.from({ length: 10 }, (_, i) => ({ ...zombie(0), id: 20 + i, position: new Vec3(6.5 + 2 * i, 64, 0.5) }))
+  const r = scored(room(-2, -3, 0, 3), zombies, [], { walkersTo: (world, to, o) => { drops.push(o.maxDrop); return walkersTo(world, to, o) } })
+  assert.deepStrictEqual({ fires: r.fires, watched: r.watched.length }, { fires: false, watched: 10 })
+  assert.deepStrictEqual(drops, [3])
+})
+
+test('a zombie sealed in a stone room 20 off has no walk, for at most 23 sight checks per column of the open field', () => {
+  // Stone walls 3 high and a roof at y 67 round the floor from (18, -2) to (22, 2).
+  const sealed = (p) => p.x >= 17 && p.x <= 23 && Math.abs(p.z) <= 3 && p.y <= 67 && (p.y === 67 || p.x === 17 || p.x === 23 || Math.abs(p.z) === 3) ? 'stone' : null
+  const checks = new Map()
+  const env = {
+    bot: { entity: { position: HERE }, blockAt: blockAt(sealed) },
+    Vec3,
+    ck,
+    isDoor,
+    walkersTo,
+    groundCell,
+    cellKnown: (p) => {
+      const column = p.x + ',' + p.z
+      checks.set(column, (checks.get(column) || 0) + 1)
+      return true
+    },
+    WALK_MEMO: botConstant('WALK_MEMO'),
+    WALK_STEPS: botConstant('WALK_STEPS'),
+    WALK_CAP: botConstant('WALK_CAP')
+  }
+  const { walksToBody, walkBudget } = loadBotFunctions(['walksToBody', 'walkBudget'], env)
+  const zombie = new Vec3(20.5, 64, 0.5)
+  assert.strictEqual(walksToBody(zombie, { steps: walkBudget(zombie), drop: botConstant('CREEPER_DROP') }), false)
+  // A field column pays for its ground block and the 22 cells above it that could floor a drop of up to 22.
+  // The columns round the body and beside the room also serve flood cells at other heights.
+  const over = [...checks].filter(([column, n]) => {
+    const [x, z] = column.split(',').map(Number)
+    const aside = Math.max(Math.abs(x), Math.abs(z)) <= 2 || (x >= 16 && x <= 24 && Math.abs(z) <= 4)
+    return n > 23 && !aside
+  })
+  assert.deepStrictEqual(over.slice(0, 5), [], `${over.length} of ${checks.size} columns over`)
+})
+
+async function vanguardFight (at, seen, x, env = {}) {
+  const chases = []
+  const legs = []
+  let sprints = 0
+  const z = zombie(x)
+  const entities = { 7: z }
+  const r = await standoff(open, z, {
+    bot: {
+      entities,
+      blockAt: at,
+      pathfinder: { goal: null, isMoving: () => false, setGoal (g) { this.goal = g; if (g) chases.push(g) } },
+      // A sprint opener skips the timer that removes the zombie on its third wait.
+      setControlState (c, s) {
+        if (c !== 'sprint' || !s) return
+        sprints++
+        delete entities[7]
+      }
+    },
+    env: {
+      AGGRO_CONFIRMED: new Map([[7, { name: 'zombie', t: Date.now(), ranged: false }]]),
+      STANCES: { vanguard: { fleeDist: 12, bowBand: [7, 24], chase: true, engage: 'closers' } },
+      fight: guardFight({ stance: 'vanguard' }),
+      entityPerceptible: () => seen,
+      takeLegs (reflex, why) { legs.push(why) },
+      runCells: rules.runCells,
+      RUN_COAST: legacy1710.RUN_COAST,
+      RUN_TICKS: rules.RUN_TICKS,
+      ...env
+    }
+  })
+  return { swings: r.swings, chases: chases.length, sprints, legs }
+}
+
 test('the vanguard reflex neither chases nor swings at a zombie that hit the body from behind a wall', async () => {
   const wall = (p) => p.x === 2 && p.y >= 64 && p.y < 67 ? 'stone' : null
-  // The swings, chase goals, sprints and leg takings against a confirmed zombie x off, in sight or behind the wall.
-  const fight = async (seen, x, env = {}) => {
-    const chases = []
-    const legs = []
-    let sprints = 0
-    const z = zombie(x)
-    const entities = { 7: z }
-    const r = await standoff(seen ? open : wall, z, {
-      bot: {
-        entities,
-        pathfinder: { goal: null, isMoving: () => false, setGoal (g) { this.goal = g; if (g) chases.push(g) } },
-        // The zombie leaves after the first sprint opener, which waits on no timer.
-        setControlState (c, s) {
-          if (c !== 'sprint' || !s) return
-          sprints++
-          delete entities[7]
-        }
-      },
-      env: {
-        AGGRO_CONFIRMED: new Map([[7, { name: 'zombie', t: Date.now(), ranged: false }]]),
-        STANCES: { vanguard: { fleeDist: 12, bowBand: [7, 24], chase: true, engage: 'closers' } },
-        fight: guardFight({ stance: 'vanguard' }),
-        entityPerceptible: () => seen,
-        takeLegs (reflex, why) { legs.push(why) },
-        runCells: rules.runCells,
-        RUN_COAST: legacy1710.RUN_COAST,
-        RUN_TICKS: rules.RUN_TICKS,
-        ...env
-      }
-    })
-    return { swings: r.swings, chases: chases.length, sprints, legs }
-  }
+  const fight = (seen, x, env) => vanguardFight(blockAt(seen ? open : wall), seen, x, env)
   const NONE = { swings: 0, chases: 0, sprints: 0, legs: [] }
   // A walk to the zombie, then a 1.7.10 sprint opener.
   for (const sprintBlock of [() => 'beyond 8', () => null]) {
@@ -413,6 +620,60 @@ test('the vanguard reflex neither chases nor swings at a zombie that hit the bod
     const reach = { ...IN_REACH, LEGACY_1710: legacy, meleeAim: undefined, HITBOX_1710: legacy1710.HITBOX_1710 }
     assert.ok((await fight(true, 3.5, reach)).swings > 0, `control: no swing in sight on ${version(legacy)}`)
     assert.deepStrictEqual(await fight(false, 3.5, reach), NONE, `a swing behind the wall on ${version(legacy)}`)
+  }
+})
+
+test('the vanguard reflex chases a zombie in sight over open ground and through an open door, not through a window', async () => {
+  // The zombie stands east of the room's east wall.
+  const field = roomBlockAt(() => null)
+  const door = roomBlockAt(room(-1, -1, 1, 1, { x: 2, z: 0, kind: 'open door' }))
+  const closed = roomBlockAt(room(-1, -1, 1, 1))
+  for (const sprintBlock of [() => 'beyond 8', () => null]) {
+    const run = sprintBlock() ? 'a goal' : 'a sprint opener'
+    for (const [where, at, x] of [['open ground', field, 5.5], ['an open door', door, 4.5]]) {
+      const chased = await vanguardFight(at, true, x, { sprintBlock })
+      assert.ok(chased.chases + chased.sprints > 0 && chased.legs.includes('chase'), `control: no chase over ${where} with ${run}, ${JSON.stringify(chased)}`)
+    }
+    const walled = await vanguardFight(closed, true, 4.5, { sprintBlock })
+    assert.deepStrictEqual({ chases: walled.chases, sprints: walled.sprints, chase: walled.legs.includes('chase') }, { chases: 0, sprints: 0, chase: false }, `a chase through a window with ${run}`)
+  }
+})
+
+test('the vanguard reflex does not chase a zombie on a ledge 3 high or 2 deep in a pit', async () => {
+  const places = [
+    ['on a ledge 3 high', (p) => p.y < 64 || (p.x >= 3 && p.y <= 66), new Vec3(4.5, 67, 0.5)],
+    ['2 deep in a pit', (p) => p.y < 64 && !(p.x >= 3 && p.x <= 4 && Math.abs(p.z) <= 1 && p.y >= 62), new Vec3(3.5, 62, 0.5)]
+  ]
+  for (const [where, stone, position] of places) for (const sprintBlock of [() => 'beyond 8', () => null]) {
+    const chases = []
+    const legs = []
+    const z = { id: 7, name: 'zombie', width: 0.6, height: 1.95, position }
+    const entities = { 7: z }
+    await standoff(open, z, {
+      bot: {
+        entities,
+        blockAt: (p) => Object.assign(Block.fromProperties(stone(p) ? 'stone' : 'air', {}, 0), { position: p }),
+        pathfinder: { goal: null, isMoving: () => false, setGoal (g) { this.goal = g; if (g) chases.push(g) } },
+        // A sprint opener skips the timer that removes the zombie on its third wait.
+        setControlState (c, s) {
+          if (c !== 'sprint' || !s) return
+          legs.push('sprint')
+          delete entities[7]
+        }
+      },
+      env: {
+        AGGRO_CONFIRMED: new Map([[7, { name: 'zombie', t: Date.now(), ranged: false }]]),
+        STANCES: { vanguard: { fleeDist: 12, bowBand: [7, 24], chase: true, engage: 'closers' } },
+        fight: guardFight({ stance: 'vanguard' }),
+        takeLegs (reflex, why) { legs.push(why) },
+        sprintBlock,
+        runCells: rules.runCells,
+        RUN_COAST: legacy1710.RUN_COAST,
+        RUN_TICKS: rules.RUN_TICKS
+      }
+    })
+    const run = sprintBlock() ? 'a goal' : 'a sprint opener'
+    assert.deepStrictEqual({ chases: chases.length, legs }, { chases: 0, legs: [] }, `${where} with ${run}`)
   }
 })
 

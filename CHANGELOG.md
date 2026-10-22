@@ -32,6 +32,25 @@ again only once the player stands more than 1.5 blocks from the spot where it fi
 seen only by the nametag never counts, and the 5 s start over after a fight, another hold or a
 lost sight.
 
+## 2026-10-21: combat stays inside the walls
+
+In the 2026-10-21 play session, indoors at night, a skeleton outside the wall of a closed room
+counted as a close threat, and `strike` walked the bot out the door into the dark after it.
+Flees and cover moves then kept it outside. Combat now weighs a hostile by whether it can walk
+to the bot past the walls and closed doors the bot has seen. `strike` and the vanguard chase
+go only for a hostile the bot itself can walk to, never through a closed door and never down a
+drop it can't climb back up, or swing in place at one already in sword range. `strike` refuses
+the rest and names the wall when one is in the way. Livestock is struck over a fence as before.
+After a kill the bot picks up the drops only where its own short walk reaches them, never
+through a door or down into a pit.
+
+The threat check watches a walled-off mob until it hits, except a ranged mob in sight within its
+range. A flee holds the guard only when no threat around has a way in, and it never stops a walk
+under way. The pack count leaves walled-off mobs out, and cover stays on the bot's side of the
+wall. Water, carpet, a jump and an unseen field no longer read as a wall. A swelling creeper and
+anything that already hit the bot are fled as before. Walls the bot never saw count as open, so
+a dark room behaves as it did before.
+
 ## 2026-10-21: seeing in the dark
 
 A pilot underground beside fresh wall torches read "Dim (light 0)" in `scene`. It could not
