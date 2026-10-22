@@ -1,9 +1,11 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const { isDoor, doorStep, panelAcross, doorCrossing } = require('../lib/doors')
-const { loadBotFunctions } = require('./helpers')
+const { LEGACY_DOOR_TOGGLE_MS } = require('../lib/bot/legacy-1710')
+const { loadBotFunctions, fakeClock } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty', shapes: [], light: 15, skyLight: 15 }
 const STONE = { name: 'stone', boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 1]] }
@@ -65,6 +67,136 @@ test('a door left out of reach is reported once', () => {
   closeDoorsBehind()
   closeDoorsBehind()
   assert.deepStrictEqual([activated.length, events], [0, ['manners']])
+})
+
+const LOWER = new Vec3(2, 64, 0)
+const UPPER = new Vec3(2, 65, 0)
+const flush = () => new Promise((resolve) => setImmediate(resolve))
+
+// look: ms the click spends turning before it is written.
+function gateBot (legacy, toggles = true, look = 0) {
+  const clock = fakeClock()
+  const state = { open: false }
+  const ticks = []
+  const sent = []
+  const halves = { [LOWER]: 'lower', [UPPER]: 'upper' }
+  const blockAt = (p) => ({ ...(halves[p] ? door('oak_door', halves[p], state.open) : AIR), position: p.clone() })
+  const update = () => { for (const p of [UPPER, LOWER, UPPER]) bot.emit(`blockUpdate:${p}`, blockAt(p), blockAt(p)) }
+  const bot = Object.assign(new EventEmitter(), {
+    blockAt,
+    waitForTicks: async (n) => { ticks.push(n) },
+    activateBlock: async (b) => {
+      if (look) await new Promise((resolve) => clock.setTimeout(resolve, look))
+      sent.push(b.position.toString())
+      if (!toggles) return
+      clock.setTimeout(update, 15)
+      clock.setTimeout(() => { state.open = !state.open; update() }, 60)
+    }
+  })
+  const PENDING_DOORS = []
+  const env = {
+    bot,
+    PENDING_DOORS,
+    isManneredDoor: (b) => b && /(_door|_fence_gate)$/.test(b.name) && b.name !== 'iron_door',
+    LEGACY_1710: legacy,
+    LEGACY_DOOR_TOGGLE_MS,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    console: { log () {} }
+  }
+  loadBotFunctions(['wireGateManners'], env).wireGateManners()
+  bot.emit('spawn')
+  const click = (p) => {
+    let settled = false
+    const read = bot.activateBlock(blockAt(p)).then(() => { settled = true; return blockAt(p).getProperties().open })
+    return { read, settled: () => settled }
+  }
+  const listeners = () => bot.eventNames().filter((n) => String(n).startsWith('blockUpdate:'))
+  return { bot, clock, ticks, sent, state, PENDING_DOORS, click, listeners }
+}
+
+async function reclick (g, first, second) {
+  const a = g.click(first)
+  await flush()
+  g.clock.advance(1)
+  const b = g.click(second)
+  await flush()
+  g.clock.advance(58)
+  await flush()
+  const early = [a.settled(), b.settled()]
+  g.clock.advance(LEGACY_DOOR_TOGGLE_MS)
+  return { early, reads: [await a.read, await b.read] }
+}
+
+test('on 1.7.10 a second click on a door in flight sends nothing, the door ends open and both return after the toggle', async () => {
+  const g = gateBot(true)
+  const { early, reads } = await reclick(g, LOWER, LOWER)
+  assert.deepStrictEqual(early, [false, false], 'returned before the toggle')
+  assert.deepStrictEqual([g.sent, g.state.open, reads], [['(2, 64, 0)'], true, [true, true]])
+})
+
+test('on 1.7.10 a click on one half of a door in flight on the other half sends nothing', async () => {
+  for (const [first, second] of [[LOWER, UPPER], [UPPER, LOWER]]) {
+    const g = gateBot(true)
+    const { reads } = await reclick(g, first, second)
+    assert.deepStrictEqual([g.sent, g.state.open, reads], [[first.toString()], true, [true, true]], `${first} then ${second}`)
+  }
+})
+
+test('on 1.7.10 a click after the toggle wait ended goes out, and no listener or timer is left', async () => {
+  const g = gateBot(true)
+  await reclick(g, LOWER, UPPER)
+  const c = g.click(LOWER)
+  await flush()
+  g.clock.advance(LEGACY_DOOR_TOGGLE_MS)
+  assert.deepStrictEqual([await c.read, g.sent, g.listeners(), g.clock.pending()], [false, ['(2, 64, 0)', '(2, 64, 0)'], [], 0])
+})
+
+test('on 1.7.10 a click on an upper half returns once the toggle arrived, past the echo of the old state, and remembers the door', async () => {
+  const g = gateBot(true)
+  const c = g.click(UPPER)
+  await flush()
+  g.clock.advance(15)
+  await flush()
+  g.clock.advance(45)
+  assert.deepStrictEqual([await c.read, g.PENDING_DOORS.map((d) => d.key)], [true, ['(2, 65, 0)']])
+  assert.deepStrictEqual([g.listeners(), g.clock.pending()], [[], 0])
+})
+
+test('on 1.7.10 a click written after a turn longer than LEGACY_DOOR_TOGGLE_MS returns once the toggle arrived and remembers the door', async () => {
+  const g = gateBot(true, true, 1050)
+  const c = g.click(LOWER)
+  await flush()
+  g.clock.advance(1050)
+  await flush()
+  assert.deepStrictEqual([g.sent, c.settled()], [['(2, 64, 0)'], false], 'returned before the toggle')
+  g.clock.advance(15)
+  await flush()
+  g.clock.advance(45)
+  assert.deepStrictEqual([await c.read, g.PENDING_DOORS.map((d) => d.key)], [true, ['(2, 64, 0)']])
+  assert.deepStrictEqual([g.listeners(), g.clock.pending()], [[], 0])
+})
+
+test('on 1.7.10 a click the server never answers returns LEGACY_DOOR_TOGGLE_MS after it was written, remembers nothing and leaves no listener', async () => {
+  for (const look of [0, 1050]) {
+    const g = gateBot(true, false, look)
+    const c = g.click(UPPER)
+    await flush()
+    g.clock.advance(look)
+    await flush()
+    g.clock.advance(LEGACY_DOOR_TOGGLE_MS - 1)
+    await flush()
+    assert.strictEqual(c.settled(), false, `returned before the timeout after a ${look} ms turn`)
+    g.clock.advance(1)
+    assert.deepStrictEqual([await c.read, g.PENDING_DOORS, g.listeners(), g.clock.pending()], [false, [], [], 0], `${look} ms turn`)
+  }
+})
+
+test('off 1.7.10 the wrap reads the door two ticks after the click', async () => {
+  const g = gateBot(false)
+  g.bot.waitForTicks = async (n) => { g.ticks.push(n); g.clock.advance(60) }
+  assert.strictEqual(await g.click(LOWER).read, true)
+  assert.deepStrictEqual([g.ticks, g.PENDING_DOORS.map((d) => d.key), g.listeners()], [[2], ['(2, 64, 0)'], []])
 })
 
 // A body at 0,64,0 with a door in sight 3 east and one 6 south behind a stone wall at z 3.

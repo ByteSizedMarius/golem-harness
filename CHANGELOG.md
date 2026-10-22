@@ -51,6 +51,20 @@ wall. Water, carpet, a jump and an unseen field no longer read as a wall. A swel
 anything that already hit the bot are fled as before. Walls the bot never saw count as open, so
 a dark room behaves as it did before.
 
+## 2026-10-21: doors and beds on a 1.7.10 server
+
+`activate` on a door's upper half answered `open:false` while the door had opened. The server
+echoes the clicked half before the toggle reaches the client, and the reply read that echo. Door
+and gate clicks now wait for the toggle, up to half a second after the click goes out, before
+they read. The reply and the bot's memory of the doors it opened now match the server. A `goto`
+through a closed door clicked it twice in one tick, which toggled it shut again, and stalled at
+"could not be reached on its west side". It now sends one click per toggle, walks through and
+closes the door behind it.
+
+`craft bed` answered unknown item, and `craft white_bed` reported that the server made nothing
+while a red bed landed in the inventory. That server has one bed. Every 1.21 bed name now crafts
+it, and `craft` reports the bed it got.
+
 ## 2026-10-21: building tools name their cells and blocks
 
 `place` of a crafting table answered `on:` with the cell under the table. The pilot read it as
