@@ -47,6 +47,14 @@ test('tools/list lists exactly the table, then wait_events and manual, and no fo
   for (const t of TOOLS) assert.ok(!FORBIDDEN_ROUTES.includes(t.route), `${t.name} -> ${t.route}`)
 })
 
+test('the building tools list their block params as a block with its default', async () => {
+  const { srv } = mcpServer()
+  const tools = (await rpc(srv, 'tools/list', {})).result.tools
+  const param = (tool, name) => tools.find((x) => x.name === tool).inputSchema.properties[name].description
+  for (const tool of ['build', 'outline', 'walls', 'roof']) assert.strictEqual(param(tool, 'name'), 'block, default oak_planks', tool)
+  for (const tool of ['build', 'walls']) assert.strictEqual(param(tool, 'base_name'), 'block, default cobblestone', tool)
+})
+
 test('initialize advertises tools and no resources', async () => {
   const { srv } = mcpServer()
   const r = await srv.handle({ jsonrpc: '2.0', id: 7, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } } })

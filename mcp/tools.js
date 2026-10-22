@@ -28,6 +28,8 @@ const Y = { type: 'num', min: -64, max: 319 }
 const XYZ = { x: required(X), y: required(Y), z: required(X) }
 const AT = { x: X, y: Y, z: X }
 const NAME = { type: 'str', maxLen: 64 }
+const BLOCK = { ...NAME, desc: 'block, default oak_planks' }
+const BASE_BLOCK = { ...NAME, desc: 'block, default cobblestone' }
 // Up to 8 names of NAME's length and the 7 separators between them.
 const CHEST_NAMES = required({ type: 'str', maxLen: 519 })
 const PLAYER = { type: 'str', maxLen: 32 }
@@ -115,10 +117,10 @@ const TOOLS = [
   { name: 'grave', route: '/grave', body: true, description: 'On a server that keeps graves, list the gravestone at x,y,z or the nearest in sight. take: all or an item name.', params: { at: POINT, take: NAME }, timeoutMs: LONGEST },
 
   // Building
-  { name: 'build', route: '/build', body: true, description: 'Job: a cabin with a cobblestone foundation, oak plank walls to height h, a 2-high doorway centred in the west wall and a roof laid outer ring first. Skips solid cells. Stock enough cobblestone and oak planks first, or cells fail.', params: { template: { type: 'enum', values: ['cabin'] }, x: required(X), z: required(X), w: SIZE, d: SIZE, h: SIZE, base: Y, name: NAME, base_name: NAME } },
-  { name: 'outline', route: '/outline', body: true, description: 'Lay a rectangular foundation outline. Runs at once.', params: { x: required(X), z: required(X), w: SIZE, d: SIZE, name: NAME, y: Y }, timeoutMs: LONGEST },
-  { name: 'walls', route: '/walls', body: true, description: 'Raise perimeter walls with a doorway. Runs at once.', params: { x: required(X), z: required(X), w: SIZE, d: SIZE, h: SIZE, base: Y, name: NAME, base_name: NAME, door: { type: 'enum', values: ['west', 'east', 'north', 'south'] } }, timeoutMs: LONGEST },
-  { name: 'roof', route: '/roof', body: true, description: 'Fill a solid slab at height y, outer ring first. Runs at once.', params: { x: required(X), y: required(Y), z: required(X), w: SIZE, d: SIZE, name: NAME }, timeoutMs: LONGEST },
+  { name: 'build', route: '/build', body: true, description: 'Job: a cabin with a base_name foundation, name walls to height h, a 2-high doorway centred in the west wall and a roof laid outer ring first. Skips solid cells. Stock enough of both first, or cells fail.', params: { template: { type: 'enum', values: ['cabin'] }, x: required(X), z: required(X), w: SIZE, d: SIZE, h: SIZE, base: Y, name: BLOCK, base_name: BASE_BLOCK } },
+  { name: 'outline', route: '/outline', body: true, description: 'Lay a rectangular foundation outline.', params: { x: required(X), z: required(X), w: SIZE, d: SIZE, name: BLOCK, y: Y }, timeoutMs: LONGEST },
+  { name: 'walls', route: '/walls', body: true, description: 'Raise perimeter walls with a doorway.', params: { x: required(X), z: required(X), w: SIZE, d: SIZE, h: SIZE, base: Y, name: BLOCK, base_name: BASE_BLOCK, door: { type: 'enum', values: ['west', 'east', 'north', 'south'] } }, timeoutMs: LONGEST },
+  { name: 'roof', route: '/roof', body: true, description: 'Fill a solid slab at height y, outer ring first.', params: { x: required(X), y: required(Y), z: required(X), w: SIZE, d: SIZE, name: BLOCK }, timeoutMs: LONGEST },
 
   // Fighting
   // The route's own budget for 5 swings, and one equip wait it cannot cut short.

@@ -51,6 +51,19 @@ test('place picks a cell beside the feet that the body does not overlap', () => 
   assert.strictEqual(loadBotFunctions(['placeSpot'], placingEnv(body(0.8, 64, 0.5), boxed)).placeSpot(), null, 'the only open cell holds part of the body')
 })
 
+test('place names the cell it placed in and the block under it', async () => {
+  const clicks = []
+  const env = placingEnv(body(0.5, 64, 0.5), ground(), {
+    items: [{ name: 'crafting_table', count: 1 }],
+    bot: { async placeBlock (ref, face) { clicks.push(key(ref.position.plus(face))) } },
+    env: { require, clearSoftCover: async () => {}, round: botConstant('round') }
+  })
+  assert.deepStrictEqual(await awaitRoute('/place', { name: 'crafting_table' }, env), {
+    placed: 'crafting_table', at: { x: 1, y: 64, z: 0 }, on: { x: 1, y: 63, z: 0 }
+  })
+  assert.deepStrictEqual(clicks, ['1,64,0'])
+})
+
 // reachToPlace from a body at (0.5, 64, 0.5) over the floor, every cell known. planPath answers a successful search
 // along the cell centres in path (answering status instead when given), or null with the route ended for ended.
 // With fighting the combat reflex is busy. log records plans, route ends and walks.
@@ -302,12 +315,19 @@ function wallsRig ({ items = [{ name: 'cobblestone', count: 64 }], extra = {}, a
   return { bot, log, placed, env: buildVerbEnv(bot, env) }
 }
 
-test('walls lists the cell its pockets ran out on, with the reason', async () => {
+test('walls lists the cell its pockets ran out on, with the blocks it looked for', async () => {
   const rig = wallsRig({ items: [{ name: 'cobblestone', count: 6 }] })
   assert.deepStrictEqual(await awaitRoute('/walls', RING, rig.env), {
-    placed: 6, skipped: 0, failed: 1, failures: ['3,64,1: no block in pockets'], size: '3x3', height: 1, door: 'west'
+    placed: 6, skipped: 0, failed: 1, failures: ['3,64,1: no cobblestone or oak_planks in pockets'], size: '3x3', height: 1, door: 'west'
   })
   assert.strictEqual(rig.bot.listenerCount('death'), 0, 'the run left its death listener behind')
+})
+
+test('roof without a name reports the oak_planks it looked for', async () => {
+  const rig = wallsRig()
+  assert.deepStrictEqual(await awaitRoute('/roof', { x: '1', z: '0', w: '1', d: '1', y: '64' }, rig.env), {
+    placed: 0, skipped: 0, failed: 1, failures: ['1,64,0: no oak_planks in pockets'], size: '1x1', y: 64
+  })
 })
 
 test('walls refuses a block name the registry lacks before anything moves, and takes a server alias', async () => {

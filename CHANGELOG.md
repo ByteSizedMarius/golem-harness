@@ -51,6 +51,17 @@ wall. Water, carpet, a jump and an unseen field no longer read as a wall. A swel
 anything that already hit the bot are fled as before. Walls the bot never saw count as open, so
 a dark room behaves as it did before.
 
+## 2026-10-21: building tools name their cells and blocks
+
+`place` of a crafting table answered `on:` with the cell under the table. The pilot read it as
+the table's own cell and had to hunt for it with `blockat`. `place` now answers the placed cell
+as `at:` beside `on:`. `roof` failed every cell with "no block in pockets" while the bot carried
+129 cobblestone, because the roof block defaults to oak planks and the failure never said so. A
+build cell whose blocks are missing from the pockets now names them: `no oak_planks in pockets`,
+or `no cobblestone or oak_planks in pockets` for walls and build. After `roof name:"house_floor"`
+it was clear the pilot read `name` as a label. The block parameters of `build`, `outline`,
+`walls` and `roof` now describe themselves as a block and name their default.
+
 ## 2026-10-21: seeing in the dark
 
 A pilot underground beside fresh wall torches read "Dim (light 0)" in `scene`. It could not
