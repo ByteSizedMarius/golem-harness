@@ -4,7 +4,7 @@ const assert = require('node:assert')
 const vm = require('node:vm')
 const { Vec3 } = require('vec3')
 const shelter = require('../lib/shelter')
-const { botSource, balanced, botConstant, loadBotFunctions, shelterEnv } = require('./helpers')
+const { botSource, balanced, botConstant, botObject, loadBotFunctions, shelterEnv } = require('./helpers')
 
 const ME = new Vec3(0.5, 64, 0.5)
 const zombie = (id) => ({ id, name: 'zombie', type: 'hostile', position: new Vec3(5.5, 64, 0.5) })
@@ -108,7 +108,7 @@ function threatScene (seen = true) {
   Object.assign(env.bot, { health: 5, game: { dimension: 'overworld' } })
   Object.assign(env, {
     bunker: { cell: null },
-    guardState: { up: false, slot: -1, pilot: false },
+    guardState: botObject('guardState', { console }),
     playerCrumbs: {},
     crumbDimension: 'overworld',
     fight: { lastHit: { dmg: 3, t: Date.now() - 1000, cls: 'hostile' } },

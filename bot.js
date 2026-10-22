@@ -33,7 +33,7 @@ const { createPlacing, bindPlacing } = require('./lib/bot/placing')
 const { createWatchReflexes, bindWatchReflexes } = require('./lib/bot/watch-reflexes')
 const { createBunkerCells, bindBunkerCells } = require('./lib/bot/bunker-cells')
 const { createBunkerBuild, bindBunkerBuild } = require('./lib/bot/bunker-build')
-const { createCombat, bindCombat, wireDamageTypes, wireGuardDrop, wireItemUseCosts, wireArmSwings, wireArrowTracking, wireDamageAttribution, wireFloodDrops, wireMobHurt } = require('./lib/bot/combat')
+const { createCombat, bindCombat, wireDamageTypes, wireGuardDrop, wireHandLease, wireItemUseCosts, wireArmSwings, wireArrowTracking, wireDamageAttribution, wireFloodDrops, wireMobHurt } = require('./lib/bot/combat')
 const { createBunker, bindBunker, wireThreatReset } = require('./lib/bot/bunker')
 const { createSenses, bindSenses, wireSoundTablePin, wireHearing, wireOwnEditStamps, wireWorldChangeNotes, wireWorldChangeEvents, wireOreCallout } = require('./lib/bot/senses')
 const { createAlarms, bindAlarms, wireWearAlarm, wirePocketAlarm, wireTrailMarks, wireBodyAlarms } = require('./lib/bot/alarms')
@@ -170,7 +170,7 @@ const { installBuildingRoutes } = ctx
 createMemoryRoutes(ctx)
 const { installMemoryRoutes } = ctx
 createFightingRoutes(ctx)
-const { installFightingRoutes } = ctx
+const { installFightingRoutes, installFightGate } = ctx
 createMovingRoutes(ctx)
 const { installMovingRoutes } = ctx
 createSeeingRoutes(ctx)
@@ -209,6 +209,7 @@ function wireRuntime () {
   wireTrailMarks()
   wireBodyAlarms()
   wireGuardDrop()
+  wireHandLease()
   wireItemUseCosts()
   wireArmSwings()
   wireArrowTracking()
@@ -233,6 +234,7 @@ function installReflexes () {
   reflexes.push(lavaWatchReflex, bunkerReflex, combatReflex, unstuckReflex, currentWatchReflex, narratorReflex, trekReflex, fleeToPlayerReflex)
 }
 function installRoutes () {
+  installFightGate(app)
   installDebugRoutes(app)
   installSocialRoutes(app)
   installBuildingRoutes(app)

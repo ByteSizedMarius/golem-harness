@@ -5,7 +5,7 @@ const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const registry = require('prismarine-registry')('1.21.11')
 const Item = require('prismarine-item')(registry)
-const { botConstant, loadBotFunctions, routeHandler, awaitRoute, runRoute, wireListeners } = require('./helpers')
+const { botConstant, loadBotFunctions, routeHandler, awaitRoute, runRoute, wireListeners, botObject, fakeClock } = require('./helpers')
 
 const MOVES = botConstant('MOVES')
 const item = (name) => new Item(registry.itemsByName[name].id, 1)
@@ -65,7 +65,7 @@ function body () {
     MOVES,
     RISKY_FOODS: botConstant('RISKY_FOODS'),
     FOOD_UPDATE_MS: botConstant('FOOD_UPDATE_MS'),
-    guardState: { up: false, slot: -1, pilot: false },
+    guardState: botObject('guardState', { console }),
     reflexes: [{ name: 'combat' }, { name: 'bunker' }],
     AGGRO_CONFIRMED: new Map(),
     bunker: { building: false, cell: null },
@@ -85,6 +85,31 @@ test('a meal holds a running walk still until it ends, and drops a swing meanwhi
   const reply = await awaitRoute('/eat', {}, env)
   assert.strictEqual(reply.ate, 'bread')
   assert.deepStrictEqual(log, ['forward true', 'sprint true', 'forward false', 'sprint false', 'eat', 'ate', 'forward true', 'sprint true'])
+})
+
+test('a meal over 2 s holds the hand from its equip to the restore of the held item, and the reflex\'s sword waits for it', async () => {
+  const clock = fakeClock()
+  const { bot, env } = body()
+  Object.assign(env, { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout })
+  const { handFree } = loadBotFunctions(['handFree'], { guardState: env.guardState })
+  const order = []
+  bot.heldItem = bot.inventory.items()[1]
+  bot.equip = async (it) => { order.push(`equip ${it.name}`); bot.heldItem = it }
+  bot.consume = async () => {
+    order.push('eat')
+    handFree().then(() => order.push(`sword at ${clock.now()}`))
+    await new Promise((resolve) => clock.setTimeout(resolve, 2400))
+    order.push(`ate at ${clock.now()}`)
+  }
+  const { handle, res } = routeHandler('/eat', env)
+  const done = handle({ query: {} }, res)
+  while (res.body === undefined && res.error === undefined && clock.now() < 10000) {
+    await new Promise(setImmediate)
+    clock.advance(10)
+  }
+  await done
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(order, ['equip bread', 'eat', 'ate at 2400', 'equip bow', 'sword at 2400'])
 })
 
 test('a bow draw holds a running walk still until the arrow is loosed, and drops a swing meanwhile', async () => {

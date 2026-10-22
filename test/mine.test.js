@@ -205,7 +205,8 @@ function jobRig (t) {
     bunker: {},
     legs: { take: () => {} },
     stopFollow: () => {},
-    clearLane: () => {}
+    clearLane: () => {},
+    guardState: { hand: null }
   })
   const fns = loadBotFunctions(['stopCollect', 'stopPath'], c.env)
   c.env.jobs = createJobs({ stop: () => { fns.stopPath(); fns.stopCollect() }, emit: () => {}, deaths: deathLedger() })

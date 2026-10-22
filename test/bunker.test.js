@@ -607,6 +607,8 @@ test('the pillar verb beside a hill rises at least 2 over the hilltop and says w
       bot: { entity, blockAt: dirtWhere(solid) },
       bunker: { building: false },
       legs: legLedger(),
+      claimLane: () => ({}),
+      releaseLane () {},
       takenText,
       perch: { cell: null },
       fillers: () => [{ name: 'dirt', count: 64 }],
@@ -634,6 +636,8 @@ test('the pillar verb at the bottom of a shaft climbs out level instead of risin
     bot: { entity, blockAt: dirtWhere(solid) },
     bunker: { building: false },
     legs: legLedger(),
+    claimLane: () => ({}),
+    releaseLane () {},
     takenText,
     perch: { cell: null },
     fillers: () => [{ name: 'dirt', count: 64 }],
@@ -645,6 +649,39 @@ test('the pillar verb at the bottom of a shaft climbs out level instead of risin
     BUNKER_MAX_HEIGHT: botConstant('BUNKER_MAX_HEIGHT')
   })
   assert.deepStrictEqual(r, { placed: 2, rose: 2, y: 64 })
+})
+
+test('a pillar jump ends without a click once a flee carried the body off the cell', async () => {
+  // The jumps and clicks of a jumpPlace over the y 63 floor whose first tick moves the body to after.
+  const jump = async (after) => {
+    const entity = { position: new Vec3(0.5, 64, 0.5), width: 0.6, height: 1.8 }
+    const log = []
+    const env = {
+      bot: {
+        entity,
+        entities: {},
+        blockAt: (p) => ({ name: p.y <= 63 ? 'stone' : 'air', boundingBox: p.y <= 63 ? 'block' : 'empty', position: p }),
+        async equip (item) { this.heldItem = item },
+        async lookAt () {},
+        setControlState (c, on) { if (c === 'jump' && on) log.push('jump') },
+        async waitForTicks () { entity.position = after },
+        async placeBlock () { log.push('click') }
+      },
+      Vec3,
+      entityInCell: shelter.entityInCell,
+      bunker: { building: false },
+      BUNKER_WALK: botConstant('BUNKER_WALK'),
+      setTimeout,
+      clearTimeout,
+      blockers: () => [],
+      guardState: { hand: null }
+    }
+    const { jumpPlace } = loadBotFunctions(['jumpPlace'], env)
+    const rose = await jumpPlace({ position: new Vec3(0, 63, 0) }, { name: 'dirt' })
+    return { rose, log }
+  }
+  assert.deepStrictEqual(await jump(new Vec3(0.5, 65.4, 0.5)), { rose: true, log: ['jump', 'click'] }, 'control: the body rose over the cell')
+  assert.deepStrictEqual(await jump(new Vec3(3.5, 64, 0.5)), { rose: false, log: ['jump'] })
 })
 
 test('with too few blocks for the height a hill needs the bunker refuses the pillar', async () => {

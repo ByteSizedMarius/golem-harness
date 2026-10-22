@@ -47,6 +47,10 @@ const NAME_CAP = 32
 // The lesson tool's for.
 const LESSON_PLACE = /^[A-Za-z0-9_-]+$/
 const NAMES_SHOWN = 5
+const KINDS_SHOWN = 6
+// Unread events of these kinds refuse world work for FIGHT_GATE_MS after they happened.
+const FIGHT_KINDS = ['threat', 'combat']
+const FIGHT_GATE_MS = 60000
 // A drive letter not preceded by a letter or digit and followed by a slash, or a UNC double backslash,
 // up to the next whitespace or quote.
 const PATH_TOKEN = /(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s"']*|\\\\[^\s"']*/g
@@ -429,6 +433,8 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
   const listed = tools.map(listing)
   const closing = new AbortController()
   const frontier = { boot: start.boot, chat: start.chat, ev: start.ev }
+  // events maps id to { kind, t } for the waking events of process boot, since is the frontier's boot at the map's start.
+  const wake = { boot: null, since: frontier.boot, events: new Map() }
   let waiting = false
   let lastReturn = -Infinity
   // The last wait_events left items for the next one.
@@ -493,6 +499,15 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
       if (note !== null) tails.push(note)
       delete body.unreadChat
     }
+    if (body !== null && typeof body === 'object' && Object.hasOwn(body, 'wakeEvents')) {
+      noteWake(body.wakeEvents)
+      delete body.wakeEvents
+    }
+    // A tick reply moves the frontier.
+    if (tool.name !== 'tick') {
+      const note = waitingNote()
+      if (note !== null) tails.push(note)
+    }
     const primer = PRIMED_BY.get(tool.name)
     if (primer && primers.has(primer.topic) && !primed.has(primer.topic) && (!primer.when || primer.when(values))) {
       primed.add(primer.topic)
@@ -526,12 +541,48 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
     onDeliver({ ...frontier })
   }
 
-  // A body call while another is in flight or cut answers busy without reaching the bot.
+  // Merges the waking events a reply named into wake.
+  function noteWake (w) {
+    if (w === null || typeof w !== 'object' || bootOf(w.boot) === null || !Array.isArray(w.recent)) return
+    if (w.boot !== wake.boot) Object.assign(wake, { boot: w.boot, since: frontier.boot, events: new Map() })
+    for (const e of w.recent) {
+      if (Array.isArray(e) && isCursor(e[0]) && typeof e[1] === 'string' && Number.isFinite(e[2])) wake.events.set(e[0], { kind: e[1], t: e[2] })
+    }
+  }
+
+  // The events of wake past the frontier, oldest first.
+  function waitingEvents () {
+    // The frontier moved to another process after the map began.
+    if (frontier.boot !== wake.boot && frontier.boot !== wake.since) Object.assign(wake, { boot: frontier.boot, since: frontier.boot, events: new Map() })
+    const above = frontier.boot === wake.boot ? frontier.ev : 0
+    for (const id of wake.events.keys()) if (id <= above) wake.events.delete(id)
+    return [...wake.events].sort((a, b) => a[0] - b[0]).map(([, e]) => e)
+  }
+
+  // Names the kinds of unread waking events with counts, never their text.
+  function waitingNote () {
+    const counts = new Map()
+    for (const { kind } of waitingEvents()) {
+      const name = redactString(flatText(kind), NAME_CAP)
+      if (name) counts.set(name, (counts.get(name) || 0) + 1)
+    }
+    if (!counts.size) return null
+    const kinds = [...counts].map(([kind, n]) => (n > 1 ? `${n} ${kind}` : kind))
+    const shown = kinds.slice(0, KINDS_SHOWN).join(', ') + (kinds.length > KINDS_SHOWN ? ` and ${kinds.length - KINDS_SHOWN} more` : '')
+    return `Waiting events: ${shown}. Read them with wait_events.`
+  }
+
+  // Answers busy, or refused for world work while a fresh fight event is unread, without reaching the bot.
   async function bodyCall (tool, values) {
     if (running && running.cut) return textResult(`busy: ${running.name} passed its time budget and may still run, stop ends it.`, true)
     if (running) {
       const s = Math.round((Date.now() - running.since) / 1000)
       return textResult(`busy: ${running.name} has run ${s} s. Info and chat tools work meanwhile, stop cancels it.`, true)
+    }
+    if (!tool.combat) {
+      const at = now().getTime()
+      const fights = [...new Set(waitingEvents().filter((e) => FIGHT_KINDS.includes(e.kind) && at - e.t <= FIGHT_GATE_MS).map((e) => e.kind))]
+      if (fights.length) return textResult(`refused: unread fight events (${fights.join(', ')}). Reading them with wait_events or tick lifts this. Ways out meanwhile: goto, pillar, bunker.`, true)
     }
     const lease = { name: tool.name, since: Date.now(), cut: false }
     running = lease

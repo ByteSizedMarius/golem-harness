@@ -7,6 +7,7 @@ const mineflayer = require('mineflayer')
 const { pathfinder, goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const { legLedger } = require('../lib/leg-ledger')
+const { createLane, bindLane } = require('../lib/bot/lane')
 const { loadBotFunctions } = require('./helpers')
 
 function lane () {
@@ -26,6 +27,23 @@ test('a route releases only its own lane claim, so a stale one leaves the newer 
   assert.strictEqual(env.pilotLane.until, 0)
   releaseLane(null)
   assert.strictEqual(env.pilotLane.until, 0, 'a route that never claimed releases nothing')
+})
+
+test('a reflex move deferred to a job or to the pilot lane raises a lane event, no fight event', () => {
+  const events = []
+  const lane = {}
+  let job = true
+  createLane(lane)
+  bindLane({ bot: { entity: { position: new Vec3(0.5, 64, 0.5) } }, hpMelee: () => false, jobs: { running: () => job }, meleeThreat: () => null, emitEvent: (kind, msg) => events.push([kind, msg]) })
+  lane.laneNarrate('chase')
+  job = false
+  lane.claimLane('goto', 60000)
+  lane.pilotLane.narrated = 0
+  lane.laneNarrate('flee')
+  lane.clearLane()
+  assert.deepStrictEqual(events.map(([kind]) => kind), ['lane', 'lane'])
+  assert.match(events[0][1], /^chase deferred, the running job keeps the legs$/)
+  assert.match(events[1][1], /^flee deferred .* pilot lane held \(goto\)$/)
 })
 
 test('the pilot stop clears any claim', () => {

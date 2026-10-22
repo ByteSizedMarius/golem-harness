@@ -62,7 +62,9 @@ const CELL = new Vec3(2, 64, 0)
 const cellBlock = (name) => Object.assign(Block.fromStateId(registry.blocksByName[name].defaultState, 0), { position: CELL })
 
 // hotbar entries are a name, [name, damage] or null. during is block names, after and slot are [ms, name] updates.
-async function digRun (blockName, hotbar, held, legacy, { during = [], after = [[20, 'air']], slot = [] } = {}, query = {}) {
+// With fighting the combat reflex is busy. Each equip takes equipMs, the dig's look lookMs and the dig digMs, in fake time.
+// With reflex the combat reflex reaches for the sword as the dig starts.
+async function digRun (blockName, hotbar, held, legacy, { during = [], after = [[20, 'air']], slot = [], fighting = false, equipMs = 0, lookMs = 0, digMs = 0, digTimeMs = digMs, reflex = false } = {}, query = {}) {
   const clock = fakeClock()
   let cell = cellBlock(blockName)
   const slots = new Array(46).fill(null)
@@ -78,14 +80,29 @@ async function digRun (blockName, hotbar, held, legacy, { during = [], after = [
     quickBarSlot: held,
     setQuickBarSlot (i) { this.quickBarSlot = i },
     equips: [],
-    async equip (item) { this.equips.push(item.name); this.quickBarSlot = slots.indexOf(item) - 36 },
+    async equip (item) {
+      if (equipMs) await new Promise(resolve => clock.setTimeout(resolve, equipMs))
+      this.equips.push(item.name)
+      this.quickBarSlot = slots.indexOf(item) - 36
+    },
     blockAt: () => cell,
     targetDigBlock: null,
+    leasedAtWrite: null,
+    log: [],
+    _client: { write () {} },
+    digTime: () => digTimeMs,
     async dig (b) {
+      if (lookMs) await new Promise(resolve => clock.setTimeout(resolve, lookMs))
+      this.leasedAtWrite = !!env.guardState.hand
       this.dugWith = this.heldItem ? this.heldItem.name : null
+      this._client.write('block_dig', { status: 0, location: b.position, face: 1 })
+      if (reflex) hand.handFree().then(() => this.log.push(`sword at ${clock.now()}`))
       const update = (name) => { const old = cell; cell = cellBlock(name); this.emit(`blockUpdate:${CELL}`, old, cell) }
       this.targetDigBlock = b
       during.forEach(update)
+      if (digMs) await new Promise(resolve => clock.setTimeout(resolve, digMs))
+      this.log.push(`dug at ${clock.now()}`)
+      this._client.write('block_dig', { status: 2, location: b.position, face: 1 })
       this.targetDigBlock = null
       // mineflayer's own air write at the end of its timer.
       update('air')
@@ -104,6 +121,8 @@ async function digRun (blockName, hotbar, held, legacy, { during = [], after = [
   const env = {
     bot,
     bunker: { building: false },
+    reflexes: [{ name: 'combat', fightBusy: () => fighting, _threat: null }],
+    guardState: { hand: null },
     cellKnown: () => true,
     seenNow: () => true,
     require,
@@ -113,10 +132,13 @@ async function digRun (blockName, hotbar, held, legacy, { during = [], after = [
     LEGACY_HAND_DIG: botConstant('LEGACY_HAND_DIG'),
     LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
     LEGACY_1710: legacy,
-    setTimeout: clock.setTimeout,
+    setTimeout: (fn, ms) => { timers.push(ms); return clock.setTimeout(fn, ms) },
     clearTimeout: clock.clearTimeout,
     Date: { now: clock.now }
   }
+  const timers = []
+  const hand =loadBotFunctions(['wireHandLease', 'handFree'], { bot, guardState: env.guardState })
+  hand.wireHandLease()
   const { handle, res } = routeHandler('/digat', env)
   const done = handle({ query: { x: '2', y: '64', z: '0', ...query } }, res)
   while (res.body === undefined && res.error === undefined && clock.now() < 10000) {
@@ -126,7 +148,7 @@ async function digRun (blockName, hotbar, held, legacy, { during = [], after = [
   await done
   assert.strictEqual(bot.listenerCount(`blockUpdate:${CELL}`), 0, 'a block listener outlived the reply')
   assert.strictEqual(bot.inventory.listenerCount('updateSlot'), 0, 'a slot listener outlived the reply')
-  return { reply: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error, ms: clock.now(), bot }
+  return { reply: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error, ms: clock.now(), bot, timers }
 }
 
 async function digWith (blockName, hotbar, held, legacy = false) {
@@ -136,6 +158,42 @@ async function digWith (blockName, hotbar, held, legacy = false) {
 }
 
 const TOOLS = ['wooden_pickaxe', 'stone_axe', 'wooden_shovel', 'iron_pickaxe', 'stone_pickaxe', null]
+
+test('digat refuses while the combat reflex is busy, before any tool goes into the hand', async () => {
+  const r = await digRun('oak_log', TOOLS, 5, false, { fighting: true })
+  assert.match(r.error.message, /^refused: fighting something, the guard reflex holds the hand\./)
+  assert.strictEqual(r.error.reason, 'fighting')
+  assert.deepStrictEqual([r.bot.equips, r.bot.dugWith], [[], undefined])
+})
+
+test('digat keeps the hand lease through the dig\'s look after slow equips used up the first 2 s', async () => {
+  const r = await digRun('iron_ore', TOOLS, 1, false, { equipMs: 1800, lookMs: 600 })
+  assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  assert.strictEqual(r.bot.dugWith, 'stone_pickaxe')
+  assert.strictEqual(r.bot.leasedAtWrite, true, 'the lease ended before the dig started')
+})
+
+test('digat holds the hand through a dig over 2 s, and the reflex\'s sword waits for the dig to end', async () => {
+  const r = await digRun('stone', [['stone_pickaxe']], 0, false, { digMs: 3000, reflex: true })
+  assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  assert.deepStrictEqual(r.bot.log, ['dug at 3000', 'sword at 3000'])
+})
+
+test('digat gives the hand back once a dig outlasts its dig time by 500 ms', async () => {
+  const r = await digRun('stone', [['stone_pickaxe']], 0, false, { digMs: 4000, digTimeMs: 3000, reflex: true })
+  assert.deepStrictEqual(r.bot.log, ['sword at 3500', 'dug at 4000'])
+})
+
+test('digat holds the hand at most 30 s for a block with no finite dig time', async () => {
+  const r = await digRun('bedrock', [['stone_pickaxe']], 0, false, { digTimeMs: Infinity })
+  assert.deepStrictEqual(r.timers, [2000, 30000])
+})
+
+test('digat refuses with a retry once slow equips ended the hand lease, before the dig', async () => {
+  const r = await digRun('iron_ore', TOOLS, 1, false, { equipMs: 2100 })
+  assert.match(r.error.message, /^lost the hand during the equip, nothing dug, retry$/)
+  assert.strictEqual(r.bot.dugWith, undefined)
+})
 
 test('digat digs a log with an axe, dirt with a shovel, ore with the lowest pick that keeps the drop and a crop bare-handed', async () => {
   const log = await digWith('oak_log', TOOLS, 5)

@@ -719,6 +719,15 @@ function botConstant (name) {
   return vm.runInNewContext(`(${m[1]})`)
 }
 
+// A fresh copy of the object literal bot.js declares as const name, its methods run over env.
+function botObject (name, env) {
+  const src = botSource()
+  const at = src.search(new RegExp(`^const ${name} = \\{`, 'm'))
+  const literal = at < 0 ? '' : balanced(src, at)
+  assert.ok(literal, `const ${name} not found in bot.js`)
+  return vm.runInContext(`(${literal})`, vm.createContext(env))
+}
+
 // An empty ground-top memory and its limits as bot.js keeps them.
 function groundMemory () {
   return { GROUND_TOP: new Map(), GROUND_SPAN: botConstant('GROUND_SPAN'), SURFACE_DEPTH: botConstant('SURFACE_DEPTH') }
@@ -883,10 +892,18 @@ async function hookedRoute (route, query, env, ledger) {
   return replyOf(res)
 }
 
+let botCode
+// Where botSource() declares the name key of the reflex named name, skipping strings and comments, else -1.
+function reflexAt (name) {
+  botCode ??= codeOnly(botSource())
+  for (const m of botSource().matchAll(new RegExp(`\\bname\\s*:\\s*['"]${name}['"]`, 'g'))) if (botCode[m.index] === 'n') return m.index
+  return -1
+}
+
 // The bot.js reflex named name, evaluated over env with the bot.js functions it reaches.
 function reflexIn (name, env) {
   const src = botSource()
-  const at = src.search(new RegExp(`\\bname\\s*:\\s*['"]${name}['"]`))
+  const at = reflexAt(name)
   const literal = at < 0 ? '' : balanced(src, src.lastIndexOf('{', at))
   assert.ok(literal, `the ${name} reflex not found in bot.js`)
   const code = `(${literal})`
@@ -895,7 +912,7 @@ function reflexIn (name, env) {
 
 function bunkerReflexIn (env) {
   const src = botSource()
-  const at = src.search(/\bname\s*:\s*['"]bunker['"]/)
+  const at = reflexAt('bunker')
   const literal = at < 0 ? '' : balanced(src, src.lastIndexOf('{', at))
   assert.ok(literal, 'the bunker reflex not found in bot.js')
   return vm.runInContext(`(${literal})`, vm.createContext(env))
@@ -904,7 +921,7 @@ function bunkerReflexIn (env) {
 // The combat reflex of bot.js, evaluated over env.
 function combatReflexIn (env) {
   const src = botSource()
-  const at = src.search(/\bname\s*:\s*['"]combat['"]/)
+  const at = reflexAt('combat')
   const literal = at < 0 ? '' : balanced(src, src.lastIndexOf('{', at))
   assert.ok(literal, 'the combat reflex not found in bot.js')
   return vm.runInContext(`(${literal})`, vm.createContext(env))
@@ -1282,7 +1299,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, groundMemory, walkingBody, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
+  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, walkingBody, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, laneAt,
   buildVerbEnv, digInProblemWith, facings, digJob

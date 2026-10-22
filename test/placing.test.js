@@ -10,7 +10,7 @@ const { overrideRecipes } = require('../lib/server-overrides')
 const { deathLedger } = require('../lib/deaths')
 const { summarizePlan, DROP_MAX } = require('../lib/plan')
 const { goals } = require('mineflayer-pathfinder')
-const { loadBotFunctions, botConstant, awaitRoute, hookedRoute, routeHandler, buildVerbEnv, groundMemory } = require('./helpers')
+const { loadBotFunctions, fakeClock, botConstant, awaitRoute, hookedRoute, routeHandler, buildVerbEnv, groundMemory } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty' }
 const STONE = { name: 'stone', boundingBox: 'block' }
@@ -53,8 +53,8 @@ test('place picks a cell beside the feet that the body does not overlap', () => 
 
 // reachToPlace from a body at (0.5, 64, 0.5) over the floor, every cell known. planPath answers a successful search
 // along the cell centres in path (answering status instead when given), or null with the route ended for ended.
-// log records plans, route ends and walks.
-function reacher ({ path = [], ended = null, status = 'success' } = {}) {
+// With fighting the combat reflex is busy. log records plans, route ends and walks.
+function reacher ({ path = [], ended = null, status = 'success', fighting = false } = {}) {
   const log = []
   const env = placingEnv(body(0.5, 64, 0.5), ground(), {
     bot: { pathfinder: { goto: async (g) => { log.push(`walk ${g.x},${g.y},${g.z} within ${Math.sqrt(g.rangeSq)}`) } } },
@@ -69,7 +69,8 @@ function reacher ({ path = [], ended = null, status = 'success' } = {}) {
       knownCell: () => true,
       summarizePlan,
       DROP_MAX,
-      PLACE_WALK_MAX: botConstant('PLACE_WALK_MAX')
+      PLACE_WALK_MAX: botConstant('PLACE_WALK_MAX'),
+      reflexes: [{ name: 'combat', fightBusy: () => fighting, _threat: null }]
     }
   })
   return { log, reachToPlace: loadBotFunctions(['reachToPlace'], env).reachToPlace }
@@ -88,6 +89,12 @@ test('placeitem walks a short plan to a cell out of reach, its route ended befor
   const short = reacher({ path: lane(9) })
   await short.reachToPlace(new Vec3(10, 64, 0))
   assert.deepStrictEqual(short.log, ['plan 10,64,0', 'end', 'walk 10,64,0 within 3'])
+})
+
+test('placeitem refuses after its walk while the combat reflex is busy', async () => {
+  const fight = reacher({ path: lane(9), fighting: true })
+  await assert.rejects(fight.reachToPlace(new Vec3(10, 64, 0)), { message: /^refused: fighting something, the guard reflex holds the hand\./, reason: 'fighting' })
+  assert.deepStrictEqual(fight.log, ['plan 10,64,0', 'end', 'walk 10,64,0 within 3'])
 })
 
 test('placeitem refuses a planned walk longer than 16 blocks', async () => {
@@ -210,7 +217,7 @@ function jumper (rise) {
       async waitForTicks () { entity.position = new Vec3(0.5, rise(entity.position.y), 0.5) },
       async placeBlock () { places.push(entity.position.y) }
     },
-    env: { setTimeout, blockers: () => [] }
+    env: { setTimeout, clearTimeout, blockers: () => [], guardState: { hand: null } }
   })
   return { ctx: loadBotFunctions(['jumpPlace'], env), places, below: { position: new Vec3(0, 63, 0) } }
 }
@@ -224,6 +231,28 @@ test('a pillar block goes under the body only once the body has risen clear of t
   const stuck = jumper((y) => y)
   assert.strictEqual(await stuck.ctx.jumpPlace(stuck.below, { name: 'dirt' }), false)
   assert.deepStrictEqual(stuck.places, [], 'a block went into the cell the body stands in')
+})
+
+test('a pilot pillar holds the hand from the equip to the click of every try, and a sword swapped in between goes back out', async () => {
+  const entity = body(0.5, 64, 0.5)
+  const dirt = { name: 'dirt' }
+  const guardState = { hand: null }
+  const log = []
+  let ticks = 0
+  const env = placingEnv(entity, ground(), {
+    bot: {
+      async equip (item) { this.heldItem = item; log.push(`equip ${item.name} leased=${!!guardState.hand}`) },
+      // The first try stays in the cell, and the combat reflex swaps the sword in once the hand is free.
+      setControlState (c, on) { if (c === 'jump' && !on && !guardState.hand) env.bot.heldItem = { name: 'iron_sword' } },
+      async waitForTicks () { if (++ticks > 3) entity.position = new Vec3(0.5, 65.4, 0.5) },
+      async placeBlock () { log.push(`click ${env.bot.heldItem.name} leased=${!!guardState.hand}`) }
+    },
+    env: { setTimeout, clearTimeout, blockers: () => [], guardState }
+  })
+  const { jumpPlace } = loadBotFunctions(['jumpPlace'], env)
+  assert.strictEqual(await jumpPlace({ position: new Vec3(0, 63, 0) }, dirt), true)
+  assert.deepStrictEqual(log, ['equip dirt leased=true', 'equip dirt leased=true', 'click dirt leased=true'])
+  assert.strictEqual(guardState.hand, null, 'the lease outlived the placement')
 })
 
 test('a dig step fills from any filler carried, cobbled deepslate included', async () => {
@@ -462,6 +491,10 @@ function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen 
       clearSoftCover: async () => {},
       stampOwnEdit () {},
       send: (res, body) => { res.sent = body },
+      reflexes: [],
+      guardState: { hand: null },
+      setTimeout,
+      clearTimeout,
       ...walk
     }
   })
@@ -510,6 +543,61 @@ async function placeitemRefusal (rig) {
   assert.deepStrictEqual(rig.log.filter((l) => l.startsWith('place')), [])
   return res.error.message
 }
+
+test('placeitem refuses a fight that starts while it clears soft cover, before the item goes into the hand', async () => {
+  let fighting = false
+  let equipped = false
+  const rig = placeitemRig('oak_planks')
+  Object.assign(rig.env, { reflexes: [{ name: 'combat', fightBusy: () => fighting, _threat: null }], clearSoftCover: async () => { fighting = true } })
+  rig.env.bot.equip = async () => { equipped = true }
+  assert.match(await placeitemRefusal(rig), /^refused: fighting something, the guard reflex holds the hand\./)
+  assert.deepStrictEqual({ equipped, hand: rig.env.guardState.hand }, { equipped: false, hand: null })
+})
+
+test('a placeitem that fails between taking the hand and the click gives the hand back', async () => {
+  let held = null
+  const rig = placeitemRig('oak_planks')
+  rig.env.bot.equip = async () => {
+    held = rig.env.guardState.hand
+    throw new Error('the equip timed out')
+  }
+  assert.strictEqual(await placeitemRefusal(rig), 'the equip timed out')
+  assert.ok(held, 'control: the equip ran under a lease')
+  assert.strictEqual(rig.env.guardState.hand, null)
+})
+
+test('placeitem does not click once the guard reflex took the hand back after the equip, whatever the facing', async () => {
+  for (const face of [undefined, 'N']) {
+    const rig = placeitemRig('oak_planks')
+    rig.env.bot.lookAt = async () => { rig.env.bot.heldItem = { name: 'iron_sword' } }
+    const { handle, res } = routeHandler('/placeitem', rig.env)
+    await handle({ query: { x: '1', y: '64', z: '0', name: 'oak_planks', face } }, res)
+    assert.match(res.error && res.error.message, /^the guard reflex took the hand back from the oak_planks \(holding iron_sword\), nothing placed, retry$/, `face ${face}`)
+    assert.deepStrictEqual(rig.clicks, [], `face ${face} clicked`)
+    assert.strictEqual(rig.env.guardState.hand, null, `face ${face} kept the lease`)
+  }
+})
+
+test('placeitem keeps the hand lease through its look after a slow equip used up the first 2 s', async () => {
+  const clock = fakeClock()
+  const rig = placeitemRig('oak_planks')
+  const { env } = rig
+  const wait = (ms) => new Promise(resolve => clock.setTimeout(resolve, ms))
+  let leasedAtClick = null
+  Object.assign(env, { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout })
+  env.bot.equip = async (item) => { await wait(1800); env.bot.heldItem = item }
+  env.bot.lookAt = async () => { await wait(600) }
+  env.bot.placeBlock = async () => { leasedAtClick = !!env.guardState.hand }
+  const { handle, res } = routeHandler('/placeitem', env)
+  const done = handle({ query: { x: '1', y: '64', z: '0', name: 'oak_planks' } }, res)
+  while (res.body === undefined && res.error === undefined && clock.now() < 10000) {
+    await new Promise(setImmediate)
+    clock.advance(1)
+  }
+  await done
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.strictEqual(leasedAtClick, true, 'the lease ended before the click')
+})
 
 const SIGN_AT = { x: '1', y: '64', z: '0', text: 'hi' }
 
@@ -579,7 +667,11 @@ function heldPlatformRig (roofed) {
       ...groundMemory(),
       LEGACY_1710: false,
       clearSoftCover: async () => {},
-      stampOwnEdit () {}
+      stampOwnEdit () {},
+      reflexes: [],
+      guardState: { hand: null },
+      setTimeout,
+      clearTimeout
     }
   })
   return { env, placed }

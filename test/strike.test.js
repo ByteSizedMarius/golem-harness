@@ -11,7 +11,7 @@ const { expireConfirmed } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const { createLane } = require('../lib/bot/lane')
 const vm = require('node:vm')
-const { routeHandler, runRoute, awaitRoute, fakeClock, toolNamed, botConstant, botSource, balanced, loadBotFunctions, combatReflexIn, wireListeners } = require('./helpers')
+const { routeHandler, runRoute, awaitRoute, fakeClock, toolNamed, botConstant, botSource, balanced, loadBotFunctions, combatReflexIn, wireListeners, botObject } = require('./helpers')
 const mcData = require('minecraft-data')('1.21.11')
 const registry = require('prismarine-registry')('1.21.11')
 const loadItem = require('prismarine-item')
@@ -144,7 +144,8 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
     stopFollow () {},
     stopPath: () => env.stopPath(),
     clearLane: lane.clearLane,
-    jobs: { stopAll: () => 0 }
+    jobs: { stopAll: () => 0 },
+    guardState: { hand: null }
   })
   return { bot, env, clock, did, hits, stop }
 }
@@ -420,7 +421,7 @@ async function holdAt (query, walls, seen = true, legacy = true) {
     pilotLane: { token: null },
     claimLane: () => (env.pilotLane.token = {}),
     perch: { cell: null },
-    guardState: { up: false, slot: -1, pilot: false },
+    guardState: botObject('guardState', { console }),
     STANCES: { guard: { fleeDist: 16 } },
     fight: { ...env.fight, stance: 'guard' },
     nearHostiles: () => [],
@@ -566,7 +567,7 @@ function guardedWorld (entities) {
   })
   Object.assign(env, {
     MOVES: botConstant('MOVES'),
-    guardState: { up: false, slot: -1, pilot: false },
+    guardState: botObject('guardState', { console }),
     reflexes: [...env.reflexes, { name: 'bunker' }],
     AGGRO_CONFIRMED: new Map(),
     bunker: { building: false, cell: null },
@@ -613,7 +614,7 @@ function combatIn (world, foe) {
     CONFIRMED_HORIZON: botConstant('CONFIRMED_HORIZON'),
     fight: { ...env.fight, threatDebugUntil: 0, stance: 'guard' },
     STANCES: { guard: { fleeDist: 16, bowBand: [7, 24], chase: false, engage: 'closers' } },
-    guardState: { up: false, slot: -1, pilot: false },
+    guardState: botObject('guardState', { console }),
     bunker: { building: false },
     holdRun: { on: false },
     mobClass: (e) => (['zombie', 'spider'].includes(e.name) ? 'hostile' : 'passive'),
@@ -720,12 +721,14 @@ test('a stop during a pillar ends it as stopped after the block in hand', async 
   const lane = {}
   createLane(lane)
   const bunker = { building: false }
-  const stop = () => runRoute('/stop', {}, { bot: { clearControlStates () {} }, bunker, legs, stopFollow () {}, stopPath () {}, clearLane: lane.clearLane, jobs: { stopAll: () => 0 } })
+  const stop = () => runRoute('/stop', {}, { bot: { clearControlStates () {} }, bunker, legs, stopFollow () {}, stopPath () {}, clearLane: lane.clearLane, jobs: { stopAll: () => 0 }, guardState: { hand: null } })
   let placed = 0
   const r = await awaitRoute('/pillar', { height: '3' }, {
     bot: { entity, blockAt: (p) => ({ name: 'stone', boundingBox: p.y < entity.position.y ? 'block' : 'empty', position: p }) },
     bunker,
     legs,
+    claimLane: lane.claimLane,
+    releaseLane: lane.releaseLane,
     takenText,
     perch: { cell: null },
     fillers: () => [{ name: 'dirt', count: 64 }],

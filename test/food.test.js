@@ -33,6 +33,7 @@ const env = (bot, extra = {}) => ({
   RISKY_FOODS: botConstant('RISKY_FOODS'),
   FOOD_UPDATE_MS,
   jobs: createJobs({ stop () {}, emit () {}, deaths: deathLedger() }),
+  guardState: { hand: null },
   setTimeout,
   clearTimeout,
   ...extra
@@ -98,11 +99,12 @@ test('eat refuses while a job holds the hand, naming the job', async () => {
   assert.strictEqual(bot.heldItem, pick)
 })
 
-// refuelAfterFight over bot, with the event texts it emits.
+// refuelAfterFight over bot, with the event texts it emits and their kinds.
 function refuel (bot) {
   const events = []
-  const ctx = loadBotFunctions(['refuelAfterFight'], env(bot, { emitEvent: (kind, msg) => events.push(msg) }))
-  return { run: () => ctx.refuelAfterFight(), events }
+  const kinds = []
+  const ctx = loadBotFunctions(['refuelAfterFight'], env(bot, { guardState: { hand: null }, emitEvent: (kind, msg) => { kinds.push(kind); events.push(msg) } }))
+  return { run: () => ctx.refuelAfterFight(), events, kinds }
 }
 
 test('refuel after a fight eats nothing when rotten flesh is the only food', async () => {
@@ -120,6 +122,7 @@ test('refuel after a fight reports the food level of the update that follows the
   assert.deepStrictEqual(bot.eaten, ['carrot'])
   assert.strictEqual(r.events.length, 1)
   assert.match(r.events[0], /^refueled on carrot after the fight, food 13\/20$/)
+  assert.deepStrictEqual(r.kinds, ['refuel'])
 })
 
 test('refuel after a fight takes the previous item back in hand when the meal fails', async () => {

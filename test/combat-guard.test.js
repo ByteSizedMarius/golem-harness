@@ -3,11 +3,12 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
-const { routeWithin } = require('../lib/flee')
+const { routeWithin, planFlee, creeperCover } = require('../lib/flee')
 const { mobFamily, expireConfirmed } = require('../lib/shelter')
+const { takenText } = require('../lib/leg-ledger')
 const rules = require('../lib/combat-rules')
 const legacy1710 = require('../lib/bot/legacy-1710')
-const { loadBotFunctions, combatReflexIn, botConstant, laneAt } = require('./helpers')
+const { loadBotFunctions, fakeClock, combatReflexIn, botConstant, botObject, laneAt, routeHandler, runRoute } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const version = (legacy) => (legacy ? '1.7.10' : '1.21.11')
@@ -29,9 +30,18 @@ const guardFight = (over) => ({ stance: 'guard', lastHit: { dmg: 0, t: 0 }, last
 // The sword-block raises and lowerings, the swings, the flee classes and the [combat] guard lines of three 1.7.10
 // fight cycles against mob, which closed 1 block in the last second and stands out of melee reach. The body
 // carries only a sword. over.bot and over.env replace entries of the bot and the env, and an undefined env entry
-// loads the bot.js function of that name. over.seenAt is where the body last perceived mob. over.next(combat, bot)
-// runs after the act. With over.flee the real fleeFrom runs after each class is recorded.
+// loads the bot.js function of that name. over.guard replaces entries of the guard state. over.seenAt is where the
+// body last perceived mob. over.cycle(combat, env) runs as each wait of the act starts, over.next(combat, bot) after the act.
+// With over.flee the real fleeFrom runs after each class is recorded.
 async function standoff (extra, mob, over = {}) {
+  const fight = standoffFight(extra, mob, over)
+  await fight.combat.act(fight.bot)
+  if (over.next) await over.next(fight.combat, fight.bot)
+  return fight.result()
+}
+
+// The body, env and combat reflex of standoff before the act runs.
+function standoffFight (extra, mob, over = {}) {
   const lines = []
   const fled = []
   let raises = 0
@@ -71,7 +81,6 @@ async function standoff (extra, mob, over = {}) {
     fight: guardFight(),
     LEGACY_1710: true,
     MOVES: botConstant('MOVES'),
-    guardState: { up: false, slot: -1, pilot: false },
     LEGACY_HIT_MS: botConstant('LEGACY_HIT_MS'),
     mobHurt: { wait: () => 0 },
     noCritReason: rules.noCritReason,
@@ -106,6 +115,7 @@ async function standoff (extra, mob, over = {}) {
     holdRun: { on: false },
     strikeRun: { lane: null },
     setTimeout: (fn) => {
+      if (over.cycle) over.cycle(combat, env)
       if (++cycles === 3) delete bot.entities[mob.id]
       setImmediate(fn)
     }
@@ -114,6 +124,7 @@ async function standoff (extra, mob, over = {}) {
     if (v === undefined) delete env[k]
     else env[k] = v
   }
+  env.guardState = Object.assign(botObject('guardState', env), over.guard)
   const load = Object.entries(over.env || {}).filter(([, v]) => v === undefined).map(([k]) => k)
   loadBotFunctions(['standoffGuard', 'fleeWorld', 'creeperRoute', 'meleeSwing', 'chargedSwing', 'legsMoving', ...load], env)
   const combat = combatReflexIn(env)
@@ -125,9 +136,8 @@ async function standoff (extra, mob, over = {}) {
   combat._hist.set(mob.id, { d: dist + 1, t: Date.now() - 1000, closes: 3, logT: 0 })
   combat._threat = { e: mob, cls: 'hostile', dist, confirmed: env.AGGRO_CONFIRMED.has(mob.id) }
   if (over.seenAt) combat._seenAt.set(mob.id, over.seenAt)
-  await combat.act(bot)
-  if (over.next) await over.next(combat, bot)
-  return { raises, lowers, swings, fled, lines: lines.filter((l) => l.startsWith('[combat] guard')) }
+  const result = () => ({ raises, lowers, swings, fled, lines: lines.filter((l) => l.startsWith('[combat] guard')) })
+  return { bot, env, combat, result }
 }
 
 const zombie = (x) => ({ id: 7, name: 'zombie', width: 0.6, height: 1.95, position: new Vec3(x, 64, 0.5) })
@@ -198,7 +208,8 @@ test('the bow never draws on a zombie out of sight', async () => {
   const items = [{ name: 'iron_sword' }, { name: 'bow' }, { name: 'arrow' }]
   const run = (seen) => standoff(open, zombie(8.5), {
     bot: { inventory: { items: () => items, slots: [] } },
-    env: { guardState: { up: true, slot: 0, pilot: true }, drawAndLoose: undefined, entityPerceptible: () => seen },
+    env: { drawAndLoose: undefined, entityPerceptible: () => seen },
+    guard: { up: true, slot: 0, pilot: true },
     seenAt: new Vec3(8.5, 64, 0.5)
   })
   assert.ok((await run(true)).lowers > 0, 'control: the block comes down for the bow in sight')
@@ -211,7 +222,8 @@ test('a bow with no line of sight to its target leaves the 1.7.10 sword block up
   const wall = (p) => p.x === 5 && p.y >= 64 && p.y < 67 ? 'stone' : null
   const run = (extra) => standoff(extra, zombie(8.5), {
     bot: { inventory: { items: () => items, slots: [] } },
-    env: { guardState: { ...raised }, drawAndLoose: undefined }
+    env: { drawAndLoose: undefined },
+    guard: raised
   })
   assert.ok((await run(open)).lowers > 0, 'control: a clear line lowers the block for the bow')
   assert.deepStrictEqual(await run(wall), { raises: 0, lowers: 0, swings: 0, fled: [], lines: [] })
@@ -428,4 +440,264 @@ test('the vanguard reflex sets no chase goal while the body stands inside its bu
   const outside = await chase(null)
   assert.ok(outside.chases > 0 && outside.legs.includes('chase'), `control: no chase outside a bunker, ${JSON.stringify(outside)}`)
   assert.deepStrictEqual(await chase(new Vec3(0, 64, 0)), { chases: 0, legs: [] })
+})
+
+test('the vanguard reflex keeps a pilot walk\'s goal with a zombie in reach while the walk holds the lane', async () => {
+  // The legs taken and whether the walk's goal survived a zombie in reach, lane claimed or not.
+  const fight = async (claimed) => {
+    const legs = []
+    const entity = { position: HERE, onGround: true }
+    const lane = laneAt(entity, null)
+    if (claimed) lane.claimLane('goto', 300000)
+    const walk = new goals.GoalBlock(20, 64, 0)
+    const { bot, combat } = standoffFight(open, zombie(3.5), {
+      bot: { entity, pathfinder: { goal: walk, isMoving: () => true, setGoal (g) { this.goal = g } } },
+      env: {
+        ...IN_REACH,
+        STANCES: { vanguard: { fleeDist: 12, bowBand: [7, 24], chase: true, engage: 'closers' } },
+        fight: guardFight({ stance: 'vanguard' }),
+        takeLegs (reflex, why) { legs.push(why) },
+        laneBlocks: lane.laneBlocks,
+        laneNarrate: lane.laneNarrate
+      }
+    })
+    await combat.act(bot)
+    return { legs, kept: bot.pathfinder.goal === walk }
+  }
+  assert.deepStrictEqual(await fight(false), { legs: ['fight in melee range'], kept: false }, 'control: no lane held')
+  assert.deepStrictEqual(await fight(true), { legs: [], kept: true })
+})
+
+// ---- the hand during a fight ----
+
+test('the combat reflex is busy through a standoff, the melee, a flee, a cover move and the gap before it fires again', async () => {
+  for (const env of [{}, IN_REACH]) {
+    const busy = []
+    await standoff(open, zombie(3.5), { env, cycle: (combat, { bot }) => { if (bot.entities[7]) busy.push(combat.fightBusy()) } })
+    assert.ok(busy.length > 0 && busy.every(Boolean), `${env === IN_REACH ? 'melee' : 'standoff'}: ${busy}`)
+  }
+  const mob = zombie(5.5)
+  await standoff(open, mob, {
+    next: (combat, bot) => {
+      assert.strictEqual(combat.fightBusy(), false, 'the fought mob is gone')
+      bot.entities[mob.id] = mob
+      assert.strictEqual(combat.fightBusy(), true, 'the act ended with its threat alive')
+      combat._threat = null
+      assert.strictEqual(combat.fightBusy(), false, 'control: no threat scored')
+      combat.on = false
+      assert.strictEqual(combat.fightBusy(), false, 'the reflex switched off')
+    }
+  })
+  // A flee at disengage health, and a cover move behind a wall east of the body, each with no threat scored after.
+  const fled = standoffFight(open, zombie(2.5), {
+    bot: { health: 6 },
+    env: { planFlee, creeperCover, takenText, reflexes: [], stopPath () {}, fleeLog: undefined },
+    flee: true
+  })
+  await fled.combat.act(fled.bot)
+  fled.combat._threat = null
+  assert.ok(fled.bot.pathfinder.goal, 'control: the body fled')
+  assert.strictEqual(fled.combat.fightBusy(), true, 'a flee')
+  const wall = (p) => p.x === 2 && (p.z === 1 || p.z === 2) ? 'stone' : null
+  const covered = standoffFight(wall, skeleton(8.5), { env: { holdsWater: () => false, gridWalk: undefined, stopPath () {} } })
+  covered.combat.takeCover(covered.bot, skeleton(8.5), 'skeleton')
+  covered.combat._threat = null
+  assert.deepStrictEqual({ cover: !!covered.bot.pathfinder.goal, fled: covered.result().fled }, { cover: true, fled: [] }, 'control: the body took cover')
+  assert.strictEqual(covered.combat.fightBusy(), true, 'a cover move')
+})
+
+test('the guard log names every real raise and lowering with its cause, and leaves out the swing cycle', async () => {
+  // A walk lowers the block after the first standoff cycle, and the next cycle raises it again.
+  let walked = false
+  const lowerOnce = (combat, env) => {
+    if (walked || !env.guardState.up) return
+    walked = true
+    env.lowerGuard('for a walk')
+  }
+  const r = await standoff(ring('stone', 3), zombie(3.5), { env: { lowerGuard: undefined }, cycle: lowerOnce })
+  assert.strictEqual(r.lines.length, 4, r.lines.join('\n'))
+  assert.match(r.lines[0], /^\[combat\] guard up vs zombie ~3: closing\b/)
+  assert.strictEqual(r.lines[1], '[combat] guard down for a walk')
+  assert.match(r.lines[2], /^\[combat\] guard up vs zombie ~3: closing\b/)
+  assert.strictEqual(r.lines[3], '[combat] guard down vs zombie: the fight ended')
+  const melee = await standoff(open, zombie(3.5), { env: IN_REACH })
+  assert.ok(melee.swings > 0 && melee.raises > 1, `control: ${JSON.stringify(melee)}`)
+  assert.deepStrictEqual(melee.lines.filter((l) => l !== '[combat] guard down vs zombie: the fight ended'), [])
+})
+
+test('a fight that starts between the pre-action check and the placement click gets the sword only after the click', async () => {
+  const order = []
+  const torch = { name: 'torch' }
+  const mob = zombie(2.5)
+  let act = null
+  const fight = standoffFight(open, mob, {
+    env: IN_REACH,
+    bot: {
+      inventory: { items: () => [{ name: 'iron_sword' }, torch], slots: [] },
+      _client: { write () {} },
+      async equip (item) {
+        order.push(`equip ${item.name}`)
+        fight.bot.heldItem = item
+        // The fight starts as the torch comes into the hand.
+        if (item === torch) act = fight.combat.act(fight.bot)
+        await new Promise(setImmediate)
+      },
+      async placeBlock () {
+        order.push(`click with ${fight.bot.heldItem.name}`)
+        fight.bot._client.write('block_place', {})
+        // The server confirms the placement once the sword is in hand, or after 1 s.
+        for (const end = Date.now() + 1000; Date.now() < end && !order.includes('equip iron_sword');) await new Promise(setImmediate)
+        order.push('confirmed')
+      }
+    }
+  })
+  loadBotFunctions(['wireHandLease'], fight.env).wireHandLease()
+  const { handle, res } = routeHandler('/placeitem', {
+    bot: fight.bot,
+    guardState: fight.env.guardState,
+    require,
+    LEGACY_1710: true,
+    cellKnown: () => true,
+    bodyTouches: () => false,
+    occupant: () => null,
+    seenNow: () => true,
+    isSoftCover: () => false,
+    isInteractive: () => false,
+    reachToPlace: async () => {},
+    clearSoftCover: async () => {},
+    passageAxis: () => null,
+    stampOwnEdit () {},
+    reflexes: [{ name: 'combat', fightBusy: () => act !== null }],
+    setTimeout,
+    clearTimeout
+  })
+  await handle({ query: { x: '1', y: '64', z: '0', name: 'torch' } }, res)
+  await act
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(order, ['equip torch', 'click with torch', 'equip iron_sword', 'confirmed'])
+})
+
+// holdHand and endHand over guardState, on the global timers.
+const handLease = (guardState) => loadBotFunctions(['holdHand', 'endHand'], {
+  guardState,
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (id) => clearTimeout(id)
+})
+const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(setImmediate) }
+
+test('a pilot lease whose click never comes ends after 2 s, and the reflex then puts the sword in hand', { timeout: 10000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const torch = { name: 'torch' }
+  const equips = []
+  const fight = standoffFight(open, zombie(2.5), {
+    env: IN_REACH,
+    bot: {
+      heldItem: torch,
+      inventory: { items: () => [{ name: 'iron_sword' }, torch], slots: [] },
+      async equip (item) { equips.push(item.name); fight.bot.heldItem = item }
+    }
+  })
+  handLease(fight.env.guardState).holdHand()
+  const act = fight.combat.act(fight.bot)
+  await settle()
+  t.mock.timers.tick(1999)
+  await settle()
+  assert.deepStrictEqual(equips, [], 'the sword went into the hand while the lease held')
+  t.mock.timers.tick(1)
+  await act
+  assert.strictEqual(equips[0], 'iron_sword')
+  assert.strictEqual(fight.env.guardState.hand, null)
+})
+
+test('a renewed pilot lease holds the hand 2 s from the renewal, and a renewal after its end does nothing', () => {
+  const clock = fakeClock()
+  const guardState = { hand: null }
+  const { holdHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout })
+  const lease = holdHand()
+  clock.advance(1500)
+  lease.renew()
+  clock.advance(1999)
+  assert.strictEqual(guardState.hand, lease, 'the lease ended before 2 s after the renewal')
+  clock.advance(1)
+  assert.strictEqual(guardState.hand, null)
+  lease.renew()
+  assert.strictEqual(clock.pending(), 0, 'a renewal after the end started a timer')
+  const first = holdHand()
+  const second = holdHand()
+  first.renew()
+  assert.strictEqual(clock.pending(), 1, 'a replaced lease started a timer')
+  assert.strictEqual(guardState.hand, second)
+})
+
+test('a stop ends the pilot lease on the hand at once', async () => {
+  const guardState = botObject('guardState', { console })
+  const lease = handLease(guardState).holdHand()
+  runRoute('/stop', {}, { bot: { clearControlStates () {} }, bunker: {}, legs: { take () {} }, stopFollow () {}, stopPath () {}, clearLane () {}, jobs: { stopAll: () => 0 }, guardState })
+  assert.strictEqual(guardState.hand, null)
+  assert.strictEqual(await Promise.race([lease.then(() => 'ended'), new Promise(setImmediate).then(() => 'held')]), 'ended')
+})
+
+test('the bow goes into the hand only once the pilot lease on it ends', async () => {
+  const guardState = botObject('guardState', { console })
+  const { holdHand, endHand } = handLease(guardState)
+  const order = []
+  const target = skeleton(8.5)
+  const bot = {
+    entity: { position: HERE },
+    entities: { 8: target },
+    heldItem: { name: 'torch' },
+    inventory: { items: () => [{ name: 'bow' }, { name: 'arrow' }] },
+    async equip (item) { order.push(`equip ${item.name}`); bot.heldItem = item },
+    lookAt: async () => {},
+    waitForTicks: async () => {},
+    activateItem () { order.push('draw') },
+    deactivateItem () { order.push('loose') }
+  }
+  const env = { bot, guardState, losClear: () => true, entityPerceptible: () => true, reflexes: [{ name: 'combat', fairFill: () => ({}) }], setTimeout: (fn) => setImmediate(fn) }
+  const { drawAndLoose } = loadBotFunctions(['drawAndLoose'], env)
+  const lease = holdHand()
+  const shot = drawAndLoose(target)
+  await settle()
+  order.push('click')
+  endHand(lease)
+  assert.strictEqual(await shot, true)
+  assert.deepStrictEqual(order, ['click', 'equip bow', 'draw', 'loose'])
+})
+
+test('the standoff raises no 1.21.11 shield while the pilot holds the hand', async () => {
+  const shield = { bot: { inventory: { items: () => [{ name: 'iron_sword' }], slots: { 45: { name: 'shield' } } } }, env: { LEGACY_1710: false } }
+  assert.ok((await standoff(open, skeleton(10.5), shield)).raises > 0, 'control: no lease')
+  const fight = standoffFight(open, skeleton(10.5), shield)
+  const { holdHand, endHand } = handLease(fight.env.guardState)
+  const lease = holdHand()
+  await fight.combat.act(fight.bot)
+  endHand(lease)
+  assert.strictEqual(fight.result().raises, 0)
+})
+
+test('a pilot guard order logs its raise and its lowering', () => {
+  for (const legacy of [true, false]) {
+    const lines = []
+    const guardState = botObject('guardState', { console: { log: (line) => lines.push(line) } })
+    const env = {
+      bot: { heldItem: { name: 'iron_sword' }, quickBarSlot: 0, inventory: { slots: { 45: { name: 'shield' } } }, activateItem () {}, deactivateItem () {} },
+      shared: { ready: true },
+      LEGACY_1710: legacy,
+      guardState,
+      legsMoving: () => false
+    }
+    runRoute('/guard', { on: '1' }, env)
+    runRoute('/guard', { on: '0' }, env)
+    assert.deepStrictEqual(lines, ['[combat] guard up by pilot guard', '[combat] guard down by pilot guard'], version(legacy))
+  }
+})
+
+test('a death or a dimension change logs the lowering of a raised guard and ends the pilot order', () => {
+  const lines = []
+  const guardState = botObject('guardState', { console: { log: (line) => lines.push(line) } })
+  Object.assign(guardState, { up: true, pilot: true })
+  const env = { reflexes: [{ name: 'combat' }, { name: 'bunker' }], AGGRO_CONFIRMED: new Map(), fight: {}, bunker: {}, guardState }
+  loadBotFunctions(['resetThreatState'], env).resetThreatState()
+  assert.deepStrictEqual([guardState.up, guardState.pilot], [false, false])
+  assert.deepStrictEqual(lines, ['[combat] guard down for a death or a dimension change'])
 })

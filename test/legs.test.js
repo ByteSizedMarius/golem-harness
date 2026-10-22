@@ -9,7 +9,7 @@ const { routeDeadline } = require('../lib/walk')
 const { isDoor, doorCrossing } = require('../lib/doors')
 const { entityInCell } = require('../lib/shelter')
 const Block = require('prismarine-block')('1.21.11')
-const { loadBotFunctions, combatReflexIn, awaitRoute } = require('./helpers')
+const { loadBotFunctions, combatReflexIn, awaitRoute, routeHandler, laneAt } = require('./helpers')
 
 const KLASSES = ['discretionary', 'interrupt', 'emergency']
 const lane = (over) => laneBlocks({ klass: 'discretionary', bunker: false, laneHeld: false, hard: false, jobRunning: false, meleeThreat: false, ...over })
@@ -72,6 +72,8 @@ test('a pillar top holds the legs from every flee but an emergency at disengage 
     legs: legLedger(),
     takenText,
     perch: { cell: null },
+    claimLane: () => ({}),
+    releaseLane () {},
     fillers: () => [{ name: 'dirt', count: 64 }],
     pillarHeight: (height) => ({ height, safe: 2, why: 'flat ground' }),
     BUNKER_MAX_HEIGHT: 6,
@@ -92,6 +94,98 @@ test('a pillar top holds the legs from every flee but an emergency at disengage 
   entity.position = new Vec3(1.5, 67.5, 0.5)
   assert.strictEqual(onTop({ klass: 'discretionary' }), false, 'once the body stepped off into the air beside it')
   assert.strictEqual(env.perch.cell, null)
+})
+
+test('each level of a pilot pillar holds the legs as a pillar top while the next level goes up', async () => {
+  const entity = { position: new Vec3(0.5, 64, 0.5), onGround: true }
+  // Per level, the lane answers for each class and for an emergency at disengage health with a mob in melee reach.
+  const levels = []
+  const env = {
+    bot: { entity, blockAt: (p) => ({ name: 'stone', boundingBox: 'block', position: p }) },
+    bunker: { building: false },
+    BUNKER_WALK: 'refused while a bunker is being built',
+    legs: legLedger(),
+    takenText,
+    perch: { cell: null },
+    claimLane: () => ({}),
+    releaseLane () {},
+    fillers: () => [{ name: 'dirt', count: 64 }],
+    pillarHeight: (height) => ({ height, safe: 2, why: 'flat ground' }),
+    BUNKER_MAX_HEIGHT: 6,
+    knownCell: () => false,
+    jumpPlace: async () => {
+      const perch = perchHolds()
+      levels.push([...KLASSES.map((klass) => lane({ klass, perch })), lane({ klass: 'emergency', hpMelee: true, perch })])
+      entity.position = entity.position.offset(0, 1, 0)
+      return true
+    }
+  }
+  const { perchHolds } = loadBotFunctions(['perchHolds'], { bot: env.bot, perch: env.perch })
+  assert.deepStrictEqual(await awaitRoute('/pillar', { height: '3' }, env), { placed: 3, rose: 3, y: 67 })
+  assert.deepStrictEqual(levels[0], [false, false, false, false], 'control: the ground under the first level is no pillar top')
+  assert.deepStrictEqual(levels.slice(1), [[true, true, true, false], [true, true, true, false]])
+})
+
+// Runs /pillar 3 high with step in place of each jumpPlace, returning res and the lane's state before, during and after.
+async function pillarOverLane (step, over = {}) {
+  const entity = { position: new Vec3(0.5, 64, 0.5), onGround: true }
+  const lane = laneAt(entity, null)
+  const answers = { before: lane.laneBlocks('discretionary'), during: [] }
+  const env = {
+    bot: { entity, blockAt: (p) => ({ name: 'stone', boundingBox: p.y < entity.position.y ? 'block' : 'empty', position: p }) },
+    bunker: lane.bunker,
+    BUNKER_WALK: 'refused while a bunker is being built',
+    legs: legLedger(),
+    takenText,
+    perch: lane.perch,
+    claimLane: lane.claimLane,
+    releaseLane: lane.releaseLane,
+    fillers: () => [{ name: 'dirt', count: 64 }],
+    pillarHeight: (height) => ({ height, safe: 2, why: 'flat ground' }),
+    BUNKER_MAX_HEIGHT: 6,
+    knownCell: () => false,
+    jumpPlace: async () => {
+      answers.during.push(lane.laneBlocks('discretionary'))
+      await step({ env, lane, entity, level: answers.during.length })
+      entity.position = entity.position.offset(0, 1, 0)
+      return true
+    },
+    ...over
+  }
+  const { handle, res } = routeHandler('/pillar', env)
+  await handle({ query: { height: '3' } }, res)
+  return { ...answers, held: lane.pilotLane.until > 0, token: lane.pilotLane.token, res }
+}
+
+test('a pilot pillar holds the soft lane from its first level, so a discretionary take cannot cut it off', async () => {
+  const r = await pillarOverLane(() => {})
+  assert.strictEqual(r.res.error, undefined)
+  assert.deepStrictEqual([r.before, r.during, r.held], [false, [true, true, true], false], 'free before, held in every level, free after')
+})
+
+test('a pilot pillar keeps the interrupt and emergency classes open under its soft lane', async () => {
+  const classes = []
+  await pillarOverLane(({ lane }) => { classes.push(['interrupt', 'emergency'].map((klass) => lane.laneBlocks(klass))) })
+  assert.deepStrictEqual(classes[0], [false, false])
+})
+
+test('a pilot pillar releases its lane when it ends, stops, is refused or throws', async () => {
+  const ends = {
+    done: [() => {}, {}],
+    stopped: [({ env }) => { env.legs.take('combat', 'flee') }, {}],
+    thrown: [() => { throw new Error('jump failed') }, {}],
+    bunker: [({ env }) => { env.bunker.building = true }, {}]
+  }
+  for (const [why, [step, over]] of Object.entries(ends)) {
+    const r = await pillarOverLane(step, over)
+    assert.ok(r.during.length > 0 && r.during.every(Boolean), `control: ${why} held the lane`)
+    assert.deepStrictEqual([r.held, r.token], [false, null], `${why} left the lane held`)
+  }
+})
+
+test('a pilot pillar leaves a lane a later claim took over', async () => {
+  const r = await pillarOverLane(({ lane }) => { lane.claimLane('goto', 300000) })
+  assert.strictEqual(r.held, true, 'the goto claim outlives the pillar')
 })
 
 test('a stopped walk names the reflex that took the legs during it, nothing else does', () => {

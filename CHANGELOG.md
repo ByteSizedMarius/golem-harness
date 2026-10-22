@@ -6,6 +6,24 @@ the point, not just the diff. Dates are play-sessions, not releases. Full commit
 carry more detail (`git log`). The pilot's text (`DRIVING.md`, `manual/`) states the rules
 and leaves the stories here.
 
+## 2026-10-21: event line and combat gate
+
+In the 2026-10-21 play session the pilot chained 64 placements in one turn and learned of
+nightfall, two hostiles and a whole guard fight only afterwards, because nothing reaches a
+turn unless it calls `wait_events`. Every bot reply but a `tick`, `events` included, now ends
+with a waiting events line naming the kinds no `wait_events` or `tick` reply has shown yet,
+counted and in arrival order. The MCP server's own replies (`wait_events`, the busy and fight
+refusals, `manual`, `papercut`, `lesson` and `todo`) carry none.
+
+A queued batch of 9 placements ran while the guard reflex fought a zombie. The reflex put the
+sword back in hand every 250 ms, so placements swung the sword at the floor, 6 timed out, and
+the timeouts carried the batch past the end of the fight. World work (every body tool but the
+fight, escape, eat and equip tools) is now refused outside a bunker while the combat reflex
+fights, flees, takes cover or scores a threat, and the MCP server refuses it without asking
+the bot while a fight event under 60 s old is unread. A placement holds the hand from its
+equip to its click, a dig until it ends and a meal until the held item is back, and the sword
+waits for them. The guard log names each real raise and lowering with its cause.
+
 ## 2026-10-21: calm head while walking
 
 Players saw the bot's head twitch whenever it walked a path. The pathfinder turns the head to

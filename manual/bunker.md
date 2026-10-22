@@ -19,7 +19,7 @@ A mob's hit before the body is out of reach stops the build. After that hit, or 
 
 ## Inside and out
 
-The bunker event says where the body sits, whether the shelter is sealed, and which cells to dig to leave. Inside, the combat reflex holds the body still: fleeing, taking cover and chasing wait until it leaves the cell, and it still swings at whatever comes within reach. You decide when to come out.
+The bunker event says where the body sits, whether the shelter is sealed, and which cells to dig to leave. Inside, the combat reflex holds the body still: fleeing, taking cover and chasing wait until it leaves the cell, and it still swings at whatever comes within reach. You decide when to come out. In its bunker the body can `digat` and `placeitem` during a fight, once you have read the fight events with `wait_events`.
 
 - Dug in: `digat` the cap, then `pillar` climbs out, fills the shaft from the same blocks the bunker uses and rises exactly the height you ask for.
 - Shell: on a pillar of 3 or less, `digat` the two wall blocks the event names, then `goto` the ground below with its y (without y it stops on the ledge). On a taller pillar, `digat` the block under the feet, one at a time, down to the ground. A drop of more than 3 hurts.

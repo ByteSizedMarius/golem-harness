@@ -9,6 +9,7 @@ Every tool is `mcp__golem__<tool>`. This text writes the bare name, and a call w
 - Session start: `boot`, `waypoints`, `journal(n: 30)`, then the `manual` topics for the work ahead.
 - `wait_events` is your wake-up channel. It returns new chat, whispers and bot events as they arrive, keeps its own cursors, and returns no sooner than 5 s after its previous return unless its timeout runs out first.
 - An event wakes you: read it, `scene`, then decide.
+- A reply ending in `Waiting events` names events you have not read. Read them with `wait_events` before the next action.
 - Slow drift rings nothing: food creeping down, night coming. When nothing rang for a while, glance with `scene`, and `jobs` while work runs. Tighter in a fight or on a trip, looser while idle.
 - After a restart, which `wait_events` reports: `boot`, `equip` your tool again, and start again any job that was running.
 - Every step: query, act, verify, remember.
