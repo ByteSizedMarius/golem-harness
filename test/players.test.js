@@ -323,6 +323,8 @@ function followHarness ({ position = new Vec3(10.5, 64, 0.5), gate = { seen: tru
     panelAcross,
     doorCrossing,
     follow: { followState: null },
+    FOLLOW_STILL_MS: botConstant('FOLLOW_STILL_MS'),
+    FOLLOW_STILL_SPAN: botConstant('FOLLOW_STILL_SPAN'),
     console: { log () {} },
     setTimeout: (fn, ms) => (ms === 700 && holdPause ? pauses.push(fn) : setImmediate(fn)),
     playerEntity: (name) => (name === 'Steve' ? steve : null),
@@ -349,8 +351,8 @@ function followHarness ({ position = new Vec3(10.5, 64, 0.5), gate = { seen: tru
     // What /stop and /unfollow do to a follow.
     stop: () => { env.legs.take(null); ctx.stopFollow(); env.stopPath(); bot.clearControlStates(); log.push(['stop']) },
     unfollow: () => { ctx.stopFollow(); bot.pathfinder.goal = null; bot.clearControlStates(); log.push(['stop']) },
-    // The stall clock and the lost clock as if ms had passed.
-    age: (ms) => { st.lastT -= ms; if (st.lostT) st.lostT -= ms }
+    // The stall, lost and stillness clocks as if ms had passed.
+    age: (ms) => { st.lastT -= ms; if (st.lostT) st.lostT -= ms; if (st.stillT) st.stillT -= ms }
   }
 }
 
@@ -453,6 +455,140 @@ test('follow by the nametag alone heads for the cube centre, never the player, r
   await h.tick()
   assert.ok(h.bot.pathfinder.goal instanceof goals.GoalFollow, 'in sight')
   assert.strictEqual(h.bot.pathfinder.goal.entity, h.steve)
+})
+
+const STOPPED = { kind: 'follow', msg: 'Steve stopped near you, still following' }
+
+test('follow says once that its player stood still near the body for 5 s, again only after they stopped more than 1.5 from that spot', async () => {
+  const h = followHarness({ position: new Vec3(2.5, 64, 0.5) })
+  await h.tick()
+  h.age(4000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [], 'control: still for 4 s')
+  h.age(1000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [STOPPED], 'still for 5 s')
+  assert.strictEqual(h.env.follow.followState, h.st, 'follow goes on')
+  h.age(5000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [STOPPED], 'the next tick')
+  h.steve.position = new Vec3(2.5, 64, 1.5)
+  await h.tick()
+  h.age(5000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [STOPPED], 'a shuffle within 1.5 and a new stop')
+  h.steve.position = new Vec3(0.5, 64, 3)
+  await h.tick()
+  h.age(5000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [STOPPED, STOPPED], 'a short move within reach and a new stop')
+  h.steve.position = new Vec3(10.5, 64, 0.5)
+  await h.tick()
+  h.steve.position = new Vec3(0.5, 64, 3)
+  await h.tick()
+  h.age(5000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [STOPPED, STOPPED, STOPPED], 'walked off and stopped at the same spot again')
+})
+
+test('a player who moved out of sight or by the nametag alone and stopped elsewhere near the body is told again', async () => {
+  for (const unseen of [{ seen: false }, { seen: false, nametag: true }]) {
+    const h = followHarness({ position: new Vec3(2.5, 64, 0.5) })
+    await h.tick()
+    h.age(5000)
+    await h.tick()
+    assert.deepStrictEqual(h.events, [STOPPED], 'control: still for 5 s')
+    Object.assign(h.gate, unseen)
+    h.steve.position = new Vec3(0.5, 64, 3)
+    await h.tick()
+    h.gate.seen = true
+    await h.tick()
+    await h.tick()
+    h.age(5000)
+    await h.tick()
+    assert.deepStrictEqual(h.events, [STOPPED, STOPPED], JSON.stringify(unseen))
+  }
+})
+
+test('a fight or a lost sight alone never repeats the stop of a player who stays put', async () => {
+  const h = followHarness({ position: new Vec3(2.5, 64, 0.5) })
+  await h.tick()
+  h.age(5000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [STOPPED], 'control: still for 5 s')
+  h.combat.active = true
+  await h.tick()
+  h.combat.active = false
+  await h.tick()
+  h.age(5000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [STOPPED], 'after a fight')
+  h.gate.seen = false
+  await h.tick()
+  h.gate.seen = true
+  await h.tick()
+  await h.tick()
+  h.age(5000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [STOPPED], 'after a lost sight')
+})
+
+test('a player who stopped before the bot walked up is told once the bot has been near them for 5 s', async () => {
+  const h = followHarness({ position: new Vec3(20.5, 64, 0.5) })
+  await h.tick()
+  h.age(5000)
+  h.bot.entity.position = new Vec3(18.5, 64, 0.5)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [], 'the bot just came near')
+  h.age(4000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [], 'near for 4 s')
+  h.age(1000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [STOPPED], 'control: near for 5 s')
+})
+
+test('a stop during a hold or out of sight counts its 5 s from when follow sees the player again', async () => {
+  const held = followHarness({ position: new Vec3(2.5, 64, 0.5) })
+  await held.tick()
+  held.combat.active = true
+  held.age(5000)
+  await held.tick()
+  assert.deepStrictEqual(held.events, [], 'held')
+  held.combat.active = false
+  await held.tick()
+  assert.deepStrictEqual(held.events, [], 'the first tick after the hold')
+  held.age(5000)
+  await held.tick()
+  assert.deepStrictEqual(held.events, [STOPPED], 'control: 5 s after the hold')
+
+  const lost = followHarness({ position: new Vec3(2.5, 64, 0.5) })
+  await lost.tick()
+  lost.gate.seen = false
+  lost.age(5000)
+  await lost.tick()
+  lost.gate.seen = true
+  await lost.tick()
+  await lost.tick()
+  assert.deepStrictEqual(lost.events, [], 'shown again')
+  lost.age(5000)
+  await lost.tick()
+  assert.deepStrictEqual(lost.events, [STOPPED], 'control: 5 s after showing again')
+})
+
+test('a player seen only by the nametag never counts as stopped', async () => {
+  const h = followHarness({ position: new Vec3(2.5, 64, 0.5), gate: { nametag: true } })
+  for (let i = 0; i < 3; i++) {
+    h.age(5000)
+    await h.tick()
+  }
+  assert.deepStrictEqual(h.events, [], 'by the nametag')
+  h.gate.seen = true
+  await h.tick()
+  await h.tick()
+  h.age(5000)
+  await h.tick()
+  assert.deepStrictEqual(h.events, [STOPPED], 'control: in sight')
 })
 
 test('follow re-arms a goal a reflex cleared once the reflex is done, and not during a fight, a held lane, a job or a walk someone else set', async () => {

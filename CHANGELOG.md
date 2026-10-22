@@ -6,6 +6,18 @@ the point, not just the diff. Dates are play-sessions, not releases. Full commit
 carry more detail (`git log`). The pilot's text (`DRIVING.md`, `manual/`) states the rules
 and leaves the stories here.
 
+## 2026-10-22: follow wakes on a stop
+
+In the 2026-10-22 play session the pilot answered "lead the way, I'll follow you in" with
+`follow` and went to sleep in `wait_events`. Nothing fired when the follow arrived, so the bot
+trailed the player around the room for 47 s until the player's chat woke the pilot.
+
+A follow now sends one `follow` event when the player in sight has stood within 1.5 blocks of
+one spot for 5 s, counted only while the bot is near them, and keeps following. The event fires
+again only once the player stands more than 1.5 blocks from the spot where it fired. A stop
+seen only by the nametag never counts, and the 5 s start over after a fight, another hold or a
+lost sight.
+
 ## 2026-10-21: event line and combat gate
 
 In the 2026-10-21 play session the pilot chained 64 placements in one turn and learned of
