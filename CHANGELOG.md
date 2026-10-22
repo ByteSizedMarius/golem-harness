@@ -94,6 +94,15 @@ the phase then ("last saw sky ~10 min ago, day then", in 5-minute steps, "just n
 and nothing before its first sight of the sky. A clock in either hand tells the time anywhere in
 the overworld, as the sky does. In the Nether and the End it spins and tells nothing.
 
+## 2026-10-21: dig jobs stop when the last pick breaks
+
+`dig_tunnel` went on after its stone pick broke mid-row, mined stone by hand, and ended only on a
+stalled nudge with nothing in hand. Both dig jobs now end with "no pickaxe left (tool broke)"
+once the pick they started with is gone. A pick too weak for the block still digs on as before.
+The jobs named ores, lava and water, but passed through a cave or a wall into a farm without a
+word. A seen opening beside the corridor now raises a `mine` event "breached open air at x,y,z",
+marked "(unlit)" where it is dark, and the job carries on.
+
 ## 2026-10-21: event line and combat gate
 
 In the 2026-10-21 play session the pilot chained 64 placements in one turn and learned of
