@@ -10,17 +10,18 @@ const { combatReflexIn } = require('./helpers')
 const deg = (d) => d * Math.PI / 180
 const flush = () => new Promise(setImmediate)
 
-// A bot at yaw 0 whose smoothed look records each call to the inner look.
+// A bot at yaw 0 whose smoothed look records each call to the inner look. Other players see its real look.
 function turner (fighting = false) {
   const bot = new EventEmitter()
   bot.entity = { yaw: 0, pitch: 0 }
+  bot.sentLook = () => ({ yaw: bot.entity.yaw, pitch: bot.entity.pitch })
   const looks = []
   const look = async (yaw, pitch, force) => {
     looks.push({ yaw, pitch, force })
     bot.entity.yaw = yaw
     bot.entity.pitch = pitch
   }
-  return { bot, looks, look: smoothLook(bot, look, () => fighting) }
+  return { bot, looks, look: smoothLook(bot, look, () => fighting, () => {}) }
 }
 
 // Emits physics ticks until the turn resolves.

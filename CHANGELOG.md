@@ -6,6 +6,16 @@ the point, not just the diff. Dates are play-sessions, not releases. Full commit
 carry more detail (`git log`). The pilot's text (`DRIVING.md`, `manual/`) states the rules
 and leaves the stories here.
 
+## 2026-10-21: calm head while walking
+
+Players saw the bot's head twitch whenever it walked a path. The pathfinder turns the head to
+the next block's centre every tick, and that yaw is also the walking direction, so over 60
+ticks on a zig-zag diagonal the head turned 456°. Other players now see a steady gaze at the
+point 4 blocks ahead along the path, eased, with a 12° deadband and never more than 45° off
+the walking direction. The same walk turns it 45°. A forced look, a dig, an item in use or a
+bite of food puts the real look on the wire, and a forced look keeps its target shown for
+1.5 s even after the walk has turned the body back.
+
 ## 2026-10-21: todo priorities
 
 In long sessions the todo list grew to many items, and the owner's urgent requests sat under

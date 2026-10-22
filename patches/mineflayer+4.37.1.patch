@@ -12,3 +12,35 @@ index 507a618..73d608f 100644
    })
  
    bot._client.on('entity_destroy', (packet) => {
+diff --git a/node_modules/mineflayer/lib/plugins/physics.js b/node_modules/mineflayer/lib/plugins/physics.js
+index cecae69..4e5e024 100644
+--- a/node_modules/mineflayer/lib/plugins/physics.js
++++ b/node_modules/mineflayer/lib/plugins/physics.js
+@@ -160,8 +160,9 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+     if (!Number.isFinite(bot.entity.position.x)) return
+ 
+     // Increment the yaw in baby steps so that notchian clients (not the server) can keep up.
+-    const dYaw = deltaYaw(bot.entity.yaw, lastSentYaw)
+-    const dPitch = bot.entity.pitch - (lastSentPitch || 0)
++    const shown = bot.presentedLook ? bot.presentedLook() : bot.entity
++    const dYaw = deltaYaw(shown.yaw, lastSentYaw)
++    const dPitch = shown.pitch - (lastSentPitch || 0)
+ 
+     // Vanilla doesn't clamp yaw, so we don't want to do it either
+     const maxDeltaYaw = PHYSICS_TIMESTEP * physics.yawSpeed
+@@ -362,6 +363,15 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+     await bot.look(yaw, pitch, force)
+   }
+ 
++  // The look the move packets carry.
++  bot.sentLook = () => ({ yaw: lastSentYaw, pitch: lastSentPitch })
++
++  // The next move packet carries the real look.
++  bot.showRealLook = () => {
++    lastSentYaw = bot.entity.yaw
++    lastSentPitch = bot.entity.pitch
++  }
++
+   // 1.21.3+
+   bot._client.on('player_rotation', (packet) => {
+     bot.entity.yaw = conv.fromNotchianYaw(packet.yaw)
