@@ -8,20 +8,11 @@ A block shows only when a player standing where you stand could see it: exposed 
 
 ## Light
 
-How far you see a block or a mob depends on the light where it is, block or sky light, whichever is brighter:
-
-| Light | You see it up to |
-|---|---|
-| 0 | 2 blocks |
-| 1 | 4 |
-| 2 | 6 |
-| 3 | 8 |
-| 4 | 12 |
-| 5 | 16 |
-| 6 | 24 |
-| 7 and up | any distance |
+How far you see a block or a mob depends on the light where it is, block or sky light, whichever is brighter. Light 0: 2 blocks, 1: 4, 2: 6, 3: 8, 4: 12, 5: 16, 6: 24, 7 and up: any distance.
 
 Sky light falls to 4 at midnight, so blocks, ore and mobs on open ground show about 12 blocks out. A dark cave shows the 2 blocks around you until lit. A placed torch shows its surroundings at once.
+
+A day lasts 20 minutes, with dusk at t=12000 halfway through. Check the time before outdoor work and be inside by dusk. Without sky, `scene` and `state` say "last saw sky ~N min ago, <phase> then". A clock (4 gold ingots, 1 redstone) in hand shows the time in the overworld.
 
 ## Two tiers of knowing
 
@@ -32,7 +23,7 @@ Speak the tiers back. Navigate by structure and mine what is seen.
 
 ## Which sense
 
-- `scene` is the default glance. Call it constantly. Its `steps` grid shows how far each cell around you lies up or down, the check before a jump or a climb. Overhead it counts the cover and names its top only when the sky shows. Under rock it gives the first solid you see and leaves the rest unknown.
+- `scene` is the default glance. Call it constantly. Its `steps` grid is the check before a jump or a climb. Overhead it counts the cover and names its top only when the sky shows. Under rock it gives the first solid you see and leaves the rest unknown.
 - `gaze` is the deliberate look, where a person would turn their head. It feeds the seen set and draws `map`. Past the reach of the light it says too dark. When a far reading surprises you, check it with `find` before building a theory on it.
 - `section` is the cave tool. It shows the vertical structure `map` cannot.
 - `passages` answers which ways this space goes.
@@ -43,4 +34,4 @@ Speak the tiers back. Navigate by structure and mine what is seen.
 
 ## Scout tower
 
-Blind past the grass: `pillar(height: 12)`, then eight `gaze` sweeps from the top. Gaze rays reach 256 blocks (`gaze(dir: "n", dist: 256)`), and beyond about 64 names collapse to terrain classes, with no ore or chest names at range.
+Blind past the grass: `pillar(height: 12)`, then eight `gaze` sweeps from the top at `dist: 256`, with no ore or chest names past 64 blocks.

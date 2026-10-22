@@ -32,6 +32,24 @@ again only once the player stands more than 1.5 blocks from the spot where it fi
 seen only by the nametag never counts, and the 5 s start over after a fight, another hold or a
 lost sight.
 
+## 2026-10-21: seeing in the dark
+
+A pilot underground beside fresh wall torches read "Dim (light 0)" in `scene`. It could not
+`blockat` the middle rungs of a 1-wide ladder shaft from either end, and `goto` answered
+"no-path, no known way" back up a dark stair the bot had just walked down. Scene now reads the
+feet by the light estimate that `blockat` and `find` use. Ladders, scaffolding and vines count as
+open for sight, so a rung shows from inside its shaft while a ladder buried in rock stays hidden.
+Every cell the body passes through, and every block whose top it stands on, is remembered as
+seen, so a walked stair stays walkable for the pathfinder in the dark.
+
+## 2026-10-21: time underground
+
+Underground the pilot lost the time of day and guessed midnight at midday, because `scene` and
+`state` told the time only with the sky in sight. Both now say when the bot last saw the sky and
+the phase then ("last saw sky ~10 min ago, day then", in 5-minute steps, "just now" under that),
+and nothing before its first sight of the sky. A clock in either hand tells the time anywhere in
+the overworld, as the sky does. In the Nether and the End it spins and tells nothing.
+
 ## 2026-10-21: event line and combat gate
 
 In the 2026-10-21 play session the pilot chained 64 placements in one turn and learned of

@@ -9,7 +9,7 @@ const { routeDeadline } = require('../lib/walk')
 const { isDoor, doorCrossing } = require('../lib/doors')
 const { entityInCell } = require('../lib/shelter')
 const Block = require('prismarine-block')('1.21.11')
-const { loadBotFunctions, combatReflexIn, awaitRoute, routeHandler, laneAt } = require('./helpers')
+const { loadBotFunctions, combatReflexIn, awaitRoute, routeHandler, laneAt, botConstant, walkingBody, wireListeners } = require('./helpers')
 
 const KLASSES = ['discretionary', 'interrupt', 'emergency']
 const lane = (over) => laneBlocks({ klass: 'discretionary', bunker: false, laneHeld: false, hard: false, jobRunning: false, meleeThreat: false, ...over })
@@ -440,4 +440,57 @@ test('insideBlock never names a diagonal cell the body overlaps in the dark', ()
   const pos = new Vec3(0.8, 64, 0.8)
   assert.strictEqual(senses({ pos, cells }).insideBlock().name, 'stone', 'control: in the light')
   assert.strictEqual(senses({ pos, cells, lit: () => false }).insideBlock(), null)
+})
+
+const ck = (x, y, z) => x + ',' + y + ',' + z
+// The feet y on column x of a 1-wide stair cut down into the stone.
+const stairFeet = (x) => 64 - Math.min(5, Math.max(0, x))
+// The stair's air: the feet cell and the two over it on columns 1 to 5, below the open ground at y 64.
+const STAIR = Object.fromEntries([1, 2, 3, 4, 5].flatMap((x) => [0, 1, 2].map((dy) => stairFeet(x) + dy).filter((y) => y <= 63).map((y) => [`${x},${y},0`, ['air', {}]])))
+
+// The body's moves down the stair along z 0.5, a tenth of a block apart, each drop over three airborne moves.
+function* stairMoves () {
+  let y = 64
+  for (let k = 5; k <= 55; k++) {
+    const x = k / 10
+    // The body rests on the highest column under its 0.6 wide box, the one its west edge is over.
+    const feet = stairFeet(Math.floor((k - 3) / 10))
+    if (feet < y) for (const dy of [0.25, 0.5, 0.75]) yield [x, y - dy, false]
+    y = feet
+    yield [x, y, true]
+  }
+}
+
+test('a goto finds its way back up a dark stair the body just walked down', async (t) => {
+  const { bot, plan } = await walkingBody(t, new Vec3(0.5, 64, 0.5), STAIR)
+  const SEEN = new Set()
+  wireListeners({
+    bot,
+    Vec3,
+    ck,
+    SEEN,
+    SEEN_CAP: 1000,
+    seenEdits: 0,
+    OLDEST: new WeakMap(),
+    SURFACE: new Map(),
+    SURFACE_CAP: 1000,
+    surfaceEdits: 0,
+    STATIONS: new Map(),
+    STATION_CAP: 1000,
+    STATION_RE: botConstant('STATION_RE'),
+    stationEdits: 0,
+    bodyMarkedAt: null
+  }, 'move')
+  for (const [x, y, onGround] of stairMoves()) {
+    bot.entity.position = new Vec3(x, y, 0.5)
+    bot.entity.onGround = onGround
+    bot.emit('move')
+  }
+  assert.deepStrictEqual(bot.entity.position, new Vec3(5.5, 59, 0.5), 'control: the walk ends at the bottom')
+  const top = new goals.GoalBlock(0, 64, 0)
+  assert.strictEqual(plan(top).status, 'success', 'control: the stair climbs with every cell known')
+  const { knownMoves } = loadBotFunctions(['knownMoves'], { ck, knownCell: (p) => SEEN.has(ck(p.x, p.y, p.z)), PLAN_KNOWN: new Map() })
+  const result = plan(top, knownMoves(bot.pathfinder.movements))
+  assert.strictEqual(result.status, 'success')
+  assert.deepStrictEqual(result.path.map((p) => [Math.floor(p.x), p.y, Math.floor(p.z)]), [[4, 60, 0], [3, 61, 0], [2, 62, 0], [1, 63, 0], [0, 64, 0]])
 })

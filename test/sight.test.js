@@ -33,12 +33,13 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
   const blocks = [{ id: 1, name: 'coal_ore' }, { id: 2, name: 'iron_ore' }, { id: 4, name: 'diamond_ore' }, { id: 5, name: 'wheat', states: [{ name: 'age', num_values: 8 }] }]
   return {
     shared: { ready: true, mcData: { blocksArray: blocks, blocksByName: Object.fromEntries(blocks.map((b) => [b.name, b])), blocks: Object.fromEntries(blocks.map((b) => [b.id, b])) } },
-    bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay }, game: { minY: -64, height: 384 } },
+    bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay }, game: { minY: -64, height: 384 }, inventory: { slots: [] } },
     ck,
     Vec3,
     SEEN: new Set(),
     ESTIMATED_LIGHT: new Map(),
     SKY_IN_SIGHT: new Map(),
+    SKY_SEEN: { at: null, timeOfDay: null },
     SIGHT_MEMO: { t: 0, cells: new Map() },
     SIGHT_MS: botConstant('SIGHT_MS'),
     LEGACY_1710: false,
@@ -1055,6 +1056,37 @@ test('a block shows through an open door or a ladder, never through a closed doo
   assert.strictEqual(through(doorAt(false)), false)
 })
 
+test('blockat reads a lit rung in the middle of a ladder shaft from below, from above and through the rungs at an angle', () => {
+  // A lit room at y 62..63 under a ladder shaft at 0,64..70,0 open at y 71..72, diamond behind its wall at 2,67,0, a ladder buried at 3,66,0.
+  const ladderShaft = (x, y) => {
+    const rungs = Object.fromEntries(Array.from({ length: 7 }, (_, i) => [ck(0, 64 + i, 0), LADDER]))
+    const env = withHands(withCells(world({
+      open: (cx, cy, cz) => (cy >= 62 && cy <= 63 && Math.abs(cx) <= 2 && Math.abs(cz) <= 2) || (cx === 0 && cz === 0 && (cy === 71 || cy === 72)),
+      ores: { '2,67,0': 'diamond_ore' },
+      light: () => LIT
+    }), { ...rungs, '3,66,0': LADDER }))
+    env.bot.entity.position = new Vec3(x, y, 0.5)
+    return env
+  }
+  const blockat = (env, [x, y, z]) => {
+    const { handle, res } = routeHandler('/blockat', env)
+    handle({ query: { x: String(x), y: String(y), z: String(z) } }, res)
+    return { name: res.body && res.body.name, error: res.error && res.error.message }
+  }
+  const below = () => ladderShaft(0.5, 62)
+  const above = () => ladderShaft(0.5, 71)
+  assert.deepStrictEqual(blockat(below(), [0, 64, 0]), { name: 'ladder', error: undefined }, 'control: the bottom rung over the room')
+  assert.deepStrictEqual(blockat(below(), [0, 67, 0]), { name: 'ladder', error: undefined }, 'the middle rung from below')
+  assert.deepStrictEqual(blockat(above(), [0, 67, 0]), { name: 'ladder', error: undefined }, 'the middle rung from above')
+  // Only lines to the bottom face, through the rung below, miss the rock at 1,64,0.
+  assert.deepStrictEqual(blockat(ladderShaft(1.2, 62), [0, 65, 0]), { name: 'ladder', error: undefined }, 'the second rung from the room at an angle')
+  for (const [env, cell, what] of [[below(), [2, 67, 0], 'diamond behind the shaft wall'], [above(), [2, 67, 0], 'diamond behind the shaft wall from above'], [below(), [3, 66, 0], 'the buried ladder']]) {
+    const r = blockat(env, cell)
+    assert.match(r.error || '', UNSEEN, what)
+    assert.strictEqual(r.name, undefined, what)
+  }
+})
+
 test('a lit floor indoors shows through a closed fence gate or a fence, never through a wall', () => {
   // A lit corridor under rock along z 0, blocked at x 3, with the floor cell 6,63,0 beyond.
   const through = (cell) => {
@@ -1184,7 +1216,7 @@ test('digat at a cell seen before and out of sight now walks there before it say
 
 // The verbose scene reply as JSON and the boot summary over env, the senses besides the lay of the land and the sky stubbed.
 function summaries (env) {
-  Object.assign(env.bot, { health: 20, food: 20, heldItem: null, username: 'Bot', experience: { level: 0 }, inventory: { slots: [] } })
+  Object.assign(env.bot, { health: 20, food: 20, username: 'Bot', experience: { level: 0 } })
   const stubs = {
     require,
     round: (v) => v,
@@ -1254,11 +1286,13 @@ test('map draws a floor changed out of sight as last seen, and the new block onc
 
 // An open column above the body at 0,64,0 holding sky light sky.
 const shaftToSky = (sky, timeOfDay = NOON) => world({ open: (x, y, z) => x === 0 && z === 0 && y >= 64, light: () => LIT, skyLight: () => sky, timeOfDay })
+// A lit shaft up from the body at 0,64,0, capped by rock at y 80.
+const underRock = () => world({ open: (x, y, z) => x === 0 && z === 0 && y >= 64 && y < 80, light: () => LIT })
 
 // The state reply over env, the senses besides sight and the sky stubbed.
 function stateOf (env) {
   Object.assign(env.bot.entity, { pitch: 0, onGround: true })
-  Object.assign(env.bot, { health: 20, food: 20, experience: { level: 0 }, oxygenLevel: 20, game: { ...env.bot.game, dimension: 'overworld' }, registry: REGISTRY, blockAtCursor: () => null })
+  Object.assign(env.bot, { health: 20, food: 20, experience: { level: 0 }, oxygenLevel: 20, game: { dimension: 'overworld', ...env.bot.game }, registry: REGISTRY, blockAtCursor: () => null })
   return runRoute('/state', {}, { ...env, waterState: () => null, heldInfo: () => null, round: (v) => v, shared: { ...env.shared, ready: true } })
 }
 
@@ -1269,8 +1303,86 @@ test('state and scene tell the time only while the sky shows', () => {
     return [state.timeOfDay, /"time"|day|t=6000/.test(scene)]
   }
   assert.deepStrictEqual(told(shaftToSky(15)), [NOON, true], 'control: under open sky')
-  const capped = world({ open: (x, y, z) => x === 0 && z === 0 && y >= 64 && y < 80, light: () => LIT })
-  assert.deepStrictEqual(told(capped), [undefined, false])
+  assert.deepStrictEqual(told(underRock()), [undefined, false])
+})
+
+// The time of day and last sight of the sky in the state reply, and the time words of the scene summary.
+function timeTold (env) {
+  const state = stateOf(env)
+  const summary = JSON.parse(summaries(env)[0]).summary
+  return { timeOfDay: state.timeOfDay, lastSky: state.lastSky, scene: summary.match(/(?:day|dusk|night|dawn) \(t=\d+\)\. |Last saw sky [^.]*\. /)?.[0] ?? null }
+}
+
+test('state and scene say how long ago the bot last saw the sky and the phase then', () => {
+  const clock = { now: 1000000 }
+  const env = shaftToSky(15)
+  env.Date = { now: () => clock.now }
+  assert.deepStrictEqual(timeTold(env), { timeOfDay: NOON, lastSky: undefined, scene: 'day (t=6000). ' }, 'control: under open sky')
+  env.bot.blockAt = underRock().bot.blockAt
+  env.bot.time.timeOfDay = MIDNIGHT
+  // The next physics tick.
+  env.SKY_IN_SIGHT.clear()
+  clock.now += 1000
+  assert.deepStrictEqual(timeTold(env), { timeOfDay: undefined, lastSky: 'last saw sky just now, day then', scene: 'Last saw sky just now, day then. ' })
+  clock.now += 10 * 60000
+  assert.deepStrictEqual(timeTold(env), { timeOfDay: undefined, lastSky: 'last saw sky ~10 min ago, day then', scene: 'Last saw sky ~10 min ago, day then. ' })
+})
+
+test('the last sight of the sky is just now for 5 minutes, then ~5 min ago', () => {
+  const clock = { now: 1000000 }
+  const env = underRock()
+  env.Date = { now: () => clock.now }
+  env.SKY_SEEN.at = clock.now
+  env.SKY_SEEN.timeOfDay = NOON
+  const lastSky = (min) => {
+    clock.now = 1000000 + min * 60000
+    return stateOf(env).lastSky
+  }
+  assert.strictEqual(lastSky(3), 'last saw sky just now, day then')
+  assert.strictEqual(lastSky(6), 'last saw sky ~5 min ago, day then')
+})
+
+test('state and scene name no last sight of the sky before the bot has seen it', () => {
+  const env = underRock()
+  assert.doesNotMatch(JSON.stringify([stateOf(env), summaries(env)]), /lastSky|last saw/i)
+})
+
+test('a clock in hand tells the time underground in the overworld, never in the Nether', () => {
+  const holding = (dimension, slot) => {
+    const env = underRock()
+    env.bot.game.dimension = dimension
+    const clock = { name: 'clock', count: 1 }
+    if (slot === 'offhand') env.bot.inventory.slots[45] = clock
+    else env.bot.heldItem = clock
+    return timeTold(env)
+  }
+  const shown = { timeOfDay: NOON, lastSky: undefined, scene: 'day (t=6000). ' }
+  assert.deepStrictEqual(holding('overworld', 'main'), shown)
+  assert.deepStrictEqual(holding('overworld', 'offhand'), shown, 'in the offhand')
+  assert.deepStrictEqual(holding('the_nether', 'main'), { timeOfDay: undefined, lastSky: undefined, scene: null })
+})
+
+test('scene reads the feet by the light a torch just placed on the wall gives them, not the stale light of the chunk', () => {
+  // The tunnel's chunk reports block light 0 everywhere, torch or not.
+  const scene = (torch) => {
+    const env = wireLight(tunnel(8, DARK))
+    env.bot.world = { getBlockLight: (p) => env.bot.blockAt(p).light }
+    if (torch) env.bot.emit('blockUpdate', stoneAt(torch), torchAt(torch))
+    return JSON.parse(summaries(env)[0]).summary
+  }
+  assert.match(scene(null), /Dim \(light 0\)\. /, 'control: no torch')
+  assert.doesNotMatch(scene([3, 65, 1]), /Dim/)
+})
+
+test('scene reads a lit room as lit while the body stands on soul sand', () => {
+  const scene = (light) => {
+    const room = world({ open: (x, y, z) => y >= 64 && y <= 66 && Math.abs(x) <= 3 && Math.abs(z) <= 3, light: () => light })
+    const env = withCells(room, { '0,64,0': { name: 'soul_sand', boundingBox: 'block', shapes: [[0, 0, 0, 1, 0.875, 1]], light: 0 } })
+    env.bot.entity.position = new Vec3(0.5, 64.875, 0.5)
+    return JSON.parse(summaries(env)[0]).summary
+  }
+  assert.match(scene(DARK), /Dim \(light 0\)\. /, 'control: a dark room')
+  assert.doesNotMatch(scene(LIT), /Dim/)
 })
 
 // A lit room at x -3..3, z -3..3, y 64..65.
