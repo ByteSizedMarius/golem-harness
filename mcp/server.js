@@ -76,12 +76,13 @@ const LOCAL_TOOLS = [
   },
   {
     name: 'todo',
-    description: 'Your todo list, kept across restarts and shown at boot: add what was asked (by who) or promised, then done or drop it by id.',
+    description: 'Your todo list, kept across restarts and shown at boot: add what was asked (by who) or promised, at priority high when it is urgent, then done or drop it by id.',
     params: {
-      action: { type: 'enum', values: ['add', 'done', 'drop', 'list'], required: true },
+      action: { type: 'enum', values: ['add', 'done', 'drop', 'priority', 'list'], required: true },
       text: { type: 'str', maxLen: 200 },
       who: { type: 'str', maxLen: NAME_CAP },
-      id: { type: 'int', min: 1, max: 999999 }
+      id: { type: 'int', min: 1, max: 999999 },
+      priority: { type: 'enum', values: ['high', 'normal', 'low'] }
     }
   }
 ]
@@ -674,12 +675,14 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
     }
   }
 
-  function todo ({ action, text, who, id }) {
+  function todo ({ action, text, who, id, priority }) {
     if (todoFile === undefined) return textResult('todos are off', true)
     if (action !== 'add' && (text !== undefined || who !== undefined)) return textResult('text and who are only for add', true)
-    if ((action === 'add' || action === 'list') && id !== undefined) return textResult('id is only for done and drop', true)
+    if ((action === 'add' || action === 'list') && id !== undefined) return textResult('id is only for done, drop and priority', true)
+    if (action !== 'add' && action !== 'priority' && priority !== undefined) return textResult('priority is only for add and priority', true)
     if (action === 'add' && text === undefined) return textResult('add needs text', true)
-    if ((action === 'done' || action === 'drop') && id === undefined) return textResult(`${action} needs id`, true)
+    if (action !== 'add' && action !== 'list' && id === undefined) return textResult(`${action} needs id`, true)
+    if (action === 'priority' && priority === undefined) return textResult('priority needs priority', true)
     let head = null
     let failed = false
     try {
@@ -687,8 +690,11 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
         const line = flatText(text)
         if (!line) return textResult('todo text is empty', true)
         const asker = who === undefined ? '' : flatText(who)
-        head = `Added #${todos.add(todoFile, line, asker, now())}.`
+        head = `Added #${todos.add(todoFile, line, asker, now(), priority)}.`
         if (asker) head += `\nTell ${asker} it is queued if you have not.`
+      } else if (action === 'priority') {
+        failed = !todos.setPriority(todoFile, id, priority)
+        head = failed ? `No open todo has id ${id}.` : `#${id} is now ${priority}.`
       } else if (action !== 'list') {
         failed = !todos.remove(todoFile, id)
         head = failed ? `No open todo has id ${id}.` : `${action === 'done' ? 'Done' : 'Dropped'} #${id}.`

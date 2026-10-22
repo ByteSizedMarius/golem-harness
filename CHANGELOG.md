@@ -6,6 +6,14 @@ the point, not just the diff. Dates are play-sessions, not releases. Full commit
 carry more detail (`git log`). The pilot's text (`DRIVING.md`, `manual/`) states the rules
 and leaves the stories here.
 
+## 2026-10-21: todo priorities
+
+In long sessions the todo list grew to many items, and the owner's urgent requests sat under
+older small ones, since the list was oldest first and nothing else. An item now carries a
+priority, high, normal or low, set at `add` or changed later with the `priority` action. The
+list shows high first and low last, oldest first within each level. Files written before keep
+every item at normal.
+
 ## 2026-10-19: version split and live-play fixes
 
 Two versions. The bot speaks 1.21.11 and defaults to it (`MC_VERSION`). `GOLEM_MC_1710=1`
