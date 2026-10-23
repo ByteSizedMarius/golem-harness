@@ -6,7 +6,7 @@ const http = require('node:http')
 const os = require('node:os')
 const path = require('node:path')
 const { createServer, redact, PATH_TOKEN } = require('../mcp/server')
-const { TOOLS } = require('../mcp/tools')
+const { TOOLS, LONGEST } = require('../mcp/tools')
 const { ROUTE_BOUNDS } = require('../lib/bounds')
 const {
   HUNG, PORT, MCP_TOKEN, proofOver, timed, delay, rawReply, mcpServer, manualFixture, call, rpc, callReq, isToolError, isRpcError, assertOk,
@@ -502,10 +502,9 @@ test('a tool with timeoutMs is not cut at the request timeout', { timeout: 10000
   assert.ok(ms >= 3 * REQUEST_TIMEOUT - 20, `answered after ${ms} ms, before the reply was sent`)
 })
 
-test('withdraw and deposit wait for the walk, the chest opening and a window wait for each of 8 names', () => {
-  const floor = 60000 + 8 * 20000
+test('withdraw and deposit wait as long as the longest routes', () => {
   for (const name of ['withdraw', 'deposit']) {
-    assert.ok(toolNamed(name).timeoutMs > floor, `${name} timeoutMs ${toolNamed(name).timeoutMs} is not above ${floor}`)
+    assert.strictEqual(toolNamed(name).timeoutMs, LONGEST, name)
   }
 })
 

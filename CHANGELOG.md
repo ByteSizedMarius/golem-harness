@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-23: one withdraw call takes several stacks
+
+Sorting chests took one withdraw call per stack, and the pilot repeated an item name inside one call
+to take more. The withdraw text now says that count may span stacks. A withdraw without count takes
+one stack of the item (16 ender pearls, a single sword) instead of 64 items, and the deposit text
+says that no count puts everything in. Both wait up to the longest route timeout, since one call can
+move many stacks.
+
 ## 2026-10-23: goto refuses long swims, and pillar keeps the legs under water
 
 Three drownings followed long gotos that hopped toward a far waypoint or into a lake without

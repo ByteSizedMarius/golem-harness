@@ -111,8 +111,9 @@ const TOOLS = [
   { name: 'toss', route: '/toss', body: true, description: 'Drop items, or throw them toward a player with to. Walk away afterwards or you pick them up again.', params: { name: required(NAME), count: COUNT, to: PLAYER }, timeoutMs: EVENT },
   { name: 'fish', route: '/fish', body: true, description: 'Job: cast the fishing rod count times, at seen water (x, y and z together) or ahead. Each catch arrives as an event.', params: { count: { type: 'int', min: 1, max: 32 }, ...AT } },
   { name: 'chest', route: '/chest', body: true, description: 'List the chest at x, y and z together. Without them, list every chest seen within radius (default 12), nearest first, and the items of the nearest. A double chest shows both cells.', params: { ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT },
-  { name: 'withdraw', route: '/withdraw', body: true, description: 'Take items from the chest at x, y and z together, or the nearest seen within radius (default 12). name is one item name or up to 8 separated by |, all taken with one chest open. Exact names win, else each name matches as a substring. count applies to each name. When none matches, the error names the other chests seen, a double chest by both cells.', params: { name: CHEST_NAMES, count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + 9 * EVENT },
-  { name: 'deposit', route: '/deposit', body: true, description: 'Put items into the chest at x, y and z together, or the nearest seen within radius (default 12). name is one item name or up to 8 separated by |, all put in with one chest open. Exact names win, else each name matches as a substring. count applies to each name. When the chest fills, the error names the other chests seen, a double chest by both cells.', params: { name: CHEST_NAMES, count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + 9 * EVENT },
+  // The walk, the window and one window wait per stack moved, up to the 54 of a double chest.
+  { name: 'withdraw', route: '/withdraw', body: true, description: 'Take items from the chest at x, y and z together, or the nearest seen within radius (default 12). name is one item name or up to 8 split by |, taken with one chest open. Exact names win, else each name matches as a substring. count per name may span stacks, default one stack. When none matches, the error names other seen chests, a double chest by both cells.', params: { name: CHEST_NAMES, count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: LONGEST },
+  { name: 'deposit', route: '/deposit', body: true, description: 'Put items into the chest at x, y and z together, or the nearest seen within radius (default 12). name is one item name or up to 8 split by |, put in with one chest open. Exact names win, else each name matches as a substring. count per name, default all. When the chest fills, the error names other seen chests, a double chest by both cells.', params: { name: CHEST_NAMES, count: COUNT, ...AT, radius: CHEST_RADIUS }, timeoutMs: LONGEST },
   // The walk, the window and one withdraw per stack, a stack pause apart.
   { name: 'grave', route: '/grave', body: true, description: 'On a server that keeps graves, list the gravestone at x,y,z or the nearest in sight. take: all or an item name.', params: { at: POINT, take: NAME }, timeoutMs: LONGEST },
 
@@ -151,4 +152,4 @@ const TOOLS = [
   { name: 'job_stop', route: '/job_stop', description: 'Cancel one job.', params: { id: required(JOB_ID) } }
 ]
 
-module.exports = { TOOLS }
+module.exports = { TOOLS, LONGEST }

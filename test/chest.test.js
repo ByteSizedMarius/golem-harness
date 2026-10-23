@@ -7,7 +7,7 @@ const { awaitRoute, routeHandler, botConstant, loadBotFunctions } = require('./h
 const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 
 const CHEST_ID = 54
-const IDS = { stone: 1, cobblestone: 4, diamond: 264, wheat_seeds: 295, wheat: 296, cobbled_deepslate: 1101 }
+const IDS = { stone: 1, cobblestone: 4, diamond: 264, iron_sword: 267, wheat_seeds: 295, wheat: 296, ender_pearl: 368, cobbled_deepslate: 1101 }
 const NAMES = Object.fromEntries(Object.entries(IDS).map(([n, id]) => [id, n]))
 const CHEST_SLOTS = 27
 const HERE = new Vec3(0.5, 64, 0.5)
@@ -16,7 +16,7 @@ const FAR = new Vec3(-7, 64, 3)
 // Nearer than NEAR and FAR.
 const HIDDEN = new Vec3(0, 64, -3)
 
-const stack = (name, count) => ({ name, type: IDS[name], count, stackSize: 64 })
+const stack = (name, count, stackSize = 64) => ({ name, type: IDS[name], count, stackSize })
 // A chest facing north pairs its left half with the cell east of it and its right half with the cell west.
 const LEFT = { type: 'left', facing: 'north' }
 const RIGHT = { type: 'right', facing: 'north' }
@@ -319,6 +319,30 @@ test('withdraw and deposit move one stack per mineflayer call, a stack pause apa
   assert.deepStrictEqual(await pacedRoute(t, '/deposit', { name: 'stone' }, env), { deposited: [{ item: 'stone', count: 84, inChestNow: 84 }] })
   assert.deepStrictEqual(deposited.map(([count]) => count), [64, 20])
   assertStackGaps(deposited)
+})
+
+test('withdraw without count takes one stack of each item, and a count spans stacks, each from one chest opening', async () => {
+  const fourStacks = () => chestWindow(Array.from({ length: 4 }, () => stack('cobblestone', 64)))
+  const single = fourStacks()
+  const one = chestEnv([NEAR], { '5,64,0': single })
+  assert.deepStrictEqual(await awaitRoute('/withdraw', { name: 'cobblestone' }, one.env), { withdrew: [{ item: 'cobblestone', count: 64 }] })
+  assert.deepStrictEqual(single.containerItems(), Array.from({ length: 3 }, () => stack('cobblestone', 64)))
+  assert.deepStrictEqual(one.opened, ['5,64,0'])
+
+  const small = chestWindow([stack('ender_pearl', 16, 16), stack('ender_pearl', 16, 16), stack('iron_sword', 1, 1), stack('iron_sword', 1, 1)])
+  const stackOf = chestEnv([NEAR], { '5,64,0': small })
+  assert.deepStrictEqual(await awaitRoute('/withdraw', { name: 'ender_pearl|iron_sword' }, stackOf.env), {
+    withdrew: [{ item: 'ender_pearl', count: 16 }, { item: 'iron_sword', count: 1 }]
+  })
+  assert.deepStrictEqual(small.containerItems(), [stack('ender_pearl', 16, 16), stack('iron_sword', 1, 1)])
+
+  const spanned = fourStacks()
+  const withdrawn = recorded(spanned, 'withdraw')
+  const many = chestEnv([NEAR], { '5,64,0': spanned })
+  assert.deepStrictEqual(await awaitRoute('/withdraw', { name: 'cobblestone', count: '200' }, many.env), { withdrew: [{ item: 'cobblestone', count: 200 }] })
+  assert.deepStrictEqual(withdrawn.map(([count]) => count), [64, 64, 64, 8])
+  assert.deepStrictEqual(spanned.containerItems(), [stack('cobblestone', 56)])
+  assert.deepStrictEqual(many.opened, ['5,64,0'])
 })
 
 test('a chest closed during the stack pause stops withdraw and deposit, and the error names what moved', async () => {
