@@ -1273,6 +1273,7 @@ async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, 
   await awaitRoute(route, query, {
     bot,
     require,
+    LEGACY_1710: false,
     bunker: { building: false },
     jobs: { start: (n, fn) => { name = n; job = fn({ cancelled: false, progress () {} }); return { id: 1 } } },
     emitEvent () {},

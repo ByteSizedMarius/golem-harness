@@ -4,6 +4,25 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-23: dig jobs survive a broken pick and falling gravel
+
+The held stone pick broke mid `dig_tunnel`, and the job ended "cannot advance: nudge stalled" with
+spare picks in the pockets, never naming the broken one. On 1.7.10, `dig_tunnel` and `dig_stair` now
+wait for the server's answer to each dig. A block the server sends back is dug once more after a
+fresh equip, and a block sent back twice stops the job, naming the block and the held item. A swap
+to a spare pick raises a `mine` event naming the broken pick and the spare.
+
+After `dig_stair` stopped on falling gravel, a `dig_tunnel` toward the same spot let the gravel bury
+the bot's head. `dig_tunnel` now stops on gravel or sand that a face dig lays bare over its passage,
+and short of such gravel it already knows of. `dig_stair` going up also checks the cell above the
+one it digs over its head. After a gravel stop, either job steps one cell back when the body can
+stand there.
+
+The suffocation rescue dug the head block in place, so each dug gravel block let the next one fall
+in, and the bot lost 15 HP before it walked out. A body whose head is buried now steps to a known
+open cell beside its feet whose floor is a full block, the cell it came from first. It digs the head
+block only when no such cell exists or the step fails.
+
 ## 2026-10-23: the sample pilot memory system is removed
 
 The sample pilot memory system in `examples/`, a tiered markdown graph with a validator, is gone,

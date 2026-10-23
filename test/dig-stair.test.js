@@ -3,43 +3,59 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
-const { digJob, facings, awaitRoute, botConstant } = require('./helpers')
+const { digJob, facings, awaitRoute, botConstant, loadBotFunctions } = require('./helpers')
 const { ROUTE_BOUNDS } = require('../lib/bounds')
 
 const UP_EAST = { dir: 'e', up: '1', steps: '2', torch: '0' }
+const PICK_TYPE = { wooden_pickaxe: 1, stone_pickaxe: 2, iron_pickaxe: 3 }
 
-// Runs route for a body at (0, 64, 0) in stone, each pick breaking after its uses digs, and returns the result with the cells dug and the mine event texts.
+// Runs route for a body at (0, 64, 0) in stone, each pick breaking after its uses digs, and returns the result with the cells dug, the mine event texts and the feet cell it ends in.
 // The server's update of the held slot follows each dig after lag ms.
-async function watchedDig (route, query, { open = () => false, picks = [{ name: 'iron_pickaxe' }], lag = 0 } = {}) {
+// With legacy the server answers each dig after 2 ms, and resends a block dug without a pick that has uses left after 30 ms.
+// canStepOutTo is the bot's own over a world the body knows in full.
+// nudgeInto refuses a move the body's head or feet would sweep through a solid cell on.
+// The job gets cancelled during the dig of the cell cancelOn names.
+async function watchedDig (route, query, { open = () => false, blocks = {}, picks = [{ name: 'iron_pickaxe' }], lag = 0, legacy = false, cancelOn = null } = {}) {
   const key = (p) => `${p.x},${p.y},${p.z}`
   const opened = new Set(['0,64,0', '0,65,0'])
   const isOpen = (p) => opened.has(key(p)) || open(p)
-  const items = picks.map((p, i) => ({ uses: Infinity, slot: 36 + i, ...p }))
+  const items = picks.map((p, i) => ({ uses: Infinity, slot: 36 + i, type: PICK_TYPE[p.name], ...p }))
   const dug = []
   const events = []
-  const bot = {
+  const state = { cancelled: false, progress () {} }
+  const inventory = Object.assign(new EventEmitter(), { emptySlotCount: () => 30, items: () => items })
+  Object.defineProperty(inventory, 'slots', { get: () => { const s = new Array(46).fill(null); for (const it of items) s[it.slot] = it; return s } })
+  const bot = Object.assign(new EventEmitter(), {
     entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 },
     heldItem: null,
-    inventory: Object.assign(new EventEmitter(), { emptySlotCount: () => 30, items: () => items }),
+    inventory,
     async equip (item) { bot.heldItem = item },
     blockAt: (p) => {
-      const name = isOpen(p) ? 'air' : 'stone'
-      return { name, boundingBox: name === 'air' ? 'empty' : 'block', position: p, skyLight: 0 }
+      const name = isOpen(p) ? 'air' : blocks[key(p)] || 'stone'
+      return { name, boundingBox: name === 'air' ? 'empty' : 'block', shapes: name === 'air' ? [] : [[0, 0, 0, 1, 1, 1]], position: p, skyLight: 0 }
     },
     async dig (b) {
       dug.push(key(b.position))
       opened.add(key(b.position))
+      if (key(b.position) === cancelOn) state.cancelled = true
       const held = bot.heldItem
-      if (!held) return
+      const refused = !(held && held.uses > 0)
+      if (legacy) {
+        setTimeout(() => {
+          if (refused) opened.delete(key(b.position))
+          bot.emit(`blockUpdate:${b.position}`, null, bot.blockAt(b.position))
+        }, refused ? 30 : 2)
+      }
+      if (refused) return
+      const broke = --held.uses === 0
       const wear = () => {
-        const broke = --held.uses === 0
         if (broke) { items.splice(items.indexOf(held), 1); if (bot.heldItem === held) bot.heldItem = null }
         bot.inventory.emit('updateSlot', held.slot, held, broke ? null : held)
       }
       if (lag) setTimeout(wear, lag)
       else wear()
     }
-  }
+  })
   const NEIGHBOURS = botConstant('NEIGHBOURS')
   let job = null
   await awaitRoute(route, query, {
@@ -47,13 +63,22 @@ async function watchedDig (route, query, { open = () => false, picks = [{ name: 
     require,
     NEIGHBOURS,
     PICK_TIER: botConstant('PICK_TIER'),
+    LEGACY_1710: legacy,
+    LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
     bunker: { building: false },
-    jobs: { start: (n, fn) => { job = fn({ cancelled: false, progress () {} }); return { id: 1 } } },
+    jobs: { start: (n, fn) => { job = fn(state); return { id: 1 } } },
     emitEvent: (kind, text) => { if (kind === 'mine') events.push(text) },
     refuseWhileBuilding () {},
     fillFrom: async () => null,
     macroPlaceAt: async () => ({}),
-    nudgeInto: async (cell) => { bot.entity.position = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5); return true },
+    nudgeInto: async (cell) => {
+      const from = bot.entity.position.floored()
+      const swept = [cell, cell.offset(0, 1, 0), ...(cell.y < from.y ? [cell.offset(0, 2, 0)] : []), ...(cell.y > from.y ? [from.offset(0, 2, 0)] : [])]
+      if (!swept.every(isOpen)) return false
+      bot.entity.position = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5)
+      return true
+    },
+    canStepOutTo: loadBotFunctions(['canStepOutTo'], { bot, knownCell: () => true }).canStepOutTo,
     knownCell: () => false,
     skyInSight: () => false,
     lightRange: () => Infinity,
@@ -61,7 +86,9 @@ async function watchedDig (route, query, { open = () => false, picks = [{ name: 
     setTimeout,
     clearTimeout
   })
-  return { ...(await job), dug, events }
+  const result = await job
+  const listeners = bot.eventNames().filter((n) => String(n).startsWith('blockUpdate:')).length + bot.inventory.listenerCount('updateSlot')
+  return { ...result, dug, events, listeners, at: key(bot.entity.position.floored()) }
 }
 
 const breaches = (r) => r.events.filter((t) => t.startsWith('breached'))
@@ -72,10 +99,33 @@ test('dig_stair stops once its last pick breaks', async () => {
   assert.deepStrictEqual(r.dug, ['0,66,0', '1,67,0', '1,66,0', '1,65,0', '2,68,0'], 'dug on after the pick broke')
 })
 
+test('dig_stair cancelled during a passage dig digs no further passage cell', async () => {
+  const r = await watchedDig('/dig_stair', UP_EAST, { cancelOn: '1,67,0' })
+  assert.deepStrictEqual([r.stopped, r.dug], ['cancelled', ['0,66,0', '1,67,0']])
+})
+
 test('dig_stair stops on a pick the server breaks 100 ms after the dig', async () => {
   const r = await watchedDig('/dig_stair', UP_EAST, { lag: 100, picks: [{ name: 'stone_pickaxe', uses: 1, maxDurability: 131, durabilityUsed: 131 }] })
   assert.strictEqual(r.stopped, 'no pickaxe left (tool broke)')
   assert.deepStrictEqual(r.dug, ['0,66,0'], 'dug on with the broken pick')
+})
+
+// The first pick breaks on the first dig.
+const BREAKS = [{ name: 'stone_pickaxe', uses: 1 }, { name: 'stone_pickaxe' }]
+
+test('on 1.7.10 dig_stair digs a block the server resent to a broken pick again with the spare, and names the swap', async () => {
+  const r = await watchedDig('/dig_stair', UP_EAST, { legacy: true, lag: 10, picks: BREAKS })
+  assert.strictEqual(r.stopped, 'steps done')
+  assert.deepStrictEqual(r.dug, ['0,66,0', '1,67,0', '1,67,0', '1,66,0', '1,65,0', '2,68,0', '2,67,0', '2,66,0'])
+  assert.deepStrictEqual(r.events.filter((t) => t.includes('swapped')), ['stone_pickaxe broke, swapped to stone_pickaxe'])
+  assert.strictEqual(r.listeners, 0, 'a listener outlived the job')
+})
+
+test('on 1.7.10 dig_stair stops on a block the server resends after the second dig too', async () => {
+  const r = await watchedDig('/dig_stair', UP_EAST, { legacy: true, lag: 200, picks: BREAKS })
+  assert.strictEqual(r.stopped, 'the server resent the stone at 1,67,0 after a second dig holding stone_pickaxe')
+  assert.deepStrictEqual(r.dug, ['0,66,0', '1,67,0', '1,67,0'])
+  assert.strictEqual(r.listeners, 0, 'a listener outlived the job')
 })
 
 // Going up east one step from (0, 64, 0), the open cell at (1, 67, 1) shows once the passage's top cell is dug.
@@ -141,4 +191,35 @@ test('dig_stair names gravel over its passage only once a dig lays it bare', asy
   const r = await digJob('/dig_stair', UP_EAST, gravel)
   assert.deepStrictEqual(r.dug, ['0,66,0', '1,67,0'], 'the stair stopped before the dig that laid the gravel bare')
   assert.match(r.stopped, /^gravel falling from 1,68,0\b/)
+})
+
+// Going up east from (0, 64, 0), the first dig is the launch cell at (0, 66, 0) under the gravel.
+const GRAVEL_OVER_LAUNCH = { '0,67,0': 'gravel' }
+
+test('dig_stair up stops on gravel the launch dig lays bare and steps back down to the cell behind', async () => {
+  const behind = (p) => p.x === -1 && p.z === 0 && p.y >= 63 && p.y <= 65
+  const r = await watchedDig('/dig_stair', UP_EAST, { blocks: GRAVEL_OVER_LAUNCH, open: behind })
+  assert.deepStrictEqual([r.stopped, r.dug, r.at], ['gravel falling from 0,67,0, stopping, stepped back to -1,63,0', ['0,66,0'], '-1,63,0'])
+})
+
+test('dig_stair up steps back down only where the head clears the cell over the one behind', async () => {
+  const behind = (p) => p.x === -1 && p.z === 0 && (p.y === 63 || p.y === 64)
+  const r = await watchedDig('/dig_stair', UP_EAST, { blocks: GRAVEL_OVER_LAUNCH, open: behind })
+  assert.deepStrictEqual([r.stopped, r.at], ['gravel falling from 0,67,0, stopping', '0,64,0'])
+})
+
+// Going down east from (0, 64, 0), the first dig is the cell at (1, 65, 0) under the gravel, and the step back is a climb to (-1, 65, 0).
+test('dig_stair down climbs back only where the cell over its own head is open', async () => {
+  const blocks = { '1,66,0': 'gravel' }
+  const behind = (p) => p.x === -1 && p.z === 0 && (p.y === 65 || p.y === 66)
+  const open = await watchedDig('/dig_stair', { ...UP_EAST, up: '0' }, { blocks, open: (p) => behind(p) || (p.x === 0 && p.y === 66 && p.z === 0) })
+  assert.deepStrictEqual([open.stopped, open.at], ['gravel falling from 1,66,0, stopping, stepped back to -1,65,0', '-1,65,0'], 'control')
+  const rock = await watchedDig('/dig_stair', { ...UP_EAST, up: '0' }, { blocks, open: behind })
+  assert.deepStrictEqual([rock.stopped, rock.at], ['gravel falling from 1,66,0, stopping', '0,64,0'])
+})
+
+test('dig_stair up stops short of known gravel over its launch cell', async () => {
+  const r = await digJob('/dig_stair', UP_EAST, { blocks: GRAVEL_OVER_LAUNCH, known: ['0,67,0'] })
+  assert.match(r.stopped, /^gravel overhead/)
+  assert.deepStrictEqual(r.dug, [])
 })
