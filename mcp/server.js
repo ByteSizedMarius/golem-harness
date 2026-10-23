@@ -5,6 +5,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const readline = require('node:readline')
 const { signRequest, verifyProof } = require('../lib/sig')
+const { flatText } = require('../lib/flat-text')
 const { quietText } = require('../lib/server-msg')
 const todos = require('../lib/todo')
 const { TOOLS } = require('./tools')
@@ -160,9 +161,6 @@ function capString (s, cap) {
 }
 
 const redactString = (s, cap) => capString(s.replace(PATH_TOKEN, '<path>'), cap)
-
-// U+2800 renders blank but is not whitespace.
-const flatText = (s) => s.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ').replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u{2800}]/gu, '').replace(/\s+/g, ' ').trim()
 
 // The top-level string fields named in structural are capped at STRUCTURAL_CAP, every other string at STRING_CAP.
 function redact (value, structural = []) {
@@ -610,7 +608,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
   async function gather (deadline, earliest, eager) {
     // The ids this call asks past and the process they belong to.
     const seen = { ...frontier }
-    // { item, quiet, fold, boot, chat: the chat id, or ev: the first and last event id }, oldest first.
+    // { item, t, quiet, fold, boot, chat: the chat id, or ev: the first and last event id }, oldest first.
     let gathered = []
     const notes = []
     let status
@@ -653,7 +651,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
           if (boot !== null) seen.boot = boot
           seen.chat = tick.chat.cursor
           seen.ev = tick.events.cursor
-          const said = tick.chat.messages.map((m) => ({ t: m.t, quiet: false, fold: null, chat: m.id, item: { type: m.kind === 'whisper' ? 'whisper' : 'chat', from: m.from, msg: m.msg, ...(m.pointsAt && { pointsAt: m.pointsAt }) } }))
+          const said = tick.chat.messages.map((m) => ({ t: m.t, quiet: false, fold: null, chat: m.id, item: { type: m.kind === 'whisper' ? 'whisper' : 'chat', from: m.from, msg: m.msg, ...(m.pointsAt && { pointsAt: m.pointsAt }), ...(m.where !== undefined && { where: m.where }), ...(m.me !== undefined && { me: m.me }) } }))
           const happened = tick.events.list.map((e) => ({ t: e.t, quiet: e.quiet === true, fold: quietFold(e), ev: [e.id, e.id], item: { type: 'event', kind: e.kind, msg: e.msg } }))
           for (const g of [...said, ...happened].sort((a, b) => a.t - b.t)) {
             const same = g.fold && gathered.find((o) => o.fold && o.boot === seen.boot && o.fold.text === g.fold.text)
@@ -662,7 +660,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
               same.fold.merged += g.fold.merged
               same.item.msg = redact(quietText(same.fold))
               same.ev[1] = g.ev[1]
-            } else gathered.push({ item: redact(g.item), quiet: g.quiet, fold: g.fold, boot: seen.boot, chat: g.chat, ev: g.ev })
+            } else gathered.push({ item: redact(g.item), t: g.t, quiet: g.quiet, fold: g.fold, boot: seen.boot, chat: g.chat, ev: g.ev })
           }
           status = 'no new activity'
         }
@@ -674,9 +672,11 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
     }
     // Past MAX_ITEMS or the result cap, the newest items of this process wait for the next call.
     const rest = (kept) => gathered.slice(kept).filter((g) => g.boot === seen.boot)
+    // A chat item's age counts up to this return.
     const bodyOf = (kept) => {
       const more = rest(kept).length
-      return { items: gathered.slice(0, kept).map((g) => g.item), notes: redact(more ? [...notes, `${more} more waiting, the next wait_events returns them at once`] : notes) }
+      const now = Date.now()
+      return { items: gathered.slice(0, kept).map((g) => (g.ev ? g.item : { ...g.item, age: Math.floor((now - g.t) / 1000) })), notes: redact(more ? [...notes, `${more} more waiting, the next wait_events returns them at once`] : notes) }
     }
     let kept = Math.min(gathered.length, MAX_ITEMS)
     let body = bodyOf(kept)

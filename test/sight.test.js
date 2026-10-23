@@ -8,6 +8,7 @@ const { Vec3 } = require('vec3')
 const { ambientChange, sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
 const { GRAVESTONE } = require('../lib/server-overrides')
+const { flatText } = require('../lib/flat-text')
 const { balanced, botConstant, wiredSource, groundMemory, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
@@ -1214,10 +1215,11 @@ test('digat at a cell seen before and out of sight now walks there before it say
   assert.deepStrictEqual([short.body, short.acts], [undefined, ['walk']])
 })
 
-// The verbose scene reply as JSON and the boot summary over env, the senses besides the lay of the land and the sky stubbed.
-function summaries (env) {
+// env with the senses besides the lay of the land and the sky stubbed, and nobody else online.
+function sensesStubbed (env) {
   Object.assign(env.bot, { health: 20, food: 20, username: 'Bot', experience: { level: 0 } })
-  const stubs = {
+  return {
+    ...env,
     require,
     round: (v) => v,
     shared: { ...env.shared, ready: true },
@@ -1233,10 +1235,20 @@ function summaries (env) {
     jobs: { list: () => [] },
     chatLog: { cursor: 0 },
     waypoints: { list: () => ({}) },
-    reflexes: [{ name: 'combat', fairFill: () => ({ cells: new Set() }) }]
+    reflexes: [{ name: 'combat', fairFill: () => ({ cells: new Set() }) }],
+    onlineNames: () => [],
+    flatText
   }
-  return [JSON.stringify(runRoute('/scene', { verbose: '1' }, { ...env, ...stubs })), runRoute('/boot', {}, { ...env, ...stubs }).summary]
 }
+
+// The verbose scene reply as JSON and the boot summary over env.
+function summaries (env) {
+  const stubbed = sensesStubbed(env)
+  return [JSON.stringify(runRoute('/scene', { verbose: '1' }, stubbed)), runRoute('/boot', {}, stubbed).summary]
+}
+
+// The boot reply over env with names online.
+const bootOf = (env, names) => runRoute('/boot', {}, { ...sensesStubbed(env), onlineNames: () => names })
 
 // A lit room at x -3..3, z -3..3 on a stone floor over a lava lake at y 34, with a one-wide hole at x 2, z 0
 // from the floor down to y bottom.
@@ -1412,6 +1424,47 @@ test('state never names a block the body overlaps out of sight, also one seen be
   const reply = stateOf({ ...unseen, seesLit: () => false })
   assert.ok(!('inside' in reply))
   assert.doesNotMatch(JSON.stringify(reply), /stone/)
+})
+
+test('state keeps its keys in order, the time after inside', () => {
+  const env = litRoom()
+  const plain = env.bot.blockAt
+  env.bot.blockAt = (p) => {
+    const b = plain(p)
+    return ck(b.position.x, b.position.y, b.position.z) === '0,64,0' ? { ...b, name: 'cobblestone_wall', boundingBox: 'block', shapes: [[0.25, 0, 0.25, 0.75, 1.5, 0.75]] } : b
+  }
+  Object.assign(env.SKY_SEEN, { at: Date.now(), timeOfDay: NOON })
+  env.bot.game.gameMode = 'survival'
+  assert.deepStrictEqual(Object.keys(stateOf(env)), ['pos', 'yaw', 'pitch', 'health', 'food', 'oxygen', 'xpLevel', 'onGround', 'dimension', 'gameMode', 'inside', 'lastSky', 'held', 'lookingAt'])
+})
+
+test('boot names the online players cleaned, each cut at 32 characters, at most 20 of them', () => {
+  const env = shaftToSky(15)
+  const wide = '\u{1D538}'.repeat(40)
+  const few = bootOf(env, ['Probe', 'Al\u200bex\n', '\u2800', wide])
+  assert.deepStrictEqual([few.online, few.onlineMore], [['Probe', 'Alex', '\u{1D538}'.repeat(32)], undefined])
+  const many = bootOf(env, [' ', ...Array.from({ length: 23 }, (_, i) => `p${i}`)])
+  assert.deepStrictEqual([many.online, many.onlineMore], [Array.from({ length: 20 }, (_, i) => `p${i}`), 3])
+  assert.deepStrictEqual(bootOf(env, ['Owner', 'Owner\u200b']).online, ['Owner'], 'names equal after cleaning show once')
+  assert.deepStrictEqual(bootOf(env, [wide, '\u{1D538}'.repeat(32) + '\u{1D539}'.repeat(8)]).online, ['\u{1D538}'.repeat(32)], 'names equal after the cut show once')
+  const dupes = bootOf(env, [...Array.from({ length: 20 }, (_, i) => `p${i}`), 'p0\u200b', 'p1\u200b'])
+  assert.deepStrictEqual([dupes.online.length, dupes.onlineMore], [20, undefined], 'duplicates after cleaning do not count in onlineMore')
+  assert.deepStrictEqual(bootOf(env, []).online, [], 'nobody else online')
+  assert.strictEqual(many.summary, bootOf(env, []).summary, 'the summary names no player')
+})
+
+test('boot tells the dimension, and the time only while the sky shows, as state does', () => {
+  const clock = (env) => {
+    const state = stateOf(env)
+    const { dimension, timeOfDay, lastSky } = bootOf(env, [])
+    assert.deepStrictEqual({ dimension, timeOfDay, lastSky }, { dimension: state.dimension, timeOfDay: state.timeOfDay, lastSky: state.lastSky }, 'boot and state agree')
+    return { dimension, timeOfDay, lastSky }
+  }
+  assert.deepStrictEqual(clock(shaftToSky(15)), { dimension: 'overworld', timeOfDay: NOON, lastSky: undefined }, 'control: under open sky')
+  assert.deepStrictEqual(clock(underRock()), { dimension: 'overworld', timeOfDay: undefined, lastSky: undefined })
+  const seen = underRock()
+  Object.assign(seen.SKY_SEEN, { at: Date.now(), timeOfDay: NOON })
+  assert.deepStrictEqual(clock(seen), { dimension: 'overworld', timeOfDay: undefined, lastSky: 'last saw sky just now, day then' })
 })
 
 test('nightfall stays silent underground and fires once at the first sight of the sky', () => {

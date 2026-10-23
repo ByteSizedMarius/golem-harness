@@ -28,6 +28,7 @@ const { createLegs, bindLegs, wirePlanKnownReset, wireGateManners, wireLivePath,
 const { createJobBoard, bindJobBoard } = require('./lib/bot/jobs')
 const { createFollow, bindFollow } = require('./lib/bot/follow')
 const { createAwareness, bindAwareness, wireStaleEntities, wireCrumbRecording, wireCrumbForget, wirePresenceTick } = require('./lib/bot/awareness')
+const { createOnline, bindOnline, wireOnline } = require('./lib/bot/online')
 const { createUnstuck, bindUnstuck, wireUnstuckHeartbeat } = require('./lib/bot/unstuck')
 const { createPlacing, bindPlacing } = require('./lib/bot/placing')
 const { createWatchReflexes, bindWatchReflexes } = require('./lib/bot/watch-reflexes')
@@ -149,6 +150,8 @@ const { bunkerReflex } = ctx
 
 createAwareness(ctx)
 
+createOnline(ctx)
+
 createFollow(ctx)
 
 createBunkerCells(ctx)
@@ -223,6 +226,7 @@ function wireRuntime () {
   wireCrumbRecording()
   wireCrumbForget()
   wirePresenceTick()
+  wireOnline()
   wireMobHurt()
   wireLivePath()
   wirePathfinderTicks()
@@ -256,6 +260,7 @@ function bindAll () {
   bindJobBoard(ctx)
   bindFollow(ctx)
   bindAwareness(ctx)
+  bindOnline(ctx)
   bindUnstuck(ctx)
   bindPlacing(ctx)
   bindWatchReflexes(ctx)

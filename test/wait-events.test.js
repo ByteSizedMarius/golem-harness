@@ -152,8 +152,42 @@ test('quiet items past the first 50 also come with the next call at once', { tim
 test('a chat line keeps the block its speaker pointed at', { timeout: 20000 }, async () => {
   const pointsAt = { block: 'oak_log', x: 3, y: 64, z: -2 }
   const { srv } = mcpServer({ reply: tickReply([{ ...chatLine(1, 'put it here'), pointsAt }]) })
-  const [item] = JSON.parse(textOf(await call(srv, 'wait_events', { timeout: 1 }))).items
+  const [{ age, ...item }] = JSON.parse(textOf(await call(srv, 'wait_events', { timeout: 1 }))).items
   assert.deepStrictEqual(item, { type: 'chat', from: 'Alice', msg: 'put it here', pointsAt })
+})
+
+test('a chat line keeps where its speaker was and where the bot stood, and gets its age when the wait returns', { timeout: 20000 }, async () => {
+  const where = { live: true, pos: { x: 13, y: 64, z: -3 }, dist: 13, bearing: 'E' }
+  const me = { x: 0, y: 64, z: 1 }
+  const t = Date.now() - 3000
+  const { srv } = mcpServer({ reply: tickReply([{ ...chatLine(1, 'over here'), t, where, me, age: 0 }, { ...chatLine(2, 'who?'), t, where: { live: false, unseen: true }, me, age: 0 }]) })
+  const { items } = JSON.parse(textOf(await call(srv, 'wait_events', { timeout: 1 })))
+  const age = Math.floor((Date.now() - t) / 1000)
+  assert.ok(age >= 3, `control: ${age}`)
+  assert.deepStrictEqual(items, [
+    { type: 'chat', from: 'Alice', msg: 'over here', where, me, age },
+    { type: 'chat', from: 'Alice', msg: 'who?', where: { live: false, unseen: true }, me, age }
+  ])
+})
+
+test('a fresh chat line keeps age 0, and one logged before spawn comes without the situation', { timeout: 20000 }, async () => {
+  const t = Date.now()
+  const { srv } = mcpServer({ reply: tickReply([{ ...chatLine(1, 'hello?'), t, age: 0 }]) })
+  const { items } = JSON.parse(textOf(await call(srv, 'wait_events', { timeout: 1 })))
+  assert.ok(Date.now() - t < 1000, `control: the wait took ${Date.now() - t} ms`)
+  assert.deepStrictEqual(items, [{ type: 'chat', from: 'Alice', msg: 'hello?', age: 0 }])
+})
+
+test('a chat line held for the 5 s gap is as old as it is when the wait returns', { timeout: 30000 }, async () => {
+  const messages = [{ ...chatLine(1, 'first-line'), t: Date.now() }]
+  const { srv } = mcpServer({ reply: tickReply(messages) })
+  assert.ok(textOf(await call(srv, 'wait_events', { timeout: 20 })).includes('first-line'), 'control')
+  const t = Date.now()
+  messages.push({ ...chatLine(2, 'second-line'), t, age: 0 })
+  const { items } = JSON.parse(textOf(await call(srv, 'wait_events', { timeout: 20 })))
+  const held = Math.floor((Date.now() - t) / 1000)
+  assert.ok(held >= 4, `control: held ${held} s`)
+  assert.deepStrictEqual(items.map((i) => [i.msg, i.age]), [['second-line', held]])
 })
 
 // ---- the 5 s gap between returns ----

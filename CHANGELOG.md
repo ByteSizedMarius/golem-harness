@@ -4,6 +4,17 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-23: chat lines carry where the speaker is
+
+The pilot answered the owner's chat with a place far away while the owner stood right in front of
+the bot. Chat and whisper lines now carry where their speaker is, as far as the bot can tell (an
+exact position, distance and bearing in sight, a rough distance and bearing by nametag, the last
+place it saw them, or `unseen`), and where the bot stood when the line arrived. Every read of the
+chat log, in `/tick`, `/chatlog` and `wait_events`, gives each line its age in seconds, so a
+replayed line no longer reads as current. `/boot` names the players on the tab list (at most 20,
+plus a count of the rest) and gives the dimension and, while the sky shows, the time of day, the
+same way `/state` does.
+
 ## 2026-10-23: one withdraw call takes several stacks
 
 Sorting chests took one withdraw call per stack, and the pilot repeated an item name inside one call
