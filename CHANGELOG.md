@@ -4,6 +4,17 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-23: goto refuses long swims, and pillar keeps the legs under water
+
+Three drownings followed long gotos that hopped toward a far waypoint or into a lake without
+checking the swim, and a pillar under water was cut off by the drown reflex. A goto, and each hop of
+a far one, now refuses a plan that swims more than 3 blocks of deep water unless accept is given,
+and a goto that starts in water swims out to dry ground unrefused. The step into deep water costs as
+much as a step through it for goto and collect, so a bridge or walkway beside a lake wins over a
+swim, and a shallow ford keeps its cost. While a pillar gains a level every 3 s the drown reflex
+only raises its alarm, and it takes the legs again on the first reading after the pillar stalls or
+oxygen falls to 3.
+
 ## 2026-10-23: dig jobs survive a broken pick and falling gravel
 
 The held stone pick broke mid `dig_tunnel`, and the job ended "cannot advance: nudge stalled" with
