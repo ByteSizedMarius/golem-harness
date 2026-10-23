@@ -266,8 +266,7 @@ the pathfinder solves each walk fresh.
 or linked.
 
 That is the bot's memory. The pilot's is a separate problem, since the next model instance wakes
-knowing nothing. [`examples/pilot-memory/`](examples/pilot-memory/) is the system the first crew
-used for pilot continuity, a tiered memory graph with a validator.
+knowing nothing.
 
 ## How the model survives being slow
 
