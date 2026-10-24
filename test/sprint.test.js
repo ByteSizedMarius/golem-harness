@@ -11,7 +11,8 @@ const { loadBotFunctions } = require('./helpers')
 const EAST = { dx: 1, dz: 0 }
 
 const AIR = { name: 'air', boundingBox: 'empty' }
-const STONE = { name: 'stone', boundingBox: 'block' }
+const STONE = { name: 'stone', boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 1]] }
+const SLAB = { name: 'stone_slab', boundingBox: 'block', shapes: [[0, 0, 0, 1, 0.5, 1]] }
 const WATER = { name: 'water', boundingBox: 'empty' }
 const FARMLAND = { name: 'farmland', boundingBox: 'block' }
 const WHEAT = { name: 'wheat', boundingBox: 'empty' }
@@ -23,9 +24,15 @@ const node = (x, y, z, work = {}) => ({ x: x + 0.5, y, z: z + 0.5, toBreak: work
 // Nodes east from x 1 to x n on y 64.
 const east = (n) => Array.from({ length: n }, (_, i) => node(i + 1, 64, 0))
 
-function jumps (over = {}) {
-  return noJumpReason({ path: east(6), pos: new Vec3(0.5, 64, 0.5), onGround: true, blockAt: world(), inWater: false, food: 20, fighting: false, ...over }) === null
+function reason (over = {}) {
+  return noJumpReason({ path: east(6), pos: new Vec3(0.5, 64, 0.5), onGround: true, blockAt: world(), inWater: false, food: 20, fighting: false, ...over })
 }
+
+function jumps (over = {}) {
+  return reason(over) === null
+}
+// Flat stone with `ceiling` at y 66 on z 0, from x `from` to x `to`.
+const tunnel = (ceiling, from = -1, to = 7) => (p) => (p.y === 66 && p.z === 0 && p.x >= from && p.x <= to ? ceiling : world()(p))
 
 test('the body sprint jumps along a straight, flat run with room overhead', () => {
   assert.strictEqual(jumps(), true)
@@ -46,9 +53,18 @@ test('it lets go before a turn, a step, a drop or work on the path', () => {
 
 test('it never jumps under a low ceiling or into water along the run', () => {
   assert.strictEqual(jumps({ blockAt: world({ '3,66,0': STONE }) }), false, 'a ceiling 3 above a node')
-  assert.strictEqual(jumps({ blockAt: world({ '0,66,0': STONE }) }), false, 'a ceiling 3 above the body')
+  assert.strictEqual(jumps({ blockAt: world({ '0,66,0': SLAB }) }), false, 'a slab 3 above the body')
   assert.strictEqual(jumps({ blockAt: world({ '6,66,0': STONE }) }), true, 'control: a ceiling past the run')
   assert.strictEqual(jumps({ blockAt: world({ '2,64,0': WATER }) }), false, 'water on the run')
+})
+
+test('it jumps in a two-high tunnel under full blocks, never under a slab or water there', () => {
+  assert.strictEqual(reason({ blockAt: tunnel(STONE) }), null, 'a stone ceiling')
+  assert.strictEqual(reason({ blockAt: tunnel(SLAB) }), 'no headroom', 'a bottom slab ceiling')
+  assert.strictEqual(reason({ blockAt: tunnel(WATER) }), 'water', 'water over the run')
+  assert.strictEqual(reason({ blockAt: tunnel(STONE, 0, 0) }), null, 'a tunnel the run leaves')
+  assert.strictEqual(reason({ blockAt: tunnel(STONE, 3) }), 'no headroom', 'a tunnel the run enters from open sky')
+  assert.strictEqual(reason(), null, 'control: open sky')
 })
 
 test('it never jumps over a field or where a hop lands on one', () => {

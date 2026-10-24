@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-24: sprint jumps under low ceilings
+
+The walk never sprint-jumped under a ceiling two blocks above the floor, though jumps that bump the
+head there cover more ground than a sprint walk. It now sprint-jumps under a full-block ceiling, and
+keeps the body on its feet on a run from under open sky into such a ceiling, where a hop would hit
+the ceiling's side and stop the body.
+
 ## 2026-10-24: drop the sprint when the body stops moving
 
 The bot kept sprinting while it pressed into a block or stood on a flee with no path, so players on
