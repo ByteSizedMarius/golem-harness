@@ -148,7 +148,7 @@ GOLEM_TOKEN=<token> MC_HOST=<host> MC_PORT=<port> node bot.js
 
 `.env.example` describes the rest: `MC_OWNER` (the default player for `where`),
 `GOLEM_SERVER_OVERRIDES`, `GOLEM_CHAT_MAX`, and the MCP server's `GOLEM_PAPERCUTS`,
-`GOLEM_LESSONS` and `GOLEM_TODO`.
+`GOLEM_LESSONS`, `GOLEM_TODO` and `GOLEM_TOPICS` (the gated manual topics to serve).
 
 The control API is the only port the bot opens. The bot exits when its connection to the server
 ends.
@@ -196,7 +196,7 @@ The pilot sees 77 tools: 72 that each call one bot route (`goto` calls `/goto`),
 - `lesson`: something a future player should know, appended to the file `GOLEM_LESSONS` names.
 - `todo`: the pilot's open requests and promises, each at priority high, normal or low, kept in
   the JSON file `GOLEM_TODO` names and shown at `boot`.
-- `manual`: one topic of `manual/`, whole.
+- `manual`: one topic of `manual/`, whole. A gated topic only while `GOLEM_TOPICS` names it.
 
 Each of the three files must be an absolute path. Without one, its tool answers that it is off.
 

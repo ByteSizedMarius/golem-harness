@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-24: manual topics follow the server's mods
+
+The MCP server withholds the manual topics that apply only on some servers unless `GOLEM_TOPICS`
+names them, so the pilot reads only the topics for the server it plays on. The gravestone rules
+moved from `death` into the gated topic `graves`, and the `grave` tool's key rules come from there.
+`death` keeps what holds on every server. The topics are picked from the server's mod list by the
+launcher (outside this repo).
+
 ## 2026-10-24: equip puts armor in its slot
 
 Putting on a helmet took `equip(name: "iron_helmet", dest: "head")`, while a shift-click needs no

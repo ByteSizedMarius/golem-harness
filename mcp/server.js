@@ -22,12 +22,14 @@ const MANUAL_DISK_CAP = 2 * MANUAL_CAP
 const MANUAL_DIR = path.join(__dirname, '..', 'manual')
 const TOPIC_FILE = /^[a-z0-9-]{1,32}\.md$/
 const KEY_RULES_MAX = 3
+// Topics served only when GOLEM_TOPICS names them.
+const MOD_TOPICS = ['graves']
 // A topic's key rules go out once, with the first reply of its tools that passes when.
 const PRIMED_BY = new Map([
   ...['chest', 'deposit', 'withdraw', 'walls', 'roof', 'build', 'outline'].map((name) => [name, { topic: 'building' }]),
   ['placeitem', { topic: 'building', when: ({ name }) => name.toLowerCase().includes('chest') }],
   ...['smelt', 'furnace'].map((name) => [name, { topic: 'jobs' }]),
-  ['grave', { topic: 'death' }]
+  ['grave', { topic: 'graves' }]
 ])
 // A topic's key rules go out once, with the first reply of any tool that passes when.
 const PRIMED_BY_REPLY = [
@@ -94,7 +96,7 @@ const LOCAL_TOOLS = [
 
 const manualTool = (topics) => ({
   name: 'manual',
-  description: `Return one topic of the long-form manual, whole. The topics are ${topics.join(', ')}.`,
+  description: `One topic of the long-form manual, whole: ${topics.join(', ')}.`,
   params: { topic: { type: 'enum', values: topics, required: true } }
 })
 
@@ -133,7 +135,10 @@ function loadManual (dir) {
 // The list under a "## Key rules" heading right below the title.
 function keyRules (topic, text) {
   const lines = text.split(/\r?\n/)
-  if (!lines[0].startsWith('# ') || lines[1] !== '' || lines[2] !== '## Key rules' || lines[3] !== '') return null
+  if (!lines[0].startsWith('# ') || lines[1] !== '' || lines[2] !== '## Key rules' || lines[3] !== '') {
+    if (lines.includes('## Key rules')) throw new TypeError(`manual topic ${topic} has a ## Key rules heading that is not right below its title`)
+    return null
+  }
   const end = lines.findIndex((line, i) => i > 3 && !line.startsWith('- '))
   const rules = lines.slice(4, end < 0 ? lines.length : end)
   if (rules.length < 1 || rules.length > KEY_RULES_MAX) throw new TypeError(`manual topic ${topic} has key rules of ${rules.length} lines, not 1 to ${KEY_RULES_MAX}`)
@@ -389,11 +394,12 @@ function untilAborted (promise, signal) {
 // The frontier { boot, chat, ev }: every chat line and event of process boot up to those ids reached a wait_events or tick result.
 // onWaitStart runs as a wait_events call starts waiting, onWake and onDeliver get the frontier after each wait_events return and each tick that moved it.
 // onToolCall runs on every tools/call with the name from the tool table, null for a name outside it, and the sorted names of the tool's params the call passed.
-function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { boot: null, chat: 0, ev: 0 }, onWaitStart = () => {}, onWake = () => {}, onDeliver = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, lessonsFile, todoFile, now = () => new Date() }) {
+function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = [], start = { boot: null, chat: 0, ev: 0 }, onWaitStart = () => {}, onWake = () => {}, onDeliver = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, lessonsFile, todoFile, now = () => new Date() }) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new TypeError('port must be an integer 1024-65535')
   if (typeof token !== 'string' || token === '') throw new TypeError('token must be a non-empty string')
   if (typeof fetch !== 'function') throw new TypeError('fetch must be a function')
   if (typeof manualDir !== 'string' || manualDir === '') throw new TypeError('manualDir must be a path')
+  if (!Array.isArray(topics) || !topics.every((t) => typeof t === 'string')) throw new TypeError('topics must be an array of topic names')
   if (start === null || typeof start !== 'object' || (start.boot !== null && bootOf(start.boot) === null) || !isCursor(start.chat) || !isCursor(start.ev)) {
     throw new TypeError('start must be { boot, chat, ev } with boot null or a boot id and chat and ev cursors')
   }
@@ -415,7 +421,14 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, start = { b
   }
   if (typeof now !== 'function') throw new TypeError('now must be a function')
   const manual = loadManual(manualDir)
+  // Every topic's key rules are checked at startup, served or not.
+  for (const [topic, text] of manual) keyRules(topic, text)
   const primers = loadPrimers(manual)
+  for (const topic of MOD_TOPICS) {
+    if (topics.includes(topic)) continue
+    manual.delete(topic)
+    primers.delete(topic)
+  }
   // Topics whose key rules a reply already carried.
   const primed = new Set()
   const tools = [...TOOLS, ...LOCAL_TOOLS, manualTool([...manual.keys()])]
@@ -901,9 +914,10 @@ function main () {
   const papercutsFile = process.env.GOLEM_PAPERCUTS || undefined
   const lessonsFile = process.env.GOLEM_LESSONS || undefined
   const todoFile = process.env.GOLEM_TODO || undefined
-  serveStdio(createServer({ port, token, fetch: globalThis.fetch, start, onWaitStart, onWake, onDeliver, onToolCall, papercutsFile, lessonsFile, todoFile }))
+  const topics = (process.env.GOLEM_TOPICS || '').split(',').filter(Boolean)
+  serveStdio(createServer({ port, token, fetch: globalThis.fetch, topics, start, onWaitStart, onWake, onDeliver, onToolCall, papercutsFile, lessonsFile, todoFile }))
 }
 
 if (require.main === module) main()
 
-module.exports = { createServer, redact, PATH_TOKEN }
+module.exports = { createServer, redact, PATH_TOKEN, MOD_TOPICS }

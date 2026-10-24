@@ -5,7 +5,7 @@ const fs = require('node:fs')
 const http = require('node:http')
 const os = require('node:os')
 const path = require('node:path')
-const { createServer, redact, PATH_TOKEN } = require('../mcp/server')
+const { createServer, redact, PATH_TOKEN, MOD_TOPICS } = require('../mcp/server')
 const { TOOLS, LONGEST } = require('../mcp/tools')
 const { ROUTE_BOUNDS } = require('../lib/bounds')
 const {
@@ -71,7 +71,7 @@ test('the bunker tool and the /bunker route share their bounds', () => {
   for (const [k, spec] of numeric) assert.deepStrictEqual(ROUTE_BOUNDS['/bunker'][k], [spec.min, spec.max], `/bunker ${k}`)
 })
 
-test('every manual file is at most 4000 bytes with LF ends and DRIVING.md lists exactly the manual topics', () => {
+test('every manual file is at most 4000 bytes with LF ends and DRIVING.md lists exactly the ungated manual topics', () => {
   const dir = path.join(__dirname, '..', 'manual')
   const files = fs.readdirSync(dir)
   assert.ok(files.length > 0, 'manual/ holds files')
@@ -81,7 +81,7 @@ test('every manual file is at most 4000 bytes with LF ends and DRIVING.md lists 
   }
   const line = /^Topics for manual\(topic\): (.+)$/m.exec(fs.readFileSync(path.join(__dirname, '..', 'DRIVING.md'), 'utf8'))
   assert.ok(line, 'DRIVING.md has a topics line')
-  assert.deepStrictEqual(line[1].split(', ').sort(), files.map((f) => f.replace(/\.md$/, '')).sort())
+  assert.deepStrictEqual(line[1].split(', ').sort(), files.map((f) => f.replace(/\.md$/, '')).filter((topic) => !MOD_TOPICS.includes(topic)).sort())
 })
 
 // manual replies skip the path redaction.
@@ -553,7 +553,7 @@ test('a manual checked out with CRLF line ends loads and serves each topic with 
   const shipped = path.join(__dirname, '..', 'manual')
   const topics = fs.readdirSync(shipped).map((f) => [f, fs.readFileSync(path.join(shipped, f), 'utf8').replace(/\r\n/g, '\n')])
   const dir = manualFixture(t, Object.fromEntries(topics.map(([f, text]) => [f, text.replace(/\n/g, '\r\n')])))
-  const { srv } = mcpServer({ manualDir: dir })
+  const { srv } = mcpServer({ manualDir: dir, topics: MOD_TOPICS })
   for (const [f, text] of topics) assert.strictEqual(textOf(await call(srv, 'manual', { topic: f.slice(0, -3) })), text, f)
 })
 

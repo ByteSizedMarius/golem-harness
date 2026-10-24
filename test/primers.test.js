@@ -63,10 +63,11 @@ test('an unmapped tool brings up no key rules and leaves them for the first mapp
 })
 
 test('the key rules a reply carries are the topic file\'s key rules block and a pointer to the topic', async () => {
-  for (const [tool, args, topic] of [['outline', { x: 0, z: 0 }, 'building'], ['smelt', { item: 'raw_iron' }, 'jobs'], ['grave', { take: 'all' }, 'death']]) {
+  for (const [tool, args, topic, topics] of [['outline', { x: 0, z: 0 }, 'building'], ['smelt', { item: 'raw_iron' }, 'jobs'], ['grave', { take: 'all' }, 'graves', ['graves']]]) {
     const block = keyRulesBlock(topic)
     assert.ok(block.split('\n').length <= 3, `${topic} key rules`)
-    assert.strictEqual(primerOf(await call(okBot(), tool, args)), `${block}\nMore: manual('${topic}')`, tool)
+    const srv = mcpServer({ reply: () => ({ ok: true }), topics }).srv
+    assert.strictEqual(primerOf(await call(srv, tool, args)), `${block}\nMore: manual('${topic}')`, tool)
   }
 })
 
