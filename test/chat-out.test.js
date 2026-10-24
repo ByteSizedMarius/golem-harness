@@ -255,3 +255,25 @@ test('the queue accepts again once drained', async () => {
   await h.until(3)
   assert.deepStrictEqual(h.sends(), ['a', 'b', 'c'])
 })
+
+test('drained resolves at once on an idle queue', async () => {
+  const h = harness()
+  await h.q.drained()
+  h.q.enqueue(['a'])
+  await h.until(1)
+  await h.settle()
+  await h.q.drained()
+  assert.deepStrictEqual(h.sends(), ['a'])
+})
+
+test('drained stays pending until the last queued line is sent', async () => {
+  const h = harness({ hold: true })
+  h.q.enqueue(['a', 'b'])
+  let sendsAtResolve = null
+  const done = h.q.drained().then(() => { sendsAtResolve = h.sends() })
+  await h.until(1)
+  assert.strictEqual(sendsAtResolve, null, 'resolved after the first of two lines')
+  await h.until(2)
+  await done
+  assert.deepStrictEqual(sendsAtResolve, ['a', 'b'])
+})

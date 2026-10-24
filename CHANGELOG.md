@@ -4,6 +4,12 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-24: /chat can wait for its queue
+
+`/chat` takes `wait=1`, which answers only once every queued chat line has been sent. A client that
+is about to stop the bot can wait for its last message to go out instead of guessing how long the
+queue needs.
+
 ## 2026-10-23: chat lines carry where the speaker is
 
 The pilot answered the owner's chat with a place far away while the owner stood right in front of

@@ -306,6 +306,21 @@ test('/chat?msg=hello is sent once and reports one chunk queued', async (t) => {
   assert.deepStrictEqual(s.texts(), ['hello'])
 })
 
+test('/chat with wait=1 answers once every queued line is sent, wait=0 answers at once, other values get 400', async (t) => {
+  const s = await startApp(t, { gapMs: 1000 })
+  assert.strictEqual((await s.get('/chat?msg=first')).status, 200)
+  const waited = await s.get('/chat?msg=a&wait=1')
+  assert.strictEqual(waited.status, 200)
+  assertQueuedCount(waited, 1)
+  assert.deepStrictEqual(s.texts(), ['first', 'a'], 'wait=1 answered before the line was sent')
+  assert.strictEqual((await s.get('/chat?msg=b&wait=0')).status, 200)
+  assert.deepStrictEqual(s.texts(), ['first', 'a'], 'wait=0 waited for the queue')
+  const bad = await s.get('/chat?msg=c&wait=2')
+  assert.strictEqual(bad.status, 400)
+  await s.drained()
+  assert.deepStrictEqual(s.texts(), ['first', 'a', 'b'])
+})
+
 test('one disallowed line refuses the whole lines request with 403 and nothing of it is sent', async (t) => {
   const s = await startApp(t)
   assert.strictEqual((await s.get('/chat?lines=' + enc('hi|there'))).status, 200)
