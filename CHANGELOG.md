@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-24: signs hang on the wall the pilot names
+
+A sign placed in front of a chest hung on the block across the cell, and reading it back showed
+every line as "[object Object]". `sign` now takes `wall` (N, S, E or W) to hang the sign on that
+wall of the cell, even over a floor, and its reply names the wall and the facing the server set. It
+holds the hand against the guard reflex as `placeitem` does, and `blockat` shows each sign line as
+plain text.
+
 ## 2026-10-24: manual topics follow the server's mods
 
 The MCP server withholds the manual topics that apply only on some servers unless `GOLEM_TOPICS`

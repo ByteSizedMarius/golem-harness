@@ -515,6 +515,8 @@ function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen 
       guardState: { hand: null },
       setTimeout,
       clearTimeout,
+      HANGS: botConstant('HANGS'),
+      BEHIND: botConstant('BEHIND'),
       ...walk
     }
   })
@@ -621,9 +623,9 @@ test('placeitem keeps the hand lease through its look after a slow equip used up
 
 const SIGN_AT = { x: '1', y: '64', z: '0', text: 'hi' }
 
-async function signRefusal (rig) {
+async function signRefusal (rig, query = SIGN_AT) {
   const { handle, res } = routeHandler('/sign', rig.env)
-  await handle({ query: SIGN_AT }, res)
+  await handle({ query }, res)
   assert.ok(res.error, 'sign did not refuse')
   assert.deepStrictEqual(rig.log.filter((l) => l.startsWith('place')), [])
   return res.error.message
@@ -726,6 +728,113 @@ test('sign refuses a planned walk longer than 16 blocks or one that drops more t
   assert.strictEqual(await signRefusal(long), 'refusing to walk 19 blocks to place at 1,64,0: goto closer first')
   const deep = placeitemRig('oak_sign', { path: [[-19, 64, 0], [-18, 64, 0], [-17, 60, 0], [-16, 60, 0]] })
   assert.strictEqual(await signRefusal(deep), 'refusing to walk to place at 1,64,0: the way drops 4 blocks at once')
+})
+
+const CHEST = { name: 'chest', boundingBox: 'block' }
+const wallSign = (facing) => ({ name: 'oak_wall_sign', boundingBox: 'empty', getProperties: () => ({ facing }) })
+
+async function signed (query, opts) {
+  const rig = placeitemRig('oak_sign', opts)
+  rig.env.bot.updateSign = async () => {}
+  return { reply: await awaitRoute('/sign', { ...SIGN_AT, ...query }, rig.env), ...rig }
+}
+
+test('sign with wall hangs on that neighbour, a chest included, over a solid floor and a solid block across the cell', async () => {
+  const extra = { '0,64,0': CHEST, '2,64,0': STONE }
+  const hung = await signed({ wall: 'W' }, { extra, placedAs: wallSign('east') })
+  assert.deepStrictEqual(hung.clicks, ['0,64,0 face 1,0,0'])
+  assert.deepStrictEqual(hung.log.filter((l) => l.startsWith('place')), ['place against chest sneaking=true'])
+  assert.deepStrictEqual([hung.reply.wall, hung.reply.facing, hung.reply.wrote], ['west', 'east', ['hi']])
+  const moved = await signed({ wall: 'W' }, { extra, placedAs: wallSign('west') })
+  assert.deepStrictEqual([moved.reply.wall, moved.reply.facing], ['east, wanted west', 'west'])
+  const standing = await signed({ wall: 'W' }, { extra })
+  assert.strictEqual(standing.reply.wall, 'none, wanted west')
+})
+
+test('sign without wall stands on the floor, else hangs on the first solid side from +x, and face aims the standing sign', async () => {
+  const sides = { '0,64,0': STONE, '2,64,0': STONE }
+  const floor = await signed({}, { extra: sides })
+  assert.deepStrictEqual(floor.clicks, ['1,63,0 face 0,1,0'], 'the floor first')
+  assert.strictEqual(floor.reply.wall, undefined)
+  const side = await signed({}, { extra: sides, hidden: ['1,63,0'], placedAs: wallSign('west') })
+  assert.deepStrictEqual(side.clicks, ['2,64,0 face -1,0,0'])
+  assert.deepStrictEqual([side.reply.wall, side.reply.facing], ['east', 'west'])
+  const aimed = await signed({ face: 'N' }, { extra: sides })
+  assert.deepStrictEqual(aimed.clicks, ['1,63,0 face 0,1,0'])
+  assert.deepStrictEqual(aimed.log.filter((l) => l.startsWith('look')), ['look 1.5,16.5'], 'a standing sign faces the placer')
+})
+
+test('sign refuses a wall out of sight and one that holds air alike', async () => {
+  const query = { ...SIGN_AT, wall: 'W' }
+  const air = await signRefusal(placeitemRig('oak_sign'), query)
+  assert.strictEqual(air, 'no solid wall west of the cell for a sign')
+  assert.strictEqual(await signRefusal(placeitemRig('oak_sign', { extra: { '0,64,0': CHEST }, unseen: ['0,64,0'] }), query), air)
+})
+
+test('sign refuses wall together with face before it walks', async () => {
+  const rig = placeitemRig('oak_sign', { extra: { '0,64,0': CHEST } })
+  let walked = false
+  rig.env.bot.pathfinder.goto = async () => { walked = true }
+  assert.strictEqual(await signRefusal(rig, { ...SIGN_AT, wall: 'W', face: 'N' }), 'face aims a standing sign, wall hangs one: pass one')
+  assert.strictEqual(walked, false)
+})
+
+test('sign takes wall in lower case and refuses an unknown one before it walks', async () => {
+  const extra = { '0,64,0': CHEST }
+  const hung = await signed({ wall: 'w' }, { extra, placedAs: wallSign('east') })
+  assert.deepStrictEqual(hung.clicks, ['0,64,0 face 1,0,0'])
+  const rig = placeitemRig('oak_sign', { extra })
+  let walked = false
+  rig.env.bot.pathfinder.goto = async () => { walked = true }
+  assert.strictEqual(await signRefusal(rig, { ...SIGN_AT, wall: 'q' }), 'wall must be N, S, E or W')
+  assert.deepStrictEqual({ walked, clicks: rig.clicks }, { walked: false, clicks: [] })
+})
+
+test('sign refuses a fight that starts while it clears soft cover, before the sign goes into the hand', async () => {
+  let fighting = false
+  let equipped = false
+  const rig = placeitemRig('oak_sign')
+  Object.assign(rig.env, { reflexes: [{ name: 'combat', fightBusy: () => fighting, _threat: null }], clearSoftCover: async () => { fighting = true } })
+  rig.env.bot.equip = async () => { equipped = true }
+  assert.match(await signRefusal(rig), /^refused: fighting something, the guard reflex holds the hand\./)
+  assert.deepStrictEqual({ equipped, hand: rig.env.guardState.hand }, { equipped: false, hand: null })
+})
+
+test('sign does not click once the guard reflex took the hand back after the equip, whatever the facing', async () => {
+  for (const face of [undefined, 'N']) {
+    const rig = placeitemRig('oak_sign')
+    rig.env.bot.lookAt = async () => { rig.env.bot.heldItem = { name: 'iron_sword' } }
+    assert.match(await signRefusal(rig, { ...SIGN_AT, face }), /^the guard reflex took the hand back from the oak_sign \(holding iron_sword\), nothing placed, retry$/, `face ${face}`)
+    assert.deepStrictEqual(rig.clicks, [], `face ${face} clicked`)
+    assert.strictEqual(rig.env.guardState.hand, null, `face ${face} kept the lease`)
+  }
+})
+
+test('sign keeps the hand lease through its look after a slow equip used up the first 2 s, and gives it back after', async () => {
+  for (const face of [undefined, 'N']) {
+    const clock = fakeClock()
+    const { env } = placeitemRig('oak_sign')
+    const wait = (ms) => new Promise(resolve => clock.setTimeout(resolve, ms))
+    const leased = []
+    Object.assign(env, { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout })
+    env.bot.equip = async (item) => { await wait(1800); env.bot.heldItem = item }
+    env.bot.lookAt = async () => { await wait(600) }
+    env.bot.updateSign = async () => {}
+    for (const click of ['placeBlock', '_placeBlockWithOptions']) {
+      const place = env.bot[click]
+      env.bot[click] = async (ref, at) => { leased.push(!!env.guardState.hand); return place(ref, at) }
+    }
+    const { handle, res } = routeHandler('/sign', env)
+    const done = handle({ query: { ...SIGN_AT, face } }, res)
+    while (res.body === undefined && res.error === undefined && clock.now() < 10000) {
+      await new Promise(setImmediate)
+      clock.advance(1)
+    }
+    await done
+    assert.strictEqual(res.error, undefined, res.error && res.error.message)
+    assert.deepStrictEqual(leased, [true], `face ${face}: the lease ended before the click`)
+    assert.strictEqual(env.guardState.hand, null, `face ${face} kept the lease`)
+  }
 })
 
 const ladder = (facing) => ({ name: 'ladder', boundingBox: 'block', getProperties: () => ({ facing }) })
