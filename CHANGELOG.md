@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-24: drop the sprint when the body stops moving
+
+The bot kept sprinting while it pressed into a block or stood on a flee with no path, so players on
+a 1.7.10 server saw sprint particles under a bot that wasn't moving. A sprint now ends after 4 ticks
+that each move the body less than 0.1 blocks, and the walk, the flee and the sprint opener start
+another only once the body has moved a block from there.
+
 ## 2026-10-24: one note tool with a memory for each server
 
 The pilot had free text only in one-line waypoint notes, and wrote lessons and papercuts through two

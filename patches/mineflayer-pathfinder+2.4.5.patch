@@ -1,17 +1,21 @@
 diff --git a/node_modules/mineflayer-pathfinder/index.js b/node_modules/mineflayer-pathfinder/index.js
-index b38bd30..752cecc 100644
+index b38bd30..ad1f451 100644
 --- a/node_modules/mineflayer-pathfinder/index.js
 +++ b/node_modules/mineflayer-pathfinder/index.js
-@@ -11,6 +11,8 @@ const Vec3 = require('vec3').Vec3
+@@ -11,6 +11,12 @@ const Vec3 = require('vec3').Vec3
  const Physics = require('./lib/physics')
  const nbt = require('prismarine-nbt')
  const interactableBlocks = require('./lib/interactable.json')
 +// LOCAL PATCH (Golem 10-15): a box this close to a shape's side touches it.
 +const TOUCH = 0.001
++// LOCAL PATCH (Golem 10-24): a body sprints about 0.28 blocks a tick and walks about 0.22.
++const SPRINT_MIN_STEP = 0.1
++const SPRINT_STALL_TICKS = 4
++const SPRINT_REARM = 1
  
  function inject (bot) {
    const waterType = bot.registry.blocksByName.water.id
-@@ -77,7 +79,19 @@ function inject (bot) {
+@@ -77,7 +83,19 @@ function inject (bot) {
      if (options.startMove) {
        start = options.startMove
      } else {
@@ -32,7 +36,44 @@ index b38bd30..752cecc 100644
        const dy = startPos.y - p.y
        const b = bot.blockAt(p) // The block we are standing in
        // Offset the floored bot position by one if we are standing on a block that has not the full height but is solid
-@@ -168,7 +182,13 @@ function inject (bot) {
+@@ -123,6 +141,7 @@ function inject (bot) {
+   function resetPath (reason, clearStates = true) {
+     if (!stopPathing && path.length > 0) bot.emit('path_reset', reason)
+     path = []
++    bot.pathfinder.sprintBlocked = false // LOCAL PATCH (Golem 10-24)
+     if (digging) {
+       bot.on('diggingAborted', detectDiggingStopped)
+       bot.on('diggingCompleted', detectDiggingStopped)
+@@ -163,12 +182,42 @@ function inject (bot) {
+     stopPathing = true
+   }
+ 
++  // LOCAL PATCH (Golem 10-24): a sprint averaging under SPRINT_MIN_STEP a tick ends and blocks sprinting until the body moves SPRINT_REARM blocks or the path resets.
++  bot.pathfinder.sprintBlocked = false
++  const sprintTrail = []
++  let sprintEndedAt = null
++  const flat = (a, b) => Math.hypot(a.x - b.x, a.z - b.z)
++  function watchSprint () {
++    const p = bot.entity.position
++    if (bot.pathfinder.sprintBlocked && flat(p, sprintEndedAt) >= SPRINT_REARM) bot.pathfinder.sprintBlocked = false
++    if (!bot.controlState?.sprint) {
++      sprintTrail.length = 0
++      return
++    }
++    sprintTrail.push(p.clone())
++    if (sprintTrail.length > SPRINT_STALL_TICKS + 1) sprintTrail.shift()
++    const ticks = sprintTrail.length - 1
++    if (ticks >= SPRINT_STALL_TICKS - 1 && flat(p, sprintTrail[0]) < ticks * SPRINT_MIN_STEP) {
++      sprintTrail.length = 0
++      sprintEndedAt = p.clone()
++      bot.pathfinder.sprintBlocked = true
++      bot.setControlState('sprint', false)
++    }
++  }
++  bot.on('physicsTick', watchSprint)
++
+   bot.on('physicsTick', monitorMovement)
+ 
    function postProcessPath (path) {
      for (let i = 0; i < path.length; i++) {
        const curPoint = path[i]
@@ -47,7 +88,7 @@ index b38bd30..752cecc 100644
        const b = bot.blockAt(new Vec3(curPoint.x, curPoint.y, curPoint.z))
        if (b && (b.type === waterType || ((b.type === ladderId || b.type === vineId) && i + 1 < path.length && path[i + 1].y < curPoint.y))) {
          curPoint.x = Math.floor(curPoint.x) + 0.5
-@@ -340,8 +360,34 @@ function inject (bot) {
+@@ -340,8 +389,34 @@ function inject (bot) {
  
      // Make sure our bounding box don't collide with neighboring blocks
      // otherwise recenter the position
@@ -84,7 +125,7 @@ index b38bd30..752cecc 100644
    }
  
    function moveToEdge (refBlock, edge) {
-@@ -520,10 +566,42 @@ function inject (bot) {
+@@ -520,10 +595,42 @@ function inject (bot) {
  
        // Open gates or doors
        if (placingBlock?.useOne) {
@@ -129,7 +170,7 @@ index b38bd30..752cecc 100644
          }, err => {
            console.error(err)
            lockUseBlock.release()
-@@ -608,7 +686,17 @@ function inject (bot) {
+@@ -608,13 +715,23 @@ function inject (bot) {
      bot.setControlState('forward', true)
      bot.setControlState('jump', false)
  
@@ -147,7 +188,15 @@ index b38bd30..752cecc 100644
 +    } else if (bot.entity.isInWater) {
        bot.setControlState('jump', true)
        bot.setControlState('sprint', false)
-     } else if (stateMovements.allowSprinting && physics.canStraightLine(path, true)) {
+-    } else if (stateMovements.allowSprinting && physics.canStraightLine(path, true)) {
++    } else if (stateMovements.allowSprinting && !bot.pathfinder.sprintBlocked && physics.canStraightLine(path, true)) {
+       bot.setControlState('jump', false)
+       bot.setControlState('sprint', true)
+-    } else if (stateMovements.allowSprinting && physics.canSprintJump(path)) {
++    } else if (stateMovements.allowSprinting && !bot.pathfinder.sprintBlocked && physics.canSprintJump(path)) {
+       bot.setControlState('jump', true)
+       bot.setControlState('sprint', true)
+     } else if (physics.canStraightLine(path)) {
 diff --git a/node_modules/mineflayer-pathfinder/lib/movements.js b/node_modules/mineflayer-pathfinder/lib/movements.js
 index a7e3505..355546a 100644
 --- a/node_modules/mineflayer-pathfinder/lib/movements.js
