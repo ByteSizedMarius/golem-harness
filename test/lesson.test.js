@@ -22,6 +22,7 @@ function runDir (t) {
 }
 
 const server = (lessonsFile) => createServer({ port: PORT, token: MCP_TOKEN, fetch: fakeBot().fetch, lessonsFile, now: () => NOW })
+const lesson = (srv, args) => call(srv, 'note', { kind: 'lesson', ...args })
 const read = (file) => fs.readFileSync(file, 'utf8')
 const tree = (root) => fs.readdirSync(root, { recursive: true }).map((p) => p.split(path.sep).join('/')).sort()
 
@@ -34,8 +35,8 @@ test('lesson appends one entry stamped with the time, the run dir and where it b
   const { file } = runDir(t)
   const srv = server(file)
   fs.writeFileSync(file, entry('earlier'))
-  assert.strictEqual(textOf(await call(srv, 'lesson', { text: 'sand falls when the block below goes' })), 'noted')
-  assert.strictEqual(textOf(await call(srv, 'lesson', { text: 'chests need air above', for: 'building' })), 'noted')
+  assert.strictEqual(textOf(await lesson(srv, { text: 'sand falls when the block below goes' })), 'noted')
+  assert.strictEqual(textOf(await lesson(srv, { text: 'chests need air above', for: 'building' })), 'noted')
   assert.strictEqual(read(file), entry('earlier') + entry('sand falls when the block below goes') + entry('chests need air above', 'building'))
 })
 
@@ -43,11 +44,11 @@ test('lesson appends one entry stamped with the time, the run dir and where it b
 test('lesson text lands on one line and a for outside letters, digits, - and _ is refused', async (t) => {
   const { file } = runDir(t)
   const srv = server(file)
-  assert.strictEqual(textOf(await call(srv, 'lesson', { text: 'plain words', for: 'wait_events' })), 'noted', 'control')
-  assert.strictEqual(textOf(await call(srv, 'lesson', { text: ' one \n two \u2028 three\u200b ' })), 'noted')
+  assert.strictEqual(textOf(await lesson(srv, { text: 'plain words', for: 'wait_events' })), 'noted', 'control')
+  assert.strictEqual(textOf(await lesson(srv, { text: ' one \n two \u2028 three\u200b ' })), 'noted')
   const before = read(file)
   for (const place of ['rules | pilot', 'rules\nforged', 'rules\u200b', 'a b']) {
-    assertToolError(await call(srv, 'lesson', { text: 'note', for: place }), 'for takes a manual topic, a tool name or rules')
+    assertToolError(await lesson(srv, { text: 'note', for: place }), 'for takes a manual topic, a tool name or rules')
   }
   assert.strictEqual(read(file), before)
   assert.strictEqual(before, entry('plain words', 'wait_events') + entry('one two three'))
@@ -56,13 +57,13 @@ test('lesson text lands on one line and a for outside letters, digits, - and _ i
 test('lesson refuses empty and over-long text and an over-long for, and writes nothing', async (t) => {
   const { file } = runDir(t)
   const srv = server(file)
-  assert.strictEqual(textOf(await call(srv, 'lesson', { text: 'x'.repeat(600), for: 'f'.repeat(32) })), 'noted', 'control')
+  assert.strictEqual(textOf(await lesson(srv, { text: 'x'.repeat(600), for: 'f'.repeat(32) })), 'noted', 'control')
   const before = read(file)
   for (const text of [' \u00a0\u3000 ', '\u200b\u2028\n\r\u202e\u0085']) {
-    assertToolError(await call(srv, 'lesson', { text }), 'lesson text is empty')
+    assertToolError(await lesson(srv, { text }), 'lesson text is empty')
   }
-  assert.strictEqual((await call(srv, 'lesson', { text: 'x'.repeat(601) })).result.isError, true, '601 characters')
-  assert.strictEqual((await call(srv, 'lesson', { text: 'x', for: 'f'.repeat(33) })).result.isError, true, 'for of 33 characters')
+  assert.strictEqual((await lesson(srv, { text: 'x'.repeat(601) })).result.isError, true, '601 characters')
+  assert.strictEqual((await lesson(srv, { text: 'x', for: 'f'.repeat(33) })).result.isError, true, 'for of 33 characters')
   assert.strictEqual(read(file), before)
 })
 
@@ -73,8 +74,8 @@ test('the stdio server writes to GOLEM_LESSONS and accepts at most 20 lessons pe
   const texts = Array.from({ length: 21 }, (_, i) => `entry ${i + 1}`)
   const lines = [
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } } },
-    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'lesson', arguments: { text: ' \u200b ' } } },
-    ...texts.map((text, i) => ({ jsonrpc: '2.0', id: 3 + i, method: 'tools/call', params: { name: 'lesson', arguments: { text, for: 'rules' } } }))
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'note', arguments: { kind: 'lesson', text: ' \u200b ' } } },
+    ...texts.map((text, i) => ({ jsonrpc: '2.0', id: 3 + i, method: 'tools/call', params: { name: 'note', arguments: { kind: 'lesson', text, for: 'rules' } } }))
   ]
   e.child.stdin.write(lines.map((l) => JSON.stringify(l) + '\n').join(''))
   const replies = []
@@ -104,16 +105,16 @@ test('lessons and papercuts count toward separate limits', async (t) => {
   const { dir, file } = runDir(t)
   const papercuts = path.join(dir, 'papercuts.log')
   const srv = createServer({ port: PORT, token: MCP_TOKEN, fetch: fakeBot().fetch, papercutsFile: papercuts, lessonsFile: file, now: () => NOW })
-  for (let i = 1; i <= 20; i++) assert.strictEqual(textOf(await call(srv, 'papercut', { text: `cut ${i}` })), 'noted', `cut ${i}`)
-  assertToolError(await call(srv, 'papercut', { text: 'cut 21' }), 'papercut limit reached')
-  for (let i = 1; i <= 20; i++) assert.strictEqual(textOf(await call(srv, 'lesson', { text: `lesson ${i}` })), 'noted', `lesson ${i}`)
-  assertToolError(await call(srv, 'lesson', { text: 'lesson 21' }), 'lesson limit reached')
+  for (let i = 1; i <= 20; i++) assert.strictEqual(textOf(await call(srv, 'note', { kind: 'papercut', text: `cut ${i}` })), 'noted', `cut ${i}`)
+  assertToolError(await call(srv, 'note', { kind: 'papercut', text: 'cut 21' }), 'papercut limit reached')
+  for (let i = 1; i <= 20; i++) assert.strictEqual(textOf(await lesson(srv, { text: `lesson ${i}` })), 'noted', `lesson ${i}`)
+  assertToolError(await lesson(srv, { text: 'lesson 21' }), 'lesson limit reached')
 })
 
 // CWE-73
 test('without lessonsFile, lesson answers lessons are off and writes nothing', async (t) => {
   const { root, file } = runDir(t)
-  assert.strictEqual(textOf(await call(server(file), 'lesson', { text: 'control' })), 'noted', 'control')
+  assert.strictEqual(textOf(await lesson(server(file), { text: 'control' })), 'noted', 'control')
   const before = tree(root)
   const cwd = process.cwd()
   const env = process.env.GOLEM_LESSONS
@@ -121,7 +122,7 @@ test('without lessonsFile, lesson answers lessons are off and writes nothing', a
   process.env.GOLEM_LESSONS = path.join(root, 'from-env.log')
   try {
     const srv = createServer({ port: PORT, token: MCP_TOKEN, fetch: fakeBot().fetch, now: () => NOW })
-    assertToolError(await call(srv, 'lesson', { text: 'note', for: 'rules' }), 'lessons are off')
+    assertToolError(await lesson(srv, { text: 'note', for: 'rules' }), 'lessons are off')
   } finally {
     process.chdir(cwd)
     if (env === undefined) delete process.env.GOLEM_LESSONS
@@ -133,23 +134,23 @@ test('without lessonsFile, lesson answers lessons are off and writes nothing', a
 // CWE-209
 test('a lesson write failure answers a generic error without the path', async (t) => {
   const { dir, file } = runDir(t)
-  assert.strictEqual(textOf(await call(server(file), 'lesson', { text: 'control' })), 'noted', 'control')
+  assert.strictEqual(textOf(await lesson(server(file), { text: 'control' })), 'noted', 'control')
   t.mock.method(console, 'error', () => {})
-  assertToolError(await call(server(dir), 'lesson', { text: 'into a directory' }), 'the lesson could not be written')
+  assertToolError(await lesson(server(dir), { text: 'into a directory' }), 'the lesson could not be written')
 })
 
 test('createServer refuses a relative lessonsFile', () => {
   assert.throws(() => server('lessons.log'), /lessonsFile must be an absolute path/)
 })
 
-test('tools/list names lesson with text required and an optional for', async (t) => {
+test('tools/list names note with kind required and an optional text and for', async (t) => {
   const { file } = runDir(t)
   const withFile = (await rpc(server(file), 'tools/list', {})).result.tools
   const without = (await rpc(createServer({ port: PORT, token: MCP_TOKEN, fetch: fakeBot().fetch }), 'tools/list', {})).result.tools
-  const lesson = withFile.find((x) => x.name === 'lesson')
-  assert.ok(lesson, 'control: lesson is listed with lessonsFile')
-  assert.strictEqual(lesson.inputSchema.properties.text.maxLength, 600)
-  assert.strictEqual(lesson.inputSchema.properties.for.maxLength, 32)
-  assert.deepStrictEqual(lesson.inputSchema.required, ['text'])
+  const note = withFile.find((x) => x.name === 'note')
+  assert.ok(note, 'control: note is listed with lessonsFile')
+  assert.strictEqual(note.inputSchema.properties.text.maxLength, 600)
+  assert.strictEqual(note.inputSchema.properties.for.maxLength, 32)
+  assert.deepStrictEqual(note.inputSchema.required, ['kind'])
   assert.deepStrictEqual(without.map((x) => x.name), withFile.map((x) => x.name))
 })

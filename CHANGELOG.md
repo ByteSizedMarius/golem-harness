@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-24: one note tool with a memory for each server
+
+The pilot had free text only in one-line waypoint notes, and wrote lessons and papercuts through two
+separate tools. A single `note` tool now takes the kinds `memory`, `lesson` and `papercut`. Lessons
+and papercuts go to the same files as before. Memory notes, at most 20 of 200 characters each, are
+kept in the file `GOLEM_MEMORY` names, listed and dropped by id, and shown at `boot` under a label
+that marks them as data. A file over the caps reads as unreadable instead of reaching the pilot.
+
 ## 2026-10-24: signs hang on the wall the pilot names
 
 A sign placed in front of a chest hung on the block across the cell, and reading it back showed

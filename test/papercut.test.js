@@ -23,6 +23,7 @@ function runDir (t) {
 }
 
 const server = (papercutsFile) => createServer({ port: PORT, token: MCP_TOKEN, fetch: fakeBot().fetch, papercutsFile, now: () => NOW })
+const papercut = (srv, args) => call(srv, 'note', { kind: 'papercut', ...args })
 const read = (file) => fs.readFileSync(file, 'utf8')
 const tree = (root) => fs.readdirSync(root, { recursive: true }).map((p) => p.split(path.sep).join('/')).sort()
 
@@ -34,7 +35,7 @@ function assertToolError (r, message) {
 test('papercut appends one three-line entry stamped with the time and the run dir', async (t) => {
   const { file } = runDir(t)
   fs.writeFileSync(file, entry('earlier'))
-  assert.strictEqual(textOf(await call(server(file), 'papercut', { text: 'the craft tool fought me' })), 'noted')
+  assert.strictEqual(textOf(await papercut(server(file), { text: 'the craft tool fought me' })), 'noted')
   assert.strictEqual(read(file), entry('earlier') + entry('the craft tool fought me'))
 })
 
@@ -42,21 +43,21 @@ test('papercut appends one three-line entry stamped with the time and the run di
 test('papercut text lands on one line without line breaks, controls or format characters', async (t) => {
   const { file } = runDir(t)
   const srv = server(file)
-  assert.strictEqual(textOf(await call(srv, 'papercut', { text: 'plain words' })), 'noted', 'control')
+  assert.strictEqual(textOf(await papercut(srv, { text: 'plain words' })), 'noted', 'control')
   const text = ' \u200b one \n two \r\n three \u2028 four \u2029 five \u0085 six \u202esev\u200benth\u00a0\u2003eight \n2026-01-01T00:00:00Z | pilot | x '
-  assert.strictEqual(textOf(await call(srv, 'papercut', { text })), 'noted')
+  assert.strictEqual(textOf(await papercut(srv, { text })), 'noted')
   assert.strictEqual(read(file), entry('plain words') + entry('one two three four five six seventh eight 2026-01-01T00:00:00Z | pilot | x'))
 })
 
 test('papercut refuses empty and over-long text and writes nothing', async (t) => {
   const { file } = runDir(t)
   const srv = server(file)
-  assert.strictEqual(textOf(await call(srv, 'papercut', { text: 'x'.repeat(600) })), 'noted', 'control')
+  assert.strictEqual(textOf(await papercut(srv, { text: 'x'.repeat(600) })), 'noted', 'control')
   const before = read(file)
   for (const text of [' \u00a0\u3000 ', '\u200b\u2028\n\r\u202e\u0085']) {
-    assertToolError(await call(srv, 'papercut', { text }), 'papercut text is empty')
+    assertToolError(await papercut(srv, { text }), 'papercut text is empty')
   }
-  const long = await call(srv, 'papercut', { text: 'x'.repeat(601) })
+  const long = await papercut(srv, { text: 'x'.repeat(601) })
   assert.strictEqual(long.result.isError, true, '601 characters')
   assert.strictEqual(read(file), before)
 })
@@ -68,8 +69,8 @@ test('the stdio server writes to GOLEM_PAPERCUTS and accepts at most 20 entries 
   const texts = Array.from({ length: 21 }, (_, i) => `entry ${i + 1}`)
   const lines = [
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } } },
-    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'papercut', arguments: { text: ' \u200b ' } } },
-    ...texts.map((text, i) => ({ jsonrpc: '2.0', id: 3 + i, method: 'tools/call', params: { name: 'papercut', arguments: { text } } }))
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'note', arguments: { kind: 'papercut', text: ' \u200b ' } } },
+    ...texts.map((text, i) => ({ jsonrpc: '2.0', id: 3 + i, method: 'tools/call', params: { name: 'note', arguments: { kind: 'papercut', text } } }))
   ]
   e.child.stdin.write(lines.map((l) => JSON.stringify(l) + '\n').join(''))
   const replies = []
@@ -97,7 +98,7 @@ test('the stdio server writes to GOLEM_PAPERCUTS and accepts at most 20 entries 
 // CWE-73
 test('without papercutsFile, papercut answers papercuts are off and writes nothing', async (t) => {
   const { root, file } = runDir(t)
-  assert.strictEqual(textOf(await call(server(file), 'papercut', { text: 'control' })), 'noted', 'control')
+  assert.strictEqual(textOf(await papercut(server(file), { text: 'control' })), 'noted', 'control')
   const before = tree(root)
   const cwd = process.cwd()
   const env = process.env.GOLEM_PAPERCUTS
@@ -105,7 +106,7 @@ test('without papercutsFile, papercut answers papercuts are off and writes nothi
   process.env.GOLEM_PAPERCUTS = path.join(root, 'from-env.log')
   try {
     const srv = createServer({ port: PORT, token: MCP_TOKEN, fetch: fakeBot().fetch, now: () => NOW })
-    assertToolError(await call(srv, 'papercut', { text: 'note' }), 'papercuts are off')
+    assertToolError(await papercut(srv, { text: 'note' }), 'papercuts are off')
   } finally {
     process.chdir(cwd)
     if (env === undefined) delete process.env.GOLEM_PAPERCUTS
@@ -119,7 +120,7 @@ test('papercut text that looks like a path is written as text into the configure
   const { root, dir, file } = runDir(t)
   const srv = server(file)
   const escape = `../../papercut-${crypto.randomBytes(8).toString('hex')}`
-  for (const text of [escape, 'C:/Windows/x']) assert.strictEqual(textOf(await call(srv, 'papercut', { text })), 'noted', text)
+  for (const text of [escape, 'C:/Windows/x']) assert.strictEqual(textOf(await papercut(srv, { text })), 'noted', text)
   assert.strictEqual(read(file), entry(escape) + entry('C:/Windows/x'))
   assert.deepStrictEqual(tree(root), [RUN, `${RUN}/papercuts.log`])
   assert.ok(!fs.existsSync(path.resolve(dir, escape)), 'a file was created at the text as a path')
@@ -128,18 +129,19 @@ test('papercut text that looks like a path is written as text into the configure
 // CWE-209
 test('a write failure answers a generic error without the path', async (t) => {
   const { dir, file } = runDir(t)
-  assert.strictEqual(textOf(await call(server(file), 'papercut', { text: 'control' })), 'noted', 'control')
-  assertToolError(await call(server(dir), 'papercut', { text: 'into a directory' }), 'the papercut could not be written')
+  assert.strictEqual(textOf(await papercut(server(file), { text: 'control' })), 'noted', 'control')
+  assertToolError(await papercut(server(dir), { text: 'into a directory' }), 'the papercut could not be written')
 })
 
-test('tools/list names the same tools with and without papercutsFile, papercut included', async (t) => {
+test('tools/list names the same tools with and without papercutsFile, note with kind papercut included', async (t) => {
   const { file } = runDir(t)
   const listed = async (srv) => (await rpc(srv, 'tools/list', {})).result.tools
   const withFile = await listed(server(file))
   const without = await listed(createServer({ port: PORT, token: MCP_TOKEN, fetch: fakeBot().fetch }))
-  const papercut = withFile.find((x) => x.name === 'papercut')
-  assert.ok(papercut, 'control: papercut is listed with papercutsFile')
-  assert.strictEqual(papercut.inputSchema.properties.text.maxLength, 600)
-  assert.deepStrictEqual(papercut.inputSchema.required, ['text'])
+  const note = withFile.find((x) => x.name === 'note')
+  assert.ok(note, 'control: note is listed with papercutsFile')
+  assert.ok(note.inputSchema.properties.kind.enum.includes('papercut'))
+  assert.strictEqual(note.inputSchema.properties.text.maxLength, 600)
+  assert.deepStrictEqual(note.inputSchema.required, ['kind'])
   assert.deepStrictEqual(without.map((x) => x.name), withFile.map((x) => x.name))
 })

@@ -624,12 +624,12 @@ test('the wake log names each called tool and its passed params and holds no arg
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const log = path.join(dir, 'mcp-wakes.log')
   const e = runEntry(t, [String(PORT), log], { ...baseEnv(), GOLEM_TOKEN: MCP_TOKEN })
-  const calls = [callReq('papercut', { text: 'secret papercut words' }), callReq('manual', { topic: 'chat', extra: 'hidden chat words' }), callReq('nope', {})]
+  const calls = [callReq('note', { kind: 'papercut', text: 'secret papercut words' }), callReq('manual', { topic: 'chat', extra: 'hidden chat words' }), callReq('nope', {})]
   for (const req of calls) e.child.stdin.write(JSON.stringify(req) + '\n')
   for (const req of calls) assert.ok(await e.response(req.id, 8000), `no reply to ${req.params.name}`)
   e.child.kill()
   await e.exited
-  assert.strictEqual(fs.readFileSync(log, 'utf8'), 'tool call papercut text\ntool call manual topic\ntool call (unknown)\n')
+  assert.strictEqual(fs.readFileSync(log, 'utf8'), 'tool call note kind,text\ntool call manual topic\ntool call (unknown)\n')
 })
 
 test('onWaitStart runs as a wait_events call starts, before its first /tick poll, and onWake once it returns', async () => {

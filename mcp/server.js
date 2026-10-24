@@ -8,6 +8,7 @@ const { signRequest, verifyProof } = require('../lib/sig')
 const { flatText } = require('../lib/flat-text')
 const { quietText } = require('../lib/server-msg')
 const todos = require('../lib/todo')
+const memories = require('../lib/memory')
 const { TOOLS } = require('./tools')
 
 const PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
@@ -44,10 +45,10 @@ const TIMER_MAX_MS = 2 ** 31 - 1
 const TOOL_TIMEOUT_MAX_MS = 600000
 const BODY_CAP = 2 * 1024 * 1024
 const TOKEN_MIN = 32
-// Entries per note kind and server process.
+// Lessons and papercuts per kind and server process.
 const NOTE_LIMIT = 20
 const NAME_CAP = 32
-// The lesson tool's for.
+// Allowed values of a lesson note's for.
 const LESSON_PLACE = /^[A-Za-z0-9_-]+$/
 const NAMES_SHOWN = 5
 const KINDS_SHOWN = 6
@@ -69,16 +70,15 @@ const LOCAL_TOOLS = [
     params: { timeout: { type: 'int', min: 1, max: 120 } }
   },
   {
-    name: 'papercut',
-    description: 'Note what made playing harder than it should be: a tool that fought you, a workaround you needed, a misleading reply, a missing ability. When in doubt, note it: too many beat too few. One paragraph, then move on. The owner reads these later, and it changes nothing in the game.',
-    params: { text: { type: 'str', maxLen: 600, required: true } }
-  },
-  {
-    name: 'lesson',
-    description: 'Write down what a future player should know: a game fact, a rule worth adding, a better tool text. When in doubt, note it: too many beat too few. The owner folds these into the manual. A tool that fought you is a papercut.',
+    name: 'note',
+    description: 'Write a note, or list and drop memory notes. memory: kept for this server across sessions and shown at boot, at most 20 of 200 characters, who naming whose word it is. Drop one by id to make room. lesson: what a future player should know (a game fact, a rule, a better tool text), for names a manual topic, a tool or rules. papercut: what made playing harder (a workaround, a misleading reply). A tool that fought you is a papercut, not a lesson. The owner reads lessons and papercuts later. When in doubt, note it.',
     params: {
-      text: { type: 'str', maxLen: 600, required: true },
-      for: { type: 'str', maxLen: NAME_CAP, desc: 'manual topic, tool name or rules' }
+      kind: { type: 'enum', values: ['memory', 'lesson', 'papercut'], required: true },
+      action: { type: 'enum', values: ['add', 'list', 'drop'] },
+      text: { type: 'str', maxLen: 600 },
+      for: { type: 'str', maxLen: NAME_CAP },
+      who: { type: 'str', maxLen: NAME_CAP },
+      id: { type: 'int', min: 1, max: 999999 }
     }
   },
   {
@@ -394,7 +394,7 @@ function untilAborted (promise, signal) {
 // The frontier { boot, chat, ev }: every chat line and event of process boot up to those ids reached a wait_events or tick result.
 // onWaitStart runs as a wait_events call starts waiting, onWake and onDeliver get the frontier after each wait_events return and each tick that moved it.
 // onToolCall runs on every tools/call with the name from the tool table, null for a name outside it, and the sorted names of the tool's params the call passed.
-function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = [], start = { boot: null, chat: 0, ev: 0 }, onWaitStart = () => {}, onWake = () => {}, onDeliver = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, lessonsFile, todoFile, now = () => new Date() }) {
+function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = [], start = { boot: null, chat: 0, ev: 0 }, onWaitStart = () => {}, onWake = () => {}, onDeliver = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, lessonsFile, todoFile, memoryFile, now = () => new Date() }) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new TypeError('port must be an integer 1024-65535')
   if (typeof token !== 'string' || token === '') throw new TypeError('token must be a non-empty string')
   if (typeof fetch !== 'function') throw new TypeError('fetch must be a function')
@@ -418,6 +418,9 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
   }
   if (todoFile !== undefined && (typeof todoFile !== 'string' || !path.isAbsolute(todoFile))) {
     throw new TypeError('todoFile must be an absolute path')
+  }
+  if (memoryFile !== undefined && (typeof memoryFile !== 'string' || !path.isAbsolute(memoryFile))) {
+    throw new TypeError('memoryFile must be an absolute path')
   }
   if (typeof now !== 'function') throw new TypeError('now must be a function')
   const manual = loadManual(manualDir)
@@ -776,6 +779,56 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
     return textResult(head === null ? list : `${head}\n${list}`, failed)
   }
 
+  // JSON.parse quotes the text around the fault, which can be note text.
+  const memoryFault = (e) => e instanceof SyntaxError ? 'the memory file is not valid JSON' : e.message
+
+  function memoryListing () {
+    try {
+      return memories.render(memories.load(memoryFile).notes, now().getTime())
+    } catch (e) {
+      console.error(`[golem-mcp] cannot read the memory notes: ${memoryFault(e)}`)
+      return null
+    }
+  }
+
+  function memory (action, text, who, id) {
+    if (memoryFile === undefined) return textResult('memory notes are off', true)
+    try {
+      if (action === 'add') {
+        const line = flatText(text)
+        if (!line) return textResult('memory note text is empty', true)
+        if ([...line].length > memories.TEXT_CAP) return textResult(`memory note text is over ${memories.TEXT_CAP} characters`, true)
+        const added = memories.add(memoryFile, line, who === undefined ? '' : flatText(who), now())
+        return textResult(added.existing ? `Already #${added.id}, by ${added.who ?? 'nobody'}.` : `Noted #${added.id}, ${added.count} of ${memories.MEMORY_CAP}.`)
+      }
+      if (action === 'drop') {
+        const left = memories.remove(memoryFile, id)
+        return left === false ? textResult(`No memory note has id ${id}.`, true) : textResult(`Dropped #${id}, ${left} of ${memories.MEMORY_CAP}.`)
+      }
+    } catch (e) {
+      if (!(e instanceof memories.MemoryFull)) {
+        console.error(`[golem-mcp] cannot update the memory notes: ${memoryFault(e)}`)
+        return textResult('the memory notes could not be read or written', true)
+      }
+      const list = memoryListing()
+      return textResult(list === null ? 'the memory notes could not be read' : `${e.message}\n${list}`, true)
+    }
+    const list = memoryListing()
+    return list === null ? textResult('the memory notes could not be read', true) : textResult(list)
+  }
+
+  function noteCall ({ kind, action = 'add', text, for: place, who, id }) {
+    if (action !== 'add' && kind !== 'memory') return textResult('list and drop are only for kind memory', true)
+    if (place !== undefined && kind !== 'lesson') return textResult('for is only for kind lesson', true)
+    if (who !== undefined && (kind !== 'memory' || action !== 'add')) return textResult('who is only for memory add', true)
+    if (id !== undefined && action !== 'drop') return textResult('id is only for drop', true)
+    if (text !== undefined && action !== 'add') return textResult('text is only for add', true)
+    if (action === 'drop' && id === undefined) return textResult('drop needs id', true)
+    if (action === 'add' && text === undefined) return textResult('add needs text', true)
+    if (kind === 'memory') return memory(action, text, who, id)
+    return note(kind, kind === 'lesson' ? lessonsFile : papercutsFile, text, place)
+  }
+
   async function callTool (id, params) {
     const valid = params !== null && typeof params === 'object' && typeof params.name === 'string'
     const tool = valid ? byName.get(params.name) : undefined
@@ -792,12 +845,14 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
     }
     if (tool.name === 'wait_events') return rpcResult(id, await waitEvents(values))
     if (tool.name === 'manual') return rpcResult(id, textResult(manual.get(values.topic)))
-    if (tool.name === 'papercut') return rpcResult(id, note('papercut', papercutsFile, values.text))
-    if (tool.name === 'lesson') return rpcResult(id, note('lesson', lessonsFile, values.text, values.for))
+    if (tool.name === 'note') return rpcResult(id, noteCall(values))
     if (tool.name === 'todo') return rpcResult(id, todo(values))
-    // A restarted pilot learns its open todos from boot.
-    if (tool.name === 'boot' && todoFile !== undefined) {
-      return rpcResult(id, await callRouted(tool, values, todoListing() ?? 'the todo list could not be read'))
+    // A restarted pilot learns its memory notes and open todos from boot.
+    if (tool.name === 'boot' && (memoryFile !== undefined || todoFile !== undefined)) {
+      const tails = []
+      if (memoryFile !== undefined) tails.push(memoryListing() ?? 'the memory notes could not be read')
+      if (todoFile !== undefined) tails.push(todoListing() ?? 'the todo list could not be read')
+      return rpcResult(id, await callRouted(tool, values, tails.join('\n\n')))
     }
     if (tool.body) return rpcResult(id, await bodyCall(tool, values))
     const result = await callRouted(tool, values)
@@ -914,8 +969,9 @@ function main () {
   const papercutsFile = process.env.GOLEM_PAPERCUTS || undefined
   const lessonsFile = process.env.GOLEM_LESSONS || undefined
   const todoFile = process.env.GOLEM_TODO || undefined
+  const memoryFile = process.env.GOLEM_MEMORY || undefined
   const topics = (process.env.GOLEM_TOPICS || '').split(',').filter(Boolean)
-  serveStdio(createServer({ port, token, fetch: globalThis.fetch, topics, start, onWaitStart, onWake, onDeliver, onToolCall, papercutsFile, lessonsFile, todoFile }))
+  serveStdio(createServer({ port, token, fetch: globalThis.fetch, topics, start, onWaitStart, onWake, onDeliver, onToolCall, papercutsFile, lessonsFile, todoFile, memoryFile }))
 }
 
 if (require.main === module) main()

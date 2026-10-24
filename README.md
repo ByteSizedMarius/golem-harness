@@ -148,7 +148,8 @@ GOLEM_TOKEN=<token> MC_HOST=<host> MC_PORT=<port> node bot.js
 
 `.env.example` describes the rest: `MC_OWNER` (the default player for `where`),
 `GOLEM_SERVER_OVERRIDES`, `GOLEM_CHAT_MAX`, and the MCP server's `GOLEM_PAPERCUTS`,
-`GOLEM_LESSONS`, `GOLEM_TODO` and `GOLEM_TOPICS` (the gated manual topics to serve).
+`GOLEM_LESSONS`, `GOLEM_MEMORY`, `GOLEM_TODO` and `GOLEM_TOPICS` (the gated manual topics to
+serve).
 
 The control API is the only port the bot opens. The bot exits when its connection to the server
 ends.
@@ -188,17 +189,19 @@ An optional second argument names a wake log. The server appends a line for ever
 call, delivery and tool call, and after a restart it resumes chat and events where the log left
 off.
 
-The pilot sees 77 tools: 72 that each call one bot route (`goto` calls `/goto`), plus
+The pilot sees 76 tools: 72 that each call one bot route (`goto` calls `/goto`), plus
 
 - `wait_events`: new chat, whispers and bot events.
-- `papercut`: a note for the owner on what made playing harder, appended to the file
-  `GOLEM_PAPERCUTS` names.
-- `lesson`: something a future player should know, appended to the file `GOLEM_LESSONS` names.
+- `note`: a note of kind `memory`, `lesson` or `papercut`. Memory notes, at most 20, are kept in
+  the JSON file `GOLEM_MEMORY` names and shown at `boot`. Lessons (what a future player should
+  know) and papercuts (what made playing harder) are for the owner, appended to the files
+  `GOLEM_LESSONS` and `GOLEM_PAPERCUTS` name.
 - `todo`: the pilot's open requests and promises, each at priority high, normal or low, kept in
   the JSON file `GOLEM_TODO` names and shown at `boot`.
 - `manual`: one topic of `manual/`, whole. A gated topic only while `GOLEM_TOPICS` names it.
 
-Each of the three files must be an absolute path. Without one, its tool answers that it is off.
+Each of the four files must be an absolute path. Without one, its tool or note kind answers that it
+is off.
 
 The pilot cannot start, kill or restart the bot process, and it has no camera. Chat and whispers that
 `wait_events` returns are written by players and are untrusted, and so is the text of its `server`

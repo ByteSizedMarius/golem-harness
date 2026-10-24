@@ -21,6 +21,7 @@ function runDir (t) {
 }
 
 const server = (papercutsFile) => createServer({ port: PORT, token: MCP_TOKEN, fetch: fakeBot().fetch, papercutsFile, now: () => NOW })
+const papercut = (srv, args) => call(srv, 'note', { kind: 'papercut', ...args })
 const read = (file) => fs.readFileSync(file, 'utf8')
 
 function assertToolError (r, message) {
@@ -43,8 +44,8 @@ function invisibles () {
 test('papercut drops variation selectors after the text', async (t) => {
   const { file } = runDir(t)
   const srv = server(file)
-  assert.strictEqual(textOf(await call(srv, 'papercut', { text: 'ok' })), 'noted', 'control')
-  assert.strictEqual(textOf(await call(srv, 'papercut', { text: 'ok️︎\u{e0100}\u{e01ef}' })), 'noted')
+  assert.strictEqual(textOf(await papercut(srv, { text: 'ok' })), 'noted', 'control')
+  assert.strictEqual(textOf(await papercut(srv, { text: 'ok️︎\u{e0100}\u{e01ef}' })), 'noted')
   assert.strictEqual(read(file), entry('ok') + entry('ok'))
 })
 
@@ -52,12 +53,12 @@ test('papercut drops variation selectors after the text', async (t) => {
 test('papercut text made only of default-ignorable characters and U+2800 is empty and writes nothing', async (t) => {
   const { file } = runDir(t)
   const srv = server(file)
-  assert.strictEqual(textOf(await call(srv, 'papercut', { text: 'plain words' })), 'noted', 'control')
+  assert.strictEqual(textOf(await papercut(srv, { text: 'plain words' })), 'noted', 'control')
   const before = read(file)
   const texts = ['️', 'ㅤ', 'ᅟᅠﾠ', '᠋᠌᠍᠎᠏', '\u{e0100}\u{e01ef}',
     '⠀', ' ㅤ ⠀ ️ ', '͏឴឵⁥￰']
   for (const text of texts) {
-    assertToolError(await call(srv, 'papercut', { text }), 'papercut text is empty')
+    assertToolError(await papercut(srv, { text }), 'papercut text is empty')
   }
   assert.strictEqual(read(file), before)
 })
@@ -65,7 +66,7 @@ test('papercut text made only of default-ignorable characters and U+2800 is empt
 // CWE-117
 test('papercut drops every default-ignorable character and U+2800 between two letters', async (t) => {
   const { file } = runDir(t)
-  assert.strictEqual(textOf(await call(server(file), 'papercut', { text: 'xy' })), 'noted', 'control')
+  assert.strictEqual(textOf(await papercut(server(file), { text: 'xy' })), 'noted', 'control')
   const chars = invisibles()
   const chunks = ['']
   for (const c of chars) {
@@ -74,7 +75,7 @@ test('papercut drops every default-ignorable character and U+2800 between two le
   }
   for (const chunk of chunks) {
     const first = chunk.codePointAt(0).toString(16)
-    assert.strictEqual(textOf(await call(server(file), 'papercut', { text: `x${chunk}y` })), 'noted', `chunk from U+${first}`)
+    assert.strictEqual(textOf(await papercut(server(file), { text: `x${chunk}y` })), 'noted', `chunk from U+${first}`)
   }
   const hidden = new Set(chars)
   const kept = [...new Set([...read(file)].filter((c) => hidden.has(c)))].map((c) => `U+${c.codePointAt(0).toString(16)}`)
@@ -85,14 +86,14 @@ test('papercut drops every default-ignorable character and U+2800 between two le
 // CWE-770
 test('failed writes count toward the 20-entry limit', async (t) => {
   const { dir, file } = runDir(t)
-  assert.strictEqual(textOf(await call(server(file), 'papercut', { text: 'control' })), 'noted', 'control')
+  assert.strictEqual(textOf(await papercut(server(file), { text: 'control' })), 'noted', 'control')
   fs.rmSync(file)
   t.mock.method(console, 'error', () => {})
   const srv = server(dir)
   for (let i = 1; i <= 20; i++) {
-    assertToolError(await call(srv, 'papercut', { text: `entry ${i}` }), 'the papercut could not be written')
+    assertToolError(await papercut(srv, { text: `entry ${i}` }), 'the papercut could not be written')
   }
-  assertToolError(await call(srv, 'papercut', { text: 'entry 21' }), 'papercut limit reached')
+  assertToolError(await papercut(srv, { text: 'entry 21' }), 'papercut limit reached')
   assert.deepStrictEqual(fs.readdirSync(dir), [])
 })
 
@@ -101,10 +102,10 @@ test('refused text never reaches the write and does not count toward the limit',
   const { file } = runDir(t)
   const srv = server(file)
   for (let i = 0; i < 25; i++) {
-    assertToolError(await call(srv, 'papercut', { text: ' ​ ' }), 'papercut text is empty')
+    assertToolError(await papercut(srv, { text: ' ​ ' }), 'papercut text is empty')
   }
   for (let i = 1; i <= 20; i++) {
-    assert.strictEqual(textOf(await call(srv, 'papercut', { text: `entry ${i}` })), 'noted', `entry ${i}`)
+    assert.strictEqual(textOf(await papercut(srv, { text: `entry ${i}` })), 'noted', `entry ${i}`)
   }
-  assertToolError(await call(srv, 'papercut', { text: 'entry 21' }), 'papercut limit reached')
+  assertToolError(await papercut(srv, { text: 'entry 21' }), 'papercut limit reached')
 })
