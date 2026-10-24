@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-24: floor ore gets dug from beside it
+
+Mining ore in the floor, the bot dug the block it stood on and dropped into the hole, with `digat`
+and with `mine`. `digat`, `mine` and `gather` now walk to a cell beside such a block that has a
+solid floor, centre the body there and dig from it, and their walks no longer end on top of the
+block. If the body stands on the block and no cell beside it holds the body, such as on a pillar top
+or in a shaft, `digat` and `mine` dig it in place and the body drops. `gather` skips that block.
+
 ## 2026-10-24: sprint jumps under low ceilings
 
 The walk never sprint-jumped under a ceiling two blocks above the floor, though jumps that bump the
