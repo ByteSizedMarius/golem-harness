@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-24: equip puts armor in its slot
+
+Putting on a helmet took `equip(name: "iron_helmet", dest: "head")`, while a shift-click needs no
+slot. `equip` without `dest` now puts a helmet, chestplate, leggings or boots in its armor slot, an
+elytra on the back, and anything else in the hand, and the reply names the slot. Like a shift-click,
+it refuses when that slot already holds a piece and names the worn one. An explicit `dest` swaps the
+worn piece as before.
+
 ## 2026-10-24: /chat can wait for its queue
 
 `/chat` takes `wait=1`, which answers only once every queued chat line has been sent. A client that
