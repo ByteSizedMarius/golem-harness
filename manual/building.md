@@ -17,7 +17,7 @@
 - Stairs: place one with `face`, `blockat` it to check the facing, then place the rest.
 - Ladders on 1.7.10: `face: "N"` hangs the ladder on the wall north of the cell. Without `face` it follows the ladder below, else the first solid wall. The reply's `wall` and `facing` are the ones the server set.
 - A ladder shaft: light it first, hang every rung on one wall from the floor cell to the top, and `blockat` each rung to check they all show the same `facing`.
-- Item frames: `useon` puts an item into an empty frame. `strike` with any carried item knocks the item out (it drops below the frame) and refuses an empty frame.
+- Item frames: `placeitem` with `face` names the wall a frame hangs on, a chest included. `useon` puts an item into an empty frame. `strike` with any carried item knocks the item out (the drop can land a few blocks off in any direction, and strike goes after it) and refuses an empty frame. `at` with the frame's cell picks the frame for both, and `entities` shows what each frame holds.
 - `craft` in small explicit batches, or let a teammate craft at a real table while you lay blocks.
 - `build` lays a whole cabin as a job. `outline`, `walls` and `roof` run at once and suit smaller, precise work.
 - A gap crossing: `bridging(on: "1")`, cross, `bridging(on: "0")`, then `tidy` to take the scaffold back. The pathfinder places nothing on its own.

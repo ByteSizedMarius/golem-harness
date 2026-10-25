@@ -65,3 +65,33 @@ test('melee reach looks from the lowered eye of a sneaking body', () => {
     assert.strictEqual(reach(new Vec3(0.5, 67, 0.5), legacy, { crouching: true })(zombie), true, `sneaking on ${version(legacy)}`)
   }
 })
+
+const frameBox = (en) => loadBotFunctions(['frameBox'], {}).frameBox(en)
+// A frame in cell 6,150,-1 with the spawn objectData facing.
+const frame = (objectData, position) => ({ id: 20, name: 'item_frame', width: 0.5, height: 0.5, position, objectData })
+
+// Per facing: the box in cell 6,150,-1.
+for (const [objectData, facing, lo, hi] of [
+  [0, 'down', [6.125, 150.9375, -0.875], [6.875, 151, -0.125]],
+  [1, 'up', [6.125, 150, -0.875], [6.875, 150.0625, -0.125]],
+  [2, 'north', [6.125, 150.125, -0.0625], [6.875, 150.875, 0]],
+  [3, 'south', [6.125, 150.125, -1], [6.875, 150.875, -0.9375]],
+  [4, 'west', [6.9375, 150.125, -0.875], [7, 150.875, -0.125]],
+  [5, 'east', [6, 150.125, -0.875], [6.0625, 150.875, -0.125]]
+]) {
+  test(`a frame facing ${facing} spawned at the corner of its cell, as on 1.7.10 and 1.21.11 alike, has its face against the cell side it faces away from`, () => {
+    // The box array comes from the vm context.
+    assert.deepStrictEqual(Array.from(frameBox(frame(objectData, new Vec3(6, 150, -1))), (v) => v.toArray()), [lo, hi])
+  })
+}
+
+test('a frame without a spawn facing has no box', () => {
+  assert.strictEqual(frameBox(frame(undefined, new Vec3(6, 150, -1))), null)
+})
+
+test('on 1.7.10 melee reach measures a frame by its face, not by the corner it spawned at', () => {
+  // The live c2 case: 2.8 to a box around the corner, 3.6 to the face.
+  assert.strictEqual(reach(new Vec3(7.5, 150, -3.5), true)(frame(2, new Vec3(6, 150, -1))), false, 'the c2 stand')
+  assert.strictEqual(reach(new Vec3(6.5, 150, -1.5), true)(frame(2, new Vec3(6, 150, -1))), true, 'control: in front of the face')
+  assert.strictEqual(reach(new Vec3(6.5, 150, -1.5), true)(frame(undefined, new Vec3(6, 150, -1))), false, 'no known facing')
+})

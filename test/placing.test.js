@@ -471,11 +471,23 @@ test('build answers not ready before it reads the body position', async () => {
 // remembering the cells in unseen without seeing them now, on 1.7.10 when legacy is true.
 // A click leaves placedAs (default a block of name) in the target, or with refused times out on the block update.
 // With path the body stands at (-19.5, 64, 0.5) and its walk plans along the cell centres in path.
+// With spawn, a _genericPlace click spawns spawnAs (default name) with that objectData in the cell off the clicked face, or at spawnAt ([x, y, z]).
+// With spawnNext, a second spawn with that objectData follows the first in the same emit.
+// It arrives on the next immediate. With spawnWhen 'look' it arrives
+// at spawnAt during every look instead. A function spawnWhen runs at the click, and the spawn arrives when it calls its emit.
+// A _genericPlace without forceLook 'ignore' looks at the face centre first, as mineflayer's does.
 // log records looks, sneaks and places, clicks each clicked face as 'x,y,z face dx,dy,dz'.
-function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen = [], legacy = false, refused = false, path = null } = {}) {
+// looks records each look in full as {x, y, z, force}, lookAtClick the last of them at each _genericPlace click.
+function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen = [], legacy = false, refused = false, path = null, spawn = null, spawnNext = null, spawnAt = null, spawnAs = name, spawnWhen = 'after' } = {}) {
   const log = []
   const clicks = []
+  const looks = []
+  const lookAtClick = []
   const world = { ...extra }
+  const client = new EventEmitter()
+  const emitSpawn = ([x, y, z]) => {
+    for (const objectData of spawnNext === null ? [spawn] : [spawn, spawnNext]) client.emit('spawn_entity', { entityId: 77, type: registry.entitiesByName[spawnAs].id, x, y, z, objectData })
+  }
   let sneaking = false
   const place = (ref, face) => {
     log.push(`place against ${ref.name} sneaking=${sneaking}`)
@@ -496,11 +508,27 @@ function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen 
     items: [{ name, count: 1 }],
     bot: {
       pathfinder: { goto: async () => {} },
-      async lookAt (p) { log.push(`look ${p.x},${p.z}`) },
+      async lookAt (p, force) {
+        log.push(`look ${p.x},${p.z}`)
+        looks.push({ x: p.x, y: p.y, z: p.z, force })
+        if (spawn !== null && spawnWhen === 'look') emitSpawn(spawnAt)
+      },
       async waitForTicks () {},
       setControlState (c, on) { if (c === 'sneak') { sneaking = on; log.push(`sneak ${on}`) } },
       async placeBlock (ref, face) { place(ref, face) },
-      async _placeBlockWithOptions (ref, face) { place(ref, face) }
+      async _placeBlockWithOptions (ref, face) { place(ref, face) },
+      registry,
+      _client: client,
+      async _genericPlace (ref, face, { forceLook } = {}) {
+        if (forceLook !== 'ignore') await this.lookAt(ref.position.offset(0.5 + face.x * 0.5, 0.5 + face.y * 0.5, 0.5 + face.z * 0.5))
+        log.push(`place against ${ref.name} sneaking=${sneaking}`)
+        clicks.push(`${key(ref.position)} face ${key(face)}`)
+        lookAtClick.push(looks.at(-1))
+        if (spawn === null || spawnWhen === 'look') return
+        const at = spawnAt || ref.position.plus(face).toArray()
+        if (typeof spawnWhen === 'function') spawnWhen(() => emitSpawn(at))
+        else setImmediate(() => emitSpawn(at))
+      }
     },
     env: {
       require,
@@ -515,12 +543,13 @@ function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen 
       guardState: { hand: null },
       setTimeout,
       clearTimeout,
+      setImmediate,
       HANGS: botConstant('HANGS'),
       BEHIND: botConstant('BEHIND'),
       ...walk
     }
   })
-  return { log, clicks, env }
+  return { log, clicks, looks, lookAtClick, env }
 }
 
 const FENCE_NS = { '1,64,-1': { name: 'oak_fence', boundingBox: 'block' }, '1,64,1': { name: 'oak_fence', boundingBox: 'block' } }
@@ -899,4 +928,315 @@ test('a ladder on 1.21.11 goes on the block below, with face or without', async 
     await awaitRoute('/placeitem', { ...LADDER_AT, face }, rig.env)
     assert.deepStrictEqual(rig.clicks, ['1,63,0 face 0,1,0'], `face ${face}`)
   }
+})
+
+const FRAME_AT = { x: '1', y: '64', z: '0', name: 'item_frame' }
+const SLAB = { name: 'stone_slab', boundingBox: 'block' }
+// The objectData of a frame spawn by facing.
+const FACING = { up: 1, north: 2, south: 3, west: 4, east: 5 }
+
+// placeitemRig for an item_frame, with the frames in hanging as {name, at: [x, y, z], objectData, seen} already tracked.
+// A hanging frame is perceived unless seen is false. The server ticks every 50 ms of rig.clock and sends its age every
+// 20 ticks through rig.server, or no age when ageless. rig.proxy(ms) holds the ages for ms and then delivers them at once.
+function frameRig ({ hanging = [], ageless = false, ...opts } = {}) {
+  const rig = placeitemRig('item_frame', opts)
+  const clock = fakeClock()
+  const server = new EventEmitter()
+  Object.assign(rig.env, { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, Date: { now: clock.now } })
+  Object.assign(rig.env.bot, { time: { age: ageless ? null : 0 }, on: (e, f) => server.on(e, f), removeListener: (e, f) => server.removeListener(e, f) })
+  const sendAge = (age) => {
+    rig.env.bot.time.age = age
+    server.emit('time')
+  }
+  let ticks = 0
+  let held = null
+  clock.setInterval(() => {
+    if (++ticks % 20 || ageless) return
+    if (held) held.push(ticks)
+    else sendAge(ticks)
+  }, 50)
+  rig.proxy = (ms) => {
+    held = []
+    clock.setTimeout(() => {
+      const ages = held
+      held = null
+      ages.forEach(sendAge)
+    }, ms)
+  }
+  Object.assign(rig, { clock, server })
+  rig.env.FRAME_SPAWN_MS = botConstant('FRAME_SPAWN_MS')
+  rig.env.FRAME_SPAWN_CAP_MS = botConstant('FRAME_SPAWN_CAP_MS')
+  rig.env.staleEntities = new Set()
+  rig.env.targetSeen = (en) => en.seen
+  hanging.forEach(({ name, at, objectData, seen = true }, i) => { rig.env.bot.entities[i + 1] = { id: i + 1, name, position: new Vec3(...at), objectData, seen } })
+  return rig
+}
+
+async function frameRoute (rig, query) {
+  const { clock } = rig
+  const { handle, res } = routeHandler('/placeitem', rig.env)
+  const done = handle({ query }, res)
+  while (res.body === undefined && res.error === undefined && clock.now() < 10000) {
+    await new Promise(setImmediate)
+    clock.advance(50)
+  }
+  await done
+  return res
+}
+
+async function frameReply (rig, query) {
+  const res = await frameRoute(rig, query)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  return JSON.parse(JSON.stringify(res.body))
+}
+
+async function frameRefusal (rig, query) {
+  const res = await frameRoute(rig, query)
+  assert.ok(res.error, 'placeitem did not refuse')
+  return res.error.message
+}
+
+test('a 1.7.10 frame with face hangs on that wall, a chest clicked sneaking, over a floor and beside a slab', async () => {
+  const rig = frameRig({ legacy: true, extra: { [WALL.west]: CHEST, [WALL.east]: SLAB }, spawn: FACING.east })
+  const placed = await frameReply(rig, { ...FRAME_AT, face: 'W', then: 'blockat' })
+  assert.deepStrictEqual(rig.clicks, ['0,64,0 face 1,0,0'])
+  assert.deepStrictEqual(rig.log.filter((l) => !l.startsWith('look')), ['sneak true', 'place against chest sneaking=true', 'sneak false'])
+  assert.deepStrictEqual([placed.wall, placed.facing], ['west', 'east'])
+  assert.deepStrictEqual(placed.verify, { name: 'item_frame', at: { x: 1, y: 64, z: 0 } })
+})
+
+test('a 1.7.10 frame without face never clicks the floor, it hangs on a side', async () => {
+  const rig = frameRig({ legacy: true, extra: walls('south'), spawn: FACING.north })
+  const placed = await frameReply(rig, FRAME_AT)
+  assert.deepStrictEqual(rig.clicks, ['1,64,1 face 0,0,-1'])
+  assert.deepStrictEqual([placed.wall, placed.facing], ['south', 'north'])
+  const bare = frameRig({ legacy: true, spawn: FACING.up })
+  assert.strictEqual(await frameRefusal(bare, FRAME_AT), 'a frame needs a solid wall beside the cell')
+  assert.deepStrictEqual(bare.clicks, [])
+})
+
+test('a frame on 1.21.11 goes on the floor and reports the facing up', async () => {
+  const rig = frameRig({ spawn: FACING.up })
+  const placed = await frameReply(rig, FRAME_AT)
+  assert.deepStrictEqual(rig.clicks, ['1,63,0 face 0,1,0'])
+  assert.deepStrictEqual([placed.facing, placed.wall], ['up', undefined])
+})
+
+test('a frame counts as placed only on its spawn in the cell, a chest wall wrapping the no-spawn text', async () => {
+  const west = { ...FRAME_AT, face: 'W' }
+  await frameReply(frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east }), west)
+  const none = 'no item_frame spawned at 1,64,0 within 40 ticks of the click on the west wall'
+  assert.strictEqual(await frameRefusal(frameRig({ legacy: true, extra: walls('west') }), west), none)
+  const elsewhere = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east, spawnAt: [1, 65, 0] })
+  assert.strictEqual(await frameRefusal(elsewhere, west), none)
+  const chest = frameRig({ legacy: true, extra: { [WALL.west]: CHEST } })
+  assert.strictEqual(await frameRefusal(chest, west), `did not place while sneaking against the chest at 0,64,0 (${none})`)
+})
+
+test('a frame the server hangs off the named wall reports the wanted one', async () => {
+  const rig = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.north })
+  const placed = await frameReply(rig, { ...FRAME_AT, face: 'W' })
+  assert.deepStrictEqual([placed.wall, placed.facing], ['south, wanted west', 'north'])
+})
+
+test('a frame refuses a face wall out of sight and a missing one alike, before any click', async () => {
+  const missing = frameRig({ legacy: true, extra: walls('east') })
+  const text = await frameRefusal(missing, { ...FRAME_AT, face: 'W' })
+  assert.strictEqual(text, 'no solid wall west of the cell for a frame')
+  const unseen = frameRig({ legacy: true, extra: walls('west'), unseen: [WALL.west] })
+  assert.strictEqual(await frameRefusal(unseen, { ...FRAME_AT, face: 'W' }), text)
+  assert.deepStrictEqual([missing.clicks, unseen.clicks], [[], []])
+})
+
+test('a frame with face on 1.21.11 hangs on that wall, never on the floor', async () => {
+  const rig = frameRig({ extra: walls('west'), spawn: FACING.east })
+  const placed = await frameReply(rig, { ...FRAME_AT, face: 'W' })
+  assert.deepStrictEqual(rig.clicks, ['0,64,0 face 1,0,0'])
+  assert.deepStrictEqual([placed.wall, placed.facing], ['west', 'east'])
+})
+
+test('a frame spawning in the cell during the look before the click does not count', async () => {
+  const rig = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east, spawnAt: [1, 64, 0], spawnWhen: 'look' })
+  const none = 'no item_frame spawned at 1,64,0 within 40 ticks of the click on the west wall'
+  assert.strictEqual(await frameRefusal(rig, { ...FRAME_AT, face: 'W' }), none)
+  assert.deepStrictEqual(rig.clicks, ['0,64,0 face 1,0,0'], 'control: it clicked')
+})
+
+test('a 1.7.10 frame looks at the centre of the wall face, forced, before it clicks', async () => {
+  const rig = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east })
+  await frameReply(rig, { ...FRAME_AT, face: 'W' })
+  assert.deepStrictEqual(rig.clicks, ['0,64,0 face 1,0,0'], 'control: it clicked')
+  assert.deepStrictEqual(rig.lookAtClick, [{ x: 1, y: 64.5, z: 0.5, force: true }])
+})
+
+test('a frame spawn queued behind the age update that ends the wait still counts', async () => {
+  // The first age update after the click opens the 40 ticks and the third closes them.
+  const late = (emit) => {
+    let ages = 0
+    const onTime = () => {
+      if (++ages < 3) return
+      rig.server.removeListener('time', onTime)
+      setImmediate(emit)
+    }
+    rig.server.on('time', onTime)
+  }
+  const rig = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east, spawnWhen: late })
+  const placed = await frameReply(rig, { ...FRAME_AT, face: 'W' })
+  assert.deepStrictEqual([placed.wall, placed.facing], ['west', 'east'])
+})
+
+test('a frame spawn that follows the burst of stale server ages a 3 s proxy stall over the click queued counts', async () => {
+  // The proxy holds the click and the server's ages for 3 s, then delivers the ages at once. The server answers the
+  // click 100 ms later.
+  const stalled = (emit) => {
+    rig.proxy(3000)
+    rig.clock.setTimeout(emit, 3100)
+  }
+  const rig = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east, spawnWhen: stalled })
+  const placed = await frameReply(rig, { ...FRAME_AT, face: 'W' })
+  assert.deepStrictEqual([placed.wall, placed.facing], ['west', 'east'])
+})
+
+test('a frame on a server that sends no age waits 5 s after the click for its spawn', async () => {
+  const late = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east, ageless: true, spawnWhen: (emit) => late.clock.setTimeout(emit, 4500) })
+  const placed = await frameReply(late, { ...FRAME_AT, face: 'W' })
+  assert.deepStrictEqual([placed.wall, placed.facing], ['west', 'east'])
+  const quiet = frameRig({ legacy: true, extra: walls('west'), ageless: true })
+  let clickT = null
+  const click = quiet.env.bot._genericPlace
+  quiet.env.bot._genericPlace = function (...args) {
+    clickT = quiet.clock.now()
+    return click.apply(this, args)
+  }
+  const none = 'no item_frame spawned at 1,64,0 within 5 s (no tick from the server) of the click on the west wall'
+  assert.strictEqual(await frameRefusal(quiet, { ...FRAME_AT, face: 'W' }), none)
+  const waited = quiet.clock.now() - clickT
+  assert.ok(waited >= 5000 && waited <= 5100, `refused ${waited} ms after the click`)
+})
+
+test('a frame whose server sends no age after 20 ticks names the ticks it counted by the 5 s cap', async () => {
+  // The proxy holds every age after the second one since the click until long after the cap.
+  const held = () => {
+    let ages = 0
+    rig.server.on('time', function onTime () {
+      if (++ages < 2) return
+      rig.server.removeListener('time', onTime)
+      rig.proxy(10000)
+    })
+  }
+  const rig = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east, spawnWhen: held })
+  const short = 'no item_frame spawned at 1,64,0 within 5 s (20 of 40 ticks counted) of the click on the west wall'
+  assert.strictEqual(await frameRefusal(rig, { ...FRAME_AT, face: 'W' }), short)
+})
+
+test('a frame names the ticks counted by the 5 s cap, not those of an age update handled after it', async () => {
+  // The proxy swallows every age after the second one and delivers one more in the turn after the cap.
+  const held = () => {
+    let ages = 0
+    rig.server.on('time', function onTime () {
+      if (++ages < 2) return
+      rig.server.removeListener('time', onTime)
+      const emit = rig.server.emit
+      rig.server.emit = () => false
+      rig.clock.setTimeout(() => {
+        rig.server.emit = emit
+        rig.server.emit('time')
+      }, 3050)
+    })
+  }
+  const rig = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east, spawnWhen: held })
+  const short = 'no item_frame spawned at 1,64,0 within 5 s (20 of 40 ticks counted) of the click on the west wall'
+  assert.strictEqual(await frameRefusal(rig, { ...FRAME_AT, face: 'W' }), short)
+})
+
+test('a frame does not click once the guard reflex took the hand back during the look', async () => {
+  const rig = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east })
+  rig.env.bot.lookAt = async () => { rig.env.bot.heldItem = { name: 'iron_sword' } }
+  const text = await frameRefusal(rig, { ...FRAME_AT, face: 'W' })
+  assert.strictEqual(text, 'the guard reflex took the hand back from the item_frame (holding iron_sword), nothing placed, retry')
+  assert.deepStrictEqual(rig.clicks, [])
+  assert.strictEqual(rig.env.bot._client.listenerCount('spawn_entity'), 0)
+})
+
+test('a frame leaves no spawn or age listener behind after a timeout or a failed click', async () => {
+  const quiet = frameRig({ legacy: true, extra: walls('west') })
+  await frameRefusal(quiet, { ...FRAME_AT, face: 'W' })
+  assert.strictEqual(quiet.env.bot._client.listenerCount('spawn_entity'), 0, 'after the timeout')
+  assert.strictEqual(quiet.server.listenerCount('time'), 0, 'age listener after the timeout')
+  const failing = frameRig({ legacy: true, extra: walls('west') })
+  failing.env.bot._genericPlace = async () => { throw new Error('the click failed') }
+  assert.strictEqual(await frameRefusal(failing, { ...FRAME_AT, face: 'W' }), 'the click failed')
+  assert.strictEqual(failing.env.bot._client.listenerCount('spawn_entity'), 0, 'after the failed click')
+})
+
+test('a 1.21.11 frame spawning just short of the far edge of its cell confirms', async () => {
+  const rig = frameRig({ extra: walls('east'), spawn: FACING.west, spawnAt: [1.96875, 64.5, 0.5] })
+  const placed = await frameReply(rig, { ...FRAME_AT, face: 'E' })
+  assert.deepStrictEqual([placed.wall, placed.facing], ['east', 'west'])
+})
+
+test('a 1.21.11 frame at negative coordinates confirms on a spawn inside its cell', async () => {
+  const rig = frameRig({ extra: { '-4,64,0': STONE }, spawn: FACING.west, spawnAt: [-4.03125, 64.5, 0.5] })
+  const placed = await frameReply(rig, { ...FRAME_AT, x: '-5', face: 'E' })
+  assert.deepStrictEqual([placed.wall, placed.facing], ['east', 'west'])
+})
+
+test('a spawn of another entity in the cell does not count as the frame', async () => {
+  const rig = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east, spawnAs: 'item' })
+  const none = 'no item_frame spawned at 1,64,0 within 40 ticks of the click on the west wall'
+  assert.strictEqual(await frameRefusal(rig, { ...FRAME_AT, face: 'W' }), none)
+})
+
+test('two frame spawns in the cell after one click report the facing of the first', async () => {
+  const rig = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east, spawnNext: FACING.north })
+  const placed = await frameReply(rig, { ...FRAME_AT, face: 'W' })
+  assert.deepStrictEqual([placed.wall, placed.facing], ['west', 'east'])
+})
+
+test('a frame refuses a face that a frame or glow frame already hangs on, before any click, on both servers', async () => {
+  for (const legacy of [true, false]) {
+    const rig = frameRig({ legacy, extra: walls('west'), spawn: FACING.east, hanging: [{ name: 'item_frame', at: [1, 64, 0], objectData: FACING.east }] })
+    assert.strictEqual(await frameRefusal(rig, { ...FRAME_AT, face: 'W' }), 'the item_frame at 1,64,0 already hangs on that face', `legacy ${legacy}`)
+    assert.deepStrictEqual(rig.clicks, [], `legacy ${legacy}`)
+  }
+  const glow = frameRig({ extra: walls('west'), spawn: FACING.east, hanging: [{ name: 'glow_item_frame', at: [1, 64, 0], objectData: FACING.east }] })
+  assert.strictEqual(await frameRefusal(glow, { ...FRAME_AT, face: 'W' }), 'the glow_item_frame at 1,64,0 already hangs on that face')
+  assert.deepStrictEqual(glow.clicks, [])
+  const floor = frameRig({ spawn: FACING.up, hanging: [{ name: 'item_frame', at: [1, 64, 0], objectData: FACING.up }] })
+  assert.strictEqual(await frameRefusal(floor, FRAME_AT), 'the item_frame at 1,64,0 already hangs on that face')
+  assert.deepStrictEqual(floor.clicks, [])
+})
+
+test('a frame on another face of the cell or on the same face of another cell does not block a frame', async () => {
+  for (const legacy of [true, false]) {
+    const hanging = [{ name: 'item_frame', at: [1, 64, 0], objectData: FACING.north }, { name: 'item_frame', at: [1, 65, 0], objectData: FACING.east }]
+    const rig = frameRig({ legacy, extra: walls('west'), spawn: FACING.east, hanging })
+    const placed = await frameReply(rig, { ...FRAME_AT, face: 'W' })
+    assert.deepStrictEqual(rig.clicks, ['0,64,0 face 1,0,0'], `legacy ${legacy}`)
+    assert.deepStrictEqual([placed.wall, placed.facing], ['west', 'east'], `legacy ${legacy}`)
+  }
+})
+
+test('a frame the body does not perceive on the face leaves the click to the server, a perceived one refuses after the walk and the look', async () => {
+  const hanging = (seen) => [{ name: 'item_frame', at: [1, 64, 0], objectData: FACING.east, seen }]
+  const unseen = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east, hanging: hanging(false) })
+  const placed = await frameReply(unseen, { ...FRAME_AT, face: 'W' })
+  assert.deepStrictEqual([unseen.clicks, placed.wall], [['0,64,0 face 1,0,0'], 'west'])
+  const seen = frameRig({ legacy: true, extra: walls('west'), spawn: FACING.east, hanging: hanging(true) })
+  seen.env.bot.pathfinder.goto = async () => { seen.log.push('walk') }
+  assert.strictEqual(await frameRefusal(seen, { ...FRAME_AT, face: 'W' }), 'the item_frame at 1,64,0 already hangs on that face')
+  assert.deepStrictEqual([seen.log, seen.clicks], [['walk', 'look 1,0.5'], []])
+})
+
+test('a 1.7.10 frame without face skips a wall whose face holds a perceived frame, refusing only when every wall does', async () => {
+  const east = { name: 'item_frame', at: [1, 64, 0], objectData: FACING.west }
+  const moved = frameRig({ legacy: true, extra: walls('east', 'west'), spawn: FACING.east, hanging: [east] })
+  const placed = await frameReply(moved, FRAME_AT)
+  assert.deepStrictEqual([moved.clicks, placed.wall], [['0,64,0 face 1,0,0'], 'west'])
+  const unseen = frameRig({ legacy: true, extra: walls('east', 'west'), spawn: FACING.west, hanging: [{ ...east, seen: false }] })
+  const kept = await frameReply(unseen, FRAME_AT)
+  assert.deepStrictEqual([unseen.clicks, kept.wall], [['2,64,0 face -1,0,0'], 'east'])
+  const full = frameRig({ legacy: true, extra: walls('east', 'west'), hanging: [east, { name: 'glow_item_frame', at: [1, 64, 0], objectData: FACING.east }] })
+  assert.strictEqual(await frameRefusal(full, FRAME_AT), 'the item_frame at 1,64,0 already hangs on that face')
+  assert.deepStrictEqual(full.clicks, [])
 })

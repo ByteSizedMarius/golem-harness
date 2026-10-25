@@ -4,6 +4,22 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-25: item frames hang on the wall the pilot names
+
+A frame placed in front of a chest went onto the floor's top face, which a 1.7.10 server refuses, or
+onto a block across the cell, and calls reported a failure for frames that had hung. `placeitem` now
+takes `face` as the wall a frame hangs on, a chest included, never clicks the block below a frame on
+a 1.7.10 server, and counts a frame as placed once the server spawns it in the cell, naming the wall
+and facing the server set. It refuses a face that already holds a frame in sight, and without `face`
+on a 1.7.10 server it picks a wall that holds none. `strike` and `useon` take `at` to pick a frame
+by its cell, and `entities` names what each frame holds. Before acting on a frame, `strike` and
+`useon` walk to a spot where its face is in swing reach. They say so when no spot in walking reach
+puts it there, and say the walk ran out of time when their time, or the path search's think time,
+ran out before the body stood in reach. A `strike` that empties a frame waits for the drop to come
+to rest, walks onto it, and says it picked the drop up only once the drop has left the floor and the
+inventory gained it. Otherwise its reply says what became of the drop, for example that it merged
+into another item, was still moving when time ran out, or lay out of walking reach.
+
 ## 2026-10-25: the bot knows its own chat by its current name
 
 The chat log dropped the bot's own lines by the name it logged in with. On a server that shows the

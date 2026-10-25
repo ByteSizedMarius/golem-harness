@@ -1,8 +1,9 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
-const { EventEmitter } = require('node:events')
+const { EventEmitter, once } = require('node:events')
 const { Vec3 } = require('vec3')
+const mineflayer = require('mineflayer')
 const { goals } = require('mineflayer-pathfinder')
 const rules = require('../lib/combat-rules')
 const legacy1710 = require('../lib/bot/legacy-1710')
@@ -18,6 +19,7 @@ const registry = require('prismarine-registry')('1.21.11')
 const loadItem = require('prismarine-item')
 const Item = loadItem(registry)
 const Block = require('prismarine-block')(registry)
+const Entity = require('prismarine-entity')(registry)
 const FRAME_ITEM = mcData.entitiesByName.item_frame.metadataKeys.indexOf('item')
 
 // seen says whether the body perceives the zombie.
@@ -25,9 +27,9 @@ const zombie = (x, seen = true) => ({ id: 7, name: 'zombie', width: 0.6, height:
 
 // did records the body's actions in order: walk, jump, swing, draw, use. hits holds each swing's time, the
 // server's fall distance and whether the body stood on the ground. The floor is at y 63, solid cells
-// start at y ceiling, and a walk ends 2 west of its goal. stop() runs the /stop handler over the world's
-// leg ledger and pilot lane.
-function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
+// start at y ceiling, and a walk ends 2 west of its goal, or of the aim point's cell for a melee reach goal.
+// stop() runs the /stop handler over the world's leg ledger and pilot lane. stops() counts the calls of env.stopPath.
+function verbWorld (entities, { legacy = false, ceiling = Infinity, recentre = false } = {}) {
   const clock = fakeClock()
   const did = []
   const hits = []
@@ -58,6 +60,7 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
     fall = e.onGround ? 0 : fall + Math.max(0, y0 - y)
   }
   clock.setInterval(tick, 50)
+  clock.setInterval(() => bot.emit('physicsTick'), 50)
   const solid = (p) => p.y < 64 || p.y >= ceiling
   const bot = Object.assign(new EventEmitter(), {
     entity: { position: new Vec3(0.5, 64, 0.5), onGround: true },
@@ -69,11 +72,12 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
     pathfinder: {
       goto: async (goal) => {
         did.push('walk')
-        bot.entity.position = new Vec3(goal.x - 1.5, 64, goal.z + 0.5)
+        const at = goal.aim ? goal.aim.floored() : goal
+        bot.entity.position = new Vec3(at.x - 1.5, 64, at.z + 0.5)
       },
       isMoving: () => false
     },
-    blockAt: (p) => ({ name: solid(p) ? 'stone' : 'air', boundingBox: solid(p) ? 'block' : 'empty', position: p }),
+    blockAt: (p) => ({ name: solid(p) ? 'stone' : 'air', boundingBox: solid(p) ? 'block' : 'empty', shapes: solid(p) ? [[0, 0, 0, 1, 1, 1]] : [], position: p }),
     setControlState (c, s) {
       controls[c] = s
       if (c === 'jump' && s) did.push('jump')
@@ -95,6 +99,20 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
   createLane(lane)
   lane.clearLane()
   lane.strikeRun.lane = null
+  let stops = 0
+  // The events of legs.js stopPath on a walking pathfinder: setGoal(null) clears the goal and emits goal_updated, then the
+  // latched stop emits path_stop. With recentre, fullStop then moves the body to its cell centre on each axis it stands
+  // more than 0.2 off.
+  const pathStop = () => {
+    stops++
+    bot.pathfinder.goal = null
+    bot.emit('goal_updated', null, false)
+    bot.emit('path_stop')
+    if (!recentre) return
+    const p = bot.entity.position
+    const centre = (v) => Math.abs(v - Math.floor(v) - 0.5) > 0.2 ? Math.floor(v) + 0.5 : v
+    bot.entity.position = new Vec3(centre(p.x), p.y, centre(p.z))
+  }
   const env = {
     bot,
     goals,
@@ -137,8 +155,10 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
     Date: { now: clock.now },
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
+    setImmediate,
     liveEntities: () => Object.values(bot.entities),
-    reflexes: [{ name: 'combat', fairFill: () => fill }],
+    reflexes: [{ name: 'combat', fairFill: () => fill, fightBusy: () => false }],
+    guardState: { hand: null },
     entityPerceptible: (e, f) => {
       assert.strictEqual(f, fill, 'entityPerceptible got another fill')
       return e.seen
@@ -150,7 +170,7 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
     claimLane: lane.claimLane,
     releaseLane: lane.releaseLane,
     strikeRun: lane.strikeRun,
-    stopPath () {},
+    stopPath: pathStop,
     round: (v) => v && { x: v.x, y: v.y, z: v.z }
   }
   const stop = () => runRoute('/stop', {}, {
@@ -163,7 +183,18 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity } = {}) {
     jobs: { stopAll: () => 0 },
     guardState: { hand: null }
   })
-  return { bot, env, clock, did, hits, stop }
+  // A goto that never arrives and, as mineflayer-pathfinder's, fails with GoalChanged a timer turn after another goal replaces g.
+  const gotoUntilChanged = (g) => new Promise((resolve, reject) => {
+    did.push('walk')
+    bot.pathfinder.goal = g
+    const changed = (n) => {
+      if (n === g) return
+      bot.removeListener('goal_updated', changed)
+      clock.setTimeout(() => reject(Object.assign(new Error('The goal was changed before it could be completed!'), { name: 'GoalChanged' })), 0)
+    }
+    bot.on('goal_updated', changed)
+  })
+  return { bot, env, clock, did, hits, stop, stops: () => stops, gotoUntilChanged }
 }
 
 // Advances the fake clock 10 ms a step until route answers, ten minutes at most.
@@ -465,18 +496,72 @@ test('a useon whose zombie goes out of sight on the walk uses nothing and gives 
   assert.deepStrictEqual(world.did, ['walk'])
 })
 
-// An empty frame has no item key, as a 1.21.11 server sends it.
-function frame (id, x, item, seen = true) {
+test('a useon refuses a fight that starts on the walk, before the item goes into the hand', async () => {
+  let fighting = false
+  let equipped = false
+  const world = verbWorld([zombie(6.5)])
+  world.env.reflexes[0].fightBusy = () => fighting
+  world.env.bunker = { building: false }
+  const walk = world.bot.pathfinder.goto
+  world.bot.pathfinder.goto = async (goal) => {
+    await walk(goal)
+    fighting = true
+  }
+  world.bot.equip = async () => { equipped = true }
+  const res = await drive('/useon', { name: 'zombie', item: 'shears' }, world)
+  assert.match(res.error ? res.error.message : `no refusal, did ${world.did.join(', ')}`, /^refused: fighting something, the guard reflex holds the hand\./)
+  assert.deepStrictEqual({ equipped, did: world.did, hand: world.env.guardState.hand }, { equipped: false, did: ['walk'], hand: null })
+})
+
+// An empty frame has no item key, as a 1.21.11 server sends it. objectData 4 faces west, toward the body.
+function frame (id, x, item, seen = true, objectData = 4) {
   const metadata = []
   if (item) metadata[FRAME_ITEM] = Item.toNotch(new Item(registry.itemsByName[item].id, 1))
-  return { id, name: 'item_frame', width: 0.5, height: 0.5, seen, position: new Vec3(x, 65, 0.5), metadata }
+  return { id, name: 'item_frame', width: 0.5, height: 0.5, seen, position: new Vec3(x, 65, 0.5), metadata, objectData }
 }
 
-// hold(en, item) is the server changing what frame en holds, sent as an entity update.
-function frameWorld (frames, opts) {
+// hold(en, item) is the server changing what frame en holds, sent as an entity update. The server ticks every tickMs,
+// sends its age every ageEvery ticks, arriving ageLag ms after the tick, and a position update of each item every 60.
+// stall(ms) halts its ticks for ms, proxy(ms) holds its ages for ms and then delivers them at once, returning the held
+// ages, and server(ms, fn) runs the server update fn ms from now, or at the end of a stall running then.
+function frameWorld (frames, { tickMs = 50, ageLag = 0, ...opts } = {}) {
   const world = verbWorld(frames, opts)
-  const { bot, env } = world
+  const { bot, env, clock } = world
   bot.registry = registry
+  bot.time = { age: 0 }
+  world.ageEvery = 20
+  let ticks = 0
+  let stallEnd = -Infinity
+  let held = null
+  const sendAge = (age) => {
+    bot.time.age = age
+    bot.emit('time')
+  }
+  clock.setInterval(() => {
+    if (clock.now() < stallEnd) return
+    ticks++
+    if (ticks % world.ageEvery === 0) {
+      const age = ticks
+      if (held) held.push(age)
+      else if (ageLag) clock.setTimeout(() => sendAge(age), ageLag)
+      else sendAge(age)
+    }
+    if (ticks % 60 === 0) for (const e of Object.values(bot.entities)) if (e.name === 'item') bot.emit('entityMoved', e)
+  }, tickMs)
+  world.stall = (ms) => { stallEnd = clock.now() + ms }
+  world.proxy = (ms) => {
+    const ages = []
+    held = ages
+    clock.setTimeout(() => {
+      held = null
+      ages.forEach(sendAge)
+    }, ms)
+    return ages
+  }
+  world.server = (ms, fn) => clock.setTimeout(function run () {
+    if (clock.now() < stallEnd) clock.setTimeout(run, stallEnd - clock.now())
+    else fn()
+  }, ms)
   Object.assign(env, { shared: { ready: true, mcData }, loadItem })
   const items = bot.inventory.items
   bot.inventory.items = () => [...items(), { name: 'wheat' }]
@@ -493,21 +578,21 @@ function frameWorld (frames, opts) {
 }
 
 // framedBy(en) names the item the server frames after the click, undefined for no update.
-async function frameWheat (frames, framedBy = () => undefined) {
+async function frameWheat (frames, framedBy = () => undefined, query = {}) {
   const world = frameWorld(frames)
   world.bot.useOn = async (en) => {
     world.did.push(`use ${en.id}`)
     const item = framedBy(en)
     if (item !== undefined) world.hold(en, item)
   }
-  const res = await drive('/useon', { name: 'item_frame', item: 'wheat' }, world)
+  const res = await drive('/useon', { name: 'item_frame', item: 'wheat', ...query }, world)
   assert.strictEqual(res.error, undefined, res.error && res.error.message)
   return { reply: { ...res.body }, did: world.did }
 }
 
 test('useon puts the item into an empty frame and names what the frame holds after the server update', async () => {
   const framed = await frameWheat([frame(20, 2.5, null)], () => 'wheat')
-  assert.deepStrictEqual(framed.reply, { used: 'wheat', on: 'item_frame', at: { x: 2.5, y: 65, z: 0.5 }, framed: 'wheat' })
+  assert.deepStrictEqual(framed.reply, { used: 'wheat', on: 'item_frame', at: { x: 2, y: 65, z: 0 }, framed: 'wheat' })
   assert.deepStrictEqual(framed.did, ['equip wheat', 'use 20'])
   const other = await frameWheat([frame(20, 2.5, null)], () => 'iron_sword')
   assert.deepStrictEqual([other.reply.ok, other.reply.framed], [false, 'iron_sword'])
@@ -518,13 +603,13 @@ test('useon picks the nearest empty frame past a filled one', async () => {
   const empty = frame(21, 4.5, null)
   empty.metadata[FRAME_ITEM] = Item.toNotch(null)
   const { reply, did } = await frameWheat([frame(20, 2.5, 'stick'), empty], () => 'wheat')
-  assert.deepStrictEqual([reply.ok, reply.at, reply.framed], [undefined, { x: 4.5, y: 65, z: 0.5 }, 'wheat'])
+  assert.deepStrictEqual([reply.ok, reply.at, reply.framed], [undefined, { x: 4, y: 65, z: 0 }, 'wheat'])
   assert.ok(did.includes('use 21'), did.join(', '))
 })
 
 test('useon with only filled frames in sight walks, equips and clicks nothing, and names what the nearest holds', async () => {
   const { reply, did } = await frameWheat([frame(20, 4.5, 'stick'), frame(21, 6.5, 'wheat'), frame(22, 2.5, null, false)], () => 'wheat')
-  assert.deepStrictEqual([reply.ok, reply.used, reply.on, reply.at, reply.framed], [false, null, 'item_frame', { x: 4.5, y: 65, z: 0.5 }, 'stick'])
+  assert.deepStrictEqual([reply.ok, reply.used, reply.on, reply.at, reply.framed], [false, null, 'item_frame', { x: 4, y: 65, z: 0 }, 'stick'])
   assert.strictEqual(typeof reply.reason, 'string')
   assert.deepStrictEqual(did, [])
   const none = await drive('/useon', { name: 'item_frame', item: 'wheat' }, frameWorld([]))
@@ -532,11 +617,124 @@ test('useon with only filled frames in sight walks, equips and clicks nothing, a
   assert.strictEqual(hidden.error && hidden.error.message, none.error.message)
 })
 
-test('useon without a frame update within 500 ms confirms nothing', async () => {
+test('useon without a frame update within 10 ticks confirms nothing', async () => {
   const { reply } = await frameWheat([frame(20, 2.5, null)])
   assert.deepStrictEqual([reply.ok, reply.used, reply.framed], [false, 'wheat', null])
-  assert.match(reply.reason, /500 ms/)
+  assert.strictEqual(reply.reason, 'the server sent no frame update within 10 ticks, the frame shows nothing')
 })
+
+test('a useon does not click once the guard reflex took the hand back after the equip, on a creature or a frame', async () => {
+  for (const [query, world] of [
+    [{ name: 'zombie', item: 'shears' }, verbWorld([zombie(2.5)])],
+    [{ name: 'item_frame', item: 'wheat' }, frameWorld([frame(20, 2.5, null)])]
+  ]) {
+    let held = null
+    world.bot.lookAt = async () => {
+      held = world.env.guardState.hand
+      world.bot.heldItem = { name: 'iron_sword' }
+    }
+    const res = await drive('/useon', query, world)
+    assert.match(res.error && res.error.message, new RegExp(`^the guard reflex took the hand back from the ${query.item} \\(holding iron_sword\\), nothing used, retry$`), query.name)
+    assert.deepStrictEqual(world.did.filter((d) => d.startsWith('use')), [], `${query.name} clicked`)
+    assert.ok(held, `${query.name}: no hand lease at the look`)
+    assert.strictEqual(world.env.guardState.hand, null, `${query.name} kept the lease`)
+  }
+})
+
+test('a useon gives the hand back once the click is sent, before it waits for the frame update', async () => {
+  const creature = verbWorld([zombie(2.5)])
+  const frameW = frameWorld([frame(20, 2.5, null)])
+  const seen = {}
+  for (const [query, world] of [
+    [{ name: 'zombie', item: 'shears' }, creature],
+    [{ name: 'item_frame', item: 'wheat' }, frameW]
+  ]) {
+    const { guardState } = world.env
+    world.bot.useOn = async () => {
+      world.did.push('use')
+      seen[query.name] = { atClick: guardState.hand !== null }
+      world.clock.setTimeout(() => { seen[query.name].inWait = guardState.hand }, 100)
+      return 'clicked'
+    }
+    world.env.ok = (res, body) => {
+      seen[query.name].atReply = guardState.hand
+      res.body = body
+    }
+    const res = await drive('/useon', query, world)
+    assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  }
+  const held = (s) => ({ atClick: s.atClick, ...(s.inWait === undefined ? {} : { inWait: s.inWait !== null }), atReply: s.atReply !== null })
+  assert.deepStrictEqual(
+    { zombie: held(seen.zombie), frame: held(seen.item_frame) },
+    { zombie: { atClick: true, atReply: false }, frame: { atClick: true, inWait: false, atReply: false } }
+  )
+})
+
+test('a useon gives the hand back when it ends after the equip without a click, on a creature or a frame', async () => {
+  const sight = (en) => ({ lookAt: async () => { en.seen = false } })
+  const reach = (en) => ({ lookAt: async () => { en.position = new Vec3(8.5, en.position.y, en.position.z) } })
+  const cases = [
+    ['lost sight', sight, (res) => res.body.reason],
+    [{ zombie: 'target left reach', item_frame: 'the item_frame at 8,65,0 stays out of swing reach from here' }, reach, (res) => res.body ? res.body.note : res.error.message],
+    ['the equip timed out', () => ({ equip: async () => { throw new Error('the equip timed out') } }), (res) => res.error.message]
+  ]
+  for (const [endings, arrange, said] of cases) {
+    for (const [query, world] of [
+      [{ name: 'zombie', item: 'shears' }, verbWorld([zombie(2.5)])],
+      [{ name: 'item_frame', item: 'wheat' }, frameWorld([frame(20, 2.5, null)])]
+    ]) {
+      const { guardState } = world.env
+      const ends = typeof endings === 'string' ? endings : endings[query.name]
+      Object.assign(world.bot, arrange(Object.values(world.bot.entities)[0]))
+      let held = null
+      const equip = world.bot.equip
+      world.bot.equip = async (item) => {
+        held = guardState.hand
+        return equip(item)
+      }
+      const res = await drive('/useon', query, world)
+      assert.strictEqual(said(res), ends, `${query.name}: ${ends}`)
+      assert.deepStrictEqual(world.did.filter((d) => d.startsWith('use')), [], `${query.name}: ${ends} clicked`)
+      assert.ok(held, `${query.name}: ${ends}: no hand lease at the equip`)
+      assert.strictEqual(guardState.hand, null, `${query.name}: ${ends} kept the lease`)
+    }
+  }
+})
+
+test('a useon renews its hand lease after the equip, so a slow equip and a slow look keep the hand to the click', async () => {
+  for (const [query, world] of [
+    [{ name: 'zombie', item: 'shears' }, verbWorld([zombie(2.5)])],
+    [{ name: 'item_frame', item: 'wheat' }, frameWorld([frame(20, 2.5, null)])]
+  ]) {
+    const { guardState } = world.env
+    const slow = (ms) => new Promise((resolve) => world.clock.setTimeout(resolve, ms))
+    const equip = world.bot.equip
+    let leased = null
+    let atClick = null
+    world.bot.equip = async (item) => {
+      leased = guardState.hand
+      await slow(1500)
+      return equip(item)
+    }
+    world.bot.lookAt = () => slow(1000)
+    world.bot.useOn = async () => { atClick = guardState.hand }
+    const res = await drive('/useon', query, world)
+    assert.strictEqual(res.error, undefined, res.error && res.error.message)
+    assert.ok(leased, `${query.name}: no hand lease at the equip`)
+    assert.strictEqual(atClick, leased, `${query.name}: the lease was lost before the click`)
+  }
+})
+
+// Item 30 is the wheat a frame drops. Without wheat it holds no item metadata yet, as mineflayer spawns it.
+function wheatDrop (position, wheat = true, count = 1) {
+  const drop = Object.assign(new Entity(30), { name: 'item', width: 0.25, height: 0.25, seen: true, position })
+  if (wheat) giveWheat(drop, count)
+  return drop
+}
+
+function giveWheat (drop, count = 1) {
+  drop.metadata[registry.supportFeature('metadataIxOfItem')] = Item.toNotch(new Item(registry.itemsByName.wheat.id, count))
+}
 
 test('a strike on a frame swings once at the nearest filled frame whatever max says, and walks to the dropped item', async () => {
   for (const legacy of [false, true]) {
@@ -550,24 +748,983 @@ test('a strike on a frame swings once at the nearest filled frame whatever max s
     world.bot.attack = (en) => {
       world.did.push(`swing ${en.id}`)
       world.hold(en, null)
+      world.bot.entities[30] = wheatDrop(en.position.clone())
     }
     const res = await drive('/strike', { name: 'item_frame', item: 'iron_sword', max: '3' }, world)
     assert.strictEqual(res.error, undefined, res.error && res.error.message)
     const { swings, killed, dropped, at, note } = res.body
-    assert.deepStrictEqual({ swings, killed, dropped, at }, { swings: 1, killed: false, dropped: 'wheat', at: { x: 3.5, y: 65, z: 0.5 } }, `1.7.10 ${legacy}`)
+    assert.deepStrictEqual({ swings, killed, dropped, at }, { swings: 1, killed: false, dropped: 'wheat', at: { x: 3, y: 65, z: 0 } }, `1.7.10 ${legacy}`)
     assert.strictEqual(typeof note, 'string')
-    assert.deepStrictEqual(world.did.filter((d) => !d.startsWith('jump')), ['equip iron_sword', 'swing 20', 'walk'], `1.7.10 ${legacy}`)
+    // The face of frame 20 sits 3.3 off the eye.
+    assert.deepStrictEqual(world.did.filter((d) => !d.startsWith('jump')), ['walk', 'equip iron_sword', 'swing 20', 'walk'], `1.7.10 ${legacy}`)
     assert.deepStrictEqual(sprints, [], `1.7.10 ${legacy}`)
   }
 })
 
+// The live c2 frame, spawned at the corner of its cell facing north. Its face sits about 3.6 from the eye, the corner 2.8.
+test('a 1.7.10 strike on a frame whose corner sits in reach walks to its face, then swings', async () => {
+  const world = frameWorld([Object.assign(frame(20, 6, 'wheat', true, 2), { position: new Vec3(6, 64, -1) })], { legacy: true })
+  world.bot.entity.position = new Vec3(7.5, 64, -3.5)
+  world.bot.attack = (en) => {
+    world.did.push(`swing ${en.id}`)
+    world.hold(en, null)
+  }
+  const res = await drive('/strike', { name: 'item_frame', item: 'iron_sword', at: '6,64,-1' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual([res.body.swings, res.body.at, res.body.dropped], [1, { x: 6, y: 64, z: -1 }, 'wheat'], res.body.note)
+  assert.deepStrictEqual(world.did, ['walk', 'equip iron_sword', 'swing 20'])
+})
+
+test('a 1.7.10 useon on a frame whose corner sits in reach walks to its face, then clicks', async () => {
+  // The corner 2.7 off the feet, the face of the west-facing frame 3.3 off the eye.
+  const world = frameWorld([Object.assign(frame(20, 3, null), { position: new Vec3(3, 65, 0) })], { legacy: true })
+  world.bot.useOn = async (en) => {
+    world.did.push(`use ${en.id}`)
+    world.hold(en, 'wheat')
+  }
+  const res = await drive('/useon', { name: 'item_frame', item: 'wheat' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual([res.body.ok, res.body.framed], [undefined, 'wheat'], res.body.reason)
+  assert.deepStrictEqual(world.did, ['walk', 'equip wheat', 'use 20'])
+})
+
+// A pathfinder walk that stays put on a goal its start cell meets, else ends on the floor cell within 4 of cell that
+// meets the goal with the lowest heuristic.
+function reachWalk (world, cell) {
+  return async (goal) => {
+    world.did.push('walk')
+    if (goal.isEnd(world.bot.entity.position.floored())) return
+    let best = null
+    for (let dx = -4; dx <= 4; dx++) {
+      for (let dz = -4; dz <= 4; dz++) {
+        const c = new Vec3(cell.x + dx, 64, cell.z + dz)
+        if (goal.isEnd(c) && (!best || goal.heuristic(c) < goal.heuristic(best))) best = c
+      }
+    }
+    assert.ok(best, 'no floor cell meets the goal')
+    world.bot.entity.position = best.offset(0.5, 0, 0.5)
+  }
+}
+
+test('strike and useon walk from 2 above a frame facing up, whose face lies out of swing reach there, then act', async () => {
+  // From 2 above, the face sits 3.46 below the eye.
+  for (const legacy of [false, true]) {
+    for (const [route, item, fill, act] of [['/strike', 'iron_sword', 'wheat', 'swing 20'], ['/useon', 'wheat', null, 'use 20']]) {
+      const world = frameWorld([Object.assign(frame(20, 3, fill, true, 1), { position: new Vec3(3, 64, 0) })], { legacy })
+      world.bot.entity.position = new Vec3(3.5, 66, 0.5)
+      world.bot.pathfinder.goto = reachWalk(world, new Vec3(3, 64, 0))
+      world.bot.attack = (en) => {
+        world.did.push(`swing ${en.id}`)
+        world.hold(en, null)
+      }
+      world.bot.useOn = async (en) => {
+        world.did.push(`use ${en.id}`)
+        world.hold(en, 'wheat')
+      }
+      const res = await drive(route, { name: 'item_frame', item }, world)
+      assert.strictEqual(res.error, undefined, res.error && `${route} on 1.7.10 ${legacy}: ${res.error.message}`)
+      assert.deepStrictEqual(world.did, ['walk', `equip ${item}`, act], `${route} on 1.7.10 ${legacy}`)
+    }
+  }
+})
+
+test('strike and useon walk from off the centre of a cell whose centre has the frame in swing reach, then act', async () => {
+  for (const [route, item, fill, act] of [['/strike', 'iron_sword', 'wheat', 'swing 20'], ['/useon', 'wheat', null, 'use 20']]) {
+    const world = frameWorld([Object.assign(frame(20, 3, fill), { position: new Vec3(3, 65, 0) })])
+    // The face sits in reach of the centre of cell 1,64,-1 and out of reach of the body 0.45 west and north of it.
+    world.bot.entity.position = new Vec3(1.05, 64, -0.95)
+    world.bot.pathfinder.goto = reachWalk(world, new Vec3(3, 64, 0))
+    world.bot.attack = (en) => {
+      world.did.push(`swing ${en.id}`)
+      world.hold(en, null)
+    }
+    world.bot.useOn = async (en) => {
+      world.did.push(`use ${en.id}`)
+      world.hold(en, 'wheat')
+    }
+    const res = await drive(route, { name: 'item_frame', item }, world)
+    assert.strictEqual(res.error, undefined, res.error && `${route}: ${res.error.message}`)
+    assert.deepStrictEqual(world.did, ['walk', `equip ${item}`, act], route)
+  }
+})
+
+// The listeners on each bot event a walk listens to.
+const pathListeners = (bot) => Object.fromEntries(['path_update', 'goal_reached', 'goal_updated', 'path_stop', 'physicsTick'].map((e) => [e, bot.listenerCount(e)]))
+const NO_PATH_LISTENERS = { path_update: 0, goal_reached: 0, goal_updated: 0, path_stop: 0, physicsTick: 0 }
+
+test('strike and useon on a frame no walk puts in swing reach say so, when the walk runs out of time, finds no path or stays on a cell out of reach', async () => {
+  for (const [route, item, fill] of [['/strike', 'iron_sword', 'wheat'], ['/useon', 'wheat', null]]) {
+    for (const [label, walk] of [
+      ['out of time', () => new Promise(() => {})],
+      ['no path', async () => { throw Object.assign(new Error('No path to the goal!'), { name: 'NoPath' }) }],
+      // The pathfinder resolves a search whose best cell is the start, as for a walled-in body.
+      ['an empty path', async () => {}]
+    ]) {
+      const world = frameWorld([frame(20, 3.5, fill)])
+      world.bot.pathfinder.goto = (goal) => {
+        world.did.push('walk')
+        world.bot.pathfinder.goal = goal
+        return walk(goal)
+      }
+      const res = await drive(route, { name: 'item_frame', item }, world)
+      assert.strictEqual(res.error ? res.error.message : `no error, note ${res.body.note}`, 'no spot in walking reach puts the face of the item_frame at 3,65,0 in swing reach', `${route} ${label}`)
+      assert.deepStrictEqual({ did: world.did, stops: world.stops(), listening: pathListeners(world.bot) }, { did: ['walk'], stops: 1, listening: NO_PATH_LISTENERS }, `${route} ${label}`)
+      assert.ok(world.clock.now() <= rules.STRIKE_APPROACH_MS + 100, `${route} ${label} answered at ${world.clock.now()} ms`)
+    }
+  }
+})
+
+test('strike and useon on a frame say the walk ran out of time on its way after a path with steps, a partial one or a replan out of think time, no spot after a noPath or an empty success, walk on past an empty partial, and act once the body stops in reach', async () => {
+  const steps = [new Vec3(2, 64, 0), new Vec3(1, 64, 0)]
+  const onWay = 'the walk to the item_frame at 3,65,0 ran out of time on its way'
+  const noSpot = 'no spot in walking reach puts the face of the item_frame at 3,65,0 in swing reach'
+  for (const [route, item, fill, act] of [['/strike', 'iron_sword', 'wheat', 'swing 20'], ['/useon', 'wheat', null, 'use 20']]) {
+    // Each update is a path_update's status and path, reached for the body arriving in reach, or arrived for the body
+    // stopping in reach with no goal_reached. A null said is a walk that acts.
+    for (const [updates, said] of [
+      [[['success', steps]], onWay],
+      [[['partial', steps]], onWay],
+      [[['partial', []]], onWay],
+      [[['success', steps], ['timeout', []]], onWay],
+      [[['success', steps], 'arrived'], null],
+      [[['partial', []], ['timeout', []]], onWay],
+      [[['partial', []], ['noPath', []]], noSpot],
+      [[['partial', []], ['success', steps], 'reached'], null],
+      [[['partial', steps], ['noPath', steps]], noSpot],
+      [[['success', []]], noSpot]
+    ]) {
+      const label = `${route} ${updates.map((u) => typeof u === 'string' ? u : `${u[0]} with ${u[1].length} steps`).join(', ')}`
+      const world = frameWorld([frame(20, 3.5, fill)])
+      // As goto, it resolves on an empty path or goal_reached and fails on a noPath or timeout with steps.
+      world.bot.pathfinder.goto = (goal) => new Promise((resolve, reject) => {
+        world.did.push('walk')
+        world.bot.pathfinder.goal = goal
+        updates.forEach((u, i) => world.clock.setTimeout(() => {
+          if (typeof u === 'string') world.bot.entity.position = new Vec3(1.5, 64, 0.5)
+          if (u === 'arrived') return
+          if (u === 'reached') {
+            world.bot.emit('goal_reached', goal)
+            return resolve()
+          }
+          const [status, path] = u
+          world.bot.emit('path_update', { status, path })
+          if (path.length === 0) resolve()
+          else if (status === 'noPath') reject(Object.assign(new Error('No path to the goal!'), { name: 'NoPath' }))
+          else if (status === 'timeout') reject(Object.assign(new Error('Took to long to decide path to goal!'), { name: 'Timeout' }))
+        }, 500 * (i + 1)))
+      })
+      world.bot.attack = (en) => {
+        world.did.push(`swing ${en.id}`)
+        world.hold(en, null)
+      }
+      world.bot.useOn = async (en) => {
+        world.did.push(`use ${en.id}`)
+        world.hold(en, 'wheat')
+      }
+      const res = await drive(route, { name: 'item_frame', item }, world)
+      if (said === null) {
+        assert.strictEqual(res.error, undefined, res.error && `${label}: ${res.error.message}`)
+        // Only a body that stopped in reach leaves the pathfinder a goal to stop.
+        const stops = updates.includes('arrived') ? 1 : 0
+        assert.deepStrictEqual({ did: world.did, stops: world.stops(), listening: pathListeners(world.bot) }, { did: ['walk', `equip ${item}`, act], stops, listening: NO_PATH_LISTENERS }, label)
+      } else {
+        assert.strictEqual(res.error ? res.error.message : `no error, note ${res.body.note}`, said, label)
+        assert.deepStrictEqual({ did: world.did, stops: world.stops(), listening: pathListeners(world.bot) }, { did: ['walk'], stops: 1, listening: NO_PATH_LISTENERS }, label)
+      }
+      assert.ok(world.clock.now() >= 500 * updates.length, `${label} answered at ${world.clock.now()} ms`)
+    }
+  }
+})
+
+test('strike and useon on a frame whose walk runs out of time in swing reach act only when the stop leaves the body in reach, and stop the walk once', async () => {
+  for (const [route, item, fill, act] of [['/strike', 'iron_sword', 'wheat', 'swing 20'], ['/useon', 'wheat', null, 'use 20']]) {
+    // The stop recentres a body 0.4 off its cell centre, which leaves reach of the face from cell 0,64,0 and keeps it from cell 1,64,0.
+    for (const [x, kept] of [[0.9, false], [1.9, true]]) {
+      const label = `${route} from ${x}`
+      const world = frameWorld([frame(20, 3.5, fill)], { recentre: true })
+      const en = world.bot.entities[20]
+      const { inMeleeReach } = loadBotFunctions(['inMeleeReach'], { ...world.env })
+      const at = new Vec3(x, 64, 0.5)
+      assert.deepStrictEqual([inMeleeReach(en, 0.6, at), inMeleeReach(en, 0.6, new Vec3(Math.floor(x) + 0.5, 64, 0.5))], [true, kept], `${label} control: in reach before the recentre`)
+      world.bot.pathfinder.goto = (goal) => new Promise(() => {
+        world.did.push('walk')
+        world.bot.pathfinder.goal = goal
+        world.bot.entity.position = at
+      })
+      world.bot.attack = (e) => {
+        world.did.push(`swing ${e.id}`)
+        world.hold(e, null)
+      }
+      world.bot.useOn = async (e) => {
+        world.did.push(`use ${e.id}`)
+        world.hold(e, 'wheat')
+      }
+      const res = await drive(route, { name: 'item_frame', item }, world)
+      if (kept) assert.strictEqual(res.error, undefined, res.error && `${label}: ${res.error.message}`)
+      else assert.strictEqual(res.error ? res.error.message : `no error, did ${world.did.join(', ')}`, 'the walk to the item_frame at 3,65,0 ran out of time on its way', label)
+      assert.deepStrictEqual({ did: world.did, stops: world.stops(), listening: pathListeners(world.bot) }, { did: kept ? ['walk', `equip ${item}`, act] : ['walk'], stops: 1, listening: NO_PATH_LISTENERS }, label)
+    }
+  }
+})
+
+test('a stop during the walk to a frame ends a strike or a useon as stopped', async () => {
+  for (const [route, item, fill] of [['/strike', 'iron_sword', 'wheat'], ['/useon', 'wheat', null]]) {
+    const world = frameWorld([frame(20, 3.5, fill)])
+    world.bot.pathfinder.goto = () => new Promise((resolve, reject) => {
+      world.did.push('walk')
+      world.env.stopPath = () => reject(Object.assign(new Error('The goal was changed before it could be completed!'), { name: 'GoalChanged' }))
+      world.clock.setTimeout(world.stop, 500)
+    })
+    const res = await drive(route, { name: 'item_frame', item }, world)
+    assert.strictEqual(res.error, undefined, res.error && `${route}: ${res.error.message}`)
+    assert.deepStrictEqual({ reason: res.body.reason, did: world.did, listening: pathListeners(world.bot) }, { reason: 'stopped', did: ['walk'], listening: NO_PATH_LISTENERS }, route)
+    if (route === '/useon') assert.deepStrictEqual({ ...res.body }, { used: null, on: 'item_frame', reason: 'stopped' })
+  }
+})
+
+// The unstuck ladder takes the legs and clears the goal at 500 ms, and 2 ticks later replans the same goal object g.
+const unstuckReplan = (world, g) => {
+  world.clock.setTimeout(() => {
+    world.env.legs.take('unstuck', 'free the body from a wedge')
+    world.bot.pathfinder.goal = null
+    world.bot.emit('goal_updated', null, false)
+  }, 500)
+  world.clock.setTimeout(() => {
+    world.bot.pathfinder.goal = g
+    world.bot.emit('goal_updated', g, false)
+  }, 600)
+}
+
+test('a strike or a useon on a frame whose walk the unstuck reflex clears and replans ends as stopped and leaves its walk alone', async () => {
+  for (const [route, item, fill] of [['/strike', 'iron_sword', 'wheat'], ['/useon', 'wheat', null]]) {
+    const world = frameWorld([frame(20, 3.5, fill)])
+    let goal = null
+    world.bot.pathfinder.goto = (g) => {
+      goal = g
+      unstuckReplan(world, g)
+      return world.gotoUntilChanged(g)
+    }
+    const res = await drive(route, { name: 'item_frame', item }, world)
+    assert.strictEqual(res.error, undefined, res.error && `${route}: ${res.error.message}`)
+    // Past the replan and its physicsTicks.
+    world.clock.advance(500)
+    assert.deepStrictEqual({ reason: res.body.reason, did: world.did, stops: world.stops(), kept: world.bot.pathfinder.goal === goal, listening: pathListeners(world.bot) }, { reason: 'stopped', did: ['walk'], stops: 0, kept: true, listening: NO_PATH_LISTENERS }, route)
+  }
+})
+
+test('a strike whose frame walk loses the lane to a verb that leaves the pathfinder alone ends as stopped and stops its walk once', async () => {
+  for (const [label, fails] of [['runs out of time', false], ['finds no path', true]]) {
+    const world = frameWorld([frame(20, 3.5, 'wheat')])
+    // /brace takes the lane at 500 ms, and a failed goto leaves the pathfinder walking.
+    world.bot.pathfinder.goto = (g) => new Promise((resolve, reject) => {
+      world.did.push('walk')
+      world.bot.pathfinder.goal = g
+      world.clock.setTimeout(() => world.env.claimLane('brace', 8000, true), 500)
+      if (fails) world.clock.setTimeout(() => reject(Object.assign(new Error('No path to the goal!'), { name: 'NoPath' })), 1000)
+    })
+    const res = await drive('/strike', { name: 'item_frame', item: 'iron_sword' }, world)
+    assert.strictEqual(res.error, undefined, res.error && `${label}: ${res.error.message}`)
+    assert.deepStrictEqual({ reason: res.body.reason, did: world.did, stops: world.stops(), goal: world.bot.pathfinder.goal, listening: pathListeners(world.bot) }, { reason: 'stopped', did: ['walk'], stops: 1, goal: null, listening: NO_PATH_LISTENERS }, label)
+  }
+})
+
+test('a strike or a useon whose walk reaches its goal right after another verb or a reflex took the body ends as stopped before the equip', async () => {
+  // /shoot claims the lane and leaves the pathfinder alone.
+  const shoot = (world) => world.env.claimLane('shoot', 8000)
+  const unstuck = (world) => world.env.legs.take('unstuck', 'free the body from a wedge')
+  for (const [label, world, route, query, take, at] of [
+    ['a strike on a frame', frameWorld([frame(20, 3.5, 'wheat')]), '/strike', { name: 'item_frame', item: 'iron_sword' }, shoot, new Vec3(1.5, 64, 0.5)],
+    ['a useon on a frame', frameWorld([frame(20, 3.5, null)]), '/useon', { name: 'item_frame', item: 'wheat' }, unstuck, new Vec3(1.5, 64, 0.5)],
+    ['a strike on a zombie', verbWorld([zombie(6.5)]), '/strike', { name: 'zombie' }, shoot, new Vec3(5, 64, 0.5)]
+  ]) {
+    // The take and the arrival in reach both fall at 520 ms, between two physicsTicks. The pathfinder clears its goal on goal_reached.
+    world.bot.pathfinder.goto = (g) => new Promise((resolve) => {
+      world.did.push('walk')
+      world.bot.pathfinder.goal = g
+      world.clock.setTimeout(() => {
+        take(world)
+        world.bot.entity.position = at
+        world.bot.pathfinder.goal = null
+        world.bot.emit('goal_reached', g)
+        resolve()
+      }, 520)
+    })
+    const res = await drive(route, query, world)
+    assert.strictEqual(res.error, undefined, res.error && `${label}: ${res.error.message}`)
+    assert.deepStrictEqual({ reason: res.body.reason, did: world.did, held: world.bot.heldItem, stops: world.stops(), listening: pathListeners(world.bot) }, { reason: 'stopped', did: ['walk'], held: null, stops: 0, listening: NO_PATH_LISTENERS }, label)
+  }
+})
+
+test('a strike whose walk to a frame or a zombie loses the lane to /brace stops the pathfinder on the next physicsTick', async () => {
+  for (const [label, world, query] of [
+    ['frame', frameWorld([frame(20, 3.5, 'wheat')]), { name: 'item_frame', item: 'iron_sword' }],
+    ['zombie', verbWorld([zombie(6.5)]), { name: 'zombie' }]
+  ]) {
+    let stoppedAt = null
+    const stopPath = world.env.stopPath
+    world.env.stopPath = () => {
+      stoppedAt ??= world.clock.now()
+      stopPath()
+    }
+    // As goto, it fails once the goal changes. /brace takes the lane at 500 ms, and physicsTicks fall on every 50 ms.
+    world.bot.pathfinder.goto = (g) => new Promise((resolve, reject) => {
+      world.did.push('walk')
+      world.bot.pathfinder.goal = g
+      const changed = (n) => {
+        if (n === g) return
+        world.bot.removeListener('goal_updated', changed)
+        reject(Object.assign(new Error('The goal was changed before it could be completed!'), { name: 'GoalChanged' }))
+      }
+      world.bot.on('goal_updated', changed)
+      world.clock.setTimeout(() => world.env.claimLane('brace', 8000, true), 500)
+    })
+    const res = await drive('/strike', query, world)
+    assert.strictEqual(res.error, undefined, res.error && `${label}: ${res.error.message}`)
+    assert.deepStrictEqual({ reason: res.body.reason, did: world.did, held: world.bot.heldItem, stops: world.stops(), goal: world.bot.pathfinder.goal, listening: pathListeners(world.bot) }, { reason: 'stopped', did: ['walk'], held: null, stops: 1, goal: null, listening: NO_PATH_LISTENERS }, label)
+    assert.ok(stoppedAt !== null && stoppedAt <= 600, `${label} stopped the walk at ${stoppedAt} ms`)
+  }
+})
+
+test('a strike walk to a zombie or a frame whose time runs out a moment after another goal took the pathfinder leaves that goal alone', async () => {
+  for (const [label, world, query, at] of [
+    ['zombie', verbWorld([zombie(6.5)]), { name: 'zombie' }, null],
+    ['frame in reach', frameWorld([frame(20, 3.5, 'wheat')]), { name: 'item_frame', item: 'iron_sword' }, new Vec3(1.9, 64, 0.5)],
+    ['frame out of reach', frameWorld([frame(20, 3.5, 'wheat')]), { name: 'item_frame', item: 'iron_sword' }, null]
+  ]) {
+    const other = new goals.GoalBlock(9, 64, 9)
+    // The other goal lands 1 ms before the walk's time runs out, and goto fails with GoalChanged 1 ms after that time.
+    world.bot.pathfinder.goto = (g) => new Promise((resolve, reject) => {
+      world.bot.pathfinder.goal = g
+      if (at) world.bot.entity.position = at
+      world.clock.setTimeout(() => {
+        world.bot.pathfinder.goal = other
+        world.bot.emit('goal_updated', other, false)
+        world.clock.setTimeout(() => reject(Object.assign(new Error('The goal was changed before it could be completed!'), { name: 'GoalChanged' })), 2)
+      }, rules.STRIKE_APPROACH_MS - 1)
+    })
+    await drive('/strike', query, world)
+    assert.deepStrictEqual({ stops: world.stops(), kept: world.bot.pathfinder.goal === other }, { stops: 0, kept: true }, label)
+  }
+})
+
+test('a stop during the useon walk to a creature ends as stopped', async () => {
+  const world = verbWorld([zombie(6.5)])
+  world.bot.pathfinder.goto = () => new Promise((resolve, reject) => {
+    world.did.push('walk')
+    world.env.stopPath = () => reject(Object.assign(new Error('The goal was changed before it could be completed!'), { name: 'GoalChanged' }))
+    world.clock.setTimeout(world.stop, 500)
+  })
+  const res = await drive('/useon', { name: 'zombie', item: 'shears' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual({ ...res.body, did: world.did }, { used: null, on: 'zombie', reason: 'stopped', did: ['walk'] })
+})
+
+// The goto failures that leave the pathfinder walking the best path it found.
+const walkingFails = [['NoPath', 'No path to the goal!'], ['Timeout', 'Took to long to decide path to goal!']]
+
+test('a strike or a useon on a creature whose goto finds no path or times out stops the pathfinder before it answers', async () => {
+  for (const [route, query] of [['/strike', { name: 'zombie' }], ['/useon', { name: 'zombie', item: 'shears' }]]) {
+    for (const [name, message] of walkingFails) {
+      const world = verbWorld([zombie(6.5)])
+      world.bot.pathfinder.goto = async (goal) => {
+        world.did.push('walk')
+        world.bot.pathfinder.goal = goal
+        throw Object.assign(new Error(message), { name })
+      }
+      const res = await drive(route, query, world)
+      assert.deepStrictEqual({ error: res.error && res.error.message, did: world.did, stops: world.stops() }, { error: message, did: ['walk'], stops: 1 }, `${route} ${name}`)
+    }
+  }
+})
+
+test('a strike or a useon walk to a creature whose goto finds no path or times out a moment after another goal took the pathfinder leaves that goal alone', async () => {
+  for (const [route, query] of [['/strike', { name: 'zombie' }], ['/useon', { name: 'zombie', item: 'shears' }]]) {
+    for (const [name, message] of walkingFails) {
+      const world = verbWorld([zombie(6.5)])
+      const other = new goals.GoalBlock(9, 64, 9)
+      world.bot.pathfinder.goto = (g) => new Promise((resolve, reject) => {
+        world.bot.pathfinder.goal = g
+        world.clock.setTimeout(() => {
+          world.bot.pathfinder.goal = other
+          world.bot.emit('goal_updated', other, false)
+          world.clock.setTimeout(() => reject(Object.assign(new Error(message), { name })), 1)
+        }, 500)
+      })
+      await drive(route, query, world)
+      assert.deepStrictEqual({ stops: world.stops(), kept: world.bot.pathfinder.goal === other }, { stops: 0, kept: true }, `${route} ${name}`)
+    }
+  }
+})
+
+test('a strike or a useon on a frame whose goto times out stops the pathfinder and says the walk ran out of time on its way', async () => {
+  for (const [route, item, fill] of [['/strike', 'iron_sword', 'wheat'], ['/useon', 'wheat', null]]) {
+    const world = frameWorld([frame(20, 3.5, fill)])
+    world.bot.pathfinder.goto = async (goal) => {
+      world.did.push('walk')
+      world.bot.pathfinder.goal = goal
+      throw Object.assign(new Error(walkingFails[1][1]), { name: 'Timeout' })
+    }
+    const res = await drive(route, { name: 'item_frame', item }, world)
+    assert.deepStrictEqual({ error: res.error ? res.error.message : `no error, note ${res.body.note}`, did: world.did, stops: world.stops() }, { error: 'the walk to the item_frame at 3,65,0 ran out of time on its way', did: ['walk'], stops: 1 }, route)
+  }
+})
+
+test('a useon looks at the face of a frame facing north, on the far side of its cell', async () => {
+  const world = frameWorld([Object.assign(frame(20, 3, null, true, 2), { position: new Vec3(3, 65, 0) })])
+  world.bot.entity.position = new Vec3(3.5, 64, -1.5)
+  const looks = []
+  world.bot.lookAt = async (p) => { looks.push(p.toArray()) }
+  world.bot.useOn = async (en) => {
+    world.did.push(`use ${en.id}`)
+    world.hold(en, 'wheat')
+  }
+  const res = await drive('/useon', { name: 'item_frame', item: 'wheat' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(looks, [[3.5, 65.5, 0.96875]])
+  assert.deepStrictEqual(world.did, ['equip wheat', 'use 20'])
+})
+
+test('strike and useon refuse a frame of unknown facing before any walk, and say so', async () => {
+  for (const [route, item, fill] of [['/strike', 'iron_sword', 'wheat'], ['/useon', 'wheat', null]]) {
+    const unknown = frame(20, 2.5, fill)
+    delete unknown.objectData
+    const world = frameWorld([unknown])
+    const res = await drive(route, { name: 'item_frame', item }, world)
+    assert.strictEqual(res.error ? res.error.message : `no error, did ${world.did.join(', ')}`, 'the item_frame at 2,65,0 has no known facing, its reach is unknown', route)
+    assert.deepStrictEqual(world.did, [], route)
+  }
+})
+
+test('a frame keeps the objectData of its spawn once mineflayer has made its entity', async () => {
+  const client = new EventEmitter()
+  client.version = '1.21.11'
+  client.write = () => {}
+  const bot = mineflayer.createBot({ client, username: 'Claude', loadInternalPlugins: false, plugins: { entities: true } })
+  // bot.js wires before mineflayer injects its plugins.
+  loadBotFunctions(['wireDamageTypes', 'keepFrameFacing'], { bot }).wireDamageTypes()
+  await once(bot, 'inject_allowed')
+  const spawn = (entityId, name, objectData) => client.emit('spawn_entity', {
+    entityId, objectUUID: `uuid-${entityId}`, type: mcData.entitiesByName[name].id, x: 6, y: 150, z: -1, pitch: 0, yaw: 0, headPitch: 0, objectData, velocity: { x: 0, y: 0, z: 0 }
+  })
+  spawn(2663, 'item_frame', 2)
+  spawn(2664, 'glow_item_frame', 3)
+  spawn(2665, 'zombie', 0)
+  assert.deepStrictEqual([2663, 2664, 2665].map((id) => [bot.entities[id].name, bot.entities[id].objectData]), [['item_frame', 2], ['glow_item_frame', 3], ['zombie', undefined]])
+})
+
+test('a strike or a useon on a frame that leaves swing reach after the walk reached it names the frame, on 1.7.10 too', async () => {
+  for (const legacy of [false, true]) {
+    for (const [route, item, fill] of [['/strike', 'iron_sword', 'wheat'], ['/useon', 'wheat', null]]) {
+      const world = frameWorld([frame(20, 3.5, fill)], { legacy })
+      world.bot.pathfinder.goto = reachWalk(world, new Vec3(3, 64, 0))
+      world.bot.lookAt = async () => { world.bot.entities[20].position.y = 69 }
+      const res = await drive(route, { name: 'item_frame', item }, world)
+      assert.strictEqual(res.error ? res.error.message : `no error, note ${res.body.note}`, 'the item_frame at 3,69,0 stays out of swing reach from here', `${route} on 1.7.10 ${legacy}`)
+      assert.deepStrictEqual(world.did, ['walk', `equip ${item}`], `${route} on 1.7.10 ${legacy}`)
+    }
+  }
+})
+
+test('a strike on a frame counts a frame update queued in the tick of the age update that ends its wait, and goes on to the drop', async () => {
+  const world = frameWorld([frame(20, 3.5, 'wheat')], { legacy: true })
+  world.bot.attack = (en) => {
+    world.did.push(`swing ${en.id}`)
+    // The first age update after the swing opens the 10 ticks and the second closes them.
+    let ages = 0
+    const onTime = () => {
+      if (++ages < 2) return
+      world.bot.removeListener('time', onTime)
+      world.hold(en, null)
+    }
+    world.bot.on('time', onTime)
+    world.bot.entities[30] = wheatDrop(en.position.clone())
+  }
+  const res = await drive('/strike', { name: 'item_frame', item: 'iron_sword' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual([res.body.swings, res.body.dropped], [1, 'wheat'], res.body.note)
+  assert.deepStrictEqual(world.did.filter((d) => !d.startsWith('jump')), ['walk', 'equip iron_sword', 'swing 20', 'walk'])
+})
+
+// A 1.7.10 strike at a wheat frame or a useon of wheat on an empty one, with answer(world, en) as the server's answer to
+// the swing or the click. ageless sends no server age at all, and the other opts go to frameWorld. actT and replyT are
+// the clock at the act and at the reply.
+async function frameAct (route, answer, { ageless = false, ...opts } = {}) {
+  const strike = route === '/strike'
+  const world = frameWorld([frame(20, 3.5, strike ? 'wheat' : null)], { legacy: true, ...opts })
+  if (ageless) {
+    world.ageEvery = Infinity
+    world.bot.time.age = null
+  }
+  let actT = null
+  const act = (en) => {
+    actT = world.clock.now()
+    answer(world, en)
+  }
+  world.bot.attack = act
+  world.bot.useOn = async (en) => act(en)
+  const res = await drive(route, { name: 'item_frame', item: strike ? 'iron_sword' : 'wheat' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  return { reply: res.body, actT, replyT: world.clock.now() }
+}
+
+test('a strike or a useon on a frame counts the frame update the server sends at the end of a 2 s stall right after the act', async () => {
+  const stalled = (item) => (world, en) => {
+    world.stall(2000)
+    world.server(0, () => {
+      world.hold(en, item)
+      if (!item) world.bot.entities[30] = wheatDrop(en.position.clone())
+    })
+  }
+  const strike = await frameAct('/strike', stalled(null))
+  assert.strictEqual(strike.reply.dropped, 'wheat', strike.reply.note)
+  const useon = await frameAct('/useon', stalled('wheat'))
+  assert.deepStrictEqual([useon.reply.ok, useon.reply.framed], [undefined, 'wheat'], useon.reply.reason)
+})
+
+test('a strike or a useon on a frame counts the frame update that follows the burst of stale server ages a proxy stall over the act queued', async () => {
+  // The proxy holds the act and the server's ages for 2 s and then delivers both ages at once. The server answers the act
+  // 50 ms later, as live after a 2 s stall.
+  const held = (item) => (world, en) => {
+    const age = world.bot.time.age
+    world.ageEvery = Infinity
+    world.clock.setTimeout(() => {
+      for (const stale of [age + 20, age + 40]) {
+        world.bot.time.age = stale
+        world.bot.emit('time')
+      }
+      world.ageEvery = 20
+      world.clock.setTimeout(() => {
+        world.hold(en, item)
+        if (!item) world.bot.entities[30] = wheatDrop(en.position.clone())
+      }, 50)
+    }, 2000)
+  }
+  const strike = await frameAct('/strike', held(null))
+  assert.strictEqual(strike.reply.dropped, 'wheat', strike.reply.note)
+  const useon = await frameAct('/useon', held('wheat'))
+  assert.deepStrictEqual([useon.reply.ok, useon.reply.framed], [undefined, 'wheat'], useon.reply.reason)
+})
+
+// ms as the seconds a frame reply names.
+const seconds = (ms) => Math.round(ms / 100) / 10
+
+test('a strike or a useon on a frame the server never updates says so once 10 ticks of server age passed the act, and within the deadline without any age', async () => {
+  for (const route of ['/strike', '/useon']) {
+    const ticking = await frameAct(route, () => {})
+    const said = (r) => r.reply.reason || r.reply.note
+    assert.match(said(ticking), /^the server sent no frame update within 10 ticks, /, route)
+    // The server sends its age once a second. The first age after the act opens the 10 ticks, the next one closes them.
+    const waited = ticking.replyT - ticking.actT
+    assert.ok(waited >= 1000 && waited <= 2050, `${route} answered ${waited} ms after the act`)
+    const ageless = await frameAct(route, () => {}, { ageless: true })
+    // /strike waits out its own deadline, /useon 5 s from just before the click.
+    const deadline = route === '/strike' ? rules.strikeBudgetMs(1) : ageless.actT + 5000
+    const none = `the server sent no frame update within ${seconds(deadline - ageless.actT)} s (no tick from the server), `
+    assert.ok(said(ageless).startsWith(none), `${route} without any age said: ${said(ageless)}`)
+    assert.ok(ageless.replyT <= deadline + 20, `${route} without any age answered at ${ageless.replyT} ms, past ${deadline} ms`)
+  }
+})
+
+test('a strike or a useon on a frame whose server stops sending ages after 5 ticks names the ticks it counted by the deadline', async () => {
+  for (const route of ['/strike', '/useon']) {
+    // From the act the server sends its age every 5 ticks, and none after the second of those.
+    const { reply, actT } = await frameAct(route, (world) => {
+      world.ageEvery = 5
+      let ages = 0
+      world.bot.on('time', function onTime () {
+        if (++ages < 2) return
+        world.bot.removeListener('time', onTime)
+        world.ageEvery = Infinity
+      })
+    })
+    const deadline = route === '/strike' ? rules.strikeBudgetMs(1) : actT + 5000
+    const short = `the server sent no frame update within ${seconds(deadline - actT)} s (5 of 10 ticks counted), `
+    const said = reply.reason || reply.note
+    assert.ok(said.startsWith(short), `${route} said: ${said}`)
+  }
+})
+
+test('a strike or a useon on a frame counts only the ticks up to its deadline when an age arrives in the turn the deadline ends the wait', async () => {
+  for (const route of ['/strike', '/useon']) {
+    // The server sends 5 ticks of age, then none. One age of 20 more ticks arrives in the step after the deadline's.
+    const { reply } = await frameAct(route, (world) => {
+      world.ageEvery = 5
+      let ages = 0
+      world.bot.on('time', function onTime () {
+        if (++ages < 2) return
+        world.bot.removeListener('time', onTime)
+        world.ageEvery = Infinity
+      })
+      const deadline = route === '/strike' ? rules.strikeBudgetMs(1) : world.clock.now() + 5000
+      world.clock.setTimeout(() => {
+        world.bot.time.age += 20
+        world.bot.emit('time')
+      }, deadline - world.clock.now() + 10)
+    })
+    const said = reply.reason || reply.note
+    assert.match(said, /^the server sent no frame update within [\d.]+ s \(5 of 10 ticks counted\), /, route)
+  }
+})
+
+// The server's answer to the act of a frameAct on route: the strike's frame gives up its wheat as a drop, the useon's
+// frame takes the wheat.
+function frameAnswer (route, world, en) {
+  const strike = route === '/strike'
+  world.hold(en, strike ? null : 'wheat')
+  if (strike) world.bot.entities[30] = wheatDrop(en.position.clone())
+}
+
+function assertCounted (route, reply, label) {
+  if (route === '/strike') assert.strictEqual(reply.dropped, 'wheat', `${label}: ${reply.note}`)
+  else assert.deepStrictEqual([reply.ok, reply.framed], [undefined, 'wheat'], `${label}: ${reply.reason}`)
+}
+
+test('a strike or a useon on a frame counts the frame update that beats the next age after a proxy stall that queued one stale age', async () => {
+  for (const route of ['/strike', '/useon']) {
+    let held
+    // The proxy holds the act and the server's ages until 100 ms after the server sends its next age, then delivers
+    // both. The server answers the act 50 ms later, 850 ms before its following age.
+    const { reply } = await frameAct(route, (world, en) => {
+      const ms = 1000 - world.clock.now() % 1000 + 100
+      held = world.proxy(ms)
+      world.clock.setTimeout(() => frameAnswer(route, world, en), ms + 50)
+    })
+    assert.strictEqual(held.length, 1, `${route}: control, the proxy held one age`)
+    assertCounted(route, reply, route)
+  }
+})
+
+test('a strike or a useon on a frame waits 10 ticks of server time on a slow server whose ages arrive late', async () => {
+  // Ticks take 80 ms and each age arrives 300 ms after its tick, 1600 ms after the one before.
+  const slow = { tickMs: 80, ageLag: 300 }
+  for (const route of ['/strike', '/useon']) {
+    // The server answers 8 ticks after the act, 640 ms on the wall clock.
+    const late = await frameAct(route, (world, en) => world.server(8 * 80, () => frameAnswer(route, world, en)), slow)
+    assertCounted(route, late.reply, `${route} answered after 8 ticks`)
+    const never = await frameAct(route, () => {}, slow)
+    assert.match(never.reply.reason || never.reply.note, /^the server sent no frame update within 10 ticks, /, route)
+    // The first age after the act opens the 10 ticks and the next one closes them. The first age of all arrives at 1900 ms.
+    const waited = never.replyT - never.actT
+    assert.ok(waited >= 1600 && waited <= 3550, `${route} answered ${waited} ms after the act`)
+  }
+})
+
+test('a strike or a useon on a frame waits through a catch-up burst of server ages up to its deadline and no longer', async () => {
+  // A server catching up runs its ticks 10 ms apart, so every age arrives in under half its ticks' time.
+  const catchUp = { tickMs: 10 }
+  for (const route of ['/strike', '/useon']) {
+    // The answer comes 200 ticks after the act.
+    const late = await frameAct(route, (world, en) => world.server(2000, () => frameAnswer(route, world, en)), catchUp)
+    assertCounted(route, late.reply, `${route} answered after 200 ticks`)
+    const never = await frameAct(route, () => {}, catchUp)
+    // /strike waits out its own deadline, /useon 5 s from just before the click.
+    const deadline = route === '/strike' ? rules.strikeBudgetMs(1) : never.actT + 5000
+    const said = never.reply.reason || never.reply.note
+    const uncounted = `the server sent no frame update within ${seconds(deadline - never.actT)} s (0 of 10 ticks counted), `
+    assert.ok(said.startsWith(uncounted), `${route} said: ${said}`)
+    assert.ok(never.replyT >= deadline - 50 && never.replyT <= deadline + 20, `${route} answered at ${never.replyT} ms, deadline ${deadline} ms`)
+  }
+})
+
+// A 1.7.10 strike at the wheat frame at x frameX, 3 east of the body, and y frameY. The swing drops item 30, stack
+// wheat, at the frame, and flight ms later the server moves it to each of mid a second apart, then to lands. bob
+// then moves it 0.25 up or down every second. stall [at, ms] halts the server for ms from at ms after the drop. From 10
+// ticks after the drop the server takes it once the body's box grown by 1 reaches it. pickup 'pockets
+// first' puts rise wheat into the pockets and removes the drop 2 ticks later, 'entity first' removes the drop and puts
+// the wheat into the pockets 3 ticks later, and 'vanish' only removes it. onCell ends a walk to a cell on that cell,
+// else 2 west of it, and noPath fails it with an Error without a reason. late spawns the drop without its item and
+// sends the item a tick later. hides takes the drop out of sight as it moves. stopMs sends a /stop that many ms after
+// the drop. other lays item 31, one wheat, there from the start. onApproach runs as the walk to the frame starts and
+// onWalk as each walk to the drop starts, given the world, the strike's deadline, gone(id) removing entity id and
+// pocket(n) putting n wheat into the pockets, and the walk's goal. The server sends its age every ageEvery ticks, and
+// with ageAfter sends none, the age unknown, until that many ms after the drop.
+async function strikeDrop (lands, { blocks = null, onCell = true, noPath = false, frameX = 3.5, frameY = 65, late = false, hides = false, flight = 250, mid = [], bob = false, stall = null, stopMs = null, pickup = 'entity first', stack = 1, rise = stack, other = null, onApproach = null, onWalk = null, ageEvery = 20, ageAfter = null } = {}) {
+  const world = frameWorld([frame(20, frameX, 'wheat')], { legacy: true })
+  const { bot, clock, did } = world
+  world.ageEvery = ageAfter === null ? ageEvery : Infinity
+  if (ageAfter !== null) bot.time.age = null
+  const deadline = clock.now() + rules.strikeBudgetMs(1)
+  // The pockets hold a full stack of wheat, and a pickup fills a second one.
+  const wheat = [{ name: 'wheat', count: 64 }]
+  const items = bot.inventory.items
+  bot.inventory.items = () => [...items().filter((i) => i.name !== 'wheat'), ...wheat]
+  const pocket = (n = rise) => wheat.push({ name: 'wheat', count: n })
+  const gone = (id) => {
+    bot.emit('entityGone', bot.entities[id])
+    delete bot.entities[id]
+  }
+  const hooks = { ...world, deadline, gone, pocket }
+  if (other) bot.entities[31] = Object.assign(wheatDrop(other), { id: 31 })
+  bot.entities[20].position.y = frameY
+  // The real reach check refuses a frame out of melee reach.
+  if (frameY !== 65) world.env.inMeleeReach = () => true
+  if (blocks) {
+    const floor = bot.blockAt
+    bot.blockAt = (p) => blocks(p) ? { name: 'air', boundingBox: 'empty', position: p } : floor(p)
+  }
+  const walk = bot.pathfinder.goto
+  bot.pathfinder.goto = async (goal) => {
+    if (!(goal instanceof goals.GoalBlock)) {
+      if (onApproach) await onApproach(hooks)
+      return walk(goal)
+    }
+    if (noPath) throw new Error('No path to the goal!')
+    if (onWalk) await onWalk(hooks, goal)
+    if (!onCell) return walk(goal)
+    did.push('walk')
+    bot.entity.position = new Vec3(goal.x + 0.5, goal.y, goal.z + 0.5)
+  }
+  let dropT = Infinity
+  bot.attack = (en) => {
+    did.push(`swing ${en.id}`)
+    world.hold(en, null)
+    dropT = clock.now()
+    bot.entities[30] = wheatDrop(en.position.clone(), !late, stack)
+    if (late) clock.setTimeout(() => giveWheat(bot.entities[30], stack), 50)
+    if (stopMs !== null) clock.setTimeout(world.stop, stopMs)
+    if (stall) clock.setTimeout(() => world.stall(stall[1]), stall[0])
+    if (ageAfter !== null) clock.setTimeout(() => { world.ageEvery = ageEvery }, ageAfter)
+    // The server's update that puts item 30 at p.
+    const move = (p) => {
+      const item = bot.entities[30]
+      if (!item) return null
+      item.position = p
+      bot.emit('entityMoved', item)
+      return item
+    }
+    const land = () => {
+      const item = move(lands)
+      if (!item) return
+      if (hides) item.seen = false
+      let up = false
+      if (bob) {
+        clock.setInterval(() => {
+          up = !up
+          if (bot.entities[30]) move(bot.entities[30].position.offset(0, up ? 0.25 : -0.25, 0))
+        }, 1000)
+      }
+    }
+    const fly = (i) => () => {
+      if (i === mid.length) land()
+      else if (move(mid[i])) world.server(1000, fly(i + 1))
+    }
+    world.server(flight, fly(0))
+  }
+  let taken = false
+  clock.setInterval(() => {
+    const item = bot.entities[30]
+    if (!item || taken || clock.now() < dropT + 500) return
+    const d = item.position.minus(bot.entity.position)
+    if (Math.abs(d.x) < 1.425 && Math.abs(d.z) < 1.425 && d.y > -0.75 && d.y < 2.3) {
+      taken = true
+      if (pickup === 'pockets first') {
+        pocket()
+        clock.setTimeout(() => gone(30), 100)
+        return
+      }
+      gone(30)
+      if (pickup === 'entity first') clock.setTimeout(pocket, 150)
+    }
+  }, 50)
+  const res = await drive('/strike', { name: 'item_frame', item: 'iron_sword' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  return { note: res.body.note, lying: !!bot.entities[30], ...(res.body.reason && { reason: res.body.reason }) }
+}
+
+test('a strike on a frame walks onto its drop where the drop lands, and says it picked the drop up only once the body did', async () => {
+  const lands = new Vec3(5.2, 64, 0.5)
+  // A pit 2 deep from (5, -1) to (6, 1).
+  const pit = (p) => p.x >= 5 && p.x <= 6 && Math.abs(p.z) <= 1 && (p.y === 62 || p.y === 63)
+  const got = {
+    onCell: await strikeDrop(lands),
+    short: await strikeDrop(lands, { onCell: false }),
+    pit: await strikeDrop(new Vec3(5.2, 62, 0.5), { blocks: pit })
+  }
+  assert.deepStrictEqual(got, {
+    onCell: { note: 'picked up the drop, the frame stays empty', lying: false },
+    short: { note: 'walked to the drop, it still lies at 5,64,0, the frame stays empty', lying: true },
+    pit: { note: 'the drop at 5,62,0 lies out of walking reach, left it, the frame stays empty', lying: true }
+  })
+})
+
+test('a strike on a frame judges a drop flying over a drop-off where it comes to rest, and takes one in flight next to the body', async () => {
+  // Holes 2 deep from (3, -1) to (4, 1) under the frame and from (3, 4) to (4, 5).
+  const under = (p) => p.x >= 3 && p.x <= 4 && Math.abs(p.z) <= 1 && (p.y === 62 || p.y === 63)
+  const beyond = (p) => p.x >= 3 && p.x <= 4 && p.z >= 4 && p.z <= 5 && (p.y === 62 || p.y === 63)
+  // A live frame drop's first position update came 998 to 1051 ms after its spawn.
+  const flight = 1050
+  assert.deepStrictEqual({
+    floor: await strikeDrop(new Vec3(3.6, 64, 4.6), { blocks: under, flight }),
+    hole: await strikeDrop(new Vec3(3.6, 62, 4.6), { blocks: (p) => under(p) || beyond(p), flight }),
+    nextTo: await strikeDrop(new Vec3(9.2, 64, 4.6), { frameX: 1.5, flight })
+  }, {
+    floor: { note: 'picked up the drop, the frame stays empty', lying: false },
+    hole: { note: 'the drop at 3,62,4 lies out of walking reach, left it, the frame stays empty', lying: true },
+    nextTo: { note: 'picked up the drop, the frame stays empty', lying: false }
+  })
+})
+
+test('a strike on a frame waits out a server stall before its drop first moves or in mid-flight, and picks the drop up where it lands', async () => {
+  // A hole 2 deep from (3, -1) to (4, 1) under the frame.
+  const under = (p) => p.x >= 3 && p.x <= 4 && Math.abs(p.z) <= 1 && (p.y === 62 || p.y === 63)
+  const lands = new Vec3(3.6, 64, 4.6)
+  assert.deepStrictEqual({
+    spawn: await strikeDrop(lands, { blocks: under, flight: 1050, stall: [0, 1600] }),
+    flight: await strikeDrop(lands, { blocks: under, flight: 1050, mid: [new Vec3(3.6, 64.5, 1.4)], stall: [1150, 1600] })
+  }, {
+    spawn: { note: 'picked up the drop, the frame stays empty', lying: false },
+    flight: { note: 'picked up the drop, the frame stays empty', lying: false }
+  })
+})
+
+test('a strike on a frame judges a drop at rest only once it lands, with the server age every 60 ticks or none before the drop', async () => {
+  // The drop flies 4 s on position updates 20 ticks apart.
+  const mid = [new Vec3(3.8, 65.2, 1.3), new Vec3(4.2, 64.8, 2.1), new Vec3(4.6, 64.5, 2.9), new Vec3(5, 64.2, 3.7)]
+  const walked = async (opts) => {
+    const walks = []
+    const onWalk = (hooks, goal) => { walks.push(`${goal.x},${goal.y},${goal.z}`) }
+    return { ...await strikeDrop(new Vec3(5.2, 64, 4.6), { flight: 1050, mid, onWalk, ...opts }), walks }
+  }
+  const landed = { note: 'picked up the drop, the frame stays empty', lying: false, walks: ['5,64,4'] }
+  assert.deepStrictEqual({
+    control: await walked({}),
+    slow: await walked({ ageEvery: 60 }),
+    ageless: await walked({ ageAfter: 1500 })
+  }, { control: landed, slow: landed, ageless: landed })
+})
+
+test('a strike on a frame names no place for a drop still moving at its deadline, and a stop ends the wait for it', async () => {
+  const pit = (p) => p.x >= 5 && p.x <= 6 && Math.abs(p.z) <= 1 && (p.y === 62 || p.y === 63)
+  const lands = new Vec3(5.2, 62, 0.5)
+  assert.deepStrictEqual({
+    deadline: await strikeDrop(lands, { blocks: pit, bob: true }),
+    stop: await strikeDrop(lands, { blocks: pit, bob: true, stopMs: 3000 })
+  }, {
+    deadline: { note: 'the drop was still moving when the time ran out, the frame stays empty', lying: true },
+    stop: { note: 'stopped before the drop, the frame stays empty', lying: true, reason: 'stopped' }
+  })
+})
+
+test('a strike on a frame waits out a drop whose item arrives a tick after its spawn, and picks it up', async () => {
+  assert.deepStrictEqual(await strikeDrop(new Vec3(5.2, 64, 0.5), { late: true }), { note: 'picked up the drop, the frame stays empty', lying: false })
+})
+
+test('a strike on a frame lets go of a drop that slides out of sight, and names no place for it', async () => {
+  assert.deepStrictEqual(await strikeDrop(new Vec3(5.2, 64, 0.5), { hides: true }), { note: 'lost sight of the drop, the frame stays empty', lying: true })
+})
+
+test('a strike on a frame 5 above the floor walks to the floor under its falling drop', async () => {
+  assert.deepStrictEqual(await strikeDrop(new Vec3(5.2, 64, 0.5), { frameY: 69 }), { note: 'picked up the drop, the frame stays empty', lying: false })
+})
+
+test('a walk to a frame drop or to the drops of a kill that fails without a reason gives up, never claims the walk', async () => {
+  const drop = await strikeDrop(new Vec3(5.2, 64, 0.5), { noPath: true })
+  const world = realWorld([zombie(2.5)], () => null)
+  world.bot.attack = () => { delete world.bot.entities[7] }
+  world.bot.pathfinder.goto = async () => { throw new Error('No path to the goal!') }
+  const res = await drive('/strike', { name: 'zombie' }, world)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual({ drop, kill: { note: res.body.note, reason: res.body.reason } }, {
+    drop: { note: 'the walk to the drop gave up, the frame stays empty', lying: true, reason: 'no path' },
+    kill: { note: 'the walk to the drops gave up', reason: 'no path' }
+  })
+})
+
+test('a walk to a frame drop whose goto finds no path or times out stops the pathfinder once, and one that loses the lane to /brace stops it on the next physicsTick', async () => {
+  const gaveUp = { note: 'the walk to the drop gave up, the frame stays empty', lying: true, reason: 'no path' }
+  for (const [name, message] of walkingFails) {
+    let world = null
+    const onWalk = (hooks, goal) => {
+      world = hooks
+      hooks.bot.pathfinder.goal = goal
+      throw Object.assign(new Error(message), { name })
+    }
+    const got = await strikeDrop(new Vec3(5.2, 64, 0.5), { onWalk })
+    assert.deepStrictEqual({ ...got, stops: world.stops(), goal: world.bot.pathfinder.goal }, { ...gaveUp, stops: 1, goal: null }, name)
+  }
+  let world = null, claimAt = null, stoppedAt = null
+  const onWalk = (hooks, goal) => {
+    world = hooks
+    claimAt = hooks.clock.now() + 100
+    hooks.clock.setTimeout(() => hooks.env.claimLane('brace', 8000, true), 100)
+    hooks.bot.once('path_stop', () => { stoppedAt = hooks.clock.now() })
+    return hooks.gotoUntilChanged(goal)
+  }
+  const got = await strikeDrop(new Vec3(5.2, 64, 0.5), { onWalk })
+  assert.deepStrictEqual({ ...got, stops: world.stops(), goal: world.bot.pathfinder.goal }, { note: 'stopped before the drop, the frame stays empty', lying: true, reason: 'stopped', stops: 1, goal: null })
+  assert.ok(stoppedAt - claimAt <= 100, `the lane went at ${claimAt} ms and the walk stopped at ${stoppedAt} ms`)
+})
+
+test('a strike on a frame says it picked the drop up once the pockets gain it, before or after the drop leaves', async () => {
+  const lands = new Vec3(5.2, 64, 0.5)
+  assert.deepStrictEqual({
+    pockets: await strikeDrop(lands, { pickup: 'pockets first' }),
+    entity: await strikeDrop(lands, { pickup: 'entity first' })
+  }, {
+    pockets: { note: 'picked up the drop, the frame stays empty', lying: false },
+    entity: { note: 'picked up the drop, the frame stays empty', lying: false }
+  })
+})
+
+test('a strike on a frame does not take wheat picked up on the walk to the frame or to the drop for the drop', async () => {
+  const take = ({ bot, gone, pocket }) => {
+    if (!bot.entities[31]) return
+    gone(31)
+    pocket(1)
+  }
+  assert.deepStrictEqual({
+    approach: await strikeDrop(new Vec3(9.2, 64, 0.5), { onCell: false, frameX: 7.5, other: new Vec3(3.5, 64, 0.5), onApproach: take }),
+    walk: await strikeDrop(new Vec3(5.2, 64, 0.5), { onCell: false, other: new Vec3(4.5, 64, 2.5), onWalk: take })
+  }, {
+    approach: { note: 'walked to the drop, it still lies at 9,64,0, the frame stays empty', lying: true },
+    walk: { note: 'walked to the drop, it still lies at 5,64,0, the frame stays empty', lying: true }
+  })
+})
+
+test('a strike on a frame says it lost sight of a drop that left its sight before the server removed it', async () => {
+  const unseen = ({ bot, gone }) => {
+    bot.entities[30].seen = false
+    gone(30)
+  }
+  assert.deepStrictEqual(await strikeDrop(new Vec3(5.2, 64, 0.5), { onWalk: unseen }), { note: 'lost sight of the drop, the frame stays empty', lying: false })
+})
+
+test('a strike on a frame says the drop merged into a seen wheat within 1 block of where it vanished, and gone past that', async () => {
+  const lands = new Vec3(5.2, 64, 0.5)
+  assert.deepStrictEqual({
+    near: await strikeDrop(lands, { pickup: 'vanish', other: new Vec3(5.9, 64, 0.5) }),
+    far: await strikeDrop(lands, { pickup: 'vanish', other: new Vec3(6.7, 64, 0.5) })
+  }, {
+    near: { note: 'the drop merged into the item at 5,64,0, the frame stays empty', lying: false },
+    far: { note: 'the drop is gone, not into the pockets, the frame stays empty', lying: false }
+  })
+})
+
+test('a strike on a frame waits out a slot update that lands after the strike deadline', async () => {
+  // Each walk lasts until 60 ms before the deadline or 5.9 s, and the drop slides 3 east during every walk but the last.
+  const slow = async ({ bot, clock, deadline }) => {
+    const end = Math.min(clock.now() + 5900, deadline - 60)
+    await new Promise((resolve) => clock.setTimeout(resolve, end - clock.now()))
+    const item = bot.entities[30]
+    if (end < deadline - 60) item.position = item.position.offset(3, 0, 0)
+  }
+  assert.deepStrictEqual(await strikeDrop(new Vec3(5.2, 64, 0.5), { onWalk: slow }), { note: 'picked up the drop, the frame stays empty', lying: false })
+})
+
+test('a strike on a frame says the drop is gone when the server removes it and the pockets gain nothing, as when another player takes it', async () => {
+  assert.deepStrictEqual(await strikeDrop(new Vec3(5.2, 64, 0.5), { pickup: 'vanish' }), { note: 'the drop is gone, not into the pockets, the frame stays empty', lying: false })
+})
+
+test('a strike on a frame says the drop is gone when the server removes it and the pockets gain less than it held', async () => {
+  assert.deepStrictEqual(await strikeDrop(new Vec3(5.2, 64, 0.5), { stack: 3, rise: 1 }), { note: 'the drop is gone, not into the pockets, the frame stays empty', lying: false })
+})
+
 test('a 1.7.10 strike on a frame counts the frame update the server sends during the swing', async () => {
   const world = frameWorld([frame(20, 2.5, 'wheat')], { legacy: true })
-  world.env.meleeSwing = async (en) => {
+  world.bot.attack = (en) => {
     world.did.push(`swing ${en.id}`)
     en.metadata[FRAME_ITEM] = Item.toNotch(null)
     world.bot.emit('entityUpdate', en)
-    return true
   }
   const res = await drive('/strike', { name: 'item_frame', item: 'iron_sword' }, world)
   assert.strictEqual(res.error, undefined, res.error && res.error.message)
@@ -582,6 +1739,94 @@ test('a strike refuses when every frame in sight is empty', async () => {
   assert.deepStrictEqual(world.did, [])
   const seenOnly = await drive('/strike', { name: 'item_frame', item: 'iron_sword' }, frameWorld([frame(21, 2.5, null)]))
   assert.strictEqual(res.error.message, seenOnly.error.message)
+})
+
+// Each swing empties the frame it hits.
+async function strikeFrame (world, query) {
+  world.bot.attack = (en) => {
+    world.did.push(`swing ${en.id}`)
+    world.hold(en, null)
+  }
+  return drive('/strike', { name: 'item_frame', item: 'iron_sword', ...query }, world)
+}
+
+test('a strike with at swings at the filled frame in that cell past a nearer one', async () => {
+  const world = frameWorld([frame(20, 2.5, 'wheat'), frame(21, 4.5, 'stick')])
+  const res = await strikeFrame(world, { at: '4,65,0' })
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual([res.body.dropped, res.body.at], ['stick', { x: 4, y: 65, z: 0 }])
+  assert.deepStrictEqual(world.did.filter((d) => d.startsWith('swing')), ['swing 21'])
+})
+
+test('a useon with at fills the empty frame in that cell past a nearer one', async () => {
+  const { reply, did } = await frameWheat([frame(20, 2.5, null), frame(21, 4.5, null)], () => 'wheat', { at: '4,65,0' })
+  assert.deepStrictEqual([reply.ok, reply.at, reply.framed], [undefined, { x: 4, y: 65, z: 0 }, 'wheat'])
+  assert.deepStrictEqual(did.filter((d) => d.startsWith('use')), ['use 21'])
+})
+
+test('strike and useon with at answer a frame hidden in that cell as they answer no frame there', async () => {
+  for (const [route, item, fill] of [['/strike', 'iron_sword', 'stick'], ['/useon', 'wheat', null]]) {
+    // Frame 20 at 2,65,0 is the nearer frame that at must pass over.
+    const ask = async (...far) => {
+      const world = frameWorld([frame(20, 2.5, fill), ...far])
+      const res = await drive(route, { name: 'item_frame', item, at: '4,65,0' }, world)
+      return { error: res.error, did: world.did }
+    }
+    const seen = await ask(frame(21, 4.5, fill))
+    assert.strictEqual(seen.error, undefined, `${route} control: ${seen.error && seen.error.message}`)
+    const none = await ask()
+    assert.ok(none.error, `${route} with no frame at 4,65,0, did ${none.did.join(', ')}`)
+    const hidden = await ask(frame(21, 4.5, fill, false))
+    assert.strictEqual(hidden.error && hidden.error.message, none.error.message, route)
+    assert.deepStrictEqual(hidden.did, [], route)
+  }
+})
+
+test('a strike with at refuses an empty frame in that cell, and a useon with at names what a filled one holds', async () => {
+  const world = frameWorld([frame(20, 2.5, 'wheat'), frame(21, 4.5, null)])
+  const res = await strikeFrame(world, { at: '4,65,0' })
+  assert.match(res.error ? res.error.message : `no refusal, did ${world.did.join(', ')}`, /4,65,0/)
+  assert.deepStrictEqual(world.did, [])
+  const { reply, did } = await frameWheat([frame(20, 2.5, null), frame(21, 4.5, 'stick')], () => 'wheat', { at: '4,65,0' })
+  assert.deepStrictEqual([reply.ok, reply.used, reply.at, reply.framed], [false, null, { x: 4, y: 65, z: 0 }, 'stick'])
+  assert.match(reply.reason, /4,65,0/)
+  assert.deepStrictEqual(did, [])
+})
+
+test('strike and useon refuse at on anything but an item frame, and a malformed at, before any walk', async () => {
+  for (const [route, query, world, text] of [
+    ['/strike', { name: 'zombie', at: '6,64,0' }, () => verbWorld([zombie(6.5)])],
+    ['/useon', { name: 'zombie', item: 'shears', at: '6,64,0' }, () => verbWorld([zombie(6.5)])],
+    ['/strike', { name: 'item_frame', item: 'iron_sword', at: '2,65' }, () => frameWorld([frame(20, 2.5, 'wheat')]), /^at takes x,y,z$/],
+    ['/useon', { name: 'item_frame', item: 'wheat', at: '2,65' }, () => frameWorld([frame(20, 2.5, null)]), /^at takes x,y,z$/],
+    ['/strike', { name: 'item_frame', item: 'iron_sword', at: '4,,0' }, () => frameWorld([frame(20, 2.5, 'wheat')]), /^at takes x,y,z$/],
+    ['/useon', { name: 'item_frame', item: 'wheat', at: '4,a,0' }, () => frameWorld([frame(20, 2.5, null)]), /^at takes x,y,z$/],
+    ['/strike', { name: 'item_frame', item: 'iron_sword', at: ' ,1,2' }, () => frameWorld([frame(20, 2.5, 'wheat')]), /^at takes x,y,z$/],
+    ['/strike', { name: 'item_frame', item: 'iron_sword', at: '4,65,0,9' }, () => frameWorld([frame(20, 2.5, 'wheat')]), /^at takes x,y,z$/],
+    ['/useon', { name: 'item_frame', item: 'wheat', at: '4,65,0,9' }, () => frameWorld([frame(20, 2.5, null)]), /^at takes x,y,z$/]
+  ]) {
+    const w = world()
+    const res = await drive(route, query, w)
+    assert.ok(res.error, `${route} ${query.name} at=${query.at}, did ${w.did.join(', ')}`)
+    if (text) assert.match(res.error.message, text, `${route} at=${query.at}`)
+    assert.deepStrictEqual(w.did, [], `${route} ${query.name} at=${query.at}`)
+  }
+})
+
+test('entities name what each frame in sight holds, null for an empty one', () => {
+  const { env } = frameWorld([frame(20, 2.5, 'wheat'), frame(21, 4.5, null), zombie(6.5)])
+  const { entities } = runRoute('/entities', {}, env)
+  assert.deepStrictEqual(entities.map((e) => [e.name, e.framed]), [['item_frame', 'wheat'], ['item_frame', null], ['zombie', undefined]])
+})
+
+test('a frame spawned at the corner of cell 85,65,0 shows as cell 85, and a strike at 85,65,0 hits it', async () => {
+  const world = frameWorld([frame(20, 85, 'wheat')])
+  world.bot.entities[20].position = new Vec3(85, 65, 0)
+  world.bot.entity.position = new Vec3(82.5, 64, 0.5)
+  assert.deepStrictEqual(runRoute('/entities', {}, world.env).entities.map((e) => e.pos), [{ x: 85, y: 65, z: 0 }])
+  const res = await strikeFrame(world, { at: '85,65,0' })
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual([res.body.dropped, res.body.at], ['wheat', { x: 85, y: 65, z: 0 }])
 })
 
 test('a shot counts only once an arrow is loosed, and a kill only once the body sees the target die', async () => {
