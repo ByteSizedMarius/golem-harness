@@ -4,6 +4,12 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-25: the perception manual reads dark caves by shape
+
+The perception manual said a dark cave shows only the 2 blocks around the bot. It now says that
+`section` and `passages` read a dark cave's shape, and no longer lists them among the tools that
+need a lit block.
+
 ## 2026-10-25: positions name the cell
 
 Chat lines gave the bot's and the speaker's positions rounded, so a body at the centre of its cell
