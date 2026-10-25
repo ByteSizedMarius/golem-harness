@@ -627,12 +627,12 @@ test('section draws the room it sees and leaves the cave around the corner unsee
   assert.match(body.summary, /sealed from d4/)
 })
 
-test('section in total darkness names no ore and no air past two blocks', () => {
+test('section in total darkness names no ore and draws the cells past two blocks as dark shapes', () => {
   const body = runRoute('/section', { dir: 'w' }, { ...cave(DARK, FAR_END), sectionColumns, floorPhrase })
   assert.deepStrictEqual(body.ores, [])
   // Columns d -2..len west along y 65: the wall at d -1, the room at d 1..3, the coal at d 4.
   const row = body.grid.split('\n').find((r) => r.startsWith('y 65')).slice(5)
-  assert.strictEqual(row.slice(0, 7), '?#@  ??')
+  assert.strictEqual(row.slice(0, 7), '?#@  :%')
 })
 
 test('section draws a cell seen before and out of sight now as unseen, whatever it holds now', () => {
@@ -675,30 +675,37 @@ function corridor (light, bend = false) {
   return world({ open, light: (x, z) => (z >= 1 ? 15 : light) })
 }
 
-test('passages gives an exit in lit sight, never one around a corner or in the dark', () => {
+test('passages gives an exit in sight, lit or dark, never one around a corner', () => {
   const passages = (env) => runRoute('/passages', { radius: '8' }, env)
   const straight = passages(corridor(LIT))
   assert.match(straight.summary, /^air continues E \(around y64–65, walk-to 8,6[45],0\)$/, 'control: in sight')
   const bent = passages(corridor(LIT, true))
   assert.strictEqual(bent.summary, 'no exit in sight within 8 blocks')
   assert.deepStrictEqual(bent.exits, {})
-  assert.strictEqual(passages(corridor(DARK)).summary, 'no exit in sight within 8 blocks')
+  // A walk plans through no dark cell.
+  assert.strictEqual(passages(corridor(DARK)).summary, 'air continues E (around y64–65)')
 })
 
+// The bent corridor of corridor(), every cell dark.
+const darkBend = () => world({ open: (x, y, z) => (y === 64 || y === 65) && ((z === 0 && x >= 0 && x <= 3) || (x === 3 && z >= 1 && z <= 9)), light: () => DARK })
+
 test('passages gives no exit at a seen cell that only an unseen dark stretch reaches', () => {
-  const env = corridor(DARK)
-  env.SEEN.add(ck(8, 64, 0)).add(ck(8, 65, 0))
+  const env = darkBend()
+  env.SEEN.add(ck(3, 64, 8)).add(ck(3, 65, 8))
   const body = runRoute('/passages', { radius: '8' }, env)
   assert.strictEqual(body.summary, 'no exit in sight within 8 blocks')
   assert.deepStrictEqual(body.exits, {})
 })
 
-test('passages calls a pocket closed only when the bot has seen its walls', () => {
+test('passages calls a pocket closed only when the bot has seen its walls or sees their shape', () => {
   const room = () => world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 3 && (y === 64 || y === 65), light: () => DARK })
   const seen = room()
   for (let x = -1; x <= 4; x++) for (let y = 63; y <= 66; y++) for (let z = -1; z <= 1; z++) seen.SEEN.add(ck(x, y, z))
   assert.match(runRoute('/passages', { radius: '8' }, seen).summary, /^closed pocket/, 'control: every wall seen')
-  assert.strictEqual(runRoute('/passages', { radius: '8' }, room()).summary, 'no exit in sight within 8 blocks')
+  assert.match(runRoute('/passages', { radius: '8' }, room()).summary, /^closed pocket/, 'every wall in sight, dark')
+  // The room with a dark arm south at x 3 to z 3, its far walls around the corner.
+  const arm = world({ open: (x, y, z) => (y === 64 || y === 65) && ((z === 0 && x >= 0 && x <= 3) || (x === 3 && z >= 1 && z <= 3)), light: () => DARK })
+  assert.strictEqual(runRoute('/passages', { radius: '8' }, arm).summary, 'no exit in sight within 8 blocks')
 })
 
 // A dug staircase 1 wide and 3 high at z 0 east from x 0, its floor rising by rise a cell from x 1 to 8 and level
@@ -730,7 +737,9 @@ test('passages gives no slope to a level corridor or a hillside under the open s
   assert.strictEqual(stairExits(staircase(-1)).exits.E.slope, 'down', 'control: a dug staircase')
   const level = runRoute('/passages', { radius: '8' }, corridor(LIT))
   assert.ok(level.exits.E && !('slope' in level.exits.E))
-  const hill = runRoute('/passages', { radius: '8' }, world({ open: (x, y, z) => Math.abs(z) <= 3 && y >= 64 - Math.min(Math.max(x, 0), 8), light: () => LIT, skyLight: () => 15 }))
+  const hillside = world({ open: (x, y, z) => Math.abs(z) <= 3 && y >= 64 - Math.min(Math.max(x, 0), 8), light: () => LIT, skyLight: () => 15 })
+  hillside.bot.registry = REGISTRY
+  const hill = runRoute('/passages', { radius: '8' }, hillside)
   assert.ok(hill.exits.E, 'the hillside leads east')
   assert.ok(Object.values(hill.exits).every((g) => !('slope' in g)))
   assert.doesNotMatch(hill.summary, /sloping/)
@@ -741,6 +750,93 @@ test('passages gives no slope to a staircase with a floor block the bot has not 
   assert.strictEqual(remembered(null).slope, 'down', 'control: every block seen')
   const hidden = remembered(ck(4, 59, 0))
   assert.ok(hidden && !('slope' in hidden))
+})
+
+// A lit corridor along z 0 and a dark tunnel north off it at x 0 to z end, with blocks ('x,y,z' -> name) in its walls.
+const sideTunnel = (end, blocks = {}) => world({
+  open: (x, y, z) => (y === 64 || y === 65) && ((z === 0 && Math.abs(x) <= 9) || (x === 0 && z < 0 && z >= end)),
+  ores: blocks,
+  light: (x, z) => (z < 0 ? DARK : LIT)
+})
+const sectionNorth = (env) => runRoute('/section', { dir: 'n' }, { ...env, sectionColumns, floorPhrase })
+
+test('a dark side tunnel off a lit corridor shows as an opening in passages and section', () => {
+  const exits = runRoute('/passages', { radius: '8' }, sideTunnel(-20)).exits
+  assert.deepStrictEqual(Object.keys(exits).sort(), ['E', 'N', 'W'])
+  assert.deepStrictEqual([exits.N.loY, exits.N.hiY, exits.N.sample], [64, 65, undefined])
+  const section = sectionNorth(sideTunnel(-20))
+  assert.match(section.summary, /floor: level d0–16; headroom 2; passage continues past d16\.$/)
+})
+
+test('a dark wall in sight reads as solid', () => {
+  const section = sectionNorth(sideTunnel(-5))
+  assert.match(section.summary, /sealed from d6\.$/)
+  // Columns d -2..len north along y 65: the corridor's far wall, the body, the tunnel to d 5, its end wall at d 6.
+  const row = section.grid.split('\n').find((r) => r.startsWith('y 65')).slice(5)
+  assert.strictEqual(row.slice(0, 10), '?#@  :::%?')
+})
+
+test('an unlit ore and an unlit block stay unnamed in every reply, the tunnel reading the same without them', async () => {
+  // Diamond in the end wall of the dark tunnel at 0,65,-6 and a chest in its side wall at 1,64,-3.
+  const stocked = () => sideTunnel(-5, { '0,65,-6': 'diamond_ore', '1,64,-3': 'chest' })
+  const leak = /diamond|chest|"x":0,"y":65,"z":-6|"x":1,"y":64,"z":-3/
+  const replies = (env) => [sectionNorth(env), runRoute('/passages', { radius: '8' }, env), summaries(env)]
+  const dark = replies(stocked())
+  assert.doesNotMatch(JSON.stringify(dark), leak)
+  assert.deepStrictEqual(dark, replies(sideTunnel(-5)))
+  assert.strictEqual(runRoute('/find', { name: 'diamond' }, stocked()).count, 0)
+  assert.strictEqual(loadBotFunctions(['veinScan'], { ...stocked(), VEIN_SENSE_R: botConstant('VEIN_SENSE_R') }).veinScan(), null)
+  const events = []
+  loadBotFunctions(['oreCallout'], { ...stocked(), ORE_IDS: [4], ORE_ANNOUNCED: new Map(), sameVein, emitEvent: (kind, msg) => events.push(msg) }).oreCallout()
+  assert.deepStrictEqual(events, [])
+  for (const at of [{ x: '0', y: '65', z: '-6' }, { x: '1', y: '64', z: '-3' }]) {
+    const { handle, res } = routeHandler('/blockat', { ...stocked(), require })
+    await handle({ query: at }, res)
+    assert.match(res.error.message, UNSEEN)
+    assert.strictEqual(res.body, undefined)
+    assert.doesNotMatch(res.error.message, leak)
+  }
+})
+
+// A dark room at x 0..3 behind a closed door at x 4 and a dark corridor to x 12, with water at 3,64,0 when water is set.
+function doorRoom (door, water) {
+  const env = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 12 && x !== 4, light: () => DARK })
+  const base = env.bot.blockAt
+  env.bot.blockAt = (pos) => {
+    const b = base(pos)
+    const { x, y, z } = b.position
+    if (x === 4 && z === 0 && (y === 64 || y === 65)) return { ...b, name: door, getProperties: () => ({ open: false }) }
+    if (water && x === 3 && y === 64 && z === 0) return { ...b, name: 'water', boundingBox: 'empty', shapes: [], getProperties: () => ({}) }
+    return b
+  }
+  return env
+}
+
+test('a dark door and dark water read the same whatever their kind', () => {
+  const replies = (env) => [runRoute('/section', { dir: 'e' }, { ...env, sectionColumns, floorPhrase }), runRoute('/passages', { radius: '8' }, env)]
+  const iron = replies(doorRoom('iron_door', false))
+  assert.deepStrictEqual(replies(doorRoom('oak_door', false)), iron)
+  assert.deepStrictEqual(replies(doorRoom('iron_door', true)), iron)
+})
+
+// Which of eight one-second ticks run the ore sweep, the body stepping east each tick when moving.
+function oreSweeps (env, moving) {
+  const swept = []
+  let tick = 0
+  const { oreTick } = loadBotFunctions(['oreTick'], { ...env, ORE_SWEEP: botConstant('ORE_SWEEP'), oreCallout: () => swept.push(tick) })
+  for (tick = 1; tick <= 8; tick++) {
+    if (moving) env.bot.entity.position = env.bot.entity.position.offset(1, 0, 0)
+    oreTick()
+  }
+  return swept
+}
+
+test('the ore sweep runs each second while the body moves underground, every fourth second otherwise', () => {
+  assert.deepStrictEqual(oreSweeps(tunnel(30, LIT), true), [1, 2, 3, 4, 5, 6, 7, 8])
+  assert.deepStrictEqual(oreSweeps(tunnel(30, LIT), false), [1, 5])
+  const plain = world({ open: (x, y) => y >= 64, light: () => LIT, skyLight: () => 15 })
+  plain.bot.registry = REGISTRY
+  assert.deepStrictEqual(oreSweeps(plain, true), [4, 8])
 })
 
 // The walk into reach moves the body to walkTo.

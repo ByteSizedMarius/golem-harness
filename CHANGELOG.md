@@ -4,6 +4,18 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-25: dark caves show their shape
+
+In a dark cave `passages` and `section` called openings sealed, because unlit cells counted as
+unseen. Unlit cells in line of sight now give shape only: `section` draws them as dark open or dark
+solid and reads floors and walls from them, and `passages` counts them as exits or walls. Block
+names, ore, water, slopes and walk-to cells stay lit-only, and a closed door in the dark reads as a
+wall whatever it is made of.
+
+A player walked the bot past ore in plain view without a callout, since the passive ore sweep ran
+every 4 seconds. The sweep now runs each second while the body moves underground, and every 4
+seconds otherwise.
+
 ## 2026-10-25: mining jobs keep the drop and use the best pick
 
 A tunnel and a stair dug with a stone pick broke gold and redstone ore without a drop and counted

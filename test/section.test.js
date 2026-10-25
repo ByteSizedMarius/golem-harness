@@ -117,9 +117,9 @@ test('the section of a lit closed room underground reads its floor and where it 
   assert.strictEqual(body.summary, 'Section E from (0,64,0): floor: level d0–2; headroom 2; sealed from d3.')
 })
 
-test('the section of the same room in total darkness knows only the cells within two blocks', () => {
+test('the section of the same room in total darkness reads the same shape', () => {
   const body = runRoute('/section', { dir: 'e' }, closedRoom(0))
-  assert.strictEqual(body.summary, 'Section E from (0,64,0): floor: level d0–1, floor unknown at d2; headroom 2; out of sight from d3.')
+  assert.strictEqual(body.summary, 'Section E from (0,64,0): floor: level d0–2; headroom 2; sealed from d3.')
 })
 
 test('the section without a dir runs the way the bot faces', () => {
