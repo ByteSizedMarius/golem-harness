@@ -147,10 +147,10 @@ test('dig_tunnel stops on a pick the server breaks 100 ms after the dig', async 
   assert.deepStrictEqual(r.dug, ['1,65,0'], 'dug on with the broken pick')
 })
 
-test('dig_tunnel digs on with a pick too low for the ore', async () => {
+test('dig_tunnel stops at ore ahead its pick is too low for', async () => {
   const r = await watchedDig('/dig_tunnel', EAST, { picks: [{ name: 'wooden_pickaxe' }], blocks: { '1,64,0': 'iron_ore' } })
-  assert.strictEqual(r.stopped, 'length reached')
-  assert.deepStrictEqual(r.dug, ['1,65,0', '1,64,0', '2,65,0', '2,64,0'])
+  assert.strictEqual(r.stopped, 'iron_ore at 1,64,0 needs pick tier 1 (stone_pickaxe or better), holding wooden_pickaxe')
+  assert.deepStrictEqual(r.dug, ['1,65,0'])
 })
 
 // Going east one step from (0, 64, 0), the wall ore at (1, 64, 1) borders cells the body does not touch.

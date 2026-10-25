@@ -169,7 +169,7 @@ test('digat refuses while the combat reflex is busy, before any tool goes into t
 test('digat keeps the hand lease through the dig\'s look after slow equips used up the first 2 s', async () => {
   const r = await digRun('iron_ore', TOOLS, 1, false, { equipMs: 1800, lookMs: 600 })
   assert.strictEqual(r.error, undefined, r.error && r.error.message)
-  assert.strictEqual(r.bot.dugWith, 'stone_pickaxe')
+  assert.strictEqual(r.bot.dugWith, 'iron_pickaxe')
   assert.strictEqual(r.bot.leasedAtWrite, true, 'the lease ended before the dig started')
 })
 
@@ -195,12 +195,12 @@ test('digat refuses with a retry once slow equips ended the hand lease, before t
   assert.strictEqual(r.bot.dugWith, undefined)
 })
 
-test('digat digs a log with an axe, dirt with a shovel, ore with the lowest pick that keeps the drop and a crop bare-handed', async () => {
+test('digat digs a log with an axe, dirt with a shovel, ore with the best pick up to iron and a crop bare-handed', async () => {
   const log = await digWith('oak_log', TOOLS, 5)
   assert.strictEqual(log.bot.dugWith, 'stone_axe')
   assert.strictEqual(log.reply.with, 'stone_axe')
   assert.strictEqual((await digWith('dirt', TOOLS, 0)).bot.dugWith, 'wooden_shovel')
-  assert.strictEqual((await digWith('iron_ore', TOOLS, 1)).bot.dugWith, 'stone_pickaxe')
+  assert.strictEqual((await digWith('iron_ore', TOOLS, 1)).bot.dugWith, 'iron_pickaxe')
   const crop = await digWith('wheat', TOOLS, 0)
   assert.deepStrictEqual(crop.bot.equips, [], 'a crop')
   assert.strictEqual(crop.bot.dugWith, null)

@@ -4,6 +4,15 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-25: mining jobs keep the drop and use the best pick
+
+A tunnel and a stair dug with a stone pick broke gold and redstone ore without a drop and counted
+them as mined, and wore a stone pick down while an iron pick sat in the inventory. The harness now
+holds the best pick up to iron that harvests the block, and a diamond pick only where nothing lower
+harvests. A job leaves wall ore its held pick cannot harvest in place and lists it under `skipped`.
+It stops at such a block in its path with a reason naming the block and the pick tier it needs, and
+counts only ore it dug with a pick that harvests it.
+
 ## 2026-10-24: floor ore gets dug from beside it
 
 Mining ore in the floor, the bot dug the block it stood on and dropped into the hole, with `digat`
