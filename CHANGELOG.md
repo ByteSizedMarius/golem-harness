@@ -4,6 +4,15 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-25: line of sight follows block shapes
+
+A drop on a slab floor read as out of sight to the bot standing on the same floor, since every block
+with a collision box blocked the bot's line of sight. The line now passes beside and over partial
+blocks such as slabs, carpets, stairs, fence posts, open doors and chests, and is blocked only where
+it meets a block's shape. Soul sand, mud, honey blocks and powder snow look like full cubes and
+block it across the whole cell. Snow blocks it up to the top of its layers, and fences, walls and
+fence gates block it only up to 1 block high, though they stop a body at 1.5.
+
 ## 2026-10-25: item frames hang on the wall the pilot names
 
 A frame placed in front of a chest went onto the floor's top face, which a 1.7.10 server refuses, or

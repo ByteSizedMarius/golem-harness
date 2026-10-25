@@ -523,6 +523,90 @@ test('a mob standing on soul sand in the noon sun shows 10 blocks out', () => {
   assert.strictEqual(seen(true), true)
 })
 
+test('a drop on a bottom slab or a carpet in a lit room shows, behind a wall it does not', () => {
+  // The live slab room: floor cells at y 150 of height top, the body on the slabs, the drop where the 1.21 client
+  // placed it, 0.15625 below the floor surface.
+  const seen = (top, wall = false) => {
+    const room = world({ open: (x, y, z) => x >= -21 && x <= -12 && z >= 9 && z <= 18 && y >= 150 && y <= 154 && !(wall && x === -17 && y > 150), light: () => LIT })
+    const base = room.bot.blockAt
+    room.bot.blockAt = (pos) => {
+      const b = base(pos)
+      return b.name === 'air' && b.position.y === 150 ? { ...b, name: 'floor', boundingBox: 'block', shapes: [[0, 0, 0, 1, top, 1]], light: 0 } : b
+    }
+    room.bot.entity.position = new Vec3(-15.5, 150 + top, 13.5)
+    const { entityPerceptible } = loadBotFunctions(['entityPerceptible'], room)
+    return entityPerceptible({ type: 'object', name: 'item', position: new Vec3(-18.125, 150 + top - 0.15625, 13.21875), metadata: [0] }, { cells: new Set() })
+  }
+  assert.strictEqual(seen(1), true, 'control: on a full floor')
+  assert.strictEqual(seen(0.5), true, 'bottom slab')
+  assert.strictEqual(seen(0.0625), true, 'carpet')
+  assert.strictEqual(seen(0.5, true), false, 'bottom slab behind a wall')
+  assert.strictEqual(seen(1, true), false, 'control: full floor behind a wall')
+})
+
+// losClear along x from 0.5 to 4.5 in a lit corridor, past cell at 2,64,0.
+const rayPast = (cell, height = 64.5, depth = 0.5) => {
+  const corridor = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 5, light: () => LIT })
+  const env = cell ? withCells(corridor, { '2,64,0': { boundingBox: 'block', light: LIT, ...cell } }) : corridor
+  const { losClear } = loadBotFunctions(['losClear'], env)
+  return losClear(new Vec3(0.5, height, depth), new Vec3(4.5, height, depth))
+}
+
+test('a ray through the top of soul sand, mud or honey is blocked, over a dirt path it passes', () => {
+  assert.strictEqual(rayPast(null, 64.95), true, 'control: open corridor')
+  assert.strictEqual(rayPast({ name: 'soul_sand', shapes: [[0, 0, 0, 1, 0.875, 1]] }, 64.95), false, 'soul_sand')
+  assert.strictEqual(rayPast({ name: 'mud', shapes: [[0, 0, 0, 1, 0.875, 1]] }, 64.95), false, 'mud')
+  assert.strictEqual(rayPast({ name: 'honey_block', shapes: [[0.0625, 0, 0.0625, 0.9375, 0.9375, 0.9375]] }, 64.95), false, 'honey_block')
+  assert.strictEqual(rayPast({ name: 'dirt_path', shapes: [[0, 0, 0, 1, 0.9375, 1]] }, 64.97), true, 'dirt_path')
+})
+
+test('snow blocks a ray below its rendered top, powder snow across its cell', () => {
+  // The 1.21.11 snow states: boundingBox empty, the collision box a layer below the rendered top.
+  const snow = (layers) => ({ name: 'snow', boundingBox: 'empty', shapes: layers > 1 ? [[0, 0, 0, 1, (layers - 1) / 8, 1]] : [], getProperties: () => ({ layers: String(layers) }) })
+  assert.strictEqual(rayPast(snow(1), 64.2), true, '1 layer: above it')
+  assert.strictEqual(rayPast(snow(1), 64.1), false, '1 layer: through it')
+  assert.strictEqual(rayPast(snow(4), 64.55), true, '4 layers: above them')
+  assert.strictEqual(rayPast(snow(4), 64.45), false, '4 layers: through them')
+  assert.strictEqual(rayPast(snow(8), 64.95), false, '8 layers: at the top')
+  assert.strictEqual(rayPast(snow(8), 64.05), false, '8 layers: at the bottom')
+  assert.strictEqual(rayPast({ name: 'powder_snow', boundingBox: 'empty', shapes: [] }), false, 'powder_snow')
+})
+
+test('glass and leaves block a ray', () => {
+  assert.strictEqual(rayPast(null), true, 'control: open corridor')
+  for (const name of ['glass', 'oak_leaves']) assert.strictEqual(rayPast({ name, shapes: [[0, 0, 0, 1, 1, 1]] }), false, name)
+})
+
+test('a glass pane, iron bars and a fence gate block a ray by their shapes', () => {
+  const post = [[0.4375, 0, 0.4375, 0.5625, 1, 0.5625]]
+  for (const name of ['glass_pane', 'iron_bars']) {
+    assert.strictEqual(rayPast({ name, shapes: post }, 64.5, 0.2), true, `${name}: past the post`)
+    assert.strictEqual(rayPast({ name, shapes: post }), false, `${name}: through the post`)
+  }
+  assert.strictEqual(rayPast({ name: 'oak_fence_gate', shapes: [] }), true, 'an open fence gate')
+  assert.strictEqual(rayPast({ name: 'oak_fence_gate', shapes: [[0.375, 0, 0, 0.625, 1.5, 1]] }), false, 'a closed fence gate')
+})
+
+test('a ray over a fence post passes, through the post it is blocked', () => {
+  // The fence collides up to 1.5, the post shows only 1 high.
+  const fence = { name: 'oak_fence', shapes: [[0.375, 0, 0.375, 0.625, 1.5, 0.625]] }
+  assert.strictEqual(rayPast(fence, 64.5), false, 'through the post')
+  assert.strictEqual(rayPast(fence, 64.95), false, 'just under the post top')
+  // Descends from 65.9 to 64.3 and clears the post top by 0.05 at x 2.625, then enters the post cell beside it.
+  const corridor = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 5, light: () => LIT })
+  const { losClear } = loadBotFunctions(['losClear'], withCells(corridor, { '2,64,0': { boundingBox: 'block', light: LIT, ...fence } }))
+  assert.strictEqual(losClear(new Vec3(0.5, 65.9, 0.5), new Vec3(4.5, 64.3, 0.5)), true, 'over the post, through its cell')
+})
+
+test('a ray through the arm of a piston head above its cell is blocked', () => {
+  // The extended head faces up: a plate and an arm that collides and shows up to 1.25.
+  const head = { name: 'piston_head', shapes: [[0, 0, 0, 1, 0.25, 1], [0.375, 0.25, 0.375, 0.625, 1.25, 0.625]] }
+  // Same descent as over the fence post: 65.15 to 65.05 across the arm at x 2.375 to 2.625, then into the piston cell.
+  const corridor = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 5, light: () => LIT })
+  const { losClear } = loadBotFunctions(['losClear'], withCells(corridor, { '2,64,0': { boundingBox: 'block', light: LIT, ...head } }))
+  assert.strictEqual(losClear(new Vec3(0.5, 65.9, 0.5), new Vec3(4.5, 64.3, 0.5)), false, 'through the arm')
+})
+
 test('a mob behind a closed door is out of sight, behind an open one in sight', () => {
   // A lit corridor along x on y 64-65 with the door at x 4 and the zombie at x 6.
   const seen = (name, open) => {
