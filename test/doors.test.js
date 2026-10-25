@@ -322,6 +322,7 @@ function farmDoor (feet, state = { facing: 'west', hinge: 'left', open: true }) 
     findBlocks: () => [new Vec3(-308, 63, 81), new Vec3(-308, 64, 81)],
     activateBlock: async (b) => { activated.push(b.position.toString()); state.open = !state.open },
     waitForTicks: async () => {},
+    lookAt: async () => {},
     pathfinder: { goal: null }
   }
   const env = {

@@ -6,6 +6,7 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const { legLedger } = require('../lib/leg-ledger')
 const { entityInCell } = require('../lib/shelter')
+const { panelAcross, doorCrossing } = require('../lib/doors')
 const { botConstant, reflexIn, loadBotFunctions } = require('./helpers')
 
 const key = (p) => `${p.x},${p.y},${p.z}`
@@ -110,7 +111,9 @@ function world ({ blocks = {}, at = new Vec3(0.5, 64, 0.5), goal, pockets = [], 
     NEIGHBOURS: botConstant('NEIGHBOURS'),
     UNSTUCK_WATCH_TICKS: botConstant('UNSTUCK_WATCH_TICKS'),
     OPENABLE: botConstant('OPENABLE'),
-    CONTAINERS: botConstant('CONTAINERS')
+    CONTAINERS: botConstant('CONTAINERS'),
+    doorCrossing,
+    panelAcross
   }
   const reflex = reflexIn('unstuck', env)
   reflex._crumbs = crumbs
