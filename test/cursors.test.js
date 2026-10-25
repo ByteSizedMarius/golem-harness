@@ -25,7 +25,7 @@ function cursorsHarness () {
     lastTickSnap: null,
     shared: { ready: false },
     BOOT_ID: 'b0',
-    chatLog: createChatLog({ self: 'Claude' }),
+    chatLog: createChatLog({ self: () => 'Claude' }),
     ok: (res, body) => { res.body = body },
     err: (res, e) => { res.error = e }
   })

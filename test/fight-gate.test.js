@@ -55,7 +55,7 @@ test('world work passes while the body stands in its bunker, however busy the co
 
 test('a placement batch during a guard fight and after its DOWN event reaches no hand until wait_events', { timeout: 20000 }, async () => {
   // bot.js: the real reply layer and fight gate over a fight the test runs, and a placeitem that records its clicks.
-  const ctx = { chatLog: createChatLog({ self: 'Claude' }), eventLog: [], streams: { eventSeq: 0, wakeEv: 0 }, BOOT_ID: 'b0' }
+  const ctx = { chatLog: createChatLog({ self: () => 'Claude' }), eventLog: [], streams: { eventSeq: 0, wakeEv: 0 }, BOOT_ID: 'b0' }
   createReply(ctx)
   bindReply(ctx)
   let fighting = false

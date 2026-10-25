@@ -22,7 +22,7 @@ function noteOf (r) {
 }
 
 test('a tool reply after other players chatted counts the lines and names the senders, never the text', async () => {
-  const log = createChatLog({ self: SELF })
+  const log = createChatLog({ self: () => SELF })
   const { srv } = mcpServer({ reply: replyOver(log) })
   assert.strictEqual(noteOf(await call(srv, 'state', {})), null, 'control: no chat, no note')
   log.push('Halbes', SECRET, 'chat')
@@ -36,7 +36,7 @@ test('a tool reply after other players chatted counts the lines and names the se
 
 test('reading chat through tick or wait_events ends the note', async () => {
   for (const [reader, args] of [['tick', {}], ['wait_events', { timeout: 1 }]]) {
-    const log = createChatLog({ self: SELF })
+    const log = createChatLog({ self: () => SELF })
     const { srv } = mcpServer({ reply: replyOver(log) })
     log.push('Halbes', 'what are u working on?', 'chat')
     assert.ok(noteOf(await call(srv, 'state', {})), `control before ${reader}`)
@@ -48,7 +48,7 @@ test('reading chat through tick or wait_events ends the note', async () => {
 })
 
 test('the bot\'s own chat line and server events make no note', async () => {
-  const log = createChatLog({ self: SELF })
+  const log = createChatLog({ self: () => SELF })
   assert.strictEqual(log.push(SELF, 'on my way', 'chat'), null)
   const events = [{ id: 1, t: 1, kind: 'server', msg: 'Halbes joined the game' }, { id: 2, t: 2, kind: 'server', msg: 'World saved', quiet: true }]
   const reply = (url) => log.withUnread(url.pathname === '/events' ? { ok: true, cursor: 2, events } : { ok: true })

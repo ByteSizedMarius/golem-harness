@@ -24,7 +24,7 @@ const blockAt = (walled) => (pos) => {
 
 // pushChat over the bot's real whereIs and sight, the bot at ME with the given player entities.
 function chatRig ({ players = [], walled = false, ready = true, me = ME, reflexes = [{ name: 'combat', fairFill: () => ({ cells: new Set() }) }] } = {}) {
-  const chatLog = createChatLog({ self: SELF })
+  const chatLog = createChatLog({ self: () => SELF })
   const env = {
     console: { log () {} },
     chatLog,
@@ -113,7 +113,7 @@ test('the bot\'s own chat line stays out of the log', () => {
 
 test('a read gives each line its age in whole seconds and leaves the stored line as it was', (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: 1000000 })
-  const log = createChatLog({ self: SELF })
+  const log = createChatLog({ self: () => SELF })
   const line = log.push('Steve', 'hi', 'chat')
   assert.deepStrictEqual(log.read(0), [{ id: 1, t: 1000000, from: 'Steve', msg: 'hi', kind: 'chat', age: 0 }])
   t.mock.timers.tick(2999)

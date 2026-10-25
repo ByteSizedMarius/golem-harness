@@ -7,7 +7,7 @@ const { mcpServer, call, textOf, errorText, isToolError, tickFrom } = require('.
 
 // A bot.js process: its event store, its replies through the real reply layer, and the routes the bot was asked.
 function botProcess (boot = 'b0') {
-  const ctx = { chatLog: createChatLog({ self: 'Claude' }), eventLog: [], streams: { eventSeq: 0, wakeEv: 0 }, BOOT_ID: boot }
+  const ctx = { chatLog: createChatLog({ self: () => 'Claude' }), eventLog: [], streams: { eventSeq: 0, wakeEv: 0 }, BOOT_ID: boot }
   createReply(ctx)
   const routes = []
   const emit = (kind, { quiet = false, t = Date.now() } = {}) => {
