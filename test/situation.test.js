@@ -23,14 +23,14 @@ const blockAt = (walled) => (pos) => {
 }
 
 // pushChat over the bot's real whereIs and sight, the bot at ME with the given player entities.
-function chatRig ({ players = [], walled = false, ready = true, reflexes = [{ name: 'combat', fairFill: () => ({ cells: new Set() }) }] } = {}) {
+function chatRig ({ players = [], walled = false, ready = true, me = ME, reflexes = [{ name: 'combat', fairFill: () => ({ cells: new Set() }) }] } = {}) {
   const chatLog = createChatLog({ self: SELF })
   const env = {
     console: { log () {} },
     chatLog,
     pointerOf: () => null,
     shared: { ready },
-    bot: { entity: { position: ME }, entities: Object.fromEntries(players.map((p) => [p.id, p])), blockAt: blockAt(walled), time: { timeOfDay: 6000 }, game: { dimension: 'overworld' } },
+    bot: { entity: { position: me }, entities: Object.fromEntries(players.map((p) => [p.id, p])), blockAt: blockAt(walled), time: { timeOfDay: 6000 }, game: { dimension: 'overworld' } },
     playerNamed,
     staleEntities: new Set(),
     playerCrumbs: {},
@@ -53,15 +53,21 @@ function chatRig ({ players = [], walled = false, ready = true, reflexes = [{ na
   return { say, chatLog }
 }
 
-const ME_ROUNDED = { x: 0, y: 64, z: 1 }
+const ME_CELL = { x: 0, y: 64, z: 0 }
 
 test('a chat line from a player in sight carries their position, distance and bearing and where the bot stood', () => {
   const { say } = chatRig({ players: [steve(13.3, 64, -2.6)] })
   assert.deepStrictEqual(say('Steve', 'over here'), {
     from: 'Steve', msg: 'over here', kind: 'chat',
     where: { live: true, pos: { x: 13, y: 64, z: -3 }, dist: 13, bearing: 'E' },
-    me: ME_ROUNDED
+    me: ME_CELL
   })
+})
+
+test('a body and a speaker at their cell centres are named by the cells they stand in', () => {
+  const { say } = chatRig({ me: new Vec3(10.5, 15, -16.5), players: [steve(17.5, 15, -12.5)] })
+  const line = say('Steve', 'come up again')
+  assert.deepStrictEqual([line.me, line.where.pos], [{ x: 10, y: 15, z: -17 }, { x: 17, y: 15, z: -13 }])
 })
 
 test('a whisper carries the same', () => {
@@ -69,18 +75,18 @@ test('a whisper carries the same', () => {
   assert.deepStrictEqual(say('Steve', 'psst', 'whisper'), {
     from: 'Steve', msg: 'psst', kind: 'whisper',
     where: { live: true, pos: { x: 13, y: 64, z: -3 }, dist: 13, bearing: 'E' },
-    me: ME_ROUNDED
+    me: ME_CELL
   })
 })
 
 test('a speaker known only by the nametag gives a rough distance and a bearing, no position', () => {
   const { say } = chatRig({ players: [steve(31.2, 64, 1.3)], walled: true })
-  assert.deepStrictEqual(say('Steve', 'hello'), { from: 'Steve', msg: 'hello', kind: 'chat', where: { live: true, nametag: true, dist: 30, bearing: 'E' }, me: ME_ROUNDED })
+  assert.deepStrictEqual(say('Steve', 'hello'), { from: 'Steve', msg: 'hello', kind: 'chat', where: { live: true, nametag: true, dist: 30, bearing: 'E' }, me: ME_CELL })
 })
 
 test('a speaker never seen this session is flagged unseen', () => {
   const { say } = chatRig()
-  assert.deepStrictEqual(say('Alex', 'anyone home?'), { from: 'Alex', msg: 'anyone home?', kind: 'chat', where: { live: false, unseen: true }, me: ME_ROUNDED })
+  assert.deepStrictEqual(say('Alex', 'anyone home?'), { from: 'Alex', msg: 'anyone home?', kind: 'chat', where: { live: false, unseen: true }, me: ME_CELL })
 })
 
 test('a player loaded behind a wall past the nametag range leaks no position, distance or bearing', () => {
@@ -125,7 +131,7 @@ test('tick and chatlog carry each line\'s situation and age', (t) => {
   const expected = {
     id: 1, t: 1000000, from: 'Steve', msg: 'over here', kind: 'chat',
     where: { live: true, pos: { x: 13, y: 64, z: -3 }, dist: 13, bearing: 'E' },
-    me: ME_ROUNDED,
+    me: ME_CELL,
     age: 4
   }
 

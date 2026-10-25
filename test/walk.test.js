@@ -12,7 +12,7 @@ const { legLedger } = require('../lib/leg-ledger')
 const { createDescribe } = require('../lib/bot/describe')
 const { expireConfirmed } = require('../lib/shelter')
 const { STANCES } = require('../lib/bot/stances')
-const { loadBotFunctions, botConstant, startApp, fakeClock, combatReflexIn } = require('./helpers')
+const { loadBotFunctions, botConstant, botObject, startApp, fakeClock, combatReflexIn } = require('./helpers')
 
 const { UNLOADED, UNKNOWN, standCell, targetKind, resolveTarget, crumbCentre, arrivedAt, watchProgress, walkAttempt, routeDeadline } = walk
 
@@ -874,6 +874,30 @@ test('a /goto into a rock column beside the bot replies no-floor only when it kn
   assert.deepStrictEqual([unseen.arrived, unseen.reason, unseen.edge], [false, 'unseen-way', { x: 1, y: 40, z: 0 }])
 })
 
+test('a /goto into a known wall cell beside a dark tunnel names the block, and an unseen wall cell stays unseen-way', async () => {
+  // A 1-wide tunnel along x at z -17 in stone, the bot at the centre of its cell 10,15,-17.
+  const tunnel = (p) => p.z === -17 && (p.y === 15 || p.y === 16) && p.x >= 0 && p.x <= 15
+  const sides = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+  const eye = new Vec3(10.5, 16.62, -16.5)
+  const gap = (v, lo) => Math.max(lo - v, 0, v - lo - 1)
+  // Unlit, the bot sees 2 blocks: open cells and blocks with an open face.
+  const dark = (p) => Math.hypot(gap(eye.x, p.x), gap(eye.y, p.y), gap(eye.z, p.z)) <= 2 &&
+    (tunnel(p) || sides.some(([dx, dy, dz]) => tunnel({ x: p.x + dx, y: p.y + dy, z: p.z + dz })))
+  const setup = (bot) => {
+    bot.blockAt = (p) => ({ ...(tunnel(p) ? AIR : STONE), position: p })
+    bot.entity.position = new Vec3(10.5, 15, -16.5)
+  }
+  const replyFor = (cellKnown) => goto({ x: 11, y: 15, z: -16, range: 1 }, { setup, over: { cellKnown, knownCell: cellKnown, WALK_HINTS: botObject('WALK_HINTS', { BUNKER_WALK: '' }) } })
+  const known = await replyFor(dark)
+  assert.deepStrictEqual([known.arrived, known.reason, known.hint, known.edge],
+    [false, 'solid', 'the cell is stone: a goto names the feet cell, pick the open cell beside it', undefined])
+  const unseen = await replyFor((p) => dark(p) && !(p.x === 11 && p.y === 15 && p.z === -16))
+  assert.deepStrictEqual([unseen.reason, unseen.edge], ['unseen-way', { x: 11, y: 15, z: -16 }], 'an unseen block is never named')
+  assert.doesNotMatch(unseen.hint, /stone/)
+  const open = await goto({ x: 11, y: 15, z: -17, range: 1 }, { setup, answer: arrive, over: { cellKnown: dark, knownCell: dark } })
+  assert.strictEqual(open.arrived, true, 'control: the tunnel cell beside it')
+})
+
 test('a /goto to x and z beside a column it has not seen names that column as edge, without a y', async () => {
   const describe = {}
   createDescribe(describe)
@@ -968,6 +992,8 @@ test('the last-seen fields of a nametag crumb give only a bearing and a distance
   const fix = (c) => JSON.parse(JSON.stringify(crumbFix(c, me)))
   assert.deepStrictEqual(fix(crumb(false)), { lastSeen: { x: 13, y: 64, z: -3 }, agoSec: 7, dist: 13, bearing: 'E' }, 'control: a crumb from sight')
   assert.deepStrictEqual(fix(crumb(true)), { agoSec: 7, dist: 15, bearing: 'E' })
+  const centre = { pos: new Vec3(17.5, 64, -12.5), t: Date.now() - 7000, nametag: false }
+  assert.deepStrictEqual(fix(centre).lastSeen, { x: 17, y: 64, z: -13 }, 'a crumb at a cell centre names that cell')
 })
 
 test('crumbs are dropped when the bot enters another dimension', () => {

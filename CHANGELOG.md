@@ -4,6 +4,18 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-25: positions name the cell
+
+Chat lines gave the bot's and the speaker's positions rounded, so a body at the centre of its cell
+read as the cell to the east or south, and gotos to those coordinates ran into the wall. Chat `me`,
+`where` positions, last-seen crumbs and the pulse's position now name the cell the body stands in,
+as the F3 block coordinates do.
+
+A goto to a stone cell beside a tunnel was refused as an unseen way, with the target itself as the
+edge, and the pilot lit torches and pillared to reach a cell it could already see. A goto whose
+asked cell is known and solid, with no stand cell near it, now answers `solid` with the block's
+name, so the pilot picks the open cell beside it.
+
 ## 2026-10-25: dark caves show their shape
 
 In a dark cave `passages` and `section` called openings sealed, because unlit cells counted as
