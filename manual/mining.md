@@ -1,8 +1,23 @@
 # Mining and pockets
 
+## Key rules
+
+- Diamond and redstone lie below y 16, and caves at y 10 and below fill with lava. Branch-mine on one level, with your feet at y 11 or 12.
+- Branch mining: one main tunnel in one compass direction from a hub, a branch off it every 3rd block on both sides, every branch the same length. The way home is the main tunnel.
+- A branch that opens into a cave, ravine, lava or water ends there. Save the spot as a waypoint and take the next branch.
+
+## Branch mining
+
+- Go down with `dig_stair` and save a waypoint at its foot. That cell is the hub.
+- Dig each branch with `dig_tunnel` to one length, such as 16 to 24, then walk back along it to the main tunnel. Every 3rd block leaves 2 blocks of rock between branches.
+- Stay within a set range of the hub.
+- Leave `dig_tunnel`'s `torch` on. Ore in a tunnel wall shows only in light.
+
+## Digging
+
 - `find` before `mine`. With nothing in range, `mine` returns `mined: 0` and you learn nothing. `find` shows whether the resource is there and where, then mine it or travel to it.
 - An empty ore result usually means buried or unlit, not absent. Expose it by digging toward it: open a cave, follow a wall of exposed stone. Light a dark cave before you look.
-- Never dig the block under your own feet, except down a bunker pillar. It drops you into whatever is below: a cave, lava, a long fall. Dig into a face ahead of you or above. `gather` refuses targets more than about 2 below your feet, and with `digat` the rule is yours to keep.
+- `digat` and `mine` step off a block you stand on and dig it from beside. With no cell beside it to stand on, such as a pillar top or a shaft, they dig it in place and you drop into whatever is below: a cave, lava, a long fall. `gather` refuses targets more than about 2 below your feet.
 - `mine` gives up on a block it makes no progress toward for about 5 s, or after a minute, and its `reason` says `stalled` or `budget`. `tidy` stops the same way and keeps the rest queued.
 - A blocked route is your call: `dig_stair` or `dig_tunnel` on purpose, or another point.
 - `dig_tunnel` and `dig_stair` stop at lava or water they see ahead or a dig lays bare, and plug a hole onto lava with a filler block from your pockets. `dig_stair` also stops at gravel or sand in or over its passage.

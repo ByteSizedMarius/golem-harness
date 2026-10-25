@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-25: branch mining in the mining manual
+
+The mining manual gains key rules and a section on branch mining: one level with the feet at y 11 or
+12, a main tunnel from a hub with a branch every 3rd block on both sides, and a branch that ends
+where it opens into a cave, lava or water. `dig_tunnel` and `dig_stair` replies carry those key
+rules, and the floor-digging line follows how `digat` and `mine` step off a block or dig it in
+place.
+
 ## 2026-10-25: the perception manual reads dark caves by shape
 
 The perception manual said a dark cave shows only the 2 blocks around the bot. It now says that

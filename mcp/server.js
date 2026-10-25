@@ -30,6 +30,7 @@ const PRIMED_BY = new Map([
   ...['chest', 'deposit', 'withdraw', 'walls', 'roof', 'build', 'outline'].map((name) => [name, { topic: 'building' }]),
   ['placeitem', { topic: 'building', when: ({ name }) => name.toLowerCase().includes('chest') }],
   ...['smelt', 'furnace'].map((name) => [name, { topic: 'jobs' }]),
+  ...['dig_tunnel', 'dig_stair'].map((name) => [name, { topic: 'mining' }]),
   ['grave', { topic: 'graves' }]
 ])
 // A topic's key rules go out once, with the first reply of any tool that passes when.
