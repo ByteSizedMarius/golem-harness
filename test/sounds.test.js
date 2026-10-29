@@ -102,7 +102,7 @@ function ears (extra = {}) {
   return { onSound, raised, texts }
 }
 
-test('the explosion 1.7.10 lightning plays where its thunder struck raises no hear event, one elsewhere does', () => {
+test('the explosion 1.7.10 lightning plays where its thunder struck raises no hear event, one elsewhere or later does', () => {
   const thunder = 'minecraft:entity.lightning_bolt.thunder'
   const explode = 'minecraft:entity.generic.explode'
   const strike = new Vec3(20.5, 64, 0.5)
@@ -117,6 +117,12 @@ test('the explosion 1.7.10 lightning plays where its thunder struck raises no he
   elsewhere.onSound(thunder, strike)
   elsewhere.onSound(explode, strike.offset(0, 0, 3))
   assert.deepStrictEqual(elsewhere.raised, ['hear'], 'an explosion 3 from the strike')
+  let now = Date.now()
+  const later = ears({ Date: { now: () => now } })
+  later.onSound(thunder, strike)
+  now += 2 * LEGACY_STRIKE_MS
+  later.onSound(explode, strike)
+  assert.deepStrictEqual(later.raised, ['hear'], 'an explosion at the strike once the window has passed')
 })
 
 test('on 1.21.11 an explosion where thunder just struck raises its hear event', () => {
