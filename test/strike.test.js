@@ -2271,3 +2271,24 @@ test('a combat flee that takes the legs during a strike approach ends the strike
   assert.deepStrictEqual({ swings: res.body.swings, reason: res.body.reason, takenBy: res.body.takenBy },
     { swings: 0, reason: 'stopped', takenBy: 'the combat reflex took the legs to flee from zombie' })
 })
+
+test('a strike without the named item refuses and names the ways out, a carried sword or axe first', async () => {
+  const refusal = async (items) => {
+    const { handle, res } = routeHandler('/strike', {
+      shared: { ready: true },
+      legs: legLedger(),
+      frameAt: () => null,
+      strikeRun: { lane: null },
+      releaseLane () {},
+      bot: { inventory: { items: () => items.map((name) => ({ name })) }, removeListener () {} }
+    })
+    await handle({ query: { name: 'zombie' } }, res)
+    return res.error && res.error.message
+  }
+  const no = 'refused: no iron_sword in your pockets to strike with. Ways out:'
+  const ways = 'goto, bunker, or the combat reflex, which flees at low health while it is on.'
+  assert.strictEqual(await refusal([]), `${no} ${ways}`)
+  assert.strictEqual(await refusal(['iron_pickaxe']), `${no} ${ways}`, 'a pickaxe is no weapon')
+  assert.strictEqual(await refusal(['iron_pickaxe', 'stone_sword']), `${no} strike(item: 'stone_sword'), ${ways}`)
+  assert.strictEqual(await refusal(['wooden_axe']), `${no} strike(item: 'wooden_axe'), ${ways}`)
+})

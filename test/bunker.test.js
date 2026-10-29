@@ -603,7 +603,7 @@ test('the pillar verb beside a hill rises at least 2 over the hilltop and says w
   const climb = async (ground) => {
     const entity = { position: new Vec3(0.5, 64, 0.5) }
     const solid = (p) => ground(p) || (p.x === 0 && p.z === 0 && p.y < entity.position.y)
-    return awaitRoute('/pillar', { height: '3' }, {
+    return awaitRoute('/pillar', {}, {
       bot: { entity, blockAt: dirtWhere(solid) },
       bunker: { building: false },
       legs: legLedger(),
