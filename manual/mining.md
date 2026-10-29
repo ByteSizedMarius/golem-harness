@@ -20,12 +20,11 @@
 - `digat` and `mine` step off a block you stand on and dig it from beside. With no cell beside it to stand on, such as a pillar top or a shaft, they dig it in place and you drop into whatever is below: a cave, lava, a long fall. `gather` refuses targets more than about 2 below your feet.
 - `mine` gives up on a block it makes no progress toward for about 5 s, or after a minute, and its `reason` says `stalled` or `budget`. `tidy` stops the same way and keeps the rest queued.
 - A blocked route is your call: `dig_stair` or `dig_tunnel` on purpose, or another point.
-- `dig_tunnel` and `dig_stair` stop at lava or water they see ahead or a dig lays bare, and plug a hole onto lava with a filler block from your pockets. `dig_stair` also stops at gravel or sand in or over its passage.
+- `dig_tunnel` and `dig_stair` stop at lava or water, and at gravel or sand over their way (`dig_stair` also in it). They plug a hole onto lava with a carried filler and step back from falling gravel. A `falling` stop without `stepped back` means walk out at once.
 - A walk wedged for about 10 s gets the unstuck reflex: it replans, steps back, opens a door or jumps a step, and breaks the block in the way only when the same block is in your pockets to put back. When none of that frees you, it stops the walk and its event names where you are stuck, against what, and what it tried. Dig out yourself from there.
 - When something else holds the hand, `digat` puts a carried tool that harvests the block back in it, or refuses the dig.
-- `digat` answers once the server broke the block. A tool's `durability` counts the digs it has left.
-- A nearly broken tool raises a wear event.
-- Every dug block costs the pick about 1 durability. A bulk dig with `dig_tunnel`, such as a room, needs a spare pick or a few stone picks (3 cobblestone and 2 sticks each).
+- `digat` answers once the server broke the block. A tool's `durability` counts the digs it has left. A nearly broken tool raises a wear event.
+- A block of `dig_tunnel` length is two digs: an iron pick lasts about 125 blocks, a stone one 65. Take spares for a long tunnel or a room. A job swaps to one when its pick breaks.
 
 ## Pockets
 

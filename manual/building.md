@@ -18,8 +18,9 @@
 - Ladders on 1.7.10: `face: "N"` hangs the ladder on the wall north of the cell. Without `face` it follows the ladder below, else the first solid wall. The reply's `wall` and `facing` are the ones the server set.
 - A ladder shaft: light it first, hang every rung on one wall from the floor cell to the top, and `blockat` each rung to check they all show the same `facing`.
 - Item frames: `placeitem` with `face` names the wall a frame hangs on, a chest included. `useon` puts an item into an empty frame. `strike` with any carried item knocks the item out (the drop can land a few blocks off in any direction, and strike goes after it) and refuses an empty frame. `at` with the frame's cell picks the frame for both, and `entities` shows what each frame holds.
+- Storage: double chests stacked 3 or 4 high, the top one with a free cell under the ceiling (a chest under a chest opens). Stacks stand side by side with a block between each two, such as a crafting table or a furnace (a chest can't go beside a double chest). With leather to spare, each double chest gets an item frame on the front of its left half, holding an item of what it stores.
 - `craft` in small explicit batches, or let a teammate craft at a real table while you lay blocks.
 - `build` lays a whole cabin as a job. `outline`, `walls` and `roof` run at once and suit smaller, precise work.
-- A gap crossing: `bridging(on: "1")`, cross, `bridging(on: "0")`, then `tidy` to take the scaffold back. The pathfinder places nothing on its own.
+- A gap crossing: an existing bridge or walkway first. A way you cross again and again gets a lasting one laid with `placeitem`, a one-off `bridging(on: "1")`, cross, `bridging(on: "0")`, then `tidy` to take the scaffold back. The pathfinder places nothing on its own.
 - Stock up before you build or travel: check `inventory` and carry a stack of cobblestone or dirt.
 - Junk (cobble, dirt, spare sticks) goes into its own chest, not into someone else's.
