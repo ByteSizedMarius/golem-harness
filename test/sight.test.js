@@ -950,7 +950,7 @@ test('digat digs a block in lit sight, never one seen before and dark now, aroun
     env.bot.blockAt = (p) => ({ ...base(p), digTime: () => 750 })
     env.bot.pathfinder.goto = async () => { acts.push('walk') }
     Object.assign(env.bot, { equip: async () => { acts.push('equip') }, dig: async () => { acts.push('dig') }, digTime: () => 750 })
-    Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, setTimeout, clearTimeout, PICK_TIER: botConstant('PICK_TIER'), DIG_TOOL: botConstant('DIG_TOOL') })
+    Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, digLock: botConstant('digLock'), stopPath () {}, setTimeout, clearTimeout, PICK_TIER: botConstant('PICK_TIER'), DIG_TOOL: botConstant('DIG_TOOL') })
     const { handle, res } = routeHandler('/digat', env)
     await handle({ query: at }, res)
     return { body: res.body, error: res.error, acts }
@@ -1383,7 +1383,7 @@ test('digat at a cell seen before and out of sight now walks there before it say
     env.SEEN.add(ck(6, 64, -2))
     const acts = []
     env.bot.pathfinder = { goto: async () => { acts.push('walk'); if (arrive) env.bot.entity.position = new Vec3(4.5, 64, -1.5) } }
-    Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals: { GoalNear: function () {} } })
+    Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, digLock: botConstant('digLock'), stopPath () {}, require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals: { GoalNear: function () {} } })
     const { handle, res } = routeHandler('/digat', env)
     await handle({ query: { x: '6', y: '64', z: '-2' } }, res)
     return { body: res.body, error: res.error, acts }

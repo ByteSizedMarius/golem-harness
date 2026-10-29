@@ -123,6 +123,8 @@ async function digRun (blockName, hotbar, held, legacy, { during = [], after = [
     bunker: { building: false },
     reflexes: [{ name: 'combat', fightBusy: () => fighting, _threat: null }],
     guardState: { hand: null },
+    digLock: botConstant('digLock'),
+    stopPath () {},
     cellKnown: () => true,
     seenNow: () => true,
     require,

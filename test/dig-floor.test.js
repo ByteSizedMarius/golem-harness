@@ -5,7 +5,7 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const registry = require('prismarine-registry')('1.21.11')
 const Block = require('prismarine-block')(registry)
-const { loadBotFunctions, routeHandler } = require('./helpers')
+const { loadBotFunctions, botConstant, routeHandler } = require('./helpers')
 const { entityInCell } = require('../lib/shelter')
 
 // The floor ore every case digs.
@@ -69,6 +69,8 @@ function floorWorld (pos, walls = [], holes = []) {
     entityInCell,
     LEGACY_1710: false,
     bunker: { building: false },
+    digLock: botConstant('digLock'),
+    stopPath () {},
     cellKnown: () => true,
     seenNow: () => true,
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
