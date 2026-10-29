@@ -133,6 +133,7 @@ async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, 
     arrows: new Map(),
     AGGRO_CONFIRMED: new Map(),
     damageTypeMissed: false,
+    LEGACY_1710: false,
     ...Object.fromEntries(['SWING_MS', 'SWING_GAP_MS', 'SWING_FACING', 'ARROW_FLIGHT_MS', 'ARROW_HIT_MS', 'ARROW_RANGE']
       .map(name => [name, botConstant(name)]))
   })
@@ -175,4 +176,31 @@ test('a first swing counts as lone only when the body tracked the player through
 
 test('a sourceless hit never names a swinging player the body cannot perceive', async () => {
   assert.strictEqual(await swingHit({ seen: false }), 'zombie W ~3 (nearest hostile)')
+})
+// The attribution of a hit with no source entity and damage type typeId, from a registry of generic (0) and fall (1),
+// with no hostile, player or arrow near.
+function noSourceHit (typeId) {
+  const bot = Object.assign(new EventEmitter(), { entity: { id: 1 }, entities: {}, _client: new EventEmitter() })
+  const fight = { damageTypes: ['generic', 'fall'], lastAttrib: null }
+  const ctx = loadBotFunctions(['wireDamageAttribution'], {
+    bot,
+    fight,
+    console: { log () {} },
+    nearestHostile: () => undefined,
+    playersNear: () => [],
+    arrows: new Map(),
+    damageTypeMissed: false
+  })
+  ctx.wireDamageAttribution()
+  bot.emit('spawn')
+  bot._client.emit('damage_event', { entityId: 1, sourceTypeId: typeId, sourceCauseId: 0, sourceDirectId: 0 })
+  return fight.lastAttrib && { desc: fight.lastAttrib.desc, untyped: fight.lastAttrib.untyped }
+}
+
+test('a hit with no source entity is untyped when generic or of an unknown type, a typed one is not', () => {
+  assert.deepStrictEqual([0, 1, 2].map(noSourceHit), [
+    { desc: 'no attacker named, no hostile within 4', untyped: true },
+    { desc: 'fall', untyped: false },
+    { desc: 'no attacker named', untyped: true }
+  ])
 })

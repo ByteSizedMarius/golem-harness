@@ -1216,6 +1216,7 @@ function buildVerbEnv (bot, over = {}) {
     BUILD_FAIL_LIST: botConstant('BUILD_FAIL_LIST'),
     BUILD_REACH: botConstant('BUILD_REACH'),
     BUILD_WALK_CURES: botConstant('BUILD_WALK_CURES'),
+    digLock: botConstant('digLock'),
     ...over
   }
 }
@@ -1283,12 +1284,26 @@ async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, 
     macroPlaceAt: async () => ({}),
     nudgeInto: async (cell) => { bot.entity.position = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5); return true },
     NEIGHBOURS,
+    digLock: botConstant('digLock'),
     cellKnown: (p) => known.includes(key(p)),
     knownCell: (p) => known.includes(key(p)),
     skyInSight: () => sky(bot.entity.position),
     seesLit: (p) => NEIGHBOURS.some(([dx, dy, dz]) => open.has(key(p.offset(dx, dy, dz))))
   })
   return { ...(await job), dug, fills, name }
+}
+
+// Takes digLock as the buried self-rescue takes it.
+function claimRescue (digLock) {
+  loadBotFunctions(['claimDig'], { digLock }).claimDig('the buried self-rescue', true).sole = true
+}
+
+// What route answers on query over env, and the names of the jobs it started.
+async function routeJobs (route, query, env) {
+  const started = []
+  const { handle, res } = routeHandler(route, { jobs: { start: (name) => { started.push(name); return { id: started.length } } }, ...env })
+  await handle({ query }, res)
+  return { error: res.error, started }
 }
 
 module.exports = {
@@ -1303,5 +1318,5 @@ module.exports = {
   botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, walkingBody, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, laneAt,
-  buildVerbEnv, digInProblemWith, facings, digJob
+  buildVerbEnv, digInProblemWith, facings, digJob, claimRescue, routeJobs
 }

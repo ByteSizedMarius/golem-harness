@@ -69,6 +69,7 @@ async function pickJob (route, query, { blocks = {}, picks, held = null, stuck =
     PICK_TIER: botConstant('PICK_TIER'),
     LEGACY_1710: legacy,
     LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
+    digLock: botConstant('digLock'),
     bunker: { building: false },
     jobs: { start: (n, fn) => { job = fn(state); return { id: 1 } } },
     emitEvent: (kind, text) => { if (kind === 'mine') events.push(text) },

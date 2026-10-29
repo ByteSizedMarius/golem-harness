@@ -6,7 +6,7 @@ const { Vec3 } = require('vec3')
 const registry = require('prismarine-registry')('1.21.11')
 const Block = require('prismarine-block')(registry)
 const Item = require('prismarine-item')(registry)
-const { botConstant, fakeClock, loadBotFunctions, routeHandler, runRoute } = require('./helpers')
+const { botConstant, claimRescue, fakeClock, loadBotFunctions, routeHandler, runRoute } = require('./helpers')
 
 // A carried item built from the enchantment components a 1.21.11 server sends.
 function item (name, slot, enchants = {}, used = 0) {
@@ -154,6 +154,7 @@ async function digat (blockName, hotbar, held, query = {}) {
     bunker: { building: false },
     reflexes: [],
     guardState: { hand: null },
+    digLock: botConstant('digLock'),
     stopPath () {},
     cellKnown: () => true,
     seenNow: () => true,
@@ -235,6 +236,7 @@ test('a collect digs with the fork\'s tool choice and gives the tool plugin and 
     watchedWork: (work) => work(),
     abandonCollect () {},
     collectLock: botConstant('collectLock'),
+    digLock: botConstant('digLock'),
     holdCollectTool: async (b, silk) => { held.push(`hold ${b.name} silk=${silk}`) },
     digToolFor: (b, { silk }) => `${b.name} silk=${silk}`
   }
@@ -243,6 +245,42 @@ test('a collect digs with the fork\'s tool choice and gives the tool plugin and 
   assert.deepStrictEqual(held, ['hold coal_ore silk=true', 'coal_ore silk=true', 'oak_leaves silk=false'])
   assert.strictEqual(bot.tool.equipForBlock, stock.equip)
   assert.strictEqual(bot.pathfinder.bestHarvestTool, stock.harvest)
+})
+
+test('a collect during the buried self-rescue answers busy naming it before any tool or collect', async () => {
+  const calls = []
+  const bot = {
+    pathfinder: { movements: null, setMovements () {} },
+    tool: {},
+    collectBlock: {
+      movements: null,
+      async collect (b) {
+        await bot.tool.equipForBlock(b)
+        calls.push('collect')
+      }
+    }
+  }
+  class Movements { constructor () { this.openable = new Set() } }
+  const env = {
+    bot,
+    Movements,
+    shared: { mcData: { blocksArray: [] } },
+    knownMoves: (m) => m,
+    watchedWork: (work) => work(),
+    abandonCollect () {},
+    collectLock: botConstant('collectLock'),
+    digLock: botConstant('digLock'),
+    holdCollectTool: async () => { calls.push('hold') },
+    digToolFor: () => null
+  }
+  const { collectSafely } = loadBotFunctions(['collectSafely'], env)
+  const coal = { type: 7, name: 'coal_ore' }
+  await collectSafely(coal, 'mine coal_ore')
+  assert.deepStrictEqual(calls, ['hold', 'collect'], 'control: no rescue')
+  calls.length = 0
+  claimRescue(env.digLock)
+  await assert.rejects(collectSafely(coal, 'mine coal_ore'), (e) => e.reason === 'busy' && /^busy: the buried self-rescue is running\b/.test(e.message))
+  assert.deepStrictEqual(calls, [])
 })
 
 test('a collect with silk refuses without a silk touch pick, and without one asked holds the harvesting pick', async () => {

@@ -280,7 +280,7 @@ the body, so a pilot with ten-second round trips gets the same protection as a f
   a tool below 12% durability, dangerous sounds, low food. Watched threats and ambient world changes
   wake nothing and wait for the next call.
 - Damage from an unknown source freezes the body, so the pilot can look before anything moves. A
-  buried body digs its head free, and a submerged one swims up.
+  buried body steps aside or digs out, and a submerged one swims up.
 - Reflexes run every 300 ms: lava watch, bunker, combat, unstuck, current watch, narrator, trek and
   flee to player. `reflexes` lists them and switches each on or off.
 - Long actions run as background jobs the pilot polls. One runs at a time, and a new job stops the

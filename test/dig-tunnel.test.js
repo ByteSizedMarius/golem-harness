@@ -3,7 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
-const { digJob, facings, awaitRoute, botConstant } = require('./helpers')
+const { digJob, facings, awaitRoute, botConstant, claimRescue, routeJobs } = require('./helpers')
 
 const EAST = { dir: 'e', length: '2', torch: '0' }
 
@@ -27,6 +27,7 @@ async function tunnelOverGap (why) {
     require,
     NEIGHBOURS,
     LEGACY_1710: false,
+    digLock: botConstant('digLock'),
     bunker: { building: false },
     jobs: { start: (name, fn) => { job = fn({ cancelled: false, progress () {} }); return { id: 1 } } },
     emitEvent () {},
@@ -103,6 +104,7 @@ async function watchedDig (route, query, { open = () => false, blocks = {}, pick
     PICK_TIER: botConstant('PICK_TIER'),
     LEGACY_1710: legacy,
     LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
+    digLock: botConstant('digLock'),
     bunker: { building: false },
     jobs: { start: (n, fn) => { job = fn(state); return { id: 1 } } },
     emitEvent: (kind, text) => { if (kind === 'mine') events.push(text) },
@@ -337,4 +339,13 @@ test('after a gravel stop dig_tunnel steps back to the cell behind when it can s
 test('dig_tunnel cancelled during the dig that bares gravel does not step back', async () => {
   const r = await watchedDig('/dig_tunnel', EAST, { ...GRAVEL_OVER_FACE, cancelOn: '1,65,0', open: (p) => p.x === -1 && p.z === 0 && (p.y === 64 || p.y === 65) })
   assert.deepStrictEqual([r.stopped, r.at], ['gravel falling from 1,66,0, stopping, could not step back', '0,64,0'])
+})
+
+test('dig_tunnel during the buried self-rescue answers busy naming it and starts no job', async () => {
+  const env = { bot: { entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 } }, require, bunker: { building: false }, digLock: botConstant('digLock') }
+  assert.deepStrictEqual((await routeJobs('/dig_tunnel', EAST, env)).started, ['dig_tunnel e x2'], 'control: no rescue')
+  claimRescue(env.digLock)
+  const r = await routeJobs('/dig_tunnel', EAST, env)
+  assert.deepStrictEqual([r.error && r.error.reason, r.started], ['busy', []])
+  assert.match(r.error.message, /^busy: the buried self-rescue is running\b/)
 })

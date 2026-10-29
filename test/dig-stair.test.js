@@ -3,7 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
-const { digJob, facings, awaitRoute, botConstant, loadBotFunctions } = require('./helpers')
+const { digJob, facings, awaitRoute, botConstant, loadBotFunctions, claimRescue, routeJobs } = require('./helpers')
 const { ROUTE_BOUNDS } = require('../lib/bounds')
 
 const UP_EAST = { dir: 'e', up: '1', steps: '2', torch: '0' }
@@ -65,6 +65,7 @@ async function watchedDig (route, query, { open = () => false, blocks = {}, pick
     PICK_TIER: botConstant('PICK_TIER'),
     LEGACY_1710: legacy,
     LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
+    digLock: botConstant('digLock'),
     bunker: { building: false },
     jobs: { start: (n, fn) => { job = fn(state); return { id: 1 } } },
     emitEvent: (kind, text) => { if (kind === 'mine') events.push(text) },
@@ -222,4 +223,13 @@ test('dig_stair up stops short of known gravel over its launch cell', async () =
   const r = await digJob('/dig_stair', UP_EAST, { blocks: GRAVEL_OVER_LAUNCH, known: ['0,67,0'] })
   assert.match(r.stopped, /^gravel overhead/)
   assert.deepStrictEqual(r.dug, [])
+})
+
+test('dig_stair during the buried self-rescue answers busy naming it and starts no job', async () => {
+  const env = { bot: { entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 } }, require, bunker: { building: false }, digLock: botConstant('digLock') }
+  assert.deepStrictEqual((await routeJobs('/dig_stair', UP_EAST, env)).started, ['dig_stair up e x2'], 'control: no rescue')
+  claimRescue(env.digLock)
+  const r = await routeJobs('/dig_stair', UP_EAST, env)
+  assert.deepStrictEqual([r.error && r.error.reason, r.started], ['busy', []])
+  assert.match(r.error.message, /^busy: the buried self-rescue is running\b/)
 })

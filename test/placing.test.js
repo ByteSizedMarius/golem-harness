@@ -10,7 +10,7 @@ const { overrideRecipes } = require('../lib/server-overrides')
 const { deathLedger } = require('../lib/deaths')
 const { summarizePlan, DROP_MAX } = require('../lib/plan')
 const { goals } = require('mineflayer-pathfinder')
-const { loadBotFunctions, fakeClock, botConstant, awaitRoute, hookedRoute, routeHandler, buildVerbEnv, groundMemory } = require('./helpers')
+const { loadBotFunctions, fakeClock, botConstant, awaitRoute, hookedRoute, routeHandler, buildVerbEnv, groundMemory, claimRescue, routeJobs } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty' }
 const STONE = { name: 'stone', boundingBox: 'block' }
@@ -465,6 +465,15 @@ test('build answers not ready before it reads the body position', async () => {
   const { handle, res } = routeHandler('/build', buildVerbEnv({ entity: null }, { shared: { ready: false } }))
   await handle({ query: { x: '1', z: '-1' } }, res)
   assert.strictEqual(res.error && res.error.message, 'not ready')
+})
+
+test('build during the buried self-rescue answers busy naming it and starts no job', async () => {
+  const env = buildVerbEnv({ entity: body(0.5, 64, 0.5) })
+  assert.deepStrictEqual((await routeJobs('/build', CABIN, env)).started, ['build cabin 3x3h2 @1,-1'], 'control: no rescue')
+  claimRescue(env.digLock)
+  const r = await routeJobs('/build', CABIN, env)
+  assert.deepStrictEqual([r.error && r.error.reason, r.started], ['busy', []])
+  assert.match(r.error.message, /^busy: the buried self-rescue is running\b/)
 })
 
 // placeitem by a body at (-1.5, 64, 0.5) carrying name over the floor plus extra, blind to the cells in hidden,

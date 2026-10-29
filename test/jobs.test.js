@@ -8,7 +8,8 @@ const { Vec3 } = require('vec3')
 const { createJobs } = require('../lib/jobs')
 const { createJobBoard, bindJobBoard } = require('../lib/bot/jobs')
 const { deathLedger } = require('../lib/deaths')
-const { waitFor, loadBotFunctions, routeHandler } = require('./helpers')
+const digging = require('mineflayer/lib/plugins/digging')
+const { HUNG, botConstant, timed, waitFor, loadBotFunctions, routeHandler } = require('./helpers')
 
 function registry () {
   const emitted = []
@@ -75,6 +76,71 @@ test('yieldJob stops the cancelled job\'s walk once, and touches no walk when no
   yieldJob('combat', 'fight in melee range')
   yieldJob('combat', 'fight in melee range')
   assert.strictEqual(stops, 1)
+})
+
+test('yieldJob during the buried self-rescue dig cancels the job and leaves the rescue dig running', async () => {
+  const { jobs, emitted } = registry()
+  const writes = []
+  const bot = Object.assign(new EventEmitter(), {
+    _client: { write: (name, data) => writes.push(`${name} ${data.status}`) },
+    lookAt: async () => {},
+    swingArm () {},
+    _updateBlockState: (p) => bot.emit(`blockUpdate:${p}`, null, { type: 0 })
+  })
+  digging(bot)
+  bot.digTime = () => 50
+  const env = { jobs, bot, digLock: botConstant('digLock'), stopPath () {} }
+  const { yieldJob, wireDigGuard, claimDig, soleDig } = loadBotFunctions(['yieldJob', 'wireDigGuard', 'claimDig', 'soleDig'], env)
+  wireDigGuard()
+  bot.emit('spawn')
+  const { id } = jobs.start('dig_tunnel e x12', untilCancelled)
+  const claim = claimDig('the buried self-rescue', true)
+  claim.sole = true
+  const gravel = { name: 'gravel', position: new Vec3(0, 65, 0) }
+  const dug = soleDig(claim, gravel)
+  assert.ok(await waitFor(() => bot.targetDigBlock === gravel, 1000), 'control: the rescue dig started')
+  yieldJob('combat', 'fight in melee range')
+  await dug
+  assert.deepStrictEqual(writes, ['block_dig 0', 'block_dig 2'])
+  assert.ok(await waitFor(() => jobs.get(id).status !== 'running', 2000), 'the job kept running')
+  assert.deepStrictEqual(emitted, ['dig_tunnel e x12: cancelled, the combat reflex took the legs to fight in melee range'])
+})
+
+test('a dig whose look ends during the buried self-rescue dig answers busy under the real digging plugin', async () => {
+  const head = { name: 'gravel', position: new Vec3(0, 65, 0) }
+  const beside = { name: 'stone', position: new Vec3(1, 65, 0) }
+  const writes = []
+  const cleared = []
+  let endLook = null
+  const bot = Object.assign(new EventEmitter(), {
+    _client: {
+      write: (name, data) => {
+        writes.push(`${name} ${data.status} ${data.location}`)
+        // The outside look ends as the rescue dig starts.
+        if (data.location === head.position && data.status === 0) endLook()
+      }
+    },
+    lookAt: (p) => p.floored().equals(beside.position) ? new Promise((resolve) => { endLook = resolve }) : Promise.resolve(),
+    swingArm () {},
+    _updateBlockState: (p) => {
+      cleared.push(`${p}`)
+      bot.emit(`blockUpdate:${p}`, null, { type: 0 })
+    }
+  })
+  digging(bot)
+  bot.digTime = () => 50
+  const { wireDigGuard, claimDig, soleDig } = loadBotFunctions(['wireDigGuard', 'claimDig', 'soleDig'], { bot, digLock: botConstant('digLock') })
+  wireDigGuard()
+  bot.emit('spawn')
+  const outside = bot.dig(beside).then(() => 'dug', (e) => [e.message, e.reason])
+  assert.ok(await waitFor(() => endLook, 1000), 'control: the outside dig began its look')
+  const claim = claimDig('the buried self-rescue', true)
+  claim.sole = true
+  const dug = soleDig(claim, head)
+  assert.deepStrictEqual((await timed(outside, 1000)).out, ['busy: the buried self-rescue is running, nothing dug', 'busy'])
+  assert.notStrictEqual((await timed(dug, 1000)).out, HUNG, 'the rescue dig never finished')
+  assert.deepStrictEqual(writes, ['block_dig 0 (0, 65, 0)', 'block_dig 2 (0, 65, 0)'])
+  assert.deepStrictEqual(cleared, ['(0, 65, 0)'])
 })
 
 test('yieldTo with no job running cancels nothing', () => {

@@ -9,7 +9,7 @@ const { ambientChange, sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const { flatText } = require('../lib/flat-text')
-const { balanced, botConstant, wiredSource, groundMemory, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn } = require('./helpers')
+const { balanced, botConstant, wiredSource, groundMemory, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn, claimRescue } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4, wheat: 5, chest: 6 }
@@ -1496,6 +1496,21 @@ test('state and scene tell the time only while the sky shows', () => {
   }
   assert.deepStrictEqual(told(shaftToSky(15)), [NOON, true], 'control: under open sky')
   assert.deepStrictEqual(told(underRock()), [undefined, false])
+})
+
+test('the scene alert for a buried body names the running self-rescue or the give-up it left here, else says to dig out', () => {
+  const alert = (rescue, stuck = null) => {
+    const digLock = botConstant('digLock')
+    if (rescue) claimRescue(digLock)
+    const env = { ...sensesStubbed(underRock()), digLock, RESCUE_NAME: botConstant('RESCUE_NAME'), stuck, lastFeet: null, waterState: () => ({ buried: true }) }
+    return runRoute('/scene', { verbose: '1' }, env).summary.match(/^[^.]*\. /)[0]
+  }
+  const advice = (text) => text.slice(text.indexOf('; ') + 2)
+  assert.strictEqual(alert(false), "⚠ BURIED — head in a solid block's reach, SUFFOCATING; dig out NOW. ")
+  assert.strictEqual(advice(alert(true)), 'the buried self-rescue is freeing it. ')
+  const why = 'the head block bedrock cannot be dug'
+  assert.strictEqual(advice(alert(false, { why, feet: new Vec3(0, 64, 0), out: null })), `the buried self-rescue gave up: ${why}. `)
+  assert.strictEqual(advice(alert(false, { why, feet: new Vec3(1, 64, 0), out: null })), 'dig out NOW. ', 'a give-up in another feet cell')
 })
 
 // The time of day and last sight of the sky in the state reply, and the time words of the scene summary.

@@ -8,7 +8,7 @@ const { QUIET_MS, legLedger, takenText } = require('../lib/leg-ledger')
 const {
   botConstant, loadBotFunctions, HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, digInProblemWith,
-  awaitRoute, bunkerReflexIn, combatReflexIn, routeHandler
+  awaitRoute, bunkerReflexIn, combatReflexIn, claimRescue, routeHandler
 } = require('./helpers')
 
 const mobClass = (e) => e.cls
@@ -501,9 +501,10 @@ test('the bunker reflex arms below 8 HP within 15 s of a mob hit, and after it f
     bunkerSummary: shelter.bunkerSummary,
     buildBunker: async () => ({ mode: 'up', at: { x: 0, y: 67, z: 0 }, sealed: true, dug: 0, placed: 16, gaps: [], exit: [] }),
     emitEvent () {},
-    takeLegs () {}
+    takeLegs () {},
+    digLock: botConstant('digLock')
   }
-  loadBotFunctions(['bunkerReflexDecide'], env)
+  loadBotFunctions(['bunkerReflexDecide', 'soleClaim'], env)
   const reflex = bunkerReflexIn(env)
   env.reflexes.push(reflex)
   const arms = (health, hitAgoMs = 1000) => {
@@ -520,6 +521,33 @@ test('the bunker reflex arms below 8 HP within 15 s of a mob hit, and after it f
   assert.strictEqual(arms(7), false, 'armed again after HP rose to 11')
   arms(12)
   assert.strictEqual(arms(7), true, 'not armed again after HP rose to 12')
+})
+
+test('the bunker reflex neither builds nor flees while the buried self-rescue digs', () => {
+  const bot = { health: 7 }
+  const flees = []
+  let refuse = false
+  const env = {
+    bot,
+    fight: { lastHit: { dmg: 3, t: Date.now() - 1000, cls: 'hostile' } },
+    reflexes: [{ name: 'combat', _fleeCls: null, _fleeT: 0, fleeFrom: (b, entity, why) => flees.push(why) }],
+    bunkerHolds: () => false,
+    BUNKER_HP: botConstant('BUNKER_HP'),
+    BUNKER_REARM_HP: botConstant('BUNKER_REARM_HP'),
+    shelterInputs: () => ({ requested: 'auto', threats: [{ ...zombie(30), entity: {} }], problems: { down: null, up: null }, buildMs: { down: 2930, up: 1300 } }),
+    chooseShelter: (input) => refuse ? { refuse: 'no room' } : shelter.chooseShelter(input),
+    digLock: botConstant('digLock')
+  }
+  loadBotFunctions(['bunkerReflexDecide', 'soleClaim'], env)
+  const reflex = bunkerReflexIn(env)
+  env.reflexes.push(reflex)
+  assert.strictEqual(reflex.check(bot), true, 'control: a build')
+  refuse = true
+  assert.deepStrictEqual([reflex.check(bot), flees.length], [false, 1], 'control: a flee')
+  claimRescue(env.digLock)
+  assert.deepStrictEqual([reflex.check(bot), flees.length], [false, 1], 'fled')
+  refuse = false
+  assert.strictEqual(reflex.check(bot), false, 'built')
 })
 
 // ---- digInProblem ----

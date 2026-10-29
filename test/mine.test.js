@@ -12,7 +12,7 @@ const { Targets } = require('mineflayer-collectblock/lib/Targets')
 const { guardWork } = require('../lib/walk')
 const { createJobs } = require('../lib/jobs')
 const { deathLedger } = require('../lib/deaths')
-const { HUNG, awaitRoute, botConstant, fakeClock, loadBotFunctions, routeHandler, runRoute, timed, waitFor } = require('./helpers')
+const { HUNG, awaitRoute, botConstant, claimRescue, fakeClock, loadBotFunctions, routeHandler, runRoute, timed, waitFor } = require('./helpers')
 
 // The collect plugin switches on the class names.
 class Block {
@@ -99,6 +99,7 @@ function collector (t, { blocks, reach, drifting = false, holdDig = false }) {
     Movements,
     navPlaced: [],
     collectLock: botConstant('collectLock'),
+    digLock: botConstant('digLock'),
     COLLECT_STALL_MS: botConstant('COLLECT_STALL_MS'),
     COLLECT_BUDGET_MS: botConstant('COLLECT_BUDGET_MS'),
     guardWork: (work, o) => guardWork(work, { ...o, clock }),
@@ -175,6 +176,48 @@ test('tidy stops at a stalled reclaim, keeps the rest queued and says why', asyn
   c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
   assert.deepStrictEqual(await within(reply), { reclaimed: 0, alreadyGone: 0, failed: 1, remaining: 2, reason: 'stalled' })
   assert.deepStrictEqual(c.env.navPlaced.map((p) => p.x).sort(), [1, 2])
+})
+
+const RESCUE_BUSY = /^busy: the buried self-rescue is running\b/
+
+test('mine during the buried self-rescue answers busy naming it, and names it as the reason when the rescue starts before its collect, digging nothing', async (t) => {
+  const at = collector(t, { blocks: ORE, reach: () => true })
+  claimRescue(at.env.digLock)
+  const { handle, res } = routeHandler('/mine', at.env)
+  assert.notStrictEqual(await within(handle({ query: { name: 'iron_ore' } }, res)), HUNG, 'the /mine replied')
+  assert.strictEqual(res.error && res.error.reason, 'busy')
+  assert.match(res.error.message, RESCUE_BUSY)
+  assert.deepStrictEqual([at.seen.digs, at.seen.planned, at.bot.pathfinder.goal], [0, 0, null])
+
+  const mid = collector(t, { blocks: ORE, reach: () => true })
+  mid.env.nearestVisible = () => { claimRescue(mid.env.digLock); return mid.blocks['1,64,0'] }
+  const { reason, ...counts } = await within(awaitRoute('/mine', { name: 'iron_ore' }, mid.env))
+  assert.deepStrictEqual(counts, { mined: 0, requested: 1, gathered: 0 })
+  assert.match(reason, RESCUE_BUSY)
+  assert.deepStrictEqual([mid.seen.digs, mid.seen.planned, mid.bot.pathfinder.goal], [0, 0, null])
+})
+
+test('tidy during the buried self-rescue answers busy naming it, and names it as the reason when the rescue starts mid-reclaim, keeping the queue', async (t) => {
+  const scaffold = (x) => new Block('cobblestone', new Vec3(x, 64, 0))
+  const rig = () => {
+    const c = collector(t, { blocks: { '1,64,0': scaffold(1), '2,64,0': scaffold(2) }, reach: () => true })
+    c.env.navPlaced.push({ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 })
+    return c
+  }
+  const at = rig()
+  claimRescue(at.env.digLock)
+  const { handle, res } = routeHandler('/tidy', at.env)
+  assert.notStrictEqual(await within(handle({ query: {} }, res)), HUNG, 'the /tidy replied')
+  assert.strictEqual(res.error && res.error.reason, 'busy')
+  assert.match(res.error.message, RESCUE_BUSY)
+  assert.deepStrictEqual([at.env.navPlaced.length, at.seen.digs, at.seen.planned], [2, 0, 0])
+
+  const mid = rig()
+  mid.env.seenNow = () => { claimRescue(mid.env.digLock); return true }
+  const { reason, ...counts } = await within(awaitRoute('/tidy', {}, mid.env))
+  assert.deepStrictEqual(counts, { reclaimed: 0, alreadyGone: 0, failed: 1, remaining: 2 })
+  assert.match(reason, RESCUE_BUSY)
+  assert.deepStrictEqual([mid.seen.digs, mid.seen.planned], [0, 0])
 })
 
 test('tidy counts a scaffold block as gone only when the body sees it gone', async (t) => {
