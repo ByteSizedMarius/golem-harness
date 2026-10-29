@@ -1885,8 +1885,8 @@ test('a 1.7.10 strike with headroom swings on the way down from a jump, and unde
 
 // The /hold reply on query and the actions and hits of a body with a sword, on 1.7.10 when legacy is true. walls(p)
 // marks the stone cells above the floor, and a zombie that the body sees when seen is true steps from 6 off to 2 off
-// after 1 s.
-async function holdAt (query, walls, seen = true, legacy = true) {
+// after 1 s. raise(world) runs on each raise of the sword block.
+async function holdAt (query, walls, seen = true, legacy = true, raise = () => {}) {
   const world = verbWorld([zombie(0.5, seen)], { legacy })
   const { bot, env, clock } = world
   const z = bot.entities[7]
@@ -1894,7 +1894,7 @@ async function holdAt (query, walls, seen = true, legacy = true) {
   clock.setTimeout(() => { z.position = new Vec3(0.5, 64, 2.5) }, 1000)
   const floor = bot.blockAt
   bot.blockAt = (p) => (walls(p) ? { name: 'stone', boundingBox: 'block', position: p } : floor(p))
-  Object.assign(bot, { health: 20, quickBarSlot: 0, controlState: {}, activateItem () {}, deactivateItem () {} })
+  Object.assign(bot, { health: 20, quickBarSlot: 0, controlState: {}, activateItem () { raise(world) }, deactivateItem () {} })
   Object.assign(env, {
     MOVES: botConstant('MOVES'),
     holdRun: { on: false },
@@ -1930,6 +1930,22 @@ test('hold on 1.7.10 strikes a zombie it sees step into reach in a 1-wide doorwa
   assert.deepStrictEqual(field.did, [])
   const anywhere = await holdAt({ sec: '3', anywhere: '1' }, () => false)
   assert.strictEqual(anywhere.res.body && anywhere.res.body.spot, 'anywhere')
+})
+
+test('a 1.7.10 sword block a hold raised holds through an update of the held sword and ends when another sword takes its slot', async () => {
+  const up = []
+  const doorway = (p) => p.z === 0 && Math.abs(p.x) === 1 && (p.y === 64 || p.y === 65)
+  await holdAt({ sec: '1' }, doorway, true, true, ({ bot, env, clock }) => {
+    if (up.length) return
+    clock.setTimeout(() => {
+      loadBotFunctions(['wireGuardDrop'], env).wireGuardDrop()
+      bot.emit('heldItemChanged', { name: bot.heldItem.name })
+      up.push(env.guardState.up)
+      bot.emit('heldItemChanged', { name: 'stone_sword' })
+      up.push(env.guardState.up)
+    }, 10)
+  })
+  assert.deepStrictEqual(up, [true, false], 'the block after an update of the held sword, then after a stone_sword in its slot')
 })
 
 test('hold on 1.21.11 swings without a jump, a full sword charge apart', async () => {
@@ -2081,6 +2097,18 @@ test("the pilot's 1.7.10 sword block order ends with a death, and with anything 
   bot.heldItem = { name: 'iron_pickaxe' }
   changed(bot.heldItem)
   assert.strictEqual(env.guardState.pilot, false, 'a pickaxe in hand kept the order')
+})
+
+test('a 1.7.10 sword block the pilot raised holds through an update of the held sword and ends when another sword takes its slot', () => {
+  const { bot, env } = guardedWorld([])
+  const src = botSource()
+  const held = balanced(src, src.indexOf('=>', src.indexOf("bot.on('heldItemChanged'")))
+  const changed = vm.runInContext(`((item) => ${held})`, env)
+  changed({ name: 'iron_sword' })
+  assert.strictEqual(env.guardState.up, true, 'an update of the raised iron_sword dropped the block')
+  bot.heldItem = { name: 'stone_sword' }
+  changed(bot.heldItem)
+  assert.strictEqual(env.guardState.up, false, 'a stone_sword in the slot of the raised iron_sword kept the block')
 })
 
 // The combat reflex wired into world after foe hit the body, checked every 300 ms and acting while no act runs.

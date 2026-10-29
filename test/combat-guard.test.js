@@ -197,6 +197,24 @@ test('a skeleton raises the 1.7.10 sword block only in line of sight within 15, 
   assert.strictEqual((await standoff(open, skeleton(20.5))).raises, 0, 'a skeleton 20 off')
 })
 
+test('the 1.7.10 sword block the standoff raised holds through an update of the held sword and ends for another sword', async () => {
+  let changed
+  const up = []
+  await standoff(open, skeleton(10.5), {
+    bot: { on: (event, fn) => { if (event === 'heldItemChanged') changed = fn } },
+    env: { wireGuardDrop: undefined },
+    cycle: (combat, env) => {
+      if (!env.guardState.up || up.length) return
+      env.wireGuardDrop()
+      changed({ name: 'iron_sword' })
+      up.push(env.guardState.up)
+      changed({ name: 'stone_sword' })
+      up.push(env.guardState.up)
+    }
+  })
+  assert.deepStrictEqual(up, [true, false], 'the block after an update of the iron_sword, then after a stone_sword in its slot')
+})
+
 test('a body on a walk raises no 1.21.11 shield or 1.7.10 sword block against a skeleton in sight', async () => {
   const shield = (controlState) => standoff(open, skeleton(10.5), {
     bot: { controlState, inventory: { items: () => [{ name: 'iron_sword' }], slots: { 45: { name: 'shield' } } } },
