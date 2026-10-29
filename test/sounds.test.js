@@ -156,6 +156,14 @@ test('a danger sound raises at most one hear event per category within the throt
   assert.strictEqual(heard(lava), 1, 'lava again once the window has passed')
 })
 
+test('a strider stepping in lava is not heard as lava', () => {
+  const { onSound, raised } = ears()
+  onSound('minecraft:entity.strider.step_lava', new Vec3(8.5, 64, 0.5))
+  assert.deepStrictEqual(raised, [], 'the strider step')
+  onSound('minecraft:block.lava.ambient', new Vec3(8.5, 64, 0.5))
+  assert.deepStrictEqual(raised, ['hear'], 'a lava sound right after it')
+})
+
 test('extinguish_fire gives lava or fizz on 1.7.10 only', () => {
   const name = 'minecraft:entity.generic.extinguish_fire'
   assert.strictEqual(classify(name, LEGACY), 'lava or fizz')
