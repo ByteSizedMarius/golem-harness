@@ -8,7 +8,7 @@ const { QUIET_MS, legLedger, takenText } = require('../lib/leg-ledger')
 const {
   botConstant, loadBotFunctions, HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, digInProblemWith,
-  awaitRoute, bunkerReflexIn, combatReflexIn
+  awaitRoute, bunkerReflexIn, combatReflexIn, routeHandler
 } = require('./helpers')
 
 const mobClass = (e) => e.cls
@@ -139,6 +139,63 @@ test('no walk reaches the pathfinder while a bunker builds, whoever asks for it'
   assert.deepStrictEqual(during, [refusal, refusal], 'a walk during the build was not refused')
   assert.deepStrictEqual(walked, [], 'the pathfinder took a goal during the build')
   assert.deepStrictEqual([await walk(), walked.length], [[], 2], 'walks stay refused after the build')
+})
+
+// The /climb route with the bot at the foot of a 4-rung ladder.
+const ladderClimb = (bunker, body) => routeHandler('/climb', {
+  bot: {
+    entity: { position: new Vec3(0.5, 64, 0.5), onGround: true },
+    blockAt: (p) => (p.x === 0 && p.z === 0 && p.y >= 64 && p.y <= 67
+      ? { name: 'ladder', position: p, getProperties: () => ({ facing: 'north' }) }
+      : { name: 'air', position: p }),
+    async lookAt () {},
+    setControlState () {},
+    clearControlStates () {},
+    async waitForTicks () {},
+    ...body
+  },
+  require,
+  bunker,
+  BUNKER_WALK: botConstant('BUNKER_WALK'),
+  safeStop () {},
+  nudgeInto: async () => true
+})
+
+test('an error the climb meets once a bunker build began leaves the control states to the build', async () => {
+  const clears = async (building) => {
+    const bunker = { building: false }
+    const cleared = []
+    const { handle, res } = ladderClimb(bunker, {
+      clearControlStates () { cleared.push(bunker.building) },
+      async waitForTicks (n) {
+        bunker.building = building
+        throw new Error(`Timeout waiting for ${n} ticks`)
+      }
+    })
+    await handle({ query: {} }, res)
+    assert.ok(res.error, 'control: the climb replied without an error')
+    return cleared
+  }
+  assert.deepStrictEqual(await clears(false), [false], 'control: a failed climb without a build clears its controls')
+  assert.deepStrictEqual(await clears(true), [])
+})
+
+test('a bunker build that begins during the climb\'s look gets no forward or jump from the climb', async () => {
+  const climb = async (building) => {
+    const bunker = { building: false }
+    const pressed = []
+    const entity = { position: new Vec3(0.5, 64, 0.5), onGround: true }
+    const { handle, res } = ladderClimb(bunker, {
+      entity,
+      async lookAt () { bunker.building = building },
+      setControlState (k, v) { if (v) pressed.push(k) },
+      async waitForTicks () { entity.position = new Vec3(0.5, 68, 0.5) }
+    })
+    await handle({ query: {} }, res)
+    return { pressed, error: res.error?.message }
+  }
+  assert.deepStrictEqual(await climb(false), { pressed: ['forward', 'jump'], error: undefined }, 'control: the climb without a build')
+  assert.deepStrictEqual(await climb(true), { pressed: [], error: botConstant('BUNKER_WALK') })
 })
 
 test('stop or death ends a bunker build as stopped and the body does not flee', async () => {
