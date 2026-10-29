@@ -12,6 +12,7 @@ const { Targets } = require('mineflayer-collectblock/lib/Targets')
 const { guardWork } = require('../lib/walk')
 const { createJobs } = require('../lib/jobs')
 const { deathLedger } = require('../lib/deaths')
+const { entityInCell } = require('../lib/shelter')
 const { HUNG, awaitRoute, botConstant, claimRescue, fakeClock, loadBotFunctions, routeHandler, runRoute, timed, waitFor } = require('./helpers')
 
 // The collect plugin switches on the class names.
@@ -28,12 +29,12 @@ class Movements {
   safeToBreak () { return true }
 }
 
-// The fake pathfinder reaches a goal at once when reach(goal) holds, otherwise it plans a path and never walks it.
-function collector (t, { blocks, reach, drifting = false, holdDig = false }) {
+// The fake pathfinder reaches a goal at once when reach(goal) holds, otherwise it plans plan(goal) and never walks it.
+function collector (t, { blocks, reach, plan = () => ({ status: 'success', path: [new Vec3(1, 64, 0)] }), drifting = false, holdDig = false }) {
   blocks = { ...blocks }
   const bot = new EventEmitter()
   let x = 0
-  bot.entity = { get position () { return new Vec3(drifting ? x++ : 0, 64, 0) } }
+  bot.entity = { width: 0.6, height: 1.8, get position () { return new Vec3(drifting ? x++ : 0, 64, 0) } }
   bot.blockAt = (p) => blocks[`${p.x},${p.y},${p.z}`] || null
   const pockets = []
   bot.inventory = { items: () => pockets, emptySlotCount: () => 36 }
@@ -41,7 +42,7 @@ function collector (t, { blocks, reach, drifting = false, holdDig = false }) {
   bot.tool = { equipForBlock: async () => {} }
   bot.heldItem = null
   bot.targetDigBlock = null
-  const seen = { digs: 0, planned: 0, followed: 0, drops: [] }
+  const seen = { digs: 0, planned: 0, followed: 0, stops: 0, drops: [] }
   bot.stopDigging = () => { if (seen.abortDig) seen.abortDig(new Error('Digging aborted')) }
   bot.dig = async (b) => {
     seen.digs++
@@ -71,7 +72,7 @@ function collector (t, { blocks, reach, drifting = false, holdDig = false }) {
     movements: null,
     setMovements (m) { this.movements = m },
     isMoving: () => false,
-    stop () {},
+    stop () { seen.stops++ },
     setGoal (g) {
       this.goal = g
       bot.emit('goal_updated', g)
@@ -84,17 +85,17 @@ function collector (t, { blocks, reach, drifting = false, holdDig = false }) {
           bot.emit('goal_reached', g)
         } else {
           seen.planned++
-          bot.emit('path_update', { status: 'success', path: [new Vec3(1, 64, 0)] })
+          bot.emit('path_update', plan(g))
         }
       })
-    },
-    goto (g) { return gotoGoal(bot, g) }
+    }
   }
   bot.collectBlock = Object.assign(Object.create(CollectBlock.prototype), { bot, targets: new Targets(bot), chestLocations: [], itemFilter: () => true, movements: null })
   const clock = fakeClock()
   const env = {
     bot,
     require,
+    goals,
     shared: { mcData: { blocksArray: [], blocks: { 1: { name: 'iron_ore', drops: [903] } }, items: { 903: { name: 'raw_iron' } }, itemsByName: { raw_iron: {}, iron_ore: {} } } },
     Movements,
     navPlaced: [],
@@ -112,7 +113,9 @@ function collector (t, { blocks, reach, drifting = false, holdDig = false }) {
     holdCollectTool: async () => {}
   }
   // collectSafely hands abandonCollect on uncalled, so the route loader would not find it.
-  loadBotFunctions(['abandonCollect'], env)
+  const { watchGoto } = loadBotFunctions(['abandonCollect', 'watchGoto'], env)
+  // The goto bot.js installs at spawn.
+  bot.pathfinder.goto = watchGoto((g) => gotoGoal(bot, g))
   return { bot, env, clock, seen, blocks, pockets }
 }
 
@@ -156,6 +159,70 @@ test('mine counts the drop that reached the pockets, raw_iron from iron_ore, and
   c.pockets[0] = { name: 'raw_iron', count: 3 }
   c.bot.emit('entityGone', c.seen.drops[0])
   assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 1, reason: null })
+})
+
+test('mine ends the walk to a drop at its pickup, so a planner timeout or a stall after it leaves the reply and the goal clean', async (t) => {
+  // What follows the pickup while the walk to the drop has not arrived.
+  const after = {
+    timeout: (c) => c.bot.emit('path_update', { status: 'timeout', path: [new Vec3(1, 64, 0)] }),
+    stall: (c) => c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
+  }
+  for (const [what, then] of Object.entries(after)) {
+    const c = collector(t, { blocks: ORE, reach: (g) => !(g instanceof goals.GoalFollow) })
+    const reply = awaitRoute('/mine', { name: 'iron_ore' }, c.env)
+    assert.ok(await waitFor(() => c.seen.followed === 1, 2000), `${what}: control, the body went to the drop`)
+    c.pockets.push({ name: 'raw_iron', count: 1 })
+    c.bot.emit('entityGone', c.seen.drops[0])
+    await new Promise(setImmediate)
+    then(c)
+    assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 1, reason: null }, what)
+    assert.strictEqual(c.bot.pathfinder.goal, null, what)
+  }
+})
+
+test('mine clears the goal when the drop goes, and does not stop the pathfinder, which would zero a jump in flight', async (t) => {
+  const c = collector(t, { blocks: ORE, reach: (g) => !(g instanceof goals.GoalFollow) })
+  const goals_ = []
+  c.bot.on('goal_updated', (g) => goals_.push(g))
+  const reply = awaitRoute('/mine', { name: 'iron_ore' }, c.env)
+  assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the drop')
+  c.pockets.push({ name: 'raw_iron', count: 1 })
+  const before = goals_.length
+  c.bot.emit('entityGone', c.seen.drops[0])
+  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 1, reason: null })
+  assert.strictEqual(c.seen.stops, 0, 'the pathfinder was not stopped')
+  assert.ok(goals_.slice(before).includes(null), 'the walk ended through setGoal(null)')
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+const air = (x, y, z) => Object.assign(new Block('air', new Vec3(x, y, z), 0), { boundingBox: 'empty' })
+
+test('mine stops its walk to the block when the walk finds no path', async (t) => {
+  const c = collector(t, {
+    blocks: { ...ORE, '1,65,0': air(1, 65, 0), '1,66,0': air(1, 66, 0) },
+    reach: () => false,
+    plan: () => ({ status: 'noPath', path: [new Vec3(0, 64, 0)] })
+  })
+  const { handle, res } = routeHandler('/mine', c.env)
+  assert.notStrictEqual(await within(handle({ query: { name: 'iron_ore' } }, res)), HUNG, 'the /mine replied')
+  assert.strictEqual(res.error && res.error.name, 'NoPath')
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('mine stops its walk to the block when the walk ends on an empty path and the dig would bring gravel down', async (t) => {
+  const c = collector(t, {
+    blocks: { ...ORE, '1,65,0': new Block('gravel', new Vec3(1, 65, 0), 13) },
+    reach: () => false,
+    plan: () => ({ status: 'noPath', path: [] })
+  })
+  Object.assign(c.env, { knownCell: () => true, entityInCell })
+  // No face of the ore is in sight from where the walk ended.
+  c.bot.world = { raycast: () => null }
+  c.bot.pathfinder.startCell = (p) => p.floored()
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
+  assert.match(reply.reason, /^refusing to dig iron_ore at 1,64,0: gravel at 1,65,0 would fall on me\b/)
+  assert.strictEqual(c.seen.digs, 0)
+  assert.strictEqual(c.bot.pathfinder.goal, null)
 })
 
 test('mine returns with budget when the walk moves but never arrives', async (t) => {
@@ -241,7 +308,6 @@ function jobRig (t) {
   c.bot.world = { raycast: () => ({ position: new Vec3(1, 64, 0) }) }
   c.bot.clearControlStates = () => {}
   Object.assign(c.env, {
-    goals,
     seesLit: () => true,
     emitEvent: () => {},
     // The ore sits level with the feet.
