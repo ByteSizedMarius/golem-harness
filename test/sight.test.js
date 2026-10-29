@@ -34,13 +34,13 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
   const blocks = [{ id: 1, name: 'coal_ore' }, { id: 2, name: 'iron_ore' }, { id: 4, name: 'diamond_ore' }, { id: 5, name: 'wheat', states: [{ name: 'age', num_values: 8 }] }]
   return {
     shared: { ready: true, mcData: { blocksArray: blocks, blocksByName: Object.fromEntries(blocks.map((b) => [b.name, b])), blocks: Object.fromEntries(blocks.map((b) => [b.id, b])) } },
-    bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay }, game: { minY: -64, height: 384 }, inventory: { slots: [] } },
+    bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay, age: 100000, doDaylightCycle: true }, game: { minY: -64, height: 384 }, inventory: { slots: [] } },
     ck,
     Vec3,
     SEEN: new Set(),
     ESTIMATED_LIGHT: new Map(),
     SKY_IN_SIGHT: new Map(),
-    SKY_SEEN: { at: null, timeOfDay: null },
+    SKY_SEEN: { at: null, timeOfDay: null, age: null, cycle: null },
     SIGHT_MEMO: { t: 0, cells: new Map() },
     SIGHT_MS: botConstant('SIGHT_MS'),
     LEGACY_1710: false,
@@ -1502,10 +1502,12 @@ test('state and scene tell the time only while the sky shows', () => {
 function timeTold (env) {
   const state = stateOf(env)
   const summary = JSON.parse(summaries(env)[0]).summary
-  return { timeOfDay: state.timeOfDay, lastSky: state.lastSky, scene: summary.match(/(?:day|dusk|night|dawn) \(t=\d+\)\. |Last saw sky [^.]*\. /)?.[0] ?? null }
+  return { timeOfDay: state.timeOfDay, lastSky: state.lastSky, scene: summary.match(/(?:day|dusk|night|dawn) \(t=\d+\)\. |(?:Last saw sky|Probably) [^.]*\. /)?.[0] ?? null }
 }
 
-test('state and scene say how long ago the bot last saw the sky and the phase then', () => {
+const sawSky = (env, at, timeOfDay, cycle = true) => Object.assign(env.SKY_SEEN, { at, timeOfDay, age: env.bot.time.age, cycle })
+
+test('state and scene estimate the phase from the last sight of the sky, never from the time of day the server sends since', () => {
   const clock = { now: 1000000 }
   const env = shaftToSky(15)
   env.Date = { now: () => clock.now }
@@ -1515,28 +1517,89 @@ test('state and scene say how long ago the bot last saw the sky and the phase th
   // The next physics tick.
   env.SKY_IN_SIGHT.clear()
   clock.now += 1000
-  assert.deepStrictEqual(timeTold(env), { timeOfDay: undefined, lastSky: 'last saw sky just now, day then', scene: 'Last saw sky just now, day then. ' })
+  assert.deepStrictEqual(timeTold(env), { timeOfDay: undefined, lastSky: 'probably day now, last saw sky just now', scene: 'Probably day now, last saw sky just now. ' })
   clock.now += 10 * 60000
-  assert.deepStrictEqual(timeTold(env), { timeOfDay: undefined, lastSky: 'last saw sky ~10 min ago, day then', scene: 'Last saw sky ~10 min ago, day then. ' })
+  assert.deepStrictEqual(timeTold(env), { timeOfDay: undefined, lastSky: 'probably day now, last saw sky ~10 min ago', scene: 'Probably day now, last saw sky ~10 min ago. ' })
+})
+
+test('underground the estimate moves on with the server ticks since the last sight of the sky and crosses into night', () => {
+  const clock = { now: 1000000 }
+  const env = underRock()
+  env.Date = { now: () => clock.now }
+  sawSky(env, clock.now, NOON)
+  const after = (ticks) => {
+    env.bot.time.age = env.SKY_SEEN.age + ticks
+    clock.now = env.SKY_SEEN.at + ticks * 50
+    return timeTold(env)
+  }
+  assert.deepStrictEqual(after(7000), { timeOfDay: undefined, lastSky: 'probably dusk now, last saw sky ~5 min ago', scene: 'Probably dusk now, last saw sky ~5 min ago. ' })
+  const night = after(9000)
+  assert.deepStrictEqual(night, { timeOfDay: undefined, lastSky: 'probably night now, last saw sky ~5 min ago', scene: 'Probably night now, last saw sky ~5 min ago. ' })
+  assert.doesNotMatch(JSON.stringify([stateOf(env), summaries(env)]), /15000|t=/, 'no tick of the estimate')
+  assert.strictEqual(after(20000).lastSky, 'probably day now, last saw sky ~15 min ago', 'past midnight into the next day')
+})
+
+test('with the day cycle off at the last sight of the sky, state names the phase then, also once the cycle runs again', () => {
+  const clock = { now: 1000000 }
+  const env = underRock()
+  env.Date = { now: () => clock.now }
+  sawSky(env, clock.now, NOON, false)
+  env.bot.time.age += 9000
+  clock.now += 9000 * 50
+  assert.deepStrictEqual(timeTold(env), { timeOfDay: undefined, lastSky: 'last saw sky ~5 min ago, day then', scene: 'Last saw sky ~5 min ago, day then. ' })
+  env.bot.time.doDaylightCycle = true
+  assert.strictEqual(stateOf(env).lastSky, 'last saw sky ~5 min ago, day then')
+})
+
+test('in another dimension the estimate names the overworld', () => {
+  const env = underRock()
+  sawSky(env, Date.now(), NOON)
+  env.bot.time.age += 9000
+  env.bot.game.dimension = 'the_nether'
+  assert.strictEqual(stateOf(env).lastSky, 'probably night in the overworld now, last saw sky just now')
+})
+
+test('a night slept through underground restarts the estimate at the first time of day after waking', () => {
+  const env = underRock()
+  env.bot = Object.assign(new EventEmitter(), env.bot)
+  sawSky(env, Date.now(), MIDNIGHT)
+  loadBotFunctions(['wireSkyInSightRefresh'], env).wireSkyInSightRefresh()
+  env.bot.emit('wake')
+  assert.strictEqual(stateOf(env).lastSky, 'probably night now, last saw sky just now', 'control: before the time arrives')
+  // The server skips the night without the age moving on.
+  Object.assign(env.bot.time, { timeOfDay: 0, age: env.bot.time.age + 20 })
+  env.bot.emit('time')
+  assert.strictEqual(stateOf(env).lastSky, 'probably day now, last saw sky just now')
+})
+
+test('a clock read underground restarts the estimate at its time of day', () => {
+  const env = underRock()
+  sawSky(env, Date.now(), NOON)
+  env.bot.time.timeOfDay = MIDNIGHT
+  assert.strictEqual(stateOf(env).lastSky, 'probably day now, last saw sky just now', 'control: no clock read')
+  env.bot.heldItem = { name: 'clock', count: 1 }
+  assert.strictEqual(stateOf(env).timeOfDay, MIDNIGHT)
+  env.bot.heldItem = null
+  assert.strictEqual(stateOf(env).lastSky, 'probably night now, last saw sky just now')
 })
 
 test('the last sight of the sky is just now for 5 minutes, then ~5 min ago', () => {
   const clock = { now: 1000000 }
   const env = underRock()
   env.Date = { now: () => clock.now }
-  env.SKY_SEEN.at = clock.now
-  env.SKY_SEEN.timeOfDay = NOON
+  sawSky(env, clock.now, NOON)
   const lastSky = (min) => {
     clock.now = 1000000 + min * 60000
     return stateOf(env).lastSky
   }
-  assert.strictEqual(lastSky(3), 'last saw sky just now, day then')
-  assert.strictEqual(lastSky(6), 'last saw sky ~5 min ago, day then')
+  assert.strictEqual(lastSky(3), 'probably day now, last saw sky just now')
+  assert.strictEqual(lastSky(6), 'probably day now, last saw sky ~5 min ago')
 })
 
-test('state and scene name no last sight of the sky before the bot has seen it', () => {
+test('state and scene say nothing of the time before the bot has seen the sky, also with the server ticks moving on', () => {
   const env = underRock()
-  assert.doesNotMatch(JSON.stringify([stateOf(env), summaries(env)]), /lastSky|last saw/i)
+  env.bot.time.age += 9000
+  assert.doesNotMatch(JSON.stringify([stateOf(env), summaries(env)]), /lastSky|last saw|probably|t=/i)
 })
 
 test('a clock in hand tells the time underground in the overworld, never in the Nether', () => {
@@ -1643,8 +1706,8 @@ test('boot tells the dimension, and the time only while the sky shows, as state 
   assert.deepStrictEqual(clock(shaftToSky(15)), { dimension: 'overworld', timeOfDay: NOON, lastSky: undefined }, 'control: under open sky')
   assert.deepStrictEqual(clock(underRock()), { dimension: 'overworld', timeOfDay: undefined, lastSky: undefined })
   const seen = underRock()
-  Object.assign(seen.SKY_SEEN, { at: Date.now(), timeOfDay: NOON })
-  assert.deepStrictEqual(clock(seen), { dimension: 'overworld', timeOfDay: undefined, lastSky: 'last saw sky just now, day then' })
+  sawSky(seen, Date.now(), NOON)
+  assert.deepStrictEqual(clock(seen), { dimension: 'overworld', timeOfDay: undefined, lastSky: 'probably day now, last saw sky just now' })
 })
 
 test('nightfall stays silent underground and fires once at the first sight of the sky', () => {

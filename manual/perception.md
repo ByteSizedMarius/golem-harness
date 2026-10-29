@@ -12,7 +12,7 @@ How far you see a block or a mob depends on the light where it is, block or sky 
 
 Sky light falls to 4 at midnight, so blocks, ore and mobs on open ground show 12 out. A dark cave shows 2 blocks around you until lit, but `section` and `passages` read its shape. A placed torch shows its surroundings at once.
 
-A day lasts 20 minutes, with dusk at t=12000 halfway through. Check the time before outdoor work and be inside by dusk. Without sky, `scene` and `state` say "last saw sky ~N min ago, <phase> then". A clock (4 gold ingots, 1 redstone) in hand shows the time in the overworld.
+A day lasts 20 minutes, with dusk at t=12000 halfway through. Check the time before outdoor work and be inside by dusk. Without sky, `scene` and `state` estimate it: "probably <phase> now". A clock (4 gold ingots, 1 redstone) in hand shows the time in the overworld.
 
 ## Two tiers of knowing
 
