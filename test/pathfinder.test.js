@@ -404,6 +404,7 @@ test('the walk and a collect drop 3 blocks off a pillar and not 4, the forestry 
     const { bot, plan, shared } = await walkingBody(t, new Vec3(0.5, 64 + height, 0.5), pillar(height))
     let cage = null
     bot.collectBlock = { movements: null, async collect () { cage = this.movements } }
+    bot.tool = { equipForBlock: async () => {} }
     const env = { bot, collectLock: botConstant('collectLock'), knownMoves: (m) => m, Movements, shared, watchedWork: (work) => work(), abandonCollect () {} }
     await loadBotFunctions(['collectSafely'], env).collectSafely({ type: bot.registry.blocksByName.iron_ore.id }, 'iron_ore')
     statuses.push([height, plan(ground).status, plan(ground, cage).status, plan(ground, shared.forestryMoves).status])

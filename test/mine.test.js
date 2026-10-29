@@ -107,7 +107,8 @@ function collector (t, { blocks, reach, drifting = false, holdDig = false }) {
     cellKnown: () => true,
     console: { log: () => {} },
     resolveBlockIds: () => [1],
-    nearestVisible: () => blocks['1,64,0']
+    nearestVisible: () => blocks['1,64,0'],
+    holdCollectTool: async () => {}
   }
   // collectSafely hands abandonCollect on uncalled, so the route loader would not find it.
   loadBotFunctions(['abandonCollect'], env)
@@ -194,6 +195,7 @@ test('tidy counts a scaffold block as gone only when the body sees it gone', asy
 function jobRig (t) {
   const c = collector(t, { blocks: ORE, reach: () => true, holdDig: true })
   c.bot.findBlocks = () => [new Vec3(1, 64, 0)]
+  c.bot.world = { raycast: () => ({ position: new Vec3(1, 64, 0) }) }
   c.bot.clearControlStates = () => {}
   Object.assign(c.env, {
     goals,
@@ -301,4 +303,134 @@ test('a wood gather that replaces a running one keeps its forestry movements unt
   assert.strictEqual(c.env.jobs.get(second).status, 'done')
   assert.strictEqual(set.at(-1), considerateMoves)
   assert.strictEqual(c.bot.pathfinder.thinkTimeout, 10000)
+})
+
+const realHoldCollectTool = (bot) => loadBotFunctions(['holdCollectTool'], {
+  bot,
+  PICK_TIER: botConstant('PICK_TIER'),
+  DIG_TOOL: botConstant('DIG_TOOL'),
+  LEGACY_HAND_DIG: botConstant('LEGACY_HAND_DIG'),
+  LEGACY_1710: false
+}).holdCollectTool
+const pickBlock = (name, x, harvestable) => Object.assign(new Block(name, new Vec3(x, 64, 0)), {
+  digTime: () => 1000,
+  material: 'mineable/pickaxe',
+  ...(harvestable ? {} : { harvestTools: { 1: true }, canHarvest: () => false })
+})
+
+test('mine keeps the count of its digs when a later block has no carried tool that harvests it', async (t) => {
+  const c = collector(t, { blocks: { '1,64,0': pickBlock('iron_ore', 1, true) }, reach: () => true })
+  const unharvestable = c.blocks['2,64,0'] = pickBlock('iron_ore', 2, false)
+  c.env.nearestVisible = () => c.seen.digs ? unharvestable : c.blocks['1,64,0']
+  c.env.holdCollectTool = realHoldCollectTool(c.bot)
+  const reply = awaitRoute('/mine', { name: 'iron_ore', count: '5' }, c.env)
+  assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the first drop')
+  c.pockets.push({ name: 'raw_iron', count: 1 })
+  c.bot.emit('entityGone', c.seen.drops[0])
+  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 5, gathered: 1, reason: 'no carried tool harvests iron_ore' })
+  assert.strictEqual(c.seen.digs, 1)
+})
+
+test('tidy keeps the scaffold blocks no carried tool harvests queued, tries their name once and says why', async (t) => {
+  const c = collector(t, { blocks: { '1,64,0': pickBlock('cobblestone', 1, false), '2,64,0': pickBlock('cobblestone', 2, false) }, reach: () => true })
+  c.env.holdCollectTool = realHoldCollectTool(c.bot)
+  c.env.seenNow = () => true
+  c.env.navPlaced.push({ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 })
+  assert.deepStrictEqual(await within(awaitRoute('/tidy', {}, c.env)), { reclaimed: 0, alreadyGone: 0, failed: 1, remaining: 2, reason: 'no carried tool harvests cobblestone' })
+  assert.deepStrictEqual(c.env.navPlaced.map((p) => p.x).sort(), [1, 2])
+  assert.strictEqual(c.seen.digs, 0)
+})
+
+test('tidy reclaims the dirt around cobblestone no carried tool harvests', async (t) => {
+  const dirt = (x) => Object.assign(new Block('dirt', new Vec3(x, 64, 0)), { digTime: () => 750, material: 'mineable/shovel' })
+  const c = collector(t, { blocks: { '1,64,0': pickBlock('cobblestone', 1, false), '2,64,0': dirt(2), '3,64,0': pickBlock('cobblestone', 3, false), '4,64,0': dirt(4) }, reach: () => true })
+  c.env.holdCollectTool = realHoldCollectTool(c.bot)
+  c.env.seenNow = () => true
+  for (const x of [1, 2, 3, 4]) c.env.navPlaced.push({ x, y: 64, z: 0 })
+  const reply = awaitRoute('/tidy', {}, c.env)
+  for (const k of [1, 2]) {
+    assert.ok(await waitFor(() => c.seen.followed === k, 2000), `control: the body went to dirt drop ${k}`)
+    c.bot.emit('entityGone', c.seen.drops[k - 1])
+  }
+  assert.deepStrictEqual(await within(reply), { reclaimed: 2, alreadyGone: 0, failed: 1, remaining: 2, reason: 'no carried tool harvests cobblestone' })
+  assert.deepStrictEqual(c.env.navPlaced.map((p) => p.x).sort(), [1, 3])
+  assert.strictEqual(c.seen.digs, 2)
+})
+
+const STONE_SILK = (b) => `refusing to dig ${b.name}: the stone_pickaxe with silk touch does not harvest it`
+// A holdCollectTool that only does the silk refusal.
+const silkEquip = (env) => async (b, silk) => {
+  const noSilk = silk && env.silkRefusal(b)
+  if (noSilk) throw Object.assign(new Error(noSilk), { name: 'NoSilk', reason: noSilk })
+}
+
+test('mine with silk refuses a block the silk touch pick does not harvest before it walks there', async (t) => {
+  const goalsSet = []
+  const c = collector(t, { blocks: ORE, reach: (g) => { goalsSet.push(g); return true } })
+  c.env.silkRefusal = (b) => b ? STONE_SILK(b) : null
+  c.env.holdCollectTool = silkEquip(c.env)
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore', silk: '1' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 0, requested: 1, gathered: 0, reason: STONE_SILK(ORE['1,64,0']) })
+  assert.strictEqual(goalsSet.length, 0, 'no walk')
+})
+
+// The diamond ore is the nearer of the two.
+function silkGatherRig (t, refusal) {
+  const c = jobRig(t)
+  const diamond = new Block('diamond_ore', new Vec3(1, 64, 0))
+  const coal = new Block('coal_ore', new Vec3(0, 64, 2))
+  Object.assign(c.blocks, { '1,64,0': diamond, '0,64,2': coal })
+  c.bot.findBlocks = () => [diamond.position, coal.position]
+  // The first non-air block on the ray.
+  c.bot.world.raycast = (from, dir, range) => {
+    for (let d = 0; d <= range; d += 0.05) {
+      const p = from.plus(dir.scaled(d)).floored()
+      if (c.blocks[`${p.x},${p.y},${p.z}`]?.type) return { position: p }
+    }
+    return null
+  }
+  const walked = []
+  const setGoal = c.bot.pathfinder.setGoal
+  c.bot.pathfinder.setGoal = function (g) {
+    if (g) walked.push(g.pos || new Vec3(g.x, g.y, g.z))
+    return setGoal.call(this, g)
+  }
+  c.env.silkRefusal = refusal
+  c.env.holdCollectTool = silkEquip(c.env)
+  const toDiamond = () => walked.filter((p) => p.distanceTo(diamond.position) < 1).length
+  return { c, toDiamond }
+}
+
+test('a gather with silk skips a block the silk touch pick does not harvest before it walks there and digs the next', async (t) => {
+  const { c, toDiamond } = silkGatherRig(t, (b) => b && b.name === 'diamond_ore' ? STONE_SILK(b) : null)
+  const { job } = runRoute('/gather', { resource: 'ore', amount: '1', silk: '1' }, c.env)
+  assert.ok(await waitFor(() => c.seen.finishDig, 2000), 'the gather digs')
+  c.seen.finishDig()
+  assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the drop')
+  c.pockets.push({ name: 'raw_iron', count: 1 })
+  c.bot.emit('entityGone', c.seen.drops[0])
+  assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
+  assert.strictEqual(c.env.jobs.get(job).result.gathered, 1)
+  assert.strictEqual(c.blocks['0,64,2'].name, 'air', 'the coal ore is dug')
+  assert.strictEqual(toDiamond(), 0, 'no walk to the diamond ore')
+})
+
+test('a gather with silk whose silk touch pick harvests no candidate says so', async (t) => {
+  const { c } = silkGatherRig(t, (b) => b ? STONE_SILK(b) : null)
+  const { job } = runRoute('/gather', { resource: 'ore', amount: '1', silk: '1' }, c.env)
+  assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
+  const { gathered, reason } = c.env.jobs.get(job).result
+  assert.deepStrictEqual([gathered, reason], [0, STONE_SILK(c.blocks['0,64,2'])])
+  assert.strictEqual(c.seen.digs, 0)
+})
+
+test('a gather with silk stops before it walks once no silk touch pick is carried', async (t) => {
+  let asked = 0
+  const { c, toDiamond } = silkGatherRig(t, (b) => asked++ ? `refusing to dig${b ? ` ${b.name}` : ''}: no silk touch pick carried` : null)
+  const { job } = runRoute('/gather', { resource: 'ore', amount: '1', silk: '1' }, c.env)
+  assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
+  const { gathered, reason } = c.env.jobs.get(job).result
+  assert.deepStrictEqual([gathered, reason], [0, 'refusing to dig diamond_ore: no silk touch pick carried'])
+  assert.strictEqual(toDiamond(), 0, 'no walk to the diamond ore')
+  assert.strictEqual(c.seen.digs, 0)
 })

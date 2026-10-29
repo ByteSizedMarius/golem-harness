@@ -23,6 +23,7 @@
 - `dig_tunnel` and `dig_stair` stop at lava or water, and at gravel or sand over their way (`dig_stair` also in it). They plug a hole onto lava with a carried filler and step back from falling gravel. A `falling` stop without `stepped back` means walk out at once.
 - A walk wedged for about 10 s gets the unstuck reflex: it replans, steps back, opens a door or jumps a step, and breaks the block in the way only when the same block is in your pockets to put back. When none of that frees you, it stops the walk and its event names where you are stuck, against what, and what it tried. Dig out yourself from there.
 - When something else holds the hand, `digat` puts a carried tool that harvests the block back in it, or refuses the dig.
+- Digs use a fortune pick on ore it multiplies, else a plain one. `silk` is for glass, ice, bookshelves and ore saved for a fortune pick.
 - `digat` answers once the server broke the block. A tool's `durability` counts the digs it has left. A nearly broken tool raises a wear event.
 - A block of `dig_tunnel` length is two digs: an iron pick lasts about 125 blocks, a stone one 65. Take spares for a long tunnel or a room. A job swaps to one when its pick breaks.
 
