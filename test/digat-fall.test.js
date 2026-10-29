@@ -2,7 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
-const { goals, Movements } = require('mineflayer-pathfinder')
+const { goals, Movements, startCell } = require('mineflayer-pathfinder')
 const registry = require('prismarine-registry')('1.21.11')
 const Block = require('prismarine-block')(registry)
 const movements = new Movements({ registry })
@@ -40,6 +40,7 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false } = {}) {
     },
     pathfinder: {
       movements,
+      startCell: (p) => startCell(bot, p),
       async goto (goal) {
         const here = bot.entity.position
         if (stuck || goal.isEnd(here.floored())) return
@@ -350,4 +351,15 @@ test('mine judges the walk left to the collect from the cell of the snow layers 
   assert.strictEqual(r.error, undefined, r.error && r.error.message)
   assert.deepStrictEqual(w.digs, [])
   assert.match(r.reply.reason, /^refusing to dig iron_ore at 3,65,0: gravel at 4,65,0 would fall on me\b/)
+})
+
+// A cobblestone wall runs along x 0, and the body at 0.0125,64,0.5 touches its west side. The ore at -5,64,0 is in reach from -1,64,0 only.
+test('mine digs a gravel-capped ore in reach of the cell the pathfinder starts from beside a wall the body touches', async () => {
+  const arm = ['cobblestone_wall', { up: 'false', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
+  const wall = Object.fromEntries([-2, -1, 0, 1, 2].map((z) => [`0,64,${z}`, arm]))
+  const w = cave(new Vec3(0.0125, 64, 0.5), { ...wall, '-5,64,0': 'iron_ore', '-5,65,0': 'gravel' }, { stuck: true })
+  const r = await w.mine('iron_ore')
+  assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  assert.strictEqual(r.reply.reason, null)
+  assert.deepStrictEqual(w.digs, ['-5,64,0 from (0, 64, 0)'])
 })

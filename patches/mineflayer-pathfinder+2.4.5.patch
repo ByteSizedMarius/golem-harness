@@ -1,8 +1,8 @@
 diff --git a/node_modules/mineflayer-pathfinder/index.js b/node_modules/mineflayer-pathfinder/index.js
-index b38bd30..d32a8e7 100644
+index b38bd30..10ed8a9 100644
 --- a/node_modules/mineflayer-pathfinder/index.js
 +++ b/node_modules/mineflayer-pathfinder/index.js
-@@ -11,6 +11,14 @@ const Vec3 = require('vec3').Vec3
+@@ -11,6 +11,50 @@ const Vec3 = require('vec3').Vec3
  const Physics = require('./lib/physics')
  const nbt = require('prismarine-nbt')
  const interactableBlocks = require('./lib/interactable.json')
@@ -14,10 +14,46 @@ index b38bd30..d32a8e7 100644
 +const SPRINT_REARM = 1
 +// The longest a door decision waits for the plate under the body to read pressed.
 +const PLATE_WAIT_TICKS = 20
++
++// Whether the player box at pos, widened by margin, meets a shape in column x, z above its feet.
++function boxMeets (bot, pos, x, z, margin) {
++  const w = bot.entity.width / 2 + margin
++  for (let y = Math.floor(pos.y); y < pos.y + bot.entity.height; y++) {
++    const b = bot.blockAt(new Vec3(x, y, z))
++    if (!b) continue
++    for (const s of b.shapes) {
++      if (x + s[0] < pos.x + w && x + s[3] > pos.x - w && z + s[2] < pos.z + w && z + s[5] > pos.z - w &&
++        y + s[4] > pos.y + TOUCH && y + s[1] < pos.y + bot.entity.height) return true
++    }
++  }
++  return false
++}
++
++// LOCAL PATCH (Golem 10-29): the cell a path from pos starts in.
++function startCell (bot, pos) {
++  let p = pos.floored()
++  // LOCAL PATCH (Golem 10-15): a body touching a wall or fence in its floored cell plans from the nearest free cell it stands in.
++  if (boxMeets(bot, pos, p.x, p.z, TOUCH)) {
++    const w = bot.entity.width / 2
++    let best = null
++    for (let x = Math.floor(pos.x - w); x < pos.x + w; x++) {
++      for (let z = Math.floor(pos.z - w); z < pos.z + w; z++) {
++        const d = (x + 0.5 - pos.x) ** 2 + (z + 0.5 - pos.z) ** 2
++        if ((!best || d < best.d) && !boxMeets(bot, pos, x, z, TOUCH)) best = { x, z, d }
++      }
++    }
++    if (best) p = new Vec3(best.x, p.y, best.z)
++  }
++  const dy = pos.y - p.y
++  const b = bot.blockAt(p) // The block we are standing in
++  // Offset the floored bot position by one if we are standing on a block that has not the full height but is solid
++  const offset = (b && dy > 0.001 && bot.entity.onGround && !bot.pathfinder.movements.emptyBlocks.has(b.type)) ? 1 : 0
++  return p.offset(0, offset, 0)
++}
  
  function inject (bot) {
    const waterType = bot.registry.blocksByName.water.id
-@@ -26,6 +34,7 @@ function inject (bot) {
+@@ -26,6 +70,7 @@ function inject (bot) {
    let digging = false
    let placing = false
    let placingBlock = null
@@ -25,28 +61,31 @@ index b38bd30..d32a8e7 100644
    let lastNodeTime = performance.now()
    let returningPos = null
    let stopPathing = false
-@@ -77,7 +86,19 @@ function inject (bot) {
+@@ -67,6 +112,8 @@ function inject (bot) {
+     return result
+   }
+ 
++  bot.pathfinder.startCell = (pos) => startCell(bot, pos)
++
+   bot.pathfinder.getPathFromTo = function * (movements, startPos, goal, options = {}) {
+     const optimizePath = options.optimizePath ?? true
+     const resetEntityIntersects = options.resetEntityIntersects ?? true
+@@ -77,12 +124,8 @@ function inject (bot) {
      if (options.startMove) {
        start = options.startMove
      } else {
 -      const p = startPos.floored()
-+      let p = startPos.floored()
-+      // LOCAL PATCH (Golem 10-15): a body touching a wall or fence in its floored cell plans from the nearest free cell it stands in.
-+      if (boxMeets(startPos, p.x, p.z, TOUCH)) {
-+        const w = bot.entity.width / 2
-+        let best = null
-+        for (let x = Math.floor(startPos.x - w); x < startPos.x + w; x++) {
-+          for (let z = Math.floor(startPos.z - w); z < startPos.z + w; z++) {
-+            const d = (x + 0.5 - startPos.x) ** 2 + (z + 0.5 - startPos.z) ** 2
-+            if ((!best || d < best.d) && !boxMeets(startPos, x, z, TOUCH)) best = { x, z, d }
-+          }
-+        }
-+        if (best) p = new Vec3(best.x, p.y, best.z)
-+      }
-       const dy = startPos.y - p.y
-       const b = bot.blockAt(p) // The block we are standing in
-       // Offset the floored bot position by one if we are standing on a block that has not the full height but is solid
-@@ -123,12 +144,14 @@ function inject (bot) {
+-      const dy = startPos.y - p.y
+-      const b = bot.blockAt(p) // The block we are standing in
+-      // Offset the floored bot position by one if we are standing on a block that has not the full height but is solid
+-      const offset = (b && dy > 0.001 && bot.entity.onGround && !stateMovements.emptyBlocks.has(b.type)) ? 1 : 0
+-      start = new Move(p.x, p.y + offset, p.z, movements.countScaffoldingItems(), 0)
++      const p = startCell(bot, startPos)
++      start = new Move(p.x, p.y, p.z, movements.countScaffoldingItems(), 0)
+     }
+     if (movements.allowEntityDetection) {
+       if (resetEntityIntersects) {
+@@ -123,12 +166,14 @@ function inject (bot) {
    function resetPath (reason, clearStates = true) {
      if (!stopPathing && path.length > 0) bot.emit('path_reset', reason)
      path = []
@@ -61,7 +100,7 @@ index b38bd30..d32a8e7 100644
      pathUpdated = false
      astarContext = null
      lockEquipItem.release()
-@@ -163,12 +186,42 @@ function inject (bot) {
+@@ -163,12 +208,42 @@ function inject (bot) {
      stopPathing = true
    }
  
@@ -105,7 +144,7 @@ index b38bd30..d32a8e7 100644
        const b = bot.blockAt(new Vec3(curPoint.x, curPoint.y, curPoint.z))
        if (b && (b.type === waterType || ((b.type === ladderId || b.type === vineId) && i + 1 < path.length && path[i + 1].y < curPoint.y))) {
          curPoint.x = Math.floor(curPoint.x) + 0.5
-@@ -340,8 +393,34 @@ function inject (bot) {
+@@ -340,8 +415,20 @@ function inject (bot) {
  
      // Make sure our bounding box don't collide with neighboring blocks
      // otherwise recenter the position
@@ -117,32 +156,18 @@ index b38bd30..d32a8e7 100644
 +    if (Math.abs(pos.z - blockZ) > 0.2 && !boxCollides(new Vec3(pos.x, pos.y, blockZ))) { pos.z = blockZ }
 +  }
 +
-+  // Whether the player box at pos, widened by margin, meets a shape in column x, z above its feet.
-+  function boxMeets (pos, x, z, margin) {
-+    const w = bot.entity.width / 2 + margin
-+    for (let y = Math.floor(pos.y); y < pos.y + bot.entity.height; y++) {
-+      const b = bot.blockAt(new Vec3(x, y, z))
-+      if (!b) continue
-+      for (const s of b.shapes) {
-+        if (x + s[0] < pos.x + w && x + s[3] > pos.x - w && z + s[2] < pos.z + w && z + s[5] > pos.z - w &&
-+          y + s[4] > pos.y + TOUCH && y + s[1] < pos.y + bot.entity.height) return true
-+      }
-+    }
-+    return false
-+  }
-+
 +  function boxCollides (pos) {
 +    const w = bot.entity.width / 2
 +    for (let x = Math.floor(pos.x - w); x < pos.x + w; x++) {
 +      for (let z = Math.floor(pos.z - w); z < pos.z + w; z++) {
-+        if (boxMeets(pos, x, z, -TOUCH)) return true
++        if (boxMeets(bot, pos, x, z, -TOUCH)) return true
 +      }
 +    }
 +    return false
    }
  
    function moveToEdge (refBlock, edge) {
-@@ -391,6 +470,7 @@ function inject (bot) {
+@@ -391,6 +478,7 @@ function inject (bot) {
      stopPathing = false
      stateGoal = null
      path = []
@@ -150,7 +175,7 @@ index b38bd30..d32a8e7 100644
      bot.emit('path_stop')
      fullStop()
    }
-@@ -520,13 +600,74 @@ function inject (bot) {
+@@ -520,13 +608,74 @@ function inject (bot) {
  
        // Open gates or doors
        if (placingBlock?.useOne) {
@@ -227,7 +252,7 @@ index b38bd30..d32a8e7 100644
          })
          return
        }
-@@ -608,13 +749,23 @@ function inject (bot) {
+@@ -608,13 +757,23 @@ function inject (bot) {
      bot.setControlState('forward', true)
      bot.setControlState('jump', false)
  
@@ -254,6 +279,14 @@ index b38bd30..d32a8e7 100644
        bot.setControlState('jump', true)
        bot.setControlState('sprint', true)
      } else if (physics.canStraightLine(path)) {
+@@ -638,6 +797,7 @@ function inject (bot) {
+ 
+ module.exports = {
+   pathfinder: inject,
++  startCell,
+   Movements: require('./lib/movements'),
+   goals: require('./lib/goals')
+ }
 diff --git a/node_modules/mineflayer-pathfinder/lib/movements.js b/node_modules/mineflayer-pathfinder/lib/movements.js
 index a7e3505..355546a 100644
 --- a/node_modules/mineflayer-pathfinder/lib/movements.js
