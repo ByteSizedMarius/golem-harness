@@ -3,12 +3,15 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
+const registry = require('prismarine-registry')('1.21.11')
+const Block = require('prismarine-block')(registry)
+const diggingPlugin = require('mineflayer/lib/plugins/digging')
 const shelter = require('../lib/shelter')
 const { QUIET_MS, legLedger, takenText } = require('../lib/leg-ledger')
 const {
   botConstant, loadBotFunctions, HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, digInProblemWith,
-  awaitRoute, bunkerReflexIn, combatReflexIn, claimRescue, routeHandler
+  awaitRoute, bunkerReflexIn, combatReflexIn, claimRescue, routeHandler, waitFor, timed, HUNG
 } = require('./helpers')
 
 const mobClass = (e) => e.cls
@@ -42,6 +45,246 @@ test('a down build re-checks threats after centring and falls back to up or refu
   r = await h.ctx.buildBunker('auto', 3)
   assert.match(String(r.error), /spider 5 blocks away/, `a spider closed in during the centring, got ${JSON.stringify(r)}`)
   assert.ok(!h.log.includes('digIn') && !h.log.includes('pillarShell'), `built after the second pick refused: ${h.log}`)
+})
+
+test('a bunker build stops a dig in flight before it digs in or pillars up', async () => {
+  for (const [mode, problems] of [['digIn', { up: 'no blocks' }], ['pillarShell', { down: 'no ground to dig' }]]) {
+    const h = buildHarness({ scenes: [{ problems }] })
+    const bot = h.env.bot
+    bot.targetDigBlock = { name: 'stone', position: new Vec3(3, 64, 0) }
+    let digging = null
+    const build = h.env[mode]
+    h.env[mode] = async (...a) => { digging = bot.targetDigBlock; return build(...a) }
+    const r = await h.ctx.buildBunker('auto', 3)
+    assert.ok(h.log.includes(mode), `control: ${mode} ran, got ${JSON.stringify(r)}`)
+    assert.strictEqual(digging, null, `${mode} started with a dig in flight`)
+  }
+})
+
+// Starts a /digat whose tool equip waits until the test calls the resolver equipped() returns.
+function digatInEquip (bunker, digLock) {
+  const at = new Vec3(1, 65, 0)
+  const digs = []
+  const equips = []
+  let equipped = null
+  const blockAt = (p) => {
+    const c = p.floored()
+    const name = c.equals(at) || c.y < 64 ? 'stone' : 'air'
+    return Object.assign(Block.fromStateId(registry.blocksByName[name].defaultState, 0), { position: c })
+  }
+  const bot = {
+    entity: { position: new Vec3(0.5, 64, 0.5), width: 0.6, height: 1.8 },
+    heldItem: null,
+    inventory: { items: () => [] },
+    digTime: () => 0,
+    blockAt,
+    pathfinder: { goto: async () => {} },
+    async dig (b) { digs.push(`${b.position}`) }
+  }
+  const { handle, res } = routeHandler('/digat', {
+    bot,
+    require,
+    goals,
+    entityInCell: shelter.entityInCell,
+    LEGACY_1710: false,
+    bunker,
+    digLock,
+    cellKnown: () => true,
+    knownCell: () => true,
+    seenNow: () => true,
+    round: (v) => ({ x: v.x, y: v.y, z: v.z }),
+    refuseWhileFighting () {},
+    stopPath () {},
+    holdHand: () => ({ renew: () => true }),
+    endHand () {},
+    holdDigTool: async () => { equips.push('tool'); await new Promise((resolve) => { equipped = resolve }) },
+    holdHarvester: async () => { equips.push('harvester'); return null },
+    neededPickTier: () => 0,
+    PICK_TIER: {}
+  })
+  const done = handle({ query: { x: '1', y: '65', z: '0' } }, res)
+  return { res, done, digs, equips, equipped: () => equipped }
+}
+
+test('a digat waiting on its tool equip when a bunker build starts digs nothing and names the build', async () => {
+  const h = buildHarness()
+  const run = digatInEquip(h.bunker, h.env.digLock)
+  assert.ok(await waitFor(() => !!run.equipped(), 1000), 'control: the equip started')
+  const digIn = h.env.digIn
+  h.env.digIn = async (...a) => { run.equipped()(); await run.done; return digIn(...a) }
+  const r = await h.ctx.buildBunker('auto', 3)
+  assert.strictEqual(r.mode, 'down', `control: the build ran, got ${JSON.stringify(r)}`)
+  assert.strictEqual(run.res.error && run.res.error.message, 'the bunker build took over digat stone at 1,65,0, nothing dug')
+  assert.deepStrictEqual(run.equips, ['tool'])
+  assert.deepStrictEqual(run.digs, [])
+})
+
+test('a dig whose look ends during a bunker build digs nothing', async () => {
+  const h = buildHarness()
+  const bot = h.env.bot
+  const writes = []
+  let endLook = null
+  Object.assign(bot, {
+    _client: { write: (name, data) => writes.push(`${name} ${data.status} ${data.location}`) },
+    lookAt: () => new Promise((resolve) => { endLook = resolve }),
+    swingArm () {},
+    _updateBlockState: (p) => bot.emit(`blockUpdate:${p}`, null, { type: 0 })
+  })
+  diggingPlugin(bot)
+  bot.digTime = () => 50
+  loadBotFunctions(['wireDigGuard'], { bot, digLock: h.env.digLock }).wireDigGuard()
+  bot.emit('spawn')
+  const outside = bot.dig({ name: 'stone', position: new Vec3(3, 64, 0) }).then(() => 'dug', (e) => e.message)
+  assert.ok(await waitFor(() => !!endLook, 1000), 'control: the dig began its look')
+  let settled = null
+  const digIn = h.env.digIn
+  h.env.digIn = async (...a) => { endLook(); settled = (await timed(outside, 1000)).out; return digIn(...a) }
+  const r = await h.ctx.buildBunker('auto', 3)
+  assert.strictEqual(r.mode, 'down', `control: the build ran, got ${JSON.stringify(r)}`)
+  assert.notStrictEqual(settled, HUNG, 'the dig never settled')
+  assert.strictEqual(settled, 'busy: the bunker build is running, nothing dug')
+  assert.deepStrictEqual(writes, [])
+})
+
+test('a bunker build, the pilot\'s or the reflex\'s, is refused while the buried self-rescue digs', async () => {
+  assert.strictEqual((await buildHarness().ctx.buildBunker('auto', 3)).mode, 'down', 'control: a build with no rescue')
+  const h = buildHarness()
+  claimRescue(h.env.digLock)
+  const refusal = 'no bunker possible while the buried self-rescue runs'
+  const r = await h.ctx.buildBunker('auto', 3)
+  assert.strictEqual(r.error, refusal)
+  assert.deepStrictEqual(h.log, [], 'the refused build picked or built')
+  assert.strictEqual(h.env.digLock.holder.what, 'the buried self-rescue')
+  const { handle, res } = routeHandler('/bunker', { shared: { ready: true }, buildBunker: h.ctx.buildBunker, BUNKER_HEIGHT: 3, bunkerSummary: shelter.bunkerSummary })
+  await handle({ query: {} }, res)
+  assert.strictEqual(res.error && res.error.message, refusal)
+})
+
+test('the buried self-rescue taking over a bunker build stops it, and the body does not flee', async () => {
+  const takeovers = {
+    'between digs': (h) => () => { claimRescue(h.env.digLock) },
+    'during a dig': (h) => () => { claimRescue(h.env.digLock); throw new Error('Digging aborted') }
+  }
+  for (const [when, takeover] of Object.entries(takeovers)) {
+    const h = buildHarness()
+    h.env.digIn = digHarness({ 1: takeover(h) }, h.bunker, [], h.env.digLock).ctx.digIn
+    const r = await h.ctx.buildBunker('auto', 3)
+    assert.strictEqual(r.stopped, 'the buried self-rescue took over', `${when}, got ${JSON.stringify(r)}`)
+    assert.strictEqual(h.env.digLock.holder && h.env.digLock.holder.what, 'the buried self-rescue', `${when}: the build let go of the rescue's claim`)
+    assert.strictEqual((await actAfter(r)).length, 0, `${when}: the reflex fled`)
+  }
+})
+
+test('a death aborts the bunker build\'s own dig', async () => {
+  const h = buildHarness()
+  const bot = h.env.bot
+  Object.assign(bot, {
+    _client: { write () {} },
+    lookAt: async () => {},
+    swingArm () {},
+    _updateBlockState: (p) => bot.emit(`blockUpdate:${p}`, null, { type: 0 })
+  })
+  diggingPlugin(bot)
+  bot.digTime = () => 300
+  const env = { bot, digLock: h.env.digLock }
+  loadBotFunctions(['wireDigGuard'], env).wireDigGuard()
+  bot.emit('spawn')
+  const { soleDig } = loadBotFunctions(['soleDig'], env)
+  let settled = null
+  h.env.digIn = async (claim) => {
+    const dig = soleDig(claim, { name: 'dirt', position: new Vec3(0, 63, 0) }).then(() => 'dug', (e) => e.message)
+    assert.ok(await waitFor(() => !!bot.targetDigBlock, 1000), 'control: the dig began')
+    bot.emit('death')
+    settled = (await timed(dig, 1000)).out
+    return { at: new Vec3(0, 64, 0), dug: 0, placed: 0, stopped: h.bunker.stop }
+  }
+  const r = await h.ctx.buildBunker('auto', 3)
+  assert.strictEqual(r.stopped, 'the body died', `control: the death stopped the build, got ${JSON.stringify(r)}`)
+  assert.strictEqual(settled, 'Digging aborted')
+})
+
+test('the buried self-rescue taking over during a down build\'s placing stops the placing', async () => {
+  const cap = '0,63,0'
+  const prop = '1,63,0'
+  const takeovers = {
+    'a wall': { open: ['1,61,0', '1,62,0'], at: 0, answer: 'placed', placings: ['1,61,0'] },
+    'the cap': { open: [], at: 0, answer: null, placings: [cap] },
+    'the prop': { open: [], at: 1, answer: 'placed', placings: [cap, prop] }
+  }
+  for (const [during, { open, at, answer, placings }] of Object.entries(takeovers)) {
+    const h = buildHarness()
+    const dig = digHarness({}, h.bunker, open, h.env.digLock)
+    const placed = []
+    dig.ctx.placeFiller = async (c) => {
+      placed.push(`${c.x},${c.y},${c.z}`)
+      if (placed.length - 1 < at) return null
+      if (placed.length - 1 > at) return 'placed'
+      claimRescue(h.env.digLock)
+      return answer
+    }
+    h.env.digIn = dig.ctx.digIn
+    const r = await h.ctx.buildBunker('auto', 3)
+    assert.strictEqual(r.stopped, 'the buried self-rescue took over', `${during}, got ${JSON.stringify(r)}`)
+    assert.deepStrictEqual(placed, placings, `${during}: the placings`)
+  }
+})
+
+test('the buried self-rescue taking over while a down build fills its wet sides stops the filling', async () => {
+  const h = buildHarness()
+  const dig = digHarness({}, h.bunker, [], h.env.digLock)
+  const wet = new Set(['1,63,0', '-1,63,0', '0,63,1', '0,63,-1'])
+  const blockAt = dig.ctx.bot.blockAt
+  dig.ctx.bot.blockAt = (p) => wet.has(`${p.x},${p.y},${p.z}`) ? { name: 'water', position: p } : blockAt(p)
+  const placed = []
+  dig.ctx.placeFiller = async (c) => {
+    placed.push(`${c.x},${c.y},${c.z}`)
+    if (placed.length === 1) claimRescue(h.env.digLock)
+    return 'placed'
+  }
+  h.env.digIn = dig.ctx.digIn
+  const r = await h.ctx.buildBunker('auto', 3)
+  assert.strictEqual(r.stopped, 'the buried self-rescue took over', `got ${JSON.stringify(r)}`)
+  assert.deepStrictEqual(placed, ['1,63,0'])
+})
+
+test('a stop or death during a down build\'s pick equip digs nothing', async () => {
+  for (const why of HALT_REASONS) {
+    const h = buildHarness()
+    let digs = 0
+    const dig = digHarness({ 0: () => { digs++ } }, h.bunker, [], h.env.digLock)
+    dig.ctx.equipPickFor = async () => { halt[why](h) }
+    h.env.digIn = dig.ctx.digIn
+    const r = await h.ctx.buildBunker('auto', 3)
+    assert.strictEqual(r.stopped, why, `${why}, got ${JSON.stringify(r)}`)
+    assert.strictEqual(digs, 0, `${why}: the dig ran`)
+  }
+})
+
+test('a bunker build holds the dig alone while it runs and lets go of it however it ends', async () => {
+  const ends = {
+    built: [() => buildHarness(), (r) => r.mode === 'down' && !r.stopped],
+    refused: [() => buildHarness({ scenes: [{ problems: { down: 'no ground to dig', up: 'no blocks' } }] }), (r) => /^no bunker possible here/.test(r.error)],
+    failed: [() => {
+      const h = buildHarness()
+      h.env.digIn = async () => { throw new Error('digIn broke') }
+      return h
+    }, (r) => /digIn broke/.test(r.error)],
+    stopped: [() => {
+      const h = buildHarness()
+      h.env.digIn = async () => { h.bunker.stop = 'stopped by the pilot'; throw new Error('Digging aborted') }
+      return h
+    }, (r) => r.stopped === 'stopped by the pilot']
+  }
+  for (const [end, [make, ended]] of Object.entries(ends)) {
+    const h = make()
+    let held = null
+    const pick = h.env.chooseShelter
+    h.env.chooseShelter = (input) => { held = h.env.digLock.holder; return pick(input) }
+    const r = await h.ctx.buildBunker('auto', 3)
+    assert.ok(ended(r), `control: ${end}, got ${JSON.stringify(r)}`)
+    assert.deepStrictEqual(held && [held.what, held.sole], ['the bunker build', true], `${end}: the claim during the build`)
+    assert.strictEqual(h.env.digLock.holder, null, `${end}: the build kept the dig`)
+  }
 })
 
 test('a bunker build is refused while the body stands in water or lava', async () => {
@@ -273,13 +516,13 @@ test('a stop or death that makes a build step fail ends the build as stopped and
   ]
   for (const { name, harness, scenes, progress } of steps) {
     let h = buildHarness({ scenes })
-    h.env[name] = harness({ 1: () => false }, h.bunker).ctx[name]
+    h.env[name] = harness({ 1: () => false }, h.bunker, [], h.env.digLock).ctx[name]
     let r = await h.ctx.buildBunker('auto', 3)
     assert.ok(r.stopped && !HALT_REASONS.includes(r.stopped), `control: ${name} failed with no stop, got ${JSON.stringify(r)}`)
     assert.strictEqual((await actAfter(r)).length, 1, `control: the reflex flees after ${name} failed`)
     for (const why of HALT_REASONS) {
       h = buildHarness({ scenes })
-      h.env[name] = harness({ 1: () => { halt[why](h); return false } }, h.bunker).ctx[name]
+      h.env[name] = harness({ 1: () => { halt[why](h); return false } }, h.bunker, [], h.env.digLock).ctx[name]
       r = await h.ctx.buildBunker('auto', 3)
       assert.strictEqual(r.stopped, why, `${why} failed ${name}, got ${JSON.stringify(r)}`)
       assert.match(shelter.bunkerSummary(r), progress, `${why} failed ${name}: how far it got`)
@@ -291,7 +534,7 @@ test('a stop or death that makes a build step fail ends the build as stopped and
 test('a stop or death during the last, successful placing leaves a finished build and keeps its cell', async () => {
   for (const why of HALT_REASONS) {
     const h = buildHarness()
-    const dig = digHarness({}, h.bunker)
+    const dig = digHarness({}, h.bunker, [], h.env.digLock)
     dig.ctx.placeFiller = async () => { halt[why](h); return 'placed' }
     h.env.digIn = dig.ctx.digIn
     const r = await h.ctx.buildBunker('auto', 3)
@@ -379,7 +622,7 @@ test('a hit once the pillar reaches safe height does not stop the shell, a stop 
 test('a dig that opens onto a cave caps the shaft from 2 deep naming only the cell under the feet, and stops shallower', async () => {
   // The body digs from y 64. The cave starts 3 below the feet, under the second dug cell.
   let h = buildHarness()
-  h.env.digIn = digHarness({}, h.bunker, ['0,61,0', '0,60,0', '1,61,0', '1,60,0', '-1,61,0']).ctx.digIn
+  h.env.digIn = digHarness({}, h.bunker, ['0,61,0', '0,60,0', '1,61,0', '1,60,0', '-1,61,0'], h.env.digLock).ctx.digIn
   let r = await h.ctx.buildBunker('auto', 3)
   assert.strictEqual(r.stopped, undefined, `control: the 2-deep shaft stands, got ${JSON.stringify(r)}`)
   assert.ok(h.bunker.cell, 'the 2-deep shaft set no cell')
@@ -387,7 +630,7 @@ test('a dig that opens onto a cave caps the shaft from 2 deep naming only the ce
   assert.strictEqual(shelter.bunkerSummary(r), 'dug in 2 below ground at (0,62,0), dig stopped (an opening under the feet), 1 gap in the shell. To leave, dig (0,64,0), then pillar up 2.')
 
   h = buildHarness()
-  h.env.digIn = digHarness({}, h.bunker, ['0,62,0', '0,61,0']).ctx.digIn
+  h.env.digIn = digHarness({}, h.bunker, ['0,62,0', '0,61,0'], h.env.digLock).ctx.digIn
   r = await h.ctx.buildBunker('auto', 3)
   assert.strictEqual(shelter.bunkerSummary(r), 'dug 1 of 3 cells at (0,63,0), an opening under the feet')
   assert.strictEqual(h.bunker.cell, null, 'a 1-deep stop kept its cell')

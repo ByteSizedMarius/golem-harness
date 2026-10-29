@@ -1028,11 +1028,14 @@ function buildHarness ({ scenes = [{}], centred = true } = {}) {
     BUNKER_HALTS: botConstant('BUNKER_HALTS'),
     bunkerSummary: shelter.bunkerSummary,
     mobClass,
+    digLock: botConstant('digLock'),
     console: { log: (line) => lines.push(line) },
     bot: Object.assign(new EventEmitter(), {
       pathfinder: { setGoal () {}, goto: async () => {}, setMovements () {} },
       clearControlStates () {},
-      waitForTicks: async () => {}
+      waitForTicks: async () => {},
+      targetDigBlock: null,
+      stopDigging () { this.targetDigBlock = null }
     }),
     jobs: { stopAll () {} },
     legs: legLedger(),
@@ -1079,7 +1082,7 @@ const halt = {
 const HALT_REASONS = Object.keys(halt)
 
 // When during[k] returns false, the body does not drop into the k-th dug cell (0-based).
-function digHarness (during = {}, bunker = { building: true, stop: null, cell: null, mode: 'down', reached: 0 }, open = []) {
+function digHarness (during = {}, bunker = { building: true, stop: null, cell: null, mode: 'down', reached: 0 }, open = [], digLock = botConstant('digLock')) {
   const entity = { position: new Vec3(0.5, 64, 0.5), onGround: true }
   const air = new Set(open)
   const isOpen = (p) => air.has(`${p.x},${p.y},${p.z}`)
@@ -1104,9 +1107,13 @@ function digHarness (during = {}, bunker = { building: true, stop: null, cell: n
     },
     equipPickFor: async () => {},
     placeFiller: async () => 'placed',
-    solidAt: (p) => !isOpen(p)
+    solidAt: (p) => !isOpen(p),
+    digLock
   }
-  const ctx = loadBotFunctions(['digIn', 'onBuildHit'], env)
+  digLock.rawDig = env.bot.dig
+  const ctx = loadBotFunctions(['digIn', 'onBuildHit', 'claimDig'], env)
+  const digIn = ctx.digIn
+  ctx.digIn = (claim = Object.assign(ctx.claimDig('the bunker build', true), { sole: true })) => digIn(claim)
   return { ctx, bunker }
 }
 
