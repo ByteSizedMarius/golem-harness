@@ -17,8 +17,6 @@ const WALK = 60000
 const EVENT = 20000
 // mineflayer's wait for the block update after a placement.
 const PLACE = 5000
-// mineflayer's wait for a food item to be eaten.
-const CONSUME = 2500
 // Routes whose walks have no bound in lib/routes/, or that walk once per item or per cell.
 const LONGEST = 600000
 
@@ -103,8 +101,8 @@ const TOOLS = [
   { name: 'placeitem', route: '/placeitem', body: true, description: 'Place a block at a coordinate, onto the block below or else against a solid neighbour beside it; a cell with neither is refused. On 1.7.10 a ladder or frame needs a wall. face sets a stair ascend direction or a ladder\'s or frame\'s wall. then=blockat checks it.', params: { ...XYZ, name: required(NAME), face: FACE, then: THEN }, timeoutMs: WALK + PLACE },
   { name: 'sign', route: '/sign', body: true, description: 'Place a sign and set its text, now or never. Up to 4 lines of ~15 chars, split by |. face aims a standing sign, wall names the wall it hangs on.', params: { ...XYZ, text: { type: 'str', maxLen: 90 }, face: FACE, wall: FACE, item: NAME }, timeoutMs: WALK + PLACE },
   { name: 'equip', route: '/equip', body: true, combat: true, description: 'Without dest, armor goes to its slot and the rest to the hand. 1.7.10 has no off-hand.', params: { name: required(NAME), dest: { type: 'enum', values: ['hand', 'off-hand', 'head', 'torso', 'legs', 'feet'] } }, timeoutMs: EVENT },
-  // The equips before and after eating, the 2.1 s hold of a golden apple at full food and the 1.5 s wait for the food update.
-  { name: 'eat', route: '/eat', body: true, combat: true, description: 'Eat the named food, or the most filling one that is not rotten flesh, spider eye, poisonous potato or pufferfish. Fails while a job holds the hand.', params: { food: NAME }, timeoutMs: 2 * EVENT + CONSUME + 2100 + 1500 },
+  // The equips before and after eating, and the 3.2 s food-update wait from the bite, which outlasts mineflayer's 2.5 s consume and the 2.1 s golden-apple hold.
+  { name: 'eat', route: '/eat', body: true, combat: true, description: 'Eat the named food, or the most filling one that is not rotten flesh, spider eye, poisonous potato or pufferfish. Fails while a job holds the hand.', params: { food: NAME }, timeoutMs: 2 * EVENT + 3200 },
   { name: 'activate', route: '/activate', body: true, description: 'Right-click a block in sight (bed, lever, button, door, gate), walking into reach. Aims at the block centre: name the upper half of a door to aim level, the fence gate block itself to aim down.', params: XYZ, timeoutMs: LONGEST },
   { name: 'use', route: '/use', body: true, description: 'Right-click a block: till, sow, fill or pour a bucket.', params: { ...XYZ, item: NAME }, timeoutMs: LONGEST },
   { name: 'useon', route: '/useon', body: true, description: 'Use item on a creature or item frame in sight within 16: shears on a sheep, a bucket on a cow.', params: { name: required(NAME), item: required(NAME), at: { ...POINT, desc: 'frame cell x,y,z' } }, timeoutMs: LONGEST },

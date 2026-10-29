@@ -100,6 +100,8 @@ test('a meal over 2 s holds the hand from its equip to the restore of the held i
     handFree().then(() => order.push(`sword at ${clock.now()}`))
     await new Promise((resolve) => clock.setTimeout(resolve, 2400))
     order.push(`ate at ${clock.now()}`)
+    bot.food = 15
+    bot.emit('health')
   }
   const { handle, res } = routeHandler('/eat', env)
   const done = handle({ query: {} }, res)

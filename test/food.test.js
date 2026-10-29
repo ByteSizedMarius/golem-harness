@@ -68,7 +68,7 @@ test('eat replies with the food level of the update that follows the meal', asyn
 
 test('eat says the food level is unconfirmed when no update arrives', async () => {
   const clock = fakeClock()
-  const bot = body(['bread'])
+  const bot = body(['bread'], (b) => b.inventory.items().splice(0, 1))
   const { handle, res } = routeHandler('/eat', env(bot, { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout }))
   const done = handle({ query: {} }, res)
   await delay(10)
@@ -131,4 +131,5 @@ test('refuel after a fight takes the previous item back in hand when the meal fa
   bot.consume = async () => { throw new Error('Consuming cancelled') }
   await assert.rejects(refuel(bot).run(), /Consuming cancelled/)
   assert.strictEqual(bot.heldItem.name, 'iron_sword')
+  assert.strictEqual(bot.listenerCount('health'), 0)
 })
