@@ -107,14 +107,16 @@ test('a sourceless hit by an in-range arrow with no shooter in sight reads as an
 
 // The attribution of a sourceless hit at the last of swings, the times player Steve, 2 east of a body at the origin,
 // swung his arm facing yaw, with a zombie at hostileX on the body's row. seen says whether the body perceives Steve.
-// tracked is when his entity appeared, null for never.
-async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, seen = true, tracked = 0 } = {}) {
+// tracked is when his entity appeared, null for never. burning sets the body's on-fire flag. fight holds the attribution before the hit.
+// cells holds the blocks in the body's feet and head cells. respawn kills and respawns the body before the hit. aggro gets the confirmed attackers.
+async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, seen = true, tracked = 0, burning = false,
+  fight = { damageTypes: ['generic'], lastAttrib: null }, cells = {}, respawn = false, aggro = new Map() } = {}) {
   const clock = { now: 0 }
-  const body = { id: 1, position: new Vec3(0.5, 64, 0.5) }
+  const body = { id: 1, position: new Vec3(0.5, 64, 0.5), metadata: [burning ? 0x01 : 0] }
   const steve = { id: 2, type: 'player', username: 'Steve', yaw, position: new Vec3(2.5, 64, 0.5) }
   const zombie = { id: 3, name: 'zombie', position: new Vec3(hostileX, 64, 0.5) }
-  const bot = Object.assign(new EventEmitter(), { entity: body, entities: {}, _client: new EventEmitter() })
-  const fight = { damageTypes: ['generic'], lastAttrib: null }
+  const blockAt = (p) => (p.x === 0 && p.z === 0 && { 64: cells.feet, 65: cells.head }[p.y]) || null
+  const bot = Object.assign(new EventEmitter(), { entity: body, entities: {}, _client: new EventEmitter(), blockAt })
   const fill = { cells: new Set() }
   const ctx = loadBotFunctions(['wireArmSwings', 'wireDamageAttribution'], {
     bot,
@@ -131,7 +133,7 @@ async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, 
     },
     lastSwing: new Map(),
     arrows: new Map(),
-    AGGRO_CONFIRMED: new Map(),
+    AGGRO_CONFIRMED: aggro,
     damageTypeMissed: false,
     LEGACY_1710: false,
     ...Object.fromEntries(['SWING_MS', 'SWING_GAP_MS', 'SWING_FACING', 'ARROW_FLIGHT_MS', 'ARROW_HIT_MS', 'ARROW_RANGE']
@@ -140,6 +142,10 @@ async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, 
   ctx.wireArmSwings()
   ctx.wireDamageAttribution()
   bot.emit('spawn')
+  if (respawn) {
+    bot.emit('death')
+    bot.emit('respawn')
+  }
   if (tracked !== null) {
     clock.now = tracked
     bot.emit('entitySpawn', steve)
@@ -177,6 +183,51 @@ test('a first swing counts as lone only when the body tracked the player through
 test('a sourceless hit never names a swinging player the body cannot perceive', async () => {
   assert.strictEqual(await swingHit({ seen: false }), 'zombie W ~3 (nearest hostile)')
 })
+
+test('a sourceless hit while the body burns is the fire\'s, never the nearest hostile\'s', async () => {
+  const noSwing = { tracked: null, swings: [] }
+  assert.strictEqual(await swingHit(noSwing), 'zombie W ~3 (nearest hostile)', 'control: not burning')
+  assert.strictEqual(await swingHit({ ...noSwing, burning: true }), 'no attacker named, on fire')
+})
+
+test('a burn tick 1 s after a hostile\'s hit keeps that attribution as an environmental hit', async () => {
+  const fight = { damageTypes: ['generic'], lastAttrib: { t: -1000, desc: 'zombie W ~3 (nearest hostile)', entity: null, ranged: false } }
+  await swingHit({ tracked: null, swings: [], burning: true, fight })
+  assert.deepStrictEqual({ desc: fight.lastAttrib.desc, envHit: fight.lastAttrib.envHit }, { desc: 'zombie W ~3 (nearest hostile)', envHit: true })
+})
+
+test('a sourceless hit while the body burns ignores a swinging player farther than the nearest hostile', async () => {
+  assert.strictEqual(await swingHit({ burning: true }), 'no attacker named, Steve swung nearby', 'control: the zombie farther than the player')
+  assert.strictEqual(await swingHit({ burning: true, hostileX: -0.5 }), 'no attacker named, on fire')
+})
+
+const GRAVEL = { name: 'gravel', transparent: false, shapes: [[0, 0, 0, 1, 1, 1]] }
+const FIRE = { name: 'fire', transparent: true, shapes: [] }
+const LAVA = { name: 'lava', transparent: true, shapes: [] }
+
+test('a sourceless hit while the head is buried is the block\'s, never the nearest hostile\'s', async () => {
+  const noSwing = { tracked: null, swings: [] }
+  const control = new Map()
+  assert.strictEqual(await swingHit({ ...noSwing, cells: { feet: GRAVEL }, aggro: control }), 'zombie W ~3 (nearest hostile)', 'control: only the feet in gravel')
+  assert.deepStrictEqual([...control.keys()], [3], 'control: the zombie confirmed')
+  const aggro = new Map()
+  assert.strictEqual(await swingHit({ ...noSwing, cells: { head: GRAVEL }, aggro }), 'no attacker named, buried')
+  assert.deepStrictEqual([...aggro.keys()], [])
+})
+
+test('a sourceless hit with the feet in fire or the head in lava is theirs before the on-fire flag arrives', async () => {
+  const noSwing = { tracked: null, swings: [] }
+  assert.strictEqual(await swingHit(noSwing), 'zombie W ~3 (nearest hostile)', 'control: no fire or lava')
+  assert.strictEqual(await swingHit({ ...noSwing, cells: { feet: FIRE } }), 'no attacker named, on fire')
+  assert.strictEqual(await swingHit({ ...noSwing, cells: { head: LAVA } }), 'no attacker named, in lava')
+})
+
+test('the on-fire flag of a body that died burning ends with the respawn', async () => {
+  const noSwing = { tracked: null, swings: [], burning: true }
+  assert.strictEqual(await swingHit(noSwing), 'no attacker named, on fire', 'control: no respawn')
+  assert.strictEqual(await swingHit({ ...noSwing, respawn: true }), 'zombie W ~3 (nearest hostile)')
+})
+
 // The attribution of a hit with no source entity and damage type typeId, from a registry of generic (0) and fall (1),
 // with no hostile, player or arrow near.
 function noSourceHit (typeId) {
