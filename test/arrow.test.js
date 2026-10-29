@@ -107,7 +107,8 @@ test('a sourceless hit by an in-range arrow with no shooter in sight reads as an
 
 // The attribution of a sourceless hit at the last of swings, the times player Steve, 2 east of a body at the origin,
 // swung his arm facing yaw, with a zombie at hostileX on the body's row. seen says whether the body perceives Steve.
-async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, seen = true } = {}) {
+// tracked is when his entity appeared, null for never.
+async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, seen = true, tracked = 0 } = {}) {
   const clock = { now: 0 }
   const body = { id: 1, position: new Vec3(0.5, 64, 0.5) }
   const steve = { id: 2, type: 'player', username: 'Steve', yaw, position: new Vec3(2.5, 64, 0.5) }
@@ -138,6 +139,10 @@ async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, 
   ctx.wireArmSwings()
   ctx.wireDamageAttribution()
   bot.emit('spawn')
+  if (tracked !== null) {
+    clock.now = tracked
+    bot.emit('entitySpawn', steve)
+  }
   for (const t of swings) {
     clock.now = t
     bot.emit('entitySwingArm', steve)
@@ -155,6 +160,16 @@ test('a sourceless hit names a player whose lone swing faced the body from no fa
     ['a zombie closer than the player', { hostileX: -0.5 }, 'zombie W ~1 (nearest hostile)']
   ]) {
     assert.strictEqual(await swingHit(row), desc, label)
+  }
+})
+
+test('a first swing counts as lone only when the body tracked the player through the quiet before it', async () => {
+  assert.strictEqual(await swingHit({ swings: [10000] }), 'no attacker named, Steve swung nearby', 'control: tracked for 10 s')
+  for (const [label, row] of [
+    ['tracked for 10 ms', { tracked: 9990, swings: [10000] }],
+    ['never seen appearing', { tracked: null, swings: [10000] }]
+  ]) {
+    assert.strictEqual(await swingHit(row), 'zombie W ~3 (nearest hostile)', label)
   }
 })
 
