@@ -110,6 +110,7 @@ function body (head, feet = AIR, { cells = {}, pos, legacy = false, known = () =
       return reached
     },
     centerOnCell: (c = bot.entity.position.floored()) => centre(c),
+    bunker: { building: false },
     lastFeet,
     rescue: null,
     lastGiveUp: null,
@@ -741,7 +742,7 @@ test('a body that moved to another cell between hits gives up again, with one ev
 // running. A step reaches its cell and leaves the body in its middle. center(cell) stands in for centring on a cell
 // and by default moves the body to its middle. With controls the body keeps its control states there and freezes
 // and steps with the real freezeBody and nudgeInto.
-function wiredBody (t, cells, { hold = false, equip = async () => {}, controls = null, center = null } = {}) {
+function wiredBody (t, cells, { hold = false, equip = async () => {}, controls = null, center = null, building = false } = {}) {
   t.mock.timers.enable({ apis: ['setInterval'] })
   const id = require.resolve('../lib/bot/alarms')
   delete require.cache[id]
@@ -758,7 +759,8 @@ function wiredBody (t, cells, { hold = false, equip = async () => {}, controls =
   const ctx = {
     bot,
     fight,
-    bunker: { building: false },
+    bunker: { building },
+    onBuildHit () {},
     reflexes: [],
     mobClass: () => 'hostile',
     CONFIRMED_HORIZON: 16,
@@ -808,6 +810,8 @@ function wiredBody (t, cells, { hold = false, equip = async () => {}, controls =
     },
     // Settles once no rescue holds the dig lock.
     ended: () => waitFor(() => digLock.holder === null, 1000),
+    bot,
+    bunker: ctx.bunker,
     at,
     releases,
     log,
@@ -848,6 +852,33 @@ test('a body off-centre beside gravel at eye height hit with no attacker named s
   assert.deepStrictEqual(b.hurt, ['took 1 damage (suffocating inside gravel), HP 19/20'])
   assert.strictEqual(b.log[0], 'legs', 'the rescue never started')
   assert.ok(await b.ended(), 'the rescue never ended')
+})
+
+test('a rescue off-centre during a bunker build presses nothing until the build ends, then centres', async (t) => {
+  const controls = {}
+  let centre = null
+  const b = wiredBody(t, {}, { controls, building: true, center: (...a) => centre(...a) })
+  const pressed = []
+  const set = b.bot.setControlState
+  b.bot.setControlState = (c, on) => { pressed.push(`${c} ${on}`); set(c, on) }
+  // A forward press moves the body to the middle of its cell.
+  let ticks = 0
+  let whileBuilding = null
+  b.bot.waitForTicks = async () => {
+    if (++ticks === 3) {
+      whileBuilding = [...pressed]
+      b.bunker.building = false
+    }
+    if (controls.forward) b.bot.entity.position = new Vec3(1.5, 64, 0.5)
+  }
+  centre = loadBotFunctions(['centerOnCell'], { bot: b.bot, Vec3 }).centerOnCell
+  b.walk(1.2, 64, 0.5)
+  await b.hit({ ...SOURCELESS, untyped: true }, 1)
+  assert.strictEqual(b.log[0], 'legs', 'control: the rescue started')
+  assert.ok(await b.ended(), 'the rescue never ended')
+  assert.deepStrictEqual(pressed, ['sneak true', 'forward true', 'forward false', 'sneak false'], 'the rescue\'s centring')
+  assert.deepStrictEqual(whileBuilding, [], 'the rescue pressed controls while the build ran')
+  assert.deepStrictEqual(b.digs, [], 'the centred body dug')
 })
 
 test('a buried body hit with no attribution says what it suffocates in and steps out unfrozen', async (t) => {

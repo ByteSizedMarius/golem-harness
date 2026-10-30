@@ -247,6 +247,213 @@ test('the buried self-rescue taking over while a down build fills its wet sides 
   assert.deepStrictEqual(placed, ['1,63,0'])
 })
 
+test('the buried self-rescue taking over while a down build clears or equips for a wall places nothing', async () => {
+  for (const during of ['clearSoftCover', 'equip']) {
+    const dig = digHarness({}, undefined, ['1,61,0'])
+    let release = null
+    const filler = realFiller(dig.ctx, during, () => new Promise((resolve) => { release = resolve }))
+    dig.ctx.placeFiller = filler.placeFiller
+    const run = dig.ctx.digIn()
+    assert.ok(await waitFor(() => release, 1000), `${during}: the wall was never begun`)
+    claimRescue(dig.ctx.digLock)
+    release()
+    const r = await run
+    assert.strictEqual(r.dug, 3, `control: ${during}, the shaft was dug, got ${JSON.stringify(r)}`)
+    assert.deepStrictEqual(filler.did, during === 'equip' ? ['equip'] : [], during)
+  }
+})
+
+test('a stop or death while a down build walls its cell places no further wall, cap or prop', async () => {
+  const walls = ['1,61,0', '1,62,0', '-1,61,0']
+  for (const at of [1, 2]) {
+    for (const why of HALT_REASONS) {
+      const h = buildHarness()
+      const dig = digHarness({}, h.bunker, walls, h.env.digLock)
+      const placed = []
+      dig.ctx.placeFiller = async (c) => {
+        placed.push(`${c.x},${c.y},${c.z}`)
+        if (placed.length === at) halt[why](h)
+        return 'placed'
+      }
+      h.env.digIn = dig.ctx.digIn
+      const r = await h.ctx.buildBunker('auto', 3)
+      assert.strictEqual(r.stopped, why, `${why} at wall ${at}, got ${JSON.stringify(r)}`)
+      assert.deepStrictEqual(placed, walls.slice(0, at), `${why} at wall ${at}`)
+    }
+  }
+})
+
+test('a stop or death while a down build places its last wall places no cap', async () => {
+  for (const why of HALT_REASONS) {
+    const h = buildHarness()
+    const dig = digHarness({}, h.bunker, ['0,62,-1'], h.env.digLock)
+    const placed = []
+    dig.ctx.placeFiller = async (c) => {
+      placed.push(`${c.x},${c.y},${c.z}`)
+      halt[why](h)
+      return 'placed'
+    }
+    h.env.digIn = dig.ctx.digIn
+    const r = await h.ctx.buildBunker('auto', 3)
+    assert.strictEqual(r.stopped, why, `${why}, got ${JSON.stringify(r)}`)
+    assert.deepStrictEqual(placed, ['0,62,-1'], why)
+  }
+})
+
+test('a stop or death while a down build props its cap or fills the cap again ends the build as stopped', async () => {
+  const cap = '0,63,0'
+  const prop = '1,63,0'
+  // Each placing's answer in order. The stop arrives during the last one.
+  const ends = {
+    'the prop': [[cap, null], [prop, null]],
+    'the second cap fill': [[cap, null], [prop, 'placed'], [cap, null]]
+  }
+  for (const [during, answers] of Object.entries(ends)) {
+    for (const why of HALT_REASONS) {
+      const h = buildHarness()
+      const dig = digHarness({}, h.bunker, [], h.env.digLock)
+      const placed = []
+      dig.ctx.placeFiller = async (c) => {
+        placed.push(`${c.x},${c.y},${c.z}`)
+        if (placed.length === answers.length) halt[why](h)
+        return answers[placed.length - 1][1]
+      }
+      h.env.digIn = dig.ctx.digIn
+      const r = await h.ctx.buildBunker('auto', 3)
+      assert.deepStrictEqual(placed, answers.map(([c]) => c), `control: ${during}, ${why}`)
+      assert.strictEqual(r.stopped, why, `${during}, ${why}, got ${JSON.stringify(r)}`)
+      assert.strictEqual(h.bunker.cell, null, `${during}, ${why}: the cell stayed`)
+    }
+  }
+})
+
+// The real placeFiller over cells, calling stall() in the step during names and logging its steps in did.
+function realFiller (cells, during, stall) {
+  const did = []
+  const bot = {
+    heldItem: null,
+    blockAt: cells.bot.blockAt,
+    equip: async () => { did.push('equip'); if (during === 'equip') await stall() },
+    placeBlock: async (ref, face) => { did.push(`place ${ref.position.plus(face)}`) }
+  }
+  const env = {
+    bot,
+    solidAt: cells.solidAt,
+    NEIGHBOURS: botConstant('NEIGHBOURS'),
+    fillers: () => [{ name: 'dirt' }],
+    clearSoftCover: async () => { if (during === 'clearSoftCover') await stall() },
+    entityInCell: () => false,
+    blockers: () => []
+  }
+  return { placeFiller: loadBotFunctions(['placeFiller'], env).placeFiller, did }
+}
+
+test('a stop or death while a down build clears or equips for a wall places nothing', async () => {
+  for (const during of ['clearSoftCover', 'equip']) {
+    for (const why of HALT_REASONS) {
+      const h = buildHarness()
+      const dig = digHarness({}, h.bunker, ['1,61,0'], h.env.digLock)
+      const filler = realFiller(dig.ctx, during, async () => { halt[why](h) })
+      dig.ctx.placeFiller = filler.placeFiller
+      h.env.digIn = dig.ctx.digIn
+      const r = await h.ctx.buildBunker('auto', 3)
+      assert.strictEqual(r.stopped, why, `${during}, ${why}, got ${JSON.stringify(r)}`)
+      assert.deepStrictEqual(filler.did, during === 'equip' ? ['equip'] : [], `${during}, ${why}`)
+    }
+  }
+})
+
+test('a hit while a down build digs its first cell still seals liquid beside the body', async () => {
+  const dig = digHarness({ 0: (c) => c.onBuildHit(BUILD_HIT) }, undefined, ['1,63,0'])
+  const ground = dig.ctx.bot.blockAt
+  dig.ctx.bot.blockAt = (p) => p.x === 1 && p.y === 63 && p.z === 0 ? { name: 'lava', position: p } : ground(p)
+  const filler = realFiller(dig.ctx)
+  dig.ctx.placeFiller = filler.placeFiller
+  const r = await dig.ctx.digIn()
+  assert.strictEqual(r.stopped, 'hit while building', `control: the hit stopped the dig, got ${JSON.stringify(r)}`)
+  assert.strictEqual(r.dug, 1, 'control: dug')
+  assert.deepStrictEqual(filler.did, ['equip', 'place (1, 63, 0)'], 'the lava was not sealed')
+})
+
+test('a stop or death while an up build clears or equips for its shell places nothing', async () => {
+  for (const during of ['clearSoftCover', 'equip']) {
+    for (const why of HALT_REASONS) {
+      const h = buildHarness({ scenes: [{ threats: [zombie(30)] }] })
+      const p = pillarHarness({}, h.bunker)
+      // The first shell cell beside the top of a 3-block pillar.
+      const cells = { bot: p.ctx.bot, solidAt: (c) => `${c.x},${c.y},${c.z}` !== '1,66,0' }
+      const filler = realFiller(cells, during, async () => { halt[why](h) })
+      p.ctx.placeFiller = filler.placeFiller
+      h.env.pillarShell = p.ctx.pillarShell
+      const r = await h.ctx.buildBunker('auto', 3)
+      assert.strictEqual(r.stopped, why, `${during}, ${why}, got ${JSON.stringify(r)}`)
+      assert.deepStrictEqual(filler.did, during === 'equip' ? ['equip'] : [], `${during}, ${why}`)
+    }
+  }
+})
+
+test('a stop or death during the last pillar jump leaves the body uncentred', async () => {
+  for (const why of HALT_REASONS) {
+    const h = buildHarness({ scenes: [{ threats: [zombie(30)] }] })
+    const p = pillarHarness({ 2: () => { halt[why](h) } }, h.bunker)
+    let centred = 0
+    p.ctx.centerOnCell = async () => { centred++; return true }
+    h.env.pillarShell = p.ctx.pillarShell
+    const r = await h.ctx.buildBunker('auto', 3)
+    assert.strictEqual(r.stopped, why, `${why}, got ${JSON.stringify(r)}`)
+    assert.strictEqual(centred, 0, `${why}: centred`)
+  }
+})
+
+// pillarShell over the real jumpPlace for a body at (0.5, 64, 0.5) on a floor at y 63 that no jump lifts.
+function blockedPillar (bunker, press) {
+  const solid = (p) => p.y <= 63
+  const bot = {
+    entity: { position: new Vec3(0.5, 64, 0.5), width: 0.6, height: 1.8 },
+    blockAt: (p) => ({ name: solid(p) ? 'dirt' : 'air', position: p, boundingBox: solid(p) ? 'block' : 'empty' }),
+    equip: async () => {},
+    lookAt: async () => {},
+    waitForTicks: async () => {},
+    placeBlock: async () => {},
+    setControlState: press
+  }
+  const env = {
+    bunker,
+    SHELTER: shelter.SHELTER,
+    SIDES: botConstant('SIDES'),
+    bot,
+    Vec3,
+    entityInCell: shelter.entityInCell,
+    blockers: () => [],
+    refuseWhileBuilding () {},
+    setTimeout: (fn) => setImmediate(fn),
+    fillers: () => [{ name: 'dirt', count: 64 }],
+    centerOnCell: async () => true,
+    placeFiller: async () => 'placed',
+    solidAt: solid
+  }
+  return loadBotFunctions(['pillarShell'], env).pillarShell
+}
+
+test('a stop or death during a pillar jump ends its tries', async () => {
+  for (const why of [null, ...HALT_REASONS]) {
+    const h = buildHarness({ scenes: [{ threats: [zombie(30)] }] })
+    let jumps = 0
+    h.env.pillarShell = blockedPillar(h.bunker, (control, on) => {
+      if (control !== 'jump' || !on) return
+      jumps++
+      if (why) halt[why](h)
+    })
+    const r = await h.ctx.buildBunker('auto', 3)
+    if (!why) {
+      assert.strictEqual(jumps, 3, `control: a blocked jump with no stop tries three times, got ${JSON.stringify(r)}`)
+      continue
+    }
+    assert.strictEqual(r.stopped, why, `${why}, got ${JSON.stringify(r)}`)
+    assert.strictEqual(jumps, 1, `${why}: jumps`)
+  }
+})
+
 test('a stop or death during a down build\'s pick equip digs nothing', async () => {
   for (const why of HALT_REASONS) {
     const h = buildHarness()
@@ -484,6 +691,18 @@ test('stop or death ends a bunker build as stopped and the body does not flee', 
     assert.deepStrictEqual(h.log, ['shelterInputs', 'chooseShelter down', 'centerOnCell'], `${why} in the centring: picked or built after it`)
     assert.ok(h.ctx.bunkerSummary(r).includes(why), `the reply does not carry ${why}: ${h.ctx.bunkerSummary(r)}`)
     assert.strictEqual((await actAfter(r)).length, 0, `the reflex fled after ${why} in the centring`)
+  }
+})
+
+test('a stop or death ends the combat wait at the next tick while the combat reflex still runs', async () => {
+  for (const why of HALT_REASONS) {
+    const h = buildHarness({ scenes: [{ threats: [zombie(2)] }] })
+    h.combat.active = true
+    let ticks = 0
+    h.env.bot.waitForTicks = async () => { if (ticks++ === 0) halt[why](h) }
+    const r = await h.ctx.buildBunker('auto', 3)
+    assert.strictEqual(r.stopped, why, `${why}, got ${JSON.stringify(r)}`)
+    assert.strictEqual(ticks, 1, `${why}: ticks waited`)
   }
 })
 
