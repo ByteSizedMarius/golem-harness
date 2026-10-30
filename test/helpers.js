@@ -977,7 +977,7 @@ function shelterEnv (entities, confirmed, ages = {}) {
     pillarProblem: () => null,
     pillarHeight: (height) => ({ height, safe: shelter.SHELTER.SAFE_HEIGHT, why: 'flat ground' }),
     digMs: () => 800,
-    knownCell: () => true,
+    seenNow: () => true,
     BUNKER_DIG_MS: botConstant('BUNKER_DIG_MS'),
     downBuildMs: shelter.downBuildMs,
     upBuildMs: shelter.upBuildMs
@@ -985,21 +985,24 @@ function shelterEnv (entities, confirmed, ages = {}) {
   return { env, fills: () => fills }
 }
 
-// pillarProblem(height) for a body at (0, 64, 0) on a 5x5 floor at y 63, plus the solid cells in extra.
-// The body has never seen the cells in unseen.
-function pillarProblemWith (extra, height = 3, unseen = []) {
+// pillarProblem(height) for a body at (0, 64, 0) on a 5x5 floor at y 63, plus the solid cells in extra and
+// the snow layers in snow. The body has never seen the cells in unseen, and does not see the cells in outOfSight now.
+function pillarProblemWith (extra, height = 3, unseen = [], outOfSight = [], snow = []) {
   const solid = new Set(extra)
   for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) solid.add(`${x},63,${z}`)
   const isSolid = (p) => solid.has(`${p.x},${p.y},${p.z}`)
+  const isSnow = (p) => snow.includes(`${p.x},${p.y},${p.z}`)
   const hidden = new Set(unseen)
+  const away = new Set([...unseen, ...outOfSight])
   const env = {
     bot: {
       entity: { position: new Vec3(0.5, 64, 0.5) },
-      blockAt: (p) => ({ name: isSolid(p) ? 'stone' : 'air', boundingBox: isSolid(p) ? 'block' : 'empty', position: p })
+      blockAt: (p) => ({ name: isSnow(p) ? 'snow' : isSolid(p) ? 'stone' : 'air', boundingBox: isSnow(p) || isSolid(p) ? 'block' : 'empty', position: p })
     },
     solidAt: isSolid,
     knownCell: (p) => !hidden.has(`${p.x},${p.y},${p.z}`),
-    isSoftCover: () => false,
+    seenNow: (p) => !away.has(`${p.x},${p.y},${p.z}`),
+    isSoftCover: (b) => b.name === 'snow',
     fillers: () => [{ name: 'dirt', count: 64 }]
   }
   return loadBotFunctions(['pillarProblem'], env).pillarProblem(height)
@@ -1243,8 +1246,10 @@ function digInProblemWith ({ caves = [], known = (p) => p.y >= 63 } = {}) {
     BUNKER_GROUND: botConstant('BUNKER_GROUND'),
     BUNKER_DIG_MS: botConstant('BUNKER_DIG_MS'),
     solidAt: (p) => !isOpen(p),
+    isSoftCover: () => false,
     digMs: () => 750,
     knownCell: known,
+    seenNow: known,
     fillers: () => [{ name: 'dirt', count: 64 }]
   }
   return loadBotFunctions(['digInProblem'], env).digInProblem()

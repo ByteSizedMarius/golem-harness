@@ -1145,6 +1145,31 @@ test('overhead cover counts and tops the rock only once the sky shows, and gives
   assert.deepStrictEqual(cover(open)[0], { sky: true }, 'sky light 15 at the head')
 })
 
+test('overhead cover tells canopy from rock by the solids in sight, and remembered cover with none in sight is neither', () => {
+  // The column seen to the sky, holding first `up` over the head and behind two cells above it, in light.
+  const column = (first, behind, { up = 2, light = LIT } = {}) => {
+    const lo = 65 + up, hi = lo + 2
+    const env = world({ open: (x, y, z) => y >= 64 && !(x === 0 && z === 0 && (y === lo || y === hi)), light: () => light })
+    const base = env.bot.blockAt
+    env.bot.blockAt = (p) => (p.x === 0 && p.z === 0 && (p.y === lo || p.y === hi) ? { ...base(p), name: p.y === lo ? first : behind } : base(p))
+    for (let y = 66; y <= 320; y++) env.SEEN.add(ck(0, y, 0))
+    return env
+  }
+  const cover = (env) => {
+    const { overheadCover, skyPhrase } = loadBotFunctions(['overheadCover', 'skyPhrase'], env)
+    return skyPhrase(overheadCover())
+  }
+  const map = (env) => runRoute('/map', { radius: '2' }, { ...env, require, SURFACE: new Map(), indoors: () => false })
+  assert.strictEqual(cover(column('oak_leaves', 'oak_leaves')), 'Under tree canopy (leaves 2 up). ', 'control: the leaves in sight')
+  assert.strictEqual(cover(column('oak_leaves', 'stone')), cover(column('oak_leaves', 'oak_leaves')))
+  assert.strictEqual(map(column('stone', 'stone', { up: 11 })).underground, true, 'control: rock in sight')
+  // Leaves 11 up at midnight, past the reach of the dark.
+  const night = column('spruce_leaves', 'spruce_leaves', { up: 11, light: DARK })
+  assert.strictEqual(cover(night), 'Cover overhead (first solid 11 up), not in sight now. ')
+  const slice = map(night)
+  assert.deepStrictEqual([slice.underground, slice.note], [null, 'this map is a SLICE at your depth, NOT the surface: Cover overhead (first solid 11 up), not in sight now.'])
+})
+
 test('overhead cover scans no cell above the top of the world', () => {
   const env = shaft(LIT)
   env.bot.game = { minY: 0, height: 256 }
@@ -1454,6 +1479,48 @@ test('scene and boot report a drop on open ground the bot can see, with the lava
   const base = env.bot.blockAt
   env.bot.blockAt = (p) => (p.x >= 3 && p.y === 55 ? { ...LAVA, type: 8, position: new Vec3(p.x, p.y, p.z), skyLight: 14 } : base(p))
   for (const s of summaries(env)) assert.match(s, /falls away E at 3, floor ~9 down \(LAVA below\)/)
+})
+
+test('scene and boot give the depth of a ravine open to the sky, and no lava on a floor the bot cannot see', () => {
+  // A ravine at x 3..4 open to the sky down to y 54 with lava on its floor, the bot 2 blocks back from its edge.
+  const ravine = (x) => x === 3 || x === 4
+  const env = world({ open: (x, y) => y >= (ravine(x) ? 54 : 64), light: () => LIT, skyLight: () => 15 })
+  env.bot.registry = REGISTRY
+  const base = env.bot.blockAt
+  env.bot.blockAt = (p) => (ravine(p.x) && p.y === 54 ? { ...LAVA, type: 8, position: new Vec3(p.x, p.y, p.z), skyLight: 14 } : base(p))
+  for (const s of summaries(env)) {
+    assert.match(s, /falls away E at 3, floor ~10 down/)
+    assert.doesNotMatch(s, /LAVA|lava/)
+  }
+})
+
+test('the lay of the land in a remembered cave takes water as a floor only while the bot sees it', () => {
+  // A corridor at x -3..2, z 0 ending in a pit at x 2 down to y 55, its water from y 58 down, the cells down to y 58
+  // seen once. The body stands at the lip, its eye over the pit.
+  const around = (light) => {
+    const pit = (x, z) => x === 2 && z === 0
+    const env = world({ open: (x, y, z) => z === 0 && ((y === 64 || y === 65) && x >= -3 && x <= 2 || pit(x, z) && y >= 55), light: () => light })
+    env.bot.entity.position = new Vec3(1.95, 64, 0.5)
+    const base = env.bot.blockAt
+    env.bot.blockAt = (p) => (pit(p.x, p.z) && p.y >= 55 && p.y <= 58 ? { name: 'water', boundingBox: 'empty', shapes: [], light, skyLight: 0, metadata: 0, position: new Vec3(p.x, p.y, p.z) } : base(p))
+    for (let x = -4; x <= 3; x++) for (let y = 58; y <= 66; y++) for (let z = -1; z <= 1; z++) env.SEEN.add(ck(x, y, z))
+    return loadBotFunctions(['spatial3D'], env).spatial3D()
+  }
+  assert.match(around(LIT), /falls away E at 1, floor ~6 down \(water below\)/, 'control: the water in sight')
+  assert.match(around(DARK), /falls away E at 1, floor out of sight;/)
+})
+
+test('the lay of the land names lava at feet level only while the bot sees it', () => {
+  // A corridor at x -3..6, z 0 with lava at x 5 filling the feet cell, all of it seen once.
+  const around = (light) => {
+    const env = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= -3 && x <= 6, light: () => LIT })
+    const base = env.bot.blockAt
+    env.bot.blockAt = (p) => (p.x === 5 && p.y === 64 && p.z === 0 ? { name: 'lava', boundingBox: 'empty', shapes: [], light, skyLight: 0, metadata: 0, position: new Vec3(p.x, p.y, p.z) } : base(p))
+    for (let x = -4; x <= 7; x++) for (let y = 62; y <= 66; y++) for (let z = -1; z <= 1; z++) env.SEEN.add(ck(x, y, z))
+    return loadBotFunctions(['spatial3D'], env).spatial3D()
+  }
+  assert.match(around(LIT), /LAVA E 5/, 'control: the lava in sight')
+  assert.doesNotMatch(around(DARK), /LAVA|lava/)
 })
 
 test('map draws a floor changed out of sight as last seen, and the new block once in sight', () => {

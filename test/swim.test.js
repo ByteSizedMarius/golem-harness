@@ -40,7 +40,8 @@ const FAST = {
 }
 
 // The fake walk reaches every goal with a y and finds no path to the others. planned replaces every plan.
-async function swimGoto (q, walkOpts, { blockAt, start = new Vec3(0.5, 64, 0.5), known = () => true, planned }) {
+// seen(p, feet) tells the cells in sight now from the body's position, by default the known ones.
+async function swimGoto (q, walkOpts, { blockAt, start = new Vec3(0.5, 64, 0.5), known = () => true, seen = known, planned }) {
   const set = []
   const bot = new EventEmitter()
   bot.entity = { position: start }
@@ -70,7 +71,7 @@ async function swimGoto (q, walkOpts, { blockAt, start = new Vec3(0.5, 64, 0.5),
     for (let x = Math.floor(bot.entity.position.x) + 1; x <= g.x; x++) path.push(pathNode(x, feet(x), 0))
     return { status: 'success', path }
   }
-  const ctx = loadBotFunctions(['walkRoute', 'stagedGoto'], { ...gotoEnv(bot), planPath, knownCell: known })
+  const ctx = loadBotFunctions(['walkRoute', 'stagedGoto'], { ...gotoEnv(bot), planPath, knownCell: known, seenNow: (p) => seen(p, bot.entity.position) })
   const route = ctx.walkRoute()
   try {
     return { r: JSON.parse(JSON.stringify(await ctx.stagedGoto(q, route, walkOpts))), walks: set.length }
@@ -109,6 +110,7 @@ function gotoEnv (bot) {
     resolveBlockIds: () => [1],
     cellKnown: () => true,
     knownCell: () => true,
+    seenNow: () => true,
     hasLegalMove: () => true,
     airPrecheck: () => ({ verdict: 'connected' }),
     doorwayCommit: async () => false,
@@ -168,6 +170,20 @@ test('a goto that starts afloat swims out over a sandbar unrefused, and is refus
 test('a far goto whose first hop ends 3 cells into a lake is refused on the hop that swims on', async () => {
   const r = await swimGoto(FAR, {}, { blockAt: terrain([16, 38, 60]) })
   assert.deepStrictEqual([r.walks, r.r.reason, r.r.plan.swim], [1, 'risky', 18])
+})
+
+test('a far goto counts deep water on a hop only where the bot sees it now', async () => {
+  const lake = terrain([5, 10, 60])
+  const lit = await swimGoto(FAR, {}, { blockAt: lake })
+  assert.deepStrictEqual([lit.walks, lit.r.reason, lit.r.plan.swim], [0, 'risky', 6], 'control: the lake in sight')
+  const dark = await swimGoto(FAR, {}, { blockAt: lake, seen: (p) => p.x < 3 })
+  assert.deepStrictEqual([dark.walks, dark.r.reason], [3, 'no-path'])
+})
+
+test('a goto that starts afloat stays afloat over water out of sight, so the next hop swims on unrefused', async () => {
+  // A lake from x -10 to 38. The bot sees 8 blocks along x from the feet, so each hop plans past its sight.
+  const r = await swimGoto(FAR, {}, { blockAt: terrain([-10, 38, 60]), start: new Vec3(0.5, 63, 0.5), seen: (p, feet) => Math.abs(p.x - feet.x) <= 8 })
+  assert.deepStrictEqual([r.walks, r.r.reason], [3, 'no-path'])
 })
 
 test('a night swim counts the seen surface of a lake whose lower layer and bed are unseen as deep water', async () => {

@@ -1020,12 +1020,12 @@ test('a dig-in over unseen ground holds against a spider, counts the slowest dig
   const unseen = digInProblemWith({ caves: cave })
   assert.strictEqual(unseen, null, `refused over unseen ground: ${unseen}`)
 
-  // The bot knows the surface, y 63 and up. Stone digs slower than dirt.
+  // The bot sees the surface, y 63 and up. Stone digs slower than dirt.
   const downMs = (deep) => {
     const { env } = shelterEnv({}, [])
     Object.assign(env, {
       bot: { ...env.bot, blockAt: (p) => ({ name: p.y < 63 ? deep : 'dirt', position: p }) },
-      knownCell: (p) => p.y >= 63,
+      seenNow: (p) => p.y >= 63,
       digMs: (b) => (b.name === 'stone' ? 1200 : 750)
     })
     return loadBotFunctions(['shelterInputs'], env).shelterInputs('auto').buildMs.down
@@ -1035,25 +1035,59 @@ test('a dig-in over unseen ground holds against a spider, counts the slowest dig
   assert.strictEqual(pick.mode, 'down', `no dig-in against a spider: ${JSON.stringify(pick)}`)
 })
 
-// digInProblem for a body on dirt at (0, 64, 0) with the block name at cell, which the bot knows only when known.
-function digInWith (cell, name, known) {
+test('the dig time of a shaft cell seen before and out of sight now is the slowest the dig-in accepts', () => {
+  // The bot remembers every cell and sees y 63 and up now. Stone digs slower than dirt.
+  const downMs = (deep) => {
+    const { env } = shelterEnv({}, [])
+    Object.assign(env, {
+      bot: { ...env.bot, blockAt: (p) => ({ name: p.y < 63 ? deep : 'dirt', position: p }) },
+      knownCell: () => true,
+      seenNow: (p) => p.y >= 63,
+      digMs: (b) => (b.name === 'stone' ? 1200 : 750)
+    })
+    return loadBotFunctions(['shelterInputs'], env).shelterInputs('auto').buildMs.down
+  }
+  assert.strictEqual(downMs('stone'), downMs('dirt'))
+})
+
+// digInProblem for a body on dirt at (0, 64, 0) with the block name at cell (a key or a list of keys), which the
+// bot knows only when known and sees now only when seen. Snow is soft cover.
+function digInWith (cell, name, known, seen = known) {
   const key = (p) => `${p.x},${p.y},${p.z}`
-  const isOpen = (p) => p.y >= 64 || (key(p) === cell && /water|lava/.test(name))
+  const at = (p) => [].concat(cell).includes(key(p))
+  const isOpen = (p) => p.y >= 64 || (at(p) && /water|lava/.test(name))
   const env = {
     bot: {
       entity: { position: new Vec3(0.5, 64, 0.5), onGround: true },
-      blockAt: (p) => ({ name: key(p) === cell ? name : isOpen(p) ? 'air' : 'dirt', boundingBox: isOpen(p) ? 'empty' : 'block', position: p })
+      blockAt: (p) => ({ name: at(p) ? name : isOpen(p) ? 'air' : 'dirt', boundingBox: isOpen(p) ? 'empty' : 'block', position: p })
     },
     SIDES: botConstant('SIDES'),
     BUNKER_GROUND: botConstant('BUNKER_GROUND'),
     BUNKER_DIG_MS: botConstant('BUNKER_DIG_MS'),
-    solidAt: (p) => !isOpen(p),
+    solidAt: (p) => !isOpen(p) && !(at(p) && name === 'snow'),
+    isSoftCover: (b) => b.name === 'snow',
     digMs: () => 750,
-    knownCell: (p) => key(p) === cell ? known : p.y >= 63,
+    knownCell: (p) => at(p) ? known : p.y >= 63,
+    seenNow: (p) => at(p) ? seen : p.y >= 63,
     fillers: () => [{ name: 'dirt', count: 64 }]
   }
   return loadBotFunctions(['digInProblem'], env).digInProblem()
 }
+
+test('a dig-in names no block and no liquid in ground it saw before and does not see now', () => {
+  assert.strictEqual(digInWith('0,62,0', 'clay', true, false), null, 'clay 2 below')
+  assert.strictEqual(digInWith('1,62,0', 'lava', true, false), 'an opening beside the shaft 2 below')
+})
+
+test('a dig-in tells soft cover from a block only in sight, and reads a block seen before as a block', () => {
+  assert.strictEqual(digInWith('1,62,0', 'snow', true), 'an opening beside the shaft 2 below', 'control: snow in sight')
+  assert.strictEqual(digInWith('1,62,0', 'snow', true, false), null, 'snow beside the shaft')
+  assert.strictEqual(digInWith('0,60,0', 'snow', true, false), null, 'snow as the floor')
+  const cap = ['1,63,0', '-1,63,0', '0,63,1', '0,63,-1']
+  assert.strictEqual(digInWith(cap, 'stone', true), null, 'control: stone in sight holds the cap')
+  assert.strictEqual(digInWith(cap, 'stone', false), 'nothing beside the shaft to hold a cap', 'control: unseen stone')
+  assert.strictEqual(digInWith(cap, 'stone', true, false), null, 'stone seen before holds the cap')
+})
 
 test('a dig-in refuses water or lava beside the body or in seen ground beside the shaft, never for liquid it has not seen', () => {
   assert.strictEqual(digInWith('1,64,0', 'water', false), 'water beside the body')
@@ -1112,6 +1146,23 @@ test('a pillar is refused only for blocks the body has seen', () => {
   const ledge = column(1, 1, 64, 65)
   assert.strictEqual(pillarProblemWith(ledge), 'a step beside the pillar', 'control: a seen ledge beside the pillar')
   assert.strictEqual(pillarProblemWith(ledge, 3, ledge), null, 'an unseen ledge beside the pillar')
+})
+
+test('a pillar reads a block seen before and out of sight now like one in sight', () => {
+  const ceiling = ['0,68,0']
+  assert.strictEqual(pillarProblemWith(ceiling), 'no headroom 4 above the feet', 'control: a ceiling in sight')
+  assert.strictEqual(pillarProblemWith(ceiling, 3, [], ceiling), 'no headroom 4 above the feet', 'a ceiling over the pillar')
+  const ledge = column(1, 1, 64, 65)
+  assert.strictEqual(pillarProblemWith(ledge, 3, [], ledge), 'a step beside the pillar', 'a ledge beside the pillar')
+  const wall = column(1, 0, 64, 70)
+  assert.strictEqual(pillarProblemWith(wall), null, 'control: a wall in sight')
+  assert.strictEqual(pillarProblemWith(wall, 3, [], column(1, 0, 68, 70)), null, 'a wall whose top is out of sight')
+})
+
+test('a pillar takes snow over it for clear only in sight, and a snow layer seen before for a block', () => {
+  const snow = ['0,67,0']
+  assert.strictEqual(pillarProblemWith([], 3, [], [], snow), null, 'control: snow in sight')
+  assert.strictEqual(pillarProblemWith([], 3, [], snow, snow), 'no headroom 3 above the feet')
 })
 
 // ---- pillar height ----

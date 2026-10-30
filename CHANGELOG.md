@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-30: replies name only the blocks in sight
+
+Replies and decisions that named a block (lava, water, doors, floors, canopy, plan risk) went by
+the cell as the bot remembered it, so a block changed out of sight was named as it was. They now go
+by what the bot sees right now, while remembered geometry still plans walks, pillars and dig-ins.
+Bunker pillars keep remembered ceilings and walls. A swim that starts afloat stays afloat over
+water out of sight. `/map` answers `underground: null` when no cover is in sight.
+
 ## 2026-10-25: line of sight follows block shapes
 
 A drop on a slab floor read as out of sight to the bot standing on the same floor, since every block

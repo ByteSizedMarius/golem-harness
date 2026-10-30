@@ -2,7 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
-const { loadBotFunctions, runRoute } = require('./helpers')
+const { botConstant, loadBotFunctions, runRoute } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty' }
 const STONE = { name: 'stone', boundingBox: 'block' }
@@ -10,7 +10,8 @@ const ck = (x, y, z) => x + ',' + y + ',' + z
 const door = (open) => ({ name: 'oak_door', boundingBox: 'block', getProperties: () => ({ open }) })
 
 // A 5x5 stone room on open ground (floor y 63, roof y 66), doorway in the east wall at z 0, the body at its centre.
-function room (doorway, known = () => true) {
+// known and seenNow stand in for the bot's memory and its sight now.
+function room (doorway, known = () => true, seenNow = () => true) {
   const blockAt = (p) => {
     const inside = Math.abs(p.x) <= 2 && Math.abs(p.z) <= 2
     if (p.y <= 63) return STONE
@@ -25,15 +26,17 @@ function room (doorway, known = () => true) {
     ck,
     Vec3,
     INDOORS: new Map(),
+    OPENABLE: botConstant('OPENABLE'),
     cellKnown: known,
     knownCell: known,
+    seenNow,
     heldLight: () => ({ light: 0, skyLight: 0 })
   }
   return env
 }
 
-function coverIn (doorway, known) {
-  const { coverPhrase, overheadCover } = loadBotFunctions(['coverPhrase', 'overheadCover'], room(doorway, known))
+function coverIn (doorway, known, seenNow) {
+  const { coverPhrase, overheadCover } = loadBotFunctions(['coverPhrase', 'overheadCover'], room(doorway, known, seenNow))
   return coverPhrase(overheadCover())
 }
 
@@ -41,6 +44,11 @@ test('a way out to open ground ends indoors', () => {
   assert.match(coverIn('closed'), /Indoors/, 'control: a closed door')
   assert.doesNotMatch(coverIn('none'), /Indoors/, 'an empty doorway')
   assert.doesNotMatch(coverIn('open'), /Indoors/, 'an open door')
+})
+
+test('a door known but out of sight now does not read closed', () => {
+  assert.match(coverIn('closed'), /Indoors/, 'control: the door in sight')
+  assert.doesNotMatch(coverIn('closed', undefined, (p) => !(p.x === 2 && p.z === 0)), /Indoors/)
 })
 
 test('a roof not seen in full does not read indoors', () => {

@@ -142,6 +142,7 @@ function sources (over = {}) {
     nametag: () => false,
     visibleBlock: () => null,
     cellKnown: () => true,
+    seenNow: () => true,
     ...over
   }
 }
@@ -467,6 +468,8 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     resolveBlockIds: () => [1],
     cellKnown: () => true,
     knownCell: () => true,
+    // The bot sees now what it knows unless over says otherwise.
+    seenNow: over.cellKnown || (() => true),
     hasLegalMove: () => true,
     airPrecheck: () => ({ verdict: 'connected' }),
     doorwayCommit: async () => false,
@@ -874,7 +877,7 @@ test('a /goto into a rock column beside the bot replies no-floor only when it kn
   assert.deepStrictEqual([unseen.arrived, unseen.reason, unseen.edge], [false, 'unseen-way', { x: 1, y: 40, z: 0 }])
 })
 
-test('a /goto into a known wall cell beside a dark tunnel names the block, and an unseen wall cell stays unseen-way', async () => {
+test('a /goto into a known wall cell beside a dark tunnel names the block only in sight, and an unseen wall cell stays unseen-way', async () => {
   // A 1-wide tunnel along x at z -17 in stone, the bot at the centre of its cell 10,15,-17.
   const tunnel = (p) => p.z === -17 && (p.y === 15 || p.y === 16) && p.x >= 0 && p.x <= 15
   const sides = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
@@ -887,10 +890,13 @@ test('a /goto into a known wall cell beside a dark tunnel names the block, and a
     bot.blockAt = (p) => ({ ...(tunnel(p) ? AIR : STONE), position: p })
     bot.entity.position = new Vec3(10.5, 15, -16.5)
   }
-  const replyFor = (cellKnown) => goto({ x: 11, y: 15, z: -16, range: 1 }, { setup, over: { cellKnown, knownCell: cellKnown, WALK_HINTS: botObject('WALK_HINTS', { BUNKER_WALK: '' }) } })
+  const replyFor = (cellKnown, seenNow = cellKnown) => goto({ x: 11, y: 15, z: -16, range: 1 }, { setup, over: { cellKnown, knownCell: cellKnown, seenNow, WALK_HINTS: botObject('WALK_HINTS', { BUNKER_WALK: '' }) } })
   const known = await replyFor(dark)
   assert.deepStrictEqual([known.arrived, known.reason, known.hint, known.edge],
     [false, 'solid', 'the cell is stone: a goto names the feet cell, pick the open cell beside it', undefined])
+  const remembered = await replyFor(dark, (p) => dark(p) && !(p.x === 11 && p.y === 15 && p.z === -16))
+  assert.deepStrictEqual([remembered.reason, remembered.hint, remembered.edge],
+    ['solid', 'the cell is a solid block out of sight now: a goto names the feet cell, pick the open cell beside it', undefined], 'a wall cell seen before and out of sight now')
   const unseen = await replyFor((p) => dark(p) && !(p.x === 11 && p.y === 15 && p.z === -16))
   assert.deepStrictEqual([unseen.reason, unseen.edge], ['unseen-way', { x: 11, y: 15, z: -16 }], 'an unseen block is never named')
   assert.doesNotMatch(unseen.hint, /stone/)
@@ -1105,6 +1111,17 @@ test('a preview through terrain the bot has not seen reports only the part it kn
   assert.ok(!JSON.stringify(r).includes('59'), 'the cave floor stays hidden')
   const walked = await plannedGoto({ x: 5, z: 0 }, {}, { over: { planPath: cave, ...seen }, answer: arrive })
   assert.deepStrictEqual([walked.walks, walked.r.reason], [1, null], 'the hidden drop raises no refusal')
+})
+
+test('a goto counts deep water only where the bot sees it now, so a lake out of sight raises no swim', async () => {
+  // A lake 3 deep at x 10 to 16 on z 0, its surface at y 63. The plan swims across it.
+  const WATER = block('water', 'empty')
+  const setup = (bot) => { bot.blockAt = (p) => (p.z === 0 && p.x >= 10 && p.x <= 16 && p.y >= 61 && p.y <= 63 ? WATER : p.y <= 63 ? STONE : AIR) }
+  const across = async (g) => ({ status: 'success', path: Array.from({ length: 20 }, (_, i) => new Vec3(i + 1.5, i >= 9 && i <= 15 ? 63 : 64, 0.5)).concat([new Vec3(g.x + 0.5, g.y, g.z + 0.5)]) })
+  const lit = await plannedGoto({ x: 20, z: 0 }, {}, { setup, over: { planPath: across }, answer: arrive })
+  assert.deepStrictEqual([lit.walks, lit.r.reason, lit.r.risk], [0, 'risky', 'it swims 7 blocks of deep water'], 'control: the lake in sight')
+  const dark = await plannedGoto({ x: 20, z: 0 }, {}, { setup, over: { planPath: across, seenNow: (p) => p.x < 3 }, answer: arrive })
+  assert.deepStrictEqual([dark.walks, dark.r.reason, dark.r.risk], [1, null, undefined])
 })
 
 test('a preview of a failed search leaves reaches unknown, since unseen terrain may still hold a way', async () => {
