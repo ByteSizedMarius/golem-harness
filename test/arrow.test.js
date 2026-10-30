@@ -108,24 +108,35 @@ test('a sourceless hit by an in-range arrow with no shooter in sight reads as an
 // The attribution of a sourceless hit at the last of swings, the times player Steve, 2 east of a body at the origin,
 // swung his arm facing yaw, with a zombie at hostileX on the body's row. seen says whether the body perceives Steve.
 // tracked is when his entity appeared, null for never. burning sets the body's on-fire flag. fight holds the attribution before the hit.
-// cells holds the blocks in the body's feet and head cells. respawn kills and respawns the body before the hit. aggro gets the confirmed attackers.
+// cells holds the blocks in the body's feet and head cells. respawn respawns the body before the hit, after a death at
+// health 0, after a dimension change above it, out of the End with leftEnd. aggro gets the confirmed attackers.
+// others are more hostiles. beforeHit(bot, body) runs 50 ms before the hit. duringWait(bot, body) runs while the
+// attribution waits for a swing, an arrow or a knockback. With later, a list of [ms, step], each step(bot, body) runs
+// ms after the hit instead, the waits' timers firing at their times.
 async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, seen = true, tracked = 0, burning = false,
-  fight = { damageTypes: ['generic'], lastAttrib: null }, cells = {}, respawn = false, aggro = new Map() } = {}) {
+  fight = { damageTypes: ['generic'], lastAttrib: null }, cells = {}, respawn = false, leftEnd = false, health = 20, aggro = new Map(),
+  others = [], beforeHit = null, duringWait = () => {}, later = null } = {}) {
   const clock = { now: 0 }
   const body = { id: 1, position: new Vec3(0.5, 64, 0.5), metadata: [burning ? 0x01 : 0] }
   const steve = { id: 2, type: 'player', username: 'Steve', yaw, position: new Vec3(2.5, 64, 0.5) }
   const zombie = { id: 3, name: 'zombie', position: new Vec3(hostileX, 64, 0.5) }
   const blockAt = (p) => (p.x === 0 && p.z === 0 && { 64: cells.feet, 65: cells.head }[p.y]) || null
-  const bot = Object.assign(new EventEmitter(), { entity: body, entities: {}, _client: new EventEmitter(), blockAt })
+  const game = { dimension: leftEnd ? 'the_end' : 'overworld' }
+  const bot = Object.assign(new EventEmitter(), { entity: body, entities: {}, _client: new EventEmitter(), blockAt, health, game })
   const fill = { cells: new Set() }
+  const timers = []
   const ctx = loadBotFunctions(['wireArmSwings', 'wireDamageAttribution'], {
     bot,
     fight,
     Date: { now: () => clock.now },
-    setTimeout: (fn) => fn(),
+    setTimeout: (fn, ms) => {
+      if (later) return timers.push({ at: clock.now + ms, fn })
+      duringWait(bot, body)
+      fn()
+    },
     console: { log () {} },
-    liveEntities: () => [steve, zombie],
-    nearestHostile: () => zombie,
+    liveEntities: () => [steve, zombie, ...others],
+    mobClass: (e) => (e.type === 'player' ? 'player' : 'hostile'),
     reflexes: [{ name: 'combat', fairFill: () => fill }],
     entityPerceptible: (e, f) => {
       assert.strictEqual(f, fill, 'entityPerceptible got another fill')
@@ -136,14 +147,17 @@ async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, 
     AGGRO_CONFIRMED: aggro,
     damageTypeMissed: false,
     LEGACY_1710: false,
-    ...Object.fromEntries(['SWING_MS', 'SWING_GAP_MS', 'SWING_FACING', 'ARROW_FLIGHT_MS', 'ARROW_HIT_MS', 'ARROW_RANGE']
+    Vec3,
+    ...Object.fromEntries(['SWING_MS', 'SWING_GAP_MS', 'SWING_FACING', 'ARROW_FLIGHT_MS', 'ARROW_HIT_MS', 'ARROW_RANGE', 'KNOCK_SPEED', 'KNOCK_CONE', 'KNOCK_MS']
       .map(name => [name, botConstant(name)]))
   })
   ctx.wireArmSwings()
   ctx.wireDamageAttribution()
+  bot.emit('login')
   bot.emit('spawn')
   if (respawn) {
-    bot.emit('death')
+    if (!health) bot.emit('death')
+    game.dimension = leftEnd ? 'overworld' : 'the_nether'
     bot.emit('respawn')
   }
   if (tracked !== null) {
@@ -154,9 +168,36 @@ async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, 
     clock.now = t
     bot.emit('entitySwingArm', steve)
   }
+  if (beforeHit) {
+    beforeHit(bot, body)
+    clock.now += 50
+  }
   bot._client.emit('damage_event', { entityId: body.id, sourceTypeId: 0, sourceCauseId: 0, sourceDirectId: 0 })
+  if (later) await stepThrough(clock, timers, later.map(([ms, step]) => [ms, () => step(bot, body)]))
   await fight.swingWait
   return fight.lastAttrib && fight.lastAttrib.desc
+}
+
+// Runs each [ms, step] of steps ms after clock.now and each { at, fn } of timers at its time, in time order, settling
+// the promises after each and setting clock.now to the time it runs at.
+async function stepThrough (clock, timers, steps) {
+  const start = clock.now
+  const settle = () => new Promise(r => setImmediate(r))
+  const due = async (at) => {
+    for (const timer of timers.filter(x => x.at <= at).sort((a, b) => a.at - b.at)) {
+      timers.splice(timers.indexOf(timer), 1)
+      clock.now = timer.at
+      timer.fn()
+      await settle()
+    }
+    clock.now = at
+  }
+  for (const [ms, step] of steps) {
+    await due(start + ms)
+    step()
+    await settle()
+  }
+  await due(Infinity)
 }
 
 test('a sourceless hit names a player whose lone swing faced the body from no farther than the nearest hostile', async () => {
@@ -225,19 +266,201 @@ test('a sourceless hit with the feet in fire or the head in lava is theirs befor
 test('the on-fire flag of a body that died burning ends with the respawn', async () => {
   const noSwing = { tracked: null, swings: [], burning: true }
   assert.strictEqual(await swingHit(noSwing), 'no attacker named, on fire', 'control: no respawn')
-  assert.strictEqual(await swingHit({ ...noSwing, respawn: true }), 'zombie W ~3 (nearest hostile)')
+  assert.strictEqual(await swingHit({ ...noSwing, respawn: true, health: 0 }), 'zombie W ~3 (nearest hostile)')
+})
+
+test('the on-fire flag of a burning body outlasts a portal into another dimension but not the way out of the End', async () => {
+  const portal = { tracked: null, swings: [], burning: true, respawn: true, health: 20 }
+  assert.strictEqual(await swingHit(portal), 'no attacker named, on fire', 'control: into the nether')
+  assert.strictEqual(await swingHit({ ...portal, leftEnd: true }), 'zombie W ~3 (nearest hostile)')
+})
+
+// The server's velocity for the entity with id, x and z across in blocks per tick.
+const push = (x, z, id = 1) => (bot) => bot._client.emit('entity_velocity', { entityId: id, velocity: { x, y: 0.36, z } })
+
+test('a knockback that arrives late still names the hostile, the moment it arrives', async () => {
+  const fight = { damageTypes: ['generic'], lastAttrib: null }
+  const waiting = []
+  const look = () => waiting.push(!!fight.swingWait)
+  await swingHit({ tracked: null, swings: [], seen: false, burning: true, fight, later: [[119, look], [120, push(0.4, 0)], [121, look]] })
+  assert.deepStrictEqual({ desc: fight.lastAttrib.desc, waiting }, { desc: 'zombie W ~3 (knockback)', waiting: [true, false] })
+})
+
+test('a knockback names the hostile it points away from, and no other', async () => {
+  const burning = { tracked: null, swings: [], seen: false, burning: true }
+  const skeleton = { id: 4, name: 'skeleton', position: new Vec3(0.5, 64, 2.5) }
+  const spider = { id: 5, name: 'spider', position: new Vec3(0.5, 66, 0.5) }
+  const creeper = { id: 6, name: 'creeper', position: new Vec3(0.5 - 2 * Math.cos(Math.PI / 8), 64, 0.5 + 2 * Math.sin(Math.PI / 8)) }
+  // A push of 0.4 across, deg degrees off the line from the zombie.
+  const off = (deg) => push(0.4 * Math.cos(deg * Math.PI / 180), 0.4 * Math.sin(deg * Math.PI / 180))
+  for (const [label, row, desc] of [
+    ['toward the zombie', { duringWait: push(-0.4, 0) }, 'no attacker named, on fire'],
+    ['across the line from the zombie', { duringWait: push(0, 0.4) }, 'no attacker named, on fire'],
+    ['70 degrees off the line from the zombie', { duringWait: off(70) }, 'no attacker named, on fire'],
+    ['50 degrees off the line from the zombie', { duringWait: off(50) }, 'zombie W ~3 (knockback)'],
+    ['away from the zombie, a spider right above the body', { others: [spider], duringWait: push(0.4, 0) }, 'zombie W ~3 (knockback)'],
+    ['straight away from the zombie, 22 degrees off a nearer creeper', { others: [creeper], duringWait: push(0.4, 0) }, 'zombie W ~3 (knockback)'],
+    ['away from the farther zombie', { others: [skeleton], duringWait: push(0.4, 0) }, 'zombie W ~3 (knockback)'],
+    ['away from the nearer skeleton', { others: [skeleton], duringWait: push(0, -0.4) }, 'skeleton S ~2 (knockback)'],
+    ['away from the zombie alone', { duringWait: push(0.4, 0) }, 'zombie W ~3 (knockback)']
+  ]) {
+    assert.strictEqual(await swingHit({ ...burning, ...row }), desc, label)
+  }
+})
+
+test('a velocity names no hostile when it is another entity\'s, arrived before the hit or is too slow for a knockback', async () => {
+  const burning = { tracked: null, swings: [], seen: false, burning: true }
+  for (const [label, row] of [
+    ['another entity\'s', { duringWait: push(0.4, 0, 3) }],
+    ['before the hit', { beforeHit: push(0.4, 0) }],
+    ['under 0.2 across', { duringWait: push(0.15, 0) }]
+  ]) {
+    assert.strictEqual(await swingHit({ ...burning, ...row }), 'no attacker named, on fire', label)
+  }
+})
+
+test('a knockback 200 ms after the hit comes too late, the wait ending at 150 ms', async () => {
+  const fight = { damageTypes: ['generic'], lastAttrib: null }
+  const waiting = []
+  const look = () => waiting.push(!!fight.swingWait)
+  await swingHit({ tracked: null, swings: [], seen: false, burning: true, fight, later: [[149, look], [151, look], [200, push(0.4, 0)]] })
+  assert.deepStrictEqual({ desc: fight.lastAttrib.desc, waiting }, { desc: 'no attacker named, on fire', waiting: [true, false] })
+})
+
+test('a velocity packet the attribution fails on throws nothing back at the client', async () => {
+  const others = []
+  const broken = (bot) => {
+    others.push({ id: 9, name: 'zombie', position: {} })
+    push(0.4, 0)(bot)
+  }
+  await assert.doesNotReject(swingHit({ tracked: null, swings: [], seen: false, burning: true, others, later: [[50, broken]] }))
+})
+
+// The attribution of a sourceless hit at food 0 on a body at health hp on difficulty, with a zombie 2 west of it when
+// hostile. The health update taking drop arrives update ms after the hit, none with null. landed lands the body from a
+// fall 200 ms before the hit. Each [ms, step] of steps runs step(bot, fight) ms after the hit.
+async function starveHit ({ hp, difficulty = 'easy', drop = 1, update = 0, landed = false, hostile = false, steps = [] }) {
+  const clock = { now: 10000 }
+  const zombie = { id: 3, name: 'zombie', position: new Vec3(-1.5, 64, 0.5) }
+  const body = { id: 1, position: new Vec3(0.5, 64, 0.5), onGround: true, metadata: [0] }
+  const bot = Object.assign(new EventEmitter(), { entity: body, entities: {}, _client: new EventEmitter(), blockAt: () => null, health: hp, food: 0, game: { difficulty } })
+  const fight = { damageTypes: ['generic'], lastAttrib: null }
+  const fill = { cells: new Set() }
+  const timers = []
+  const ctx = loadBotFunctions(['wireDamageAttribution'], {
+    bot,
+    fight,
+    Vec3,
+    LEGACY_1710: false,
+    Date: { now: () => clock.now },
+    setTimeout: (fn, ms) => timers.push({ at: clock.now + ms, fn }),
+    console: { log () {} },
+    liveEntities: () => (hostile ? [zombie] : []),
+    mobClass: () => 'hostile',
+    reflexes: [{ name: 'combat', fairFill: () => fill }],
+    entityPerceptible: () => true,
+    playersNear: () => [],
+    arrows: new Map(),
+    AGGRO_CONFIRMED: new Map(),
+    damageTypeMissed: false,
+    ...Object.fromEntries(['SWING_MS', 'KNOCK_SPEED', 'KNOCK_CONE', 'KNOCK_MS'].map(name => [name, botConstant(name)]))
+  })
+  ctx.wireDamageAttribution()
+  bot.emit('spawn')
+  if (landed) {
+    body.onGround = false
+    bot.emit('move')
+    body.onGround = true
+    bot.emit('move')
+  }
+  clock.now += 200
+  bot._client.emit('damage_event', { entityId: 1, sourceTypeId: 0, sourceCauseId: 0, sourceDirectId: 0 })
+  const health = () => {
+    bot.health -= drop
+    bot.emit('health')
+  }
+  const all = [...(update === null ? [] : [[update, health]]), ...steps.map(([ms, step]) => [ms, () => step(bot, fight)])]
+  await stepThrough(clock, timers, all.sort((a, b) => a[0] - b[0]))
+  await fight.swingWait
+  return fight.lastAttrib && fight.lastAttrib.desc
+}
+
+test('a sourceless hit at food 0 is starvation only at a health the server starves on its difficulty', async () => {
+  for (const [label, row, desc] of [
+    ['control: 12 on easy', { hp: 12 }, 'no attacker named, starving'],
+    ['control: 10 on normal', { hp: 10, difficulty: 'normal' }, 'no attacker named, starving'],
+    ['control: 1 on hard', { hp: 1, difficulty: 'hard' }, 'no attacker named, starving'],
+    ['10 on easy', { hp: 10 }, 'no attacker named, no hostile within 4'],
+    ['1 on normal', { hp: 1, difficulty: 'normal' }, 'no attacker named, no hostile within 4']
+  ]) {
+    assert.strictEqual(await starveHit(row), desc, label)
+  }
+})
+
+test('a sourceless hit at food 0 that takes more than 1 is no starvation', async () => {
+  assert.strictEqual(await starveHit({ hp: 12, drop: 3 }), 'no attacker named, no hostile within 4')
+  assert.strictEqual(await starveHit({ hp: 12, drop: 3, hostile: true }), 'zombie W ~2 (nearest hostile)')
+})
+
+test('a sourceless hit at food 0 stays starvation when its health update comes after the wait or never', async () => {
+  for (const [label, row] of [
+    ['control: an update at once beside a hostile', { hostile: true }],
+    ['an update 200 ms after the hit beside a hostile', { hostile: true, update: 200 }],
+    ['no update beside a hostile', { hostile: true, update: null }],
+    ['no update and no hostile', { update: null }]
+  ]) {
+    assert.strictEqual(await starveHit({ hp: 12, ...row }), 'no attacker named, starving', label)
+  }
+})
+
+test('the health update of a starvation hit ends the wait', async () => {
+  for (const hostile of [false, true]) {
+    const waiting = []
+    const look = (bot, fight) => waiting.push(!!fight.swingWait)
+    const desc = await starveHit({ hp: 12, hostile, update: 20, steps: [[19, look], [21, look]] })
+    assert.deepStrictEqual({ desc, waiting }, { desc: 'no attacker named, starving', waiting: [true, false] }, `hostile ${hostile}`)
+  }
+})
+
+test('a sourceless hit at food 0 right after a fall is no starvation', async () => {
+  assert.strictEqual(await starveHit({ hp: 12, landed: true }), 'no attacker named, no hostile within 4')
+})
+
+test('a body that catches fire while the hit waits for a swing keeps the cause read at the hit', async () => {
+  const ignite = (bot, body) => { body.metadata[0] |= 0x01 }
+  assert.strictEqual(await swingHit({ swings: [] }), 'zombie W ~3 (nearest hostile)', 'control: no fire')
+  assert.strictEqual(await swingHit({ swings: [], duringWait: ignite }), 'zombie W ~3 (nearest hostile)')
+})
+
+test('a hit on a burning body with a hostile near is the hostile\'s when knockback follows it', async () => {
+  // The server's velocity for the body, in blocks per tick: a burn tick sends its leftover motion, a hit by an entity knockback.
+  const velocity = (v) => (bot, body) => bot._client.emit('entity_velocity', { entityId: body.id, velocity: v })
+  const before = 'zombie W ~3 (nearest hostile)'
+  for (const [label, duringWait, want] of [
+    ['control: no velocity', undefined, { desc: before, t: -1000, envHit: true }],
+    ['a burn tick', velocity({ x: 0, y: -0.0784, z: 0 }), { desc: before, t: -1000, envHit: true }],
+    ['knockback from the zombie', velocity({ x: 0.4, y: 0.36, z: 0 }), { desc: 'zombie W ~3 (knockback)', t: 0, envHit: undefined }]
+  ]) {
+    const fight = { damageTypes: ['generic'], lastAttrib: { t: -1000, desc: before, entity: null, ranged: false } }
+    await swingHit({ tracked: null, swings: [], seen: false, burning: true, fight, duringWait })
+    const a = fight.lastAttrib
+    assert.deepStrictEqual({ desc: a.desc, t: a.t, envHit: a.envHit }, want, label)
+  }
 })
 
 // The attribution of a hit with no source entity and damage type typeId, from a registry of generic (0) and fall (1),
 // with no hostile, player or arrow near.
 function noSourceHit (typeId) {
-  const bot = Object.assign(new EventEmitter(), { entity: { id: 1 }, entities: {}, _client: new EventEmitter() })
+  const bot = Object.assign(new EventEmitter(), { entity: { id: 1, position: new Vec3(0.5, 64, 0.5) }, entities: {}, _client: new EventEmitter(), blockAt: () => null })
   const fight = { damageTypes: ['generic', 'fall'], lastAttrib: null }
   const ctx = loadBotFunctions(['wireDamageAttribution'], {
     bot,
     fight,
+    Vec3,
+    LEGACY_1710: false,
     console: { log () {} },
-    nearestHostile: () => undefined,
+    liveEntities: () => [],
+    mobClass: () => 'hostile',
     playersNear: () => [],
     arrows: new Map(),
     damageTypeMissed: false
