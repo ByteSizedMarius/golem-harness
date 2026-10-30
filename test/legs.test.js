@@ -9,6 +9,7 @@ const { routeDeadline } = require('../lib/walk')
 const { isDoor, doorCrossing } = require('../lib/doors')
 const { entityInCell } = require('../lib/shelter')
 const Block = require('prismarine-block')('1.21.11')
+const { SPRINT_FLOOR } = require('../lib/sprint')
 const { loadBotFunctions, combatReflexIn, awaitRoute, routeHandler, laneAt, botConstant, walkingBody, wireListeners } = require('./helpers')
 
 const KLASSES = ['discretionary', 'interrupt', 'emergency']
@@ -271,6 +272,7 @@ async function meleeSwing ({ chase, goal }) {
     drawAndLoose: async () => false,
     perchStrike: () => false,
     holdRun: { on: false },
+    SPRINT_FLOOR,
     strikeRun: { lane: null },
     // The zombie dies after the first swing.
     setTimeout: (fn) => {

@@ -4,9 +4,10 @@ const assert = require('node:assert')
 const { EventEmitter, once } = require('node:events')
 const { Vec3 } = require('vec3')
 const mineflayer = require('mineflayer')
-const { pathfinder } = require('mineflayer-pathfinder')
-const { noJumpReason, passedNodes, step, RUN, MIN_FOOD } = require('../lib/sprint')
-const { loadBotFunctions } = require('./helpers')
+const { pathfinder, goals } = require('mineflayer-pathfinder')
+const { noJumpReason, passedNodes, step, RUN, MIN_FOOD, SPRINT_FLOOR, sprintAllowed, sprintGap, gapAhead } = require('../lib/sprint')
+const { walkAttempt } = require('../lib/walk')
+const { loadBotFunctions, walkingBody } = require('./helpers')
 
 const EAST = { dx: 1, dz: 0 }
 
@@ -76,8 +77,8 @@ test('it never jumps over a field or where a hop lands on one', () => {
 
 test('it never jumps in water, hungry, in a fight, off the ground, or off the line', () => {
   assert.strictEqual(jumps({ inWater: true }), false)
-  assert.strictEqual(jumps({ food: MIN_FOOD - 1 }), false)
-  assert.strictEqual(jumps({ food: MIN_FOOD }), true, `control: food ${MIN_FOOD}`)
+  assert.strictEqual(jumps({ food: SPRINT_FLOOR }), false)
+  assert.strictEqual(jumps({ food: SPRINT_FLOOR + 1 }), true, `control: food ${SPRINT_FLOOR + 1}`)
   assert.strictEqual(jumps({ fighting: true }), false)
   assert.strictEqual(jumps({ onGround: false }), false)
   assert.strictEqual(jumps({ pos: new Vec3(0.5, 64, 1.5) }), false, 'a block to the side')
@@ -119,7 +120,7 @@ function sprintBot (path, { sprint = true, moving = true, pos = new Vec3(0.5, 64
   const env = {
     bot, shared: { ready: true }, livePath: path, hopping: false, hopDir: null, jumpHeld: false, sprintSaid: { line: null, goal: null, at: 0 },
     reflexes: [{ name: 'combat', active: false, _fleeUntil: 0 }], noJumpReason, passedNodes, nodeStep: step,
-    console: { log: (s) => logs.push(s) }, Date: { now: () => clock.t }, closeDoorsBehind () {}
+    console: { log: (s) => logs.push(s) }, Date: { now: () => clock.t }, closeDoorsBehind () {}, sprintGapCheck () {}
   }
   const ctx = loadBotFunctions(['sprintTick', 'skipPassedNodes', 'wirePathfinderTicks', 'beforePathfinder', 'afterPathfinder'], env)
   return { env, controls, ctx, logs, clock, setMoving: (m) => { moving = m } }
@@ -214,7 +215,7 @@ test('under the real plugin loader the hop hooks run around the pathfinder\'s ow
   client.end = () => {}
   const bot = mineflayer.createBot({ client, username: 'Claude', loadInternalPlugins: false })
   bot.loadPlugin(pathfinder)
-  const ctx = loadBotFunctions(['wirePathfinderTicks', 'beforePathfinder', 'afterPathfinder'], { bot })
+  const ctx = loadBotFunctions(['wirePathfinderTicks', 'beforePathfinder', 'afterPathfinder'], { bot, sprintGapCheck () {} })
   ctx.wirePathfinderTicks()
   await once(bot, 'inject_allowed')
   const ticks = bot.listeners('physicsTick')
@@ -222,4 +223,174 @@ test('under the real plugin loader the hop hooks run around the pathfinder\'s ow
   assert.ok(own >= 0, 'control: the pathfinder listens to physicsTick')
   assert.ok(ticks.indexOf(ctx.beforePathfinder) < own, 'the passed-node splice runs before the pathfinder steers')
   assert.ok(ticks.indexOf(ctx.afterPathfinder) > own, 'the hop runs after the pathfinder set its control states')
+})
+
+test('a goto walk sprints above the food floor or in a fight from food 7, any other walk from food 7', () => {
+  const rows = [
+    [SPRINT_FLOOR + 1, true, false, true],
+    [SPRINT_FLOOR, true, false, false],
+    [MIN_FOOD, true, true, true],
+    [MIN_FOOD, false, false, true],
+    [MIN_FOOD - 1, false, true, false]
+  ]
+  for (const [food, goto, fighting, sprints] of rows) {
+    assert.strictEqual(sprintAllowed({ food, goto, fighting }), sprints, `food ${food}, goto ${goto}, fighting ${fighting}`)
+  }
+})
+
+const parkour = (x, y, z) => ({ ...node(x, y, z), parkour: true })
+
+// sprintSwitch of bot.js over a fake bot at pos with path left to walk, on the walk of a goto route unless goto is
+// false.
+function switchBot ({ path = east(6), food = 20, goto = true, fighting = false, onGround = true, inWater = false, hopping = false, moving = true, pos = new Vec3(0.5, 64, 0.5) } = {}) {
+  const goal = {}
+  const replans = []
+  let movements = { allowSprinting: true }
+  const bot = new EventEmitter()
+  Object.assign(bot, {
+    food,
+    entity: { position: pos, onGround, isInWater: inWater },
+    pathfinder: {
+      goal,
+      isMoving: () => moving,
+      get movements () { return movements },
+      setMovements (m) { movements = m; replans.push(m) }
+    }
+  })
+  const env = {
+    bot, livePath: path, hopping, gotoRoute: goto ? { goal } : null, sprintReplans: 0, staleGap: false,
+    reflexes: [{ name: 'combat', fightBusy: () => fighting }], sprintAllowed, gapAhead
+  }
+  const ctx = loadBotFunctions(['sprintSwitch', 'sprintGapCheck'], env)
+  return { bot, env, ctx, replans, swap: (m) => { movements = m } }
+}
+
+test('a follow walk at food 10 sprints, and so does a walk that took over from a goto', () => {
+  const follow = switchBot({ food: 10, goto: false })
+  follow.ctx.sprintSwitch()
+  assert.strictEqual(follow.bot.pathfinder.movements.allowSprinting, true)
+  const flee = switchBot({ food: 10 })
+  flee.bot.pathfinder.goal = {}
+  flee.ctx.sprintSwitch()
+  assert.strictEqual(flee.bot.pathfinder.movements.allowSprinting, true)
+  const goto = switchBot({ food: 10 })
+  goto.ctx.sprintSwitch()
+  assert.strictEqual(goto.bot.pathfinder.movements.allowSprinting, false, 'control: the goto walk')
+})
+
+test('a goto at food 10 plans without sprinting while the pathfinder has no goal', () => {
+  const h = switchBot({ food: 10, moving: false })
+  h.bot.pathfinder.goal = null
+  h.ctx.sprintSwitch()
+  assert.strictEqual(h.bot.pathfinder.movements.allowSprinting, false)
+})
+
+test('the sprint switch sets the movements the pathfinder walks on now, also after they were swapped', () => {
+  const h = switchBot({ food: SPRINT_FLOOR })
+  h.ctx.sprintSwitch()
+  assert.strictEqual(h.bot.pathfinder.movements.allowSprinting, false)
+  const swapped = { allowSprinting: true }
+  h.swap(swapped)
+  h.ctx.sprintSwitch()
+  assert.strictEqual(swapped.allowSprinting, false)
+  h.bot.food = SPRINT_FLOOR + 1
+  h.ctx.sprintSwitch()
+  assert.strictEqual(swapped.allowSprinting, true, 'a raise applies at once')
+})
+
+test('a lowered sprint waits while the body is in the air, in water, mid-hop or before a parkour jump', () => {
+  const rows = [
+    ['in the air', { onGround: false }],
+    ['in water', { inWater: true }],
+    ['mid-hop', { hopping: true }],
+    ['before a 3 block jump', { path: [parkour(3, 64, 0), node(4, 64, 0)] }],
+    // Feet past the edge of the take-off block, over the first gap cell.
+    ['on the take-off edge of a 3 block jump', { pos: new Vec3(2.1, 64, 0.5), path: [parkour(4, 64, 0), node(5, 64, 0)] }]
+  ]
+  for (const [label, over] of rows) {
+    const h = switchBot({ food: SPRINT_FLOOR, ...over })
+    h.ctx.sprintSwitch()
+    assert.strictEqual(h.bot.pathfinder.movements.allowSprinting, true, label)
+  }
+  const walk = switchBot({ food: SPRINT_FLOOR })
+  walk.ctx.sprintSwitch()
+  assert.strictEqual(walk.bot.pathfinder.movements.allowSprinting, false, 'control: a walking step next')
+})
+
+test('an idle body at food 6 beside the jump of a path it no longer walks never sprints', () => {
+  const path = [parkour(3, 64, 0), node(4, 64, 0)]
+  const idle = switchBot({ food: MIN_FOOD - 1, goto: false, moving: false, path })
+  idle.ctx.sprintSwitch()
+  assert.strictEqual(idle.bot.pathfinder.movements.allowSprinting, false)
+  const walking = switchBot({ food: MIN_FOOD - 1, goto: false, path })
+  walking.ctx.sprintSwitch()
+  assert.strictEqual(walking.bot.pathfinder.movements.allowSprinting, true, 'control: the walk before the jump')
+})
+
+test('a lowered sprint replans once while a sprint jump is left on the path, never without one and never on a raise', () => {
+  const gap = switchBot({ food: SPRINT_FLOOR, path: [node(1, 64, 0), node(2, 64, 0), parkour(5, 64, 0)] })
+  gap.ctx.sprintSwitch()
+  gap.ctx.sprintSwitch()
+  assert.deepStrictEqual([gap.bot.pathfinder.movements.allowSprinting, gap.replans.length], [false, 1])
+  assert.strictEqual(gap.replans[0], gap.bot.pathfinder.movements, 'the replan keeps the movements')
+  const plain = switchBot({ food: SPRINT_FLOOR })
+  plain.ctx.sprintSwitch()
+  assert.deepStrictEqual([plain.bot.pathfinder.movements.allowSprinting, plain.replans.length], [false, 0])
+  const raised = switchBot({ path: [node(1, 64, 0), parkour(4, 64, 0)] })
+  raised.bot.pathfinder.movements.allowSprinting = false
+  raised.ctx.sprintSwitch()
+  assert.deepStrictEqual([raised.bot.pathfinder.movements.allowSprinting, raised.replans.length], [true, 0])
+})
+
+test('a path planned with a sprint jump after the lowering is replanned once more on the next tick', () => {
+  const h = switchBot({ food: SPRINT_FLOOR, path: [node(1, 64, 0), parkour(4, 64, 0)] })
+  h.ctx.sprintSwitch()
+  const update = (path) => {
+    h.ctx.sprintGapCheck({ status: 'success', path })
+    const now = h.replans.length
+    h.ctx.sprintSwitch()
+    return [now, h.replans.length]
+  }
+  assert.deepStrictEqual(update(east(4)), [1, 1], 'control: a path without a sprint jump')
+  assert.deepStrictEqual(update([node(1, 64, 0), parkour(4, 64, 0)]), [1, 2])
+  assert.deepStrictEqual(update([node(1, 64, 0), parkour(4, 64, 0)]), [2, 2])
+})
+
+test('a path over a two-cell gap holds a sprint jump only when planned with sprinting', async (t) => {
+  // A trench two cells wide across x 1 and 2.
+  const cells = {}
+  for (let z = -3; z <= 3; z++) for (const x of [1, 2]) for (let y = 55; y <= 63; y++) cells[`${x},${y},${z}`] = ['air', {}]
+  const { bot, plan } = await walkingBody(t, new Vec3(0.5, 64, 0.5), cells)
+  const goal = new goals.GoalBlock(4, 64, 0)
+  bot.pathfinder.movements.allowSprinting = true
+  const sprint = plan(goal)
+  assert.strictEqual(gapAhead([{ x: 0.5, z: 0.5 }, ...sprint.path]), true, `control: ${JSON.stringify(sprint.path)}`)
+  bot.pathfinder.movements.allowSprinting = false
+  const walked = plan(goal)
+  assert.strictEqual(gapAhead([{ x: 0.5, z: 0.5 }, ...walked.path]), false, JSON.stringify(walked.path))
+  // One cell wide, the jump a walk takes too.
+  assert.strictEqual(sprintGap({ x: 0.5, z: 0.5 }, parkour(2, 64, 0)), false)
+})
+
+test('a sprint replan on the real pathfinder leaves the walk attempt running on its goal', async (t) => {
+  const { bot } = await walkingBody(t, new Vec3(0.5, 64, 0.5))
+  const goal = new goals.GoalBlock(8, 64, 0)
+  const ends = []
+  for (const ev of ['goal_updated', 'path_stop']) bot.on(ev, () => ends.push(ev))
+  let how = null
+  const walk = walkAttempt(bot, goal, { stallMs: 4500, thinkTimeout: 10000 })
+  walk.then((h) => { how = h })
+  const env = {
+    bot, livePath: [node(1, 64, 0), parkour(4, 64, 0)], hopping: false, gotoRoute: { goal }, sprintReplans: 0, staleGap: false,
+    reflexes: [{ name: 'combat', fightBusy: () => false }], sprintAllowed, gapAhead
+  }
+  bot.food = SPRINT_FLOOR
+  bot.entity.onGround = true
+  bot.pathfinder.isMoving = () => true
+  loadBotFunctions(['sprintSwitch'], env).sprintSwitch()
+  assert.deepStrictEqual([bot.pathfinder.movements.allowSprinting, env.sprintReplans, bot.pathfinder.goal], [false, 1, goal])
+  await new Promise(setImmediate)
+  assert.deepStrictEqual([how, ends], [null, ['goal_updated']], 'only the walk attempt set the goal')
+  bot.pathfinder.setGoal(null)
+  await walk
 })

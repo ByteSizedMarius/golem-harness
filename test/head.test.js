@@ -5,6 +5,7 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const { EventEmitter } = require('node:events')
 const { headFree, smoothLook, TURN_DEG_S, FIGHT_TURN_DEG_S } = require('../lib/head')
+const { SPRINT_FLOOR } = require('../lib/sprint')
 const { combatReflexIn } = require('./helpers')
 
 const deg = (d) => d * Math.PI / 180
@@ -87,6 +88,7 @@ async function stareCycles (moving) {
     drawAndLoose: async () => false,
     perchStrike: () => false,
     holdRun: { on: false },
+    SPRINT_FLOOR,
     strikeRun: { lane: null },
     laneBlocks: () => false,
     laneNarrate () {},

@@ -5,6 +5,15 @@ and each says what happened and what the harness does now. A heading's date is t
 or the day of a release or removal, and the commit messages carry the detail.
 
 
+A long goto cost about 15 food, sprinting and sprint-jumping down to food 2, and `eat` was refused as
+busy while it ran. No walk sprints at food 6 or below any more, flees included. A goto sprints, and
+any walk sprint-jumps, only above food 14 (a goto in a fight sprints from food 7). A goto at food 14
+or less plans and walks without sprinting and stops to eat safe food when no fight, hostile in sight,
+job or rescue needs the body or the hand. Its reply lists the meals in `meals`, and `hungry` says why
+it ate no more.
+
+## 2026-10-30: bucket use waits for the bucket, and placeitem and digat stand clear
+
 A water bucket poured on an air cell answered that nothing changed, though the water showed a moment
 later and the bucket was empty. A bucket use now counts once the bucket in the selected hotbar slot
 turns, waiting up to 20 server ticks, and names no block for the cell while its update has not come.

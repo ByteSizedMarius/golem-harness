@@ -196,6 +196,22 @@ test('eat refuses busy and bites nothing once the buried self-rescue takes the h
   assert.strictEqual(b.bot.listenerCount('health'), 0)
 })
 
+test('eat puts nothing back once another action leases the hand mid-bite', async () => {
+  const b = body([stack('iron_sword', 1), stack('cooked_beef', 18), stack('torch', 4)], slotAt(0, 1, 17))
+  b.bot.heldItem = b.items[0]
+  const { holdHand } = loadBotFunctions(['holdHand'], { guardState: b.env.guardState, digLock: b.env.digLock, setTimeout: b.clock.setTimeout, clearTimeout: b.clock.clearTimeout })
+  const bite = b.bot.consume
+  b.bot.consume = async () => {
+    await bite()
+    holdHand()
+    b.bot.heldItem = b.items[2]
+  }
+  const res = await eat(b)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.strictEqual(res.body.ate, 'cooked_beef')
+  assert.strictEqual(b.bot.heldItem.name, 'torch')
+})
+
 // A body holding an iron sword whose bite, run by server, starts the bunker build. done records its equips and bites.
 function bunkerBite (server) {
   const b = body([stack('iron_sword', 1), stack('cooked_beef', 18)])

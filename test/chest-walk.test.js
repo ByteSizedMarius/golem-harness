@@ -9,6 +9,7 @@ const { planFlee, creeperCover, routeWithin, walkersTo, groundCell } = require('
 const { isDoor } = require('../lib/doors')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const rules = require('../lib/combat-rules')
+const { MIN_FOOD } = require('../lib/sprint')
 const { LEGACY_HIT_MS, RUN_COAST } = require('../lib/bot/legacy-1710')
 const { walkingBody, loadBotFunctions, combatReflexIn, botConstant } = require('./helpers')
 
@@ -169,6 +170,7 @@ test('a walk whose sprint stalled within a block of a sprint-only gap crosses th
 // The real combat reflex over body, as the flee tests run it.
 function fleeReflex (body) {
   const { bot } = body
+  bot.food = 20
   const legs = legLedger()
   const env = {
     bot,
@@ -205,7 +207,8 @@ function fleeReflex (body) {
     takeLegs: (reflex, why) => legs.take(reflex, why),
     stopPath () { bot.pathfinder.setGoal(null) },
     emitEvent () {},
-    LEGACY_1710: true
+    LEGACY_1710: true,
+    MIN_FOOD
   }
   loadBotFunctions(['fleeWorld', 'fleeLog', 'threatWhy', 'creeperSwelling', 'walksToBody', 'rangedInSight'], env)
   return { combat: combatReflexIn(env), env }

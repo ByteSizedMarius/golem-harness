@@ -7,6 +7,7 @@ const MC_DATA = require('minecraft-data')('1.21.11')
 const Block = require('prismarine-block')(require('prismarine-registry')('1.21.11'))
 const { fleeHeading, planFlee, creeperCover, routeWithin, walkersTo, walkFlood, groundCell } = require('../lib/flee')
 const { isDoor } = require('../lib/doors')
+const { MIN_FOOD, SPRINT_FLOOR } = require('../lib/sprint')
 const { expireConfirmed } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const vm = require('node:vm')
@@ -112,6 +113,7 @@ function fleeIn (w, threat, ally = null, over = {}) {
   const mark = legs.mark()
   const bot = {
     entity: { position: new Vec3(0.5, 64, 0.5) },
+    food: 20,
     blockAt: blockAt(w),
     pathfinder: { goal: null, setGoal (g) { this.goal = g } },
     controlState: {},
@@ -153,6 +155,7 @@ function fleeIn (w, threat, ally = null, over = {}) {
     stopPath () { bot.pathfinder.setGoal(null) },
     emitEvent: (kind, msg) => events.push({ kind, msg }),
     LEGACY_1710: false,
+    MIN_FOOD,
     ...over
   }
   loadBotFunctions(['fleeWorld', 'fleeLog', 'threatWhy', 'creeperSwelling', 'walksToBody', 'rangedInSight'], env)
@@ -382,6 +385,19 @@ test('the sprint of a cover move ends with its 1 s hold, and an earlier flee nev
   assert.strictEqual(far.bot.controlState.sprint, false, 'still sprinting 6 s after the second far flee')
 })
 
+test('a flee sprints from food 7, never at food 6', () => {
+  const r = fleeIn(plateau(), creeper(3.5, 64, 0.5))
+  for (const [food, sprint] of [[MIN_FOOD - 1, undefined], [MIN_FOOD, true]]) {
+    r.bot.food = food
+    r.bot.controlState = {}
+    r.bot.pathfinder.goal = null
+    r.combat._fleeUntil = 0
+    r.combat.fleeFrom(r.bot, creeper(3.5, 64, 0.5), null, 'emergency')
+    assert.ok(r.bot.pathfinder.goal, `control: food ${food} flees`)
+    assert.strictEqual(r.bot.controlState.sprint, sprint, `food ${food}`)
+  }
+})
+
 test('a flee from a threat the body does not perceive names no mob', () => {
   const r = fleeIn(plateau(), creeper(6.5, 66, 0.5, false))
   assert.ok(r.goal, 'control: the flee found a goal')
@@ -480,6 +496,7 @@ function creeperPass (w, at, hidden = null) {
     entityPerceptible: (en) => en.seen,
     entityEngageable: () => true,
     holdRun: { on: false },
+    SPRINT_FLOOR,
     emitEvent () {}
   }
   loadBotFunctions(['creeperRoute'], env)
@@ -588,6 +605,7 @@ async function hitNarration (seen) {
     walkFlood,
     entityPerceptible: (e) => e !== zombie || seen,
     strikeRun: { lane: null },
+    SPRINT_FLOOR,
     laneBlocks: () => false,
     takeLegs () {},
     stopPath () {},
@@ -642,6 +660,7 @@ async function meleePass ({ seen = true, pack = [], players = [] } = {}) {
     inMeleeReach: () => false,
     perchStrike: () => false,
     holdRun: { on: false },
+    SPRINT_FLOOR,
     strikeRun: { lane: null },
     headFree: () => { delete bot.entities[4]; return false },
     setTimeout: (fn) => fn(),
@@ -714,6 +733,7 @@ function coverFrom ({ moved = null, known = () => true, kelp = () => false }) {
     AGGRO_CONFIRMED: new Map([[5, { name: 'skeleton', t: Date.now(), ranged: true }]]),
     bunker: { building: false },
     holdRun: { on: false },
+    SPRINT_FLOOR,
     liveEntities: () => [skeleton],
     mobClass: () => 'hostile',
     perchStrike: () => false,

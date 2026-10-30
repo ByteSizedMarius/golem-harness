@@ -9,6 +9,7 @@ const { isDoor } = require('../lib/doors')
 const { takenText } = require('../lib/leg-ledger')
 const rules = require('../lib/combat-rules')
 const legacy1710 = require('../lib/bot/legacy-1710')
+const { SPRINT_FLOOR } = require('../lib/sprint')
 const { loadBotFunctions, fakeClock, combatReflexIn, botConstant, botObject, laneAt, routeHandler, runRoute, claimRescue } = require('./helpers')
 const Block = require('prismarine-block')(require('prismarine-registry')('1.21.11'))
 
@@ -125,6 +126,7 @@ function standoffFight (extra, mob, over = {}) {
     perch: { cell: null },
     perchStrike: () => false,
     holdRun: { on: false },
+    SPRINT_FLOOR,
     strikeRun: { lane: null },
     setTimeout: (fn) => {
       if (over.cycle) over.cycle(combat, env)

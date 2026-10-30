@@ -13,6 +13,7 @@ const { expireConfirmed, babyFlag } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const { createLane } = require('../lib/bot/lane')
 const vm = require('node:vm')
+const { SPRINT_FLOOR } = require('../lib/sprint')
 const { routeHandler, runRoute, awaitRoute, fakeClock, toolNamed, botConstant, botSource, balanced, loadBotFunctions, combatReflexIn, wireListeners, botObject, claimRescue } = require('./helpers')
 const mcData = require('minecraft-data')('1.21.11')
 const registry = require('prismarine-registry')('1.21.11')
@@ -1898,6 +1899,7 @@ async function holdAt (query, walls, seen = true, legacy = true, raise = () => {
   Object.assign(env, {
     MOVES: botConstant('MOVES'),
     holdRun: { on: false },
+    SPRINT_FLOOR,
     pilotLane: { token: null },
     claimLane: () => (env.pilotLane.token = {}),
     perch: { cell: null },
@@ -2170,6 +2172,7 @@ function combatIn (world, foe) {
     guardState: botObject('guardState', { console }),
     bunker: { building: false },
     holdRun: { on: false },
+    SPRINT_FLOOR,
     mobClass: (e) => (['zombie', 'spider'].includes(e.name) ? 'hostile' : 'passive'),
     entityEngageable: () => true,
     nearHostiles: () => [],

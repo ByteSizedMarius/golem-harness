@@ -12,7 +12,10 @@ const { legLedger } = require('../lib/leg-ledger')
 const { createDescribe } = require('../lib/bot/describe')
 const { expireConfirmed } = require('../lib/shelter')
 const { STANCES } = require('../lib/bot/stances')
-const { loadBotFunctions, botConstant, botObject, startApp, fakeClock, combatReflexIn } = require('./helpers')
+const { SPRINT_FLOOR, sprintAllowed } = require('../lib/sprint')
+const registry = require('prismarine-registry')('1.21.11')
+const Item = require('prismarine-item')(registry)
+const { loadBotFunctions, botConstant, botObject, startApp, fakeClock, combatReflexIn, claimRescue } = require('./helpers')
 
 const { UNLOADED, UNKNOWN, standCell, targetKind, resolveTarget, crumbCentre, arrivedAt, watchProgress, walkAttempt, routeDeadline } = walk
 
@@ -401,6 +404,15 @@ test('walkAttempt ends on the pathfinder event that settles the walk', async () 
     assert.strictEqual(await walkAttempt(bot, new goals.GoalBlock(5, 64, 5), { stallMs: 4500, thinkTimeout: 10000 }), how)
     for (const ev of ['goal_reached', 'path_update', 'goal_updated', 'path_stop']) assert.strictEqual(bot.listenerCount(ev), 0, `${how}: ${ev} listener left`)
   }
+})
+
+test('walkAttempt asks due on every 10th physics tick and ends hungry on the first yes', async () => {
+  let ticks = 0
+  const asked = []
+  const bot = fakeWalker((b) => { for (let i = 0; i < 30; i++) { ticks++; b.emit('physicsTick') } })
+  const due = () => { asked.push(ticks); return asked.length === 2 }
+  assert.strictEqual(await walkAttempt(bot, new goals.GoalBlock(5, 64, 5), { stallMs: 4500, thinkTimeout: 10000, due }), 'hungry')
+  assert.deepStrictEqual(asked, [10, 20])
 })
 
 test('walkAttempt outlasts an empty partial path and ends a path that empties without goal_reached as a stall', async () => {
@@ -1368,4 +1380,240 @@ test('a creeper the combat reflex watches out of sight leaves the goto reply as 
   }
   const blocked = await reflexGoto(new EastMoves(), { at, seen: true })
   assert.match(blocked.r.hint, /^a creeper at 9,64,0 blocks the way/)
+})
+
+const stack = (name, count) => new Item(registry.itemsByName[name].id, count)
+// The server's food update raising food by n, 50 ms after the bite.
+const fedBy = (n) => (bot, items, clock) => clock.setTimeout(() => {
+  bot.food = Math.min(20, bot.food + n)
+  bot.emit('health')
+}, 50)
+
+// A goto to x 5, z 5 by a body at food carrying stacks, its timers and walk watch on a fake clock. Each bite runs
+// server(bot, items, clock). Each goal the walk sets ticks physics 10 times, then arrives unless the goal was let go or
+// set again since. done lists the bites and steps.
+async function hungryGoto ({ food = SPRINT_FLOOR, stacks = [stack('bread', 8)], server = fedBy(5), opts = { eat: true }, setup = () => {}, during = () => {} } = {}) {
+  const clock = fakeClock()
+  const done = []
+  const items = stacks.slice()
+  const combat = { name: 'combat', fairFill: () => ({}), _seenAt: new Map(), fightBusy: () => false }
+  let body = null
+  let sets = 0
+  const answer = (bot, g, env) => {
+    done.push('step')
+    during(bot, env)
+    for (let i = 0; i < 10; i++) bot.emit('physicsTick')
+    const set = sets
+    setImmediate(() => { if (sets === set) arrive(bot, g) })
+  }
+  const h = walkBot({
+    answer,
+    setup: (bot) => {
+      body = bot
+      Object.assign(bot, { food, foodSaturation: 0, heldItem: null })
+      bot.entity.onGround = true
+      bot.pathfinder.isMoving = () => false
+      bot.on('goal_updated', () => { sets++ })
+      bot.inventory = { items: () => items }
+      bot.equip = async (item) => { bot.heldItem = item }
+      bot.consume = async () => {
+        done.push('bite')
+        server(bot, items, clock)
+      }
+    },
+    over: {
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      walkAttempt: (b, g, o) => walkAttempt(b, g, { ...o, clock }),
+      SPRINT_FLOOR,
+      sprintAllowed,
+      RISKY_FOODS: botConstant('RISKY_FOODS'),
+      FOOD_UPDATE_MS: botConstant('FOOD_UPDATE_MS'),
+      shared: { mcData: { foods: registry.foods } },
+      jobs: { list: () => [] },
+      guardState: { hand: null },
+      digLock: botConstant('digLock'),
+      reflexes: [combat],
+      gotoRoute: null,
+      livePath: [],
+      liveEntities: () => Object.values(body.entities),
+      mobClass: (e) => e.cls,
+      AGGRO_CONFIRMED: new Map(),
+      entityPerceptible: (e) => e.seen !== false,
+      entityEngageable: () => true,
+      walksToBody: () => true
+    }
+  })
+  setup(h.bot, h.env, combat, h.ctx)
+  const route = h.ctx.walkRoute()
+  const walking = h.ctx.stagedGoto({ x: 5, z: 5 }, route, opts)
+  let end = false
+  walking.then(() => { end = true }, () => { end = true })
+  while (!end && clock.now() < 60000) {
+    await new Promise(setImmediate)
+    clock.advance(10)
+  }
+  assert.ok(end, 'no reply within 60 s')
+  const r = await walking
+  return { r: JSON.parse(JSON.stringify({ ...r, ...route.end() })), done, ...h, route }
+}
+
+test('a goto at the food floor eats once on the way and arrives naming the meal, one above it eats nothing', async () => {
+  const fed = await hungryGoto({ food: SPRINT_FLOOR + 1 })
+  assert.deepStrictEqual([fed.r.arrived, fed.r.meals, fed.r.hungry, fed.done], [true, undefined, undefined, ['step']])
+  // The food drops to the floor during the first step.
+  let steps = 0
+  const { r, done } = await hungryGoto({ food: 20, during: (bot) => { if (++steps === 1) bot.food = SPRINT_FLOOR } })
+  assert.deepStrictEqual([r.arrived, r.meals, r.hungry], [true, [`bread, food ${SPRINT_FLOOR} to ${SPRINT_FLOOR + 5}`], undefined])
+  assert.deepStrictEqual(done, ['step', 'bite', 'step'])
+})
+
+test('a goto that starts at the food floor eats before its first step', async () => {
+  const { r, done } = await hungryGoto()
+  assert.deepStrictEqual([r.arrived, done], [true, ['bite', 'step']])
+})
+
+test('a goto preview never eats', async () => {
+  const { r, done } = await hungryGoto({ opts: { eat: true, preview: true } })
+  assert.deepStrictEqual([r.meals, r.hungry, done], [undefined, undefined, []])
+  assert.ok(r.plan, 'control: the preview planned')
+})
+
+test('a goto eats only while no fight, perceived hostile, job or sole claim needs the body or the hand', async () => {
+  const zombie = (seen) => (bot) => { bot.entities[3] = { id: 3, cls: 'hostile', seen, position: new Vec3(4.5, 64, 0.5) } }
+  const rows = [
+    ['a fight', (bot, env, combat) => { combat.fightBusy = () => true }, /fight/],
+    ['a perceived hostile', zombie(true), /hostile/],
+    ['a running job', (bot, env) => { env.jobs = { list: () => [{ id: 4, name: 'dig_tunnel', status: 'running', cancelled: false }] } }, /job 4/],
+    ['a sole claim', (bot, env) => claimRescue(env.digLock), /self-rescue/]
+  ]
+  for (const [label, setup, why] of rows) {
+    const { r, done } = await hungryGoto({ setup })
+    assert.deepStrictEqual([r.arrived, r.meals, done], [true, undefined, ['step']], label)
+    assert.match(r.hungry, why, label)
+  }
+  const hidden = await hungryGoto({ setup: zombie(false) })
+  assert.deepStrictEqual(hidden.done, ['bite', 'step'], 'a hostile out of sight')
+})
+
+test('a goto takes no meal off the ground, in water or on the way into a parkour jump', async () => {
+  const rows = [
+    ['off the ground', (bot) => { bot.entity.onGround = false }],
+    ['in water', (bot) => { bot.entity.isInWater = true }],
+    // Feet past the edge of the take-off block, over the first gap cell.
+    ['on the take-off edge of a 3 block jump', (bot, env) => {
+      bot.entity.position = new Vec3(2.1, 64, 0.5)
+      bot.pathfinder.isMoving = () => true
+      env.livePath = [{ x: 4.5, y: 64, z: 0.5, parkour: true }]
+    }]
+  ]
+  for (const [label, setup] of rows) {
+    const { done } = await hungryGoto({ setup })
+    assert.deepStrictEqual(done, ['step'], label)
+  }
+})
+
+test('a goto carrying only rotten flesh and a golden apple eats nothing and says it walked without sprinting', async () => {
+  const { r, done } = await hungryGoto({ stacks: [stack('rotten_flesh', 3), stack('golden_apple', 1)] })
+  assert.deepStrictEqual([r.arrived, r.meals, done], [true, undefined, ['step']])
+  assert.match(r.hungry, /no safe food/)
+})
+
+test('a goto that ends at the food floor or below says why it ate no more, after a meal too, by the last lasting reason', async () => {
+  let fight = null
+  const grab = (bot, env, combat) => { fight = combat }
+  const server = (bot, items, clock) => {
+    fedBy(4)(bot, items, clock)
+    fight.fightBusy = () => true
+  }
+  const ate = await hungryGoto({ food: 6, server, setup: grab })
+  assert.deepStrictEqual([ate.r.arrived, ate.r.meals, ate.done], [true, ['bread, food 6 to 10'], ['bite', 'step']])
+  assert.match(ate.r.hungry || '', /^food 10\/20, .*fight/)
+  // The fight ends and the body leaves the ground during the step.
+  const during = (bot) => {
+    fight.fightBusy = () => false
+    bot.entity.onGround = false
+  }
+  const jumped = await hungryGoto({ setup: (bot, env, combat) => { grab(bot, env, combat); combat.fightBusy = () => true }, during })
+  assert.deepStrictEqual([jumped.r.meals, jumped.done], [undefined, ['step']])
+  assert.match(jumped.r.hungry, /fight/)
+})
+
+test('a goto whose meal a rescue refuses counts no failed meal and eats once the hand is free', async () => {
+  let equips = 0
+  const setup = (bot, env) => {
+    const equip = bot.equip
+    bot.equip = async (item) => {
+      await equip(item)
+      if (++equips <= 2) claimRescue(env.digLock)
+    }
+  }
+  // The rescue ends during each step.
+  const during = (bot, env) => { env.digLock.holder = null }
+  const { r, done } = await hungryGoto({ setup, during })
+  assert.deepStrictEqual([r.arrived, r.meals, done], [true, [`bread, food ${SPRINT_FLOOR} to ${SPRINT_FLOOR + 5}`], ['step', 'step', 'bite', 'step']])
+})
+
+test('a goto at food 12 is judged and previewed on the plan it walks without sprinting', async () => {
+  // A trench: a sprint jump across it, else down 5 into it and out on the far side.
+  const across = [pathNode(1, 64, 0), Object.assign(pathNode(4, 64, 0), { parkour: true }), pathNode(5, 64, 5)]
+  const through = [pathNode(1, 64, 0), pathNode(2, 59, 0), pathNode(5, 64, 5)]
+  const setup = (bot, env, combat, ctx) => {
+    bot.pathfinder.movements = { allowSprinting: true }
+    bot.pathfinder.getPathFromTo = (m) => ({ next: () => ({ value: { result: { status: 'success', path: m.allowSprinting ? across : through } } }) })
+    env.planPath = loadBotFunctions(['planPath'], { bot, routeEnd: ctx.routeEnd }).planPath
+  }
+  const fed = await hungryGoto({ food: SPRINT_FLOOR + 1, stacks: [], setup })
+  assert.strictEqual(fed.r.arrived, true, 'control: above the floor it sprints across')
+  const walked = await hungryGoto({ food: 12, stacks: [], setup })
+  assert.deepStrictEqual([walked.r.reason, walked.r.risk, walked.done], ['risky', 'it drops 5 blocks at once', []])
+  const preview = await hungryGoto({ food: 12, stacks: [], setup, opts: { eat: true, preview: true } })
+  assert.strictEqual(preview.r.plan.drop, 5)
+})
+
+test('a goto bites again only after the food update of the bite before', async () => {
+  const log = []
+  const server = (bot, items, clock) => {
+    log.push(`bite at food ${bot.food}`)
+    clock.setTimeout(() => {
+      bot.food += 4
+      log.push(`update to ${bot.food}`)
+      bot.emit('health')
+    }, 1600)
+  }
+  const { r } = await hungryGoto({ food: 6, server })
+  assert.deepStrictEqual(log, ['bite at food 6', 'update to 10', 'bite at food 10', 'update to 14', 'bite at food 14', 'update to 18'])
+  assert.deepStrictEqual(r.meals, ['bread, food 6 to 10', 'bread, food 10 to 14', 'bread, food 14 to 18'])
+})
+
+test('a goto retries a meal the server did not confirm once', async () => {
+  const eaten = (bot, items) => { items[0] = stack('bread', items[0].count - 1) }
+  const unconfirmed = await hungryGoto({ server: eaten })
+  assert.deepStrictEqual(unconfirmed.done, ['bite', 'bite', 'step'])
+  assert.deepStrictEqual(unconfirmed.r.meals, [`bread, food ${SPRINT_FLOOR} to ${SPRINT_FLOOR} (unconfirmed)`, `bread, food ${SPRINT_FLOOR} to ${SPRINT_FLOOR} (unconfirmed)`])
+  const unseen = await hungryGoto({ server: () => {} })
+  assert.deepStrictEqual([unseen.done, unseen.r.meals], [['bite', 'bite', 'step'], undefined])
+  assert.match(unseen.r.hungry, /no meal seen/)
+})
+
+test('a rescue that takes the hand mid-bite keeps it, and the goto ends stopped by the reflex that took the legs', async () => {
+  const sword = stack('iron_sword', 1)
+  const shovel = stack('iron_shovel', 1)
+  let rig = null
+  // The buried self-rescue's own start: its claim, its lease, the freeze, its shovel.
+  const server = (bot, items, clock) => {
+    fedBy(5)(bot, items, clock)
+    claimRescue(rig.env.digLock)
+    rig.ctx.holdHand(rig.env.digLock.holder)
+    rig.env.legs.take('hurt', 'freeze after an unexplained hit')
+    bot.heldItem = shovel
+  }
+  const setup = (bot, env, combat, ctx) => {
+    rig = { env, ctx }
+    bot.heldItem = sword
+  }
+  const { r, done, bot, route, env } = await hungryGoto({ stacks: [sword, stack('bread', 8), shovel], server, setup })
+  assert.deepStrictEqual([r.arrived, r.reason, done], [false, 'stopped', ['bite']])
+  assert.strictEqual(bot.heldItem, shovel)
+  assert.deepStrictEqual(env.legs.takenSince(route.mark), { reflex: 'hurt', why: 'freeze after an unexplained hit' })
 })
