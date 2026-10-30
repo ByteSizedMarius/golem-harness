@@ -77,6 +77,65 @@ test('the priority action moves an item between levels and refuses an unknown id
   assert.strictEqual(openLines(missing).length, 3)
 })
 
+test('current marks one item, moves the mark off any other, and the list shows that item first with the age of its mark', async (t) => {
+  const { file } = todoFile(t)
+  const clock = { ms: START }
+  const srv = server(file, clock)
+  await call(srv, 'todo', { action: 'add', text: 'fence the farm', priority: 'high' })
+  await call(srv, 'todo', { action: 'add', text: 'bake bread', who: 'byte' })
+  await call(srv, 'todo', { action: 'add', text: 'replant the farm plot', priority: 'low' })
+  clock.ms += 2 * 3600 * 1000
+  assert.match(textOf(await call(srv, 'todo', { action: 'current', id: 3 })), /^#3 is now current\./)
+  clock.ms += 5 * 60 * 1000
+  assert.deepStrictEqual(textOf(await call(srv, 'todo', { action: 'list' })).split('\n'), ['Todo list, the current task first, then high priority, then oldest first:',
+    '#3 [current 5m, low, 2h] replant the farm plot', '#1 [high, 2h] fence the farm', '#2 [byte, 2h] bake bread'])
+  assert.deepStrictEqual(openLines(textOf(await call(srv, 'todo', { action: 'current', id: 2 }))),
+    ['#2 is now current.', '#2 [current 0m, byte, 2h] bake bread', '#1 [high, 2h] fence the farm', '#3 [low, 2h] replant the farm plot'])
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).items.filter((x) => x.current).map((x) => x.id), [2])
+})
+
+test('done or drop on the current item leaves no item current', async (t) => {
+  for (const action of ['done', 'drop']) {
+    const { file } = todoFile(t)
+    const srv = server(file)
+    for (const text of ['bake bread', 'smelt the iron']) await call(srv, 'todo', { action: 'add', text })
+    assert.match(textOf(await call(srv, 'todo', { action: 'current', id: 2 })), /^#2 is now current\./)
+    const lines = textOf(await call(srv, 'todo', { action, id: 2 })).split('\n')
+    assert.deepStrictEqual(lines.slice(1), ['Todo list, high priority first, then oldest first:', '#1 [0m] bake bread'], action)
+    assert.ok(JSON.parse(fs.readFileSync(file, 'utf8')).items.every((x) => !Object.hasOwn(x, 'current')), action)
+  }
+})
+
+test('current needs the id of an open item and takes no text, who or priority', async (t) => {
+  const { file } = todoFile(t)
+  const srv = server(file)
+  await call(srv, 'todo', { action: 'add', text: 'bake bread' })
+  assert.match(textOf(await call(srv, 'todo', { action: 'current', id: 1 })), /^#1 is now current\./)
+  const before = fs.readFileSync(file, 'utf8')
+  assert.match(assertToolError(await call(srv, 'todo', { action: 'current', id: 9 })), /^No open todo has id 9\.\nTodo list/)
+  for (const args of [{ action: 'current' }, { action: 'current', id: 1, text: 'x' }, { action: 'current', id: 1, who: 'byte' },
+    { action: 'current', id: 1, priority: 'high' }]) {
+    assertToolError(await call(srv, 'todo', args))
+  }
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), before)
+})
+
+test('a file with two current items is refused as malformed', async (t) => {
+  const { file } = todoFile(t)
+  const at = new Date(START).toISOString()
+  fs.writeFileSync(file, JSON.stringify({ next: 3, items: [{ id: 1, text: 'bake bread', at, current: at }, { id: 2, text: 'smelt the iron', at, current: at }] }))
+  assert.strictEqual(assertToolError(await call(server(file), 'todo', { action: 'list' })), 'the todo list could not be read')
+})
+
+test('a file with current false loads that item as not current and stores it without the key', async (t) => {
+  const { file } = todoFile(t)
+  fs.writeFileSync(file, JSON.stringify({ next: 2, items: [{ id: 1, text: 'bake bread', at: new Date(START).toISOString(), current: false }] }))
+  const srv = server(file)
+  assert.deepStrictEqual(textOf(await call(srv, 'todo', { action: 'list' })).split('\n'), ['Todo list, high priority first, then oldest first:', '#1 [0m] bake bread'])
+  await call(srv, 'todo', { action: 'add', text: 'smelt the iron' })
+  assert.ok(!Object.hasOwn(JSON.parse(fs.readFileSync(file, 'utf8')).items[0], 'current'), 'false is not stored')
+})
+
 test('priority is refused outside add and the priority action, and the priority action needs id and priority', async (t) => {
   const { file } = todoFile(t)
   const srv = server(file)
@@ -154,6 +213,15 @@ test('the boot reply ends with the open list', async (t) => {
   assert.deepStrictEqual(openLines(content[content.length - 1].text), ['#1 [Halbes, 0m] bake bread'])
   const off = createServer({ port: PORT, token: MCP_TOKEN, fetch: fakeBot({ reply }).fetch })
   assert.strictEqual((await call(off, 'boot', {})).result.content.length, 1, 'no list without todoFile')
+})
+
+test('the boot reply lists the current task first', async (t) => {
+  const { file } = todoFile(t)
+  const srv = server(file)
+  for (const text of ['idle the nights', 'replant the farm plot']) await call(srv, 'todo', { action: 'add', text })
+  await call(srv, 'todo', { action: 'current', id: 2 })
+  const content = (await call(server(file, undefined, () => ({ ok: true })), 'boot', {})).result.content
+  assert.deepStrictEqual(openLines(content[content.length - 1].text), ['#2 [current 0m, 0m] replant the farm plot', '#1 [0m] idle the nights'])
 })
 
 test('the stdio server keeps the todo list in GOLEM_TODO', { timeout: 20000 }, async (t) => {

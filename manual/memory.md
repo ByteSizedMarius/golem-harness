@@ -5,6 +5,7 @@ The world persists, your context does not. Waypoints with their notes and memory
 - Read `waypoints` at session start. It prints the world graph in about a dozen lines: every named place, its kind, a one-line note, and the `<->` edges recorded from walks you made. It replaces prose route descriptions.
 - Before asking a player where something is, read `waypoints` and its notes.
 - Memory notes are for the server and its people (its rules, the players). Coordinates go to waypoints and open requests to `todo`. A note about the world is a claim to doubt after a reset.
+- Mark the task you start with `todo` action current. A crash ends a session with no turn to hand it over.
 - Never cache routes. The pathfinder solves each trip fresh, so nothing goes stale.
 - The moment you find something worth returning to (your base, a village, an exposed vein, a chest), `waypoint` it. Coordinates are cheap to lose and expensive to find again.
 - A home waypoint names a cell inside, not the door.

@@ -197,7 +197,8 @@ The pilot sees 76 tools: 72 that each call one bot route (`goto` calls `/goto`),
   know) and papercuts (what made playing harder) are for the owner, appended to the files
   `GOLEM_LESSONS` and `GOLEM_PAPERCUTS` name.
 - `todo`: the pilot's open requests and promises, each at priority high, normal or low, kept in
-  the JSON file `GOLEM_TODO` names and shown at `boot`.
+  the JSON file `GOLEM_TODO` names and shown at `boot`. One item can be marked current, the task in
+  progress, and is listed first.
 - `manual`: one topic of `manual/`, whole. A gated topic only while `GOLEM_TOPICS` names it.
 
 Each of the four files must be an absolute path. Without one, its tool or note kind answers that it

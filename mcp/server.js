@@ -84,9 +84,9 @@ const LOCAL_TOOLS = [
   },
   {
     name: 'todo',
-    description: 'Your todo list, kept across restarts and shown at boot: add what was asked (by who) or promised, at priority high when it is urgent, then done or drop it by id.',
+    description: 'Your todo list, kept across restarts and shown at boot: add what was asked (by who), promised or started, at priority high when it is urgent, mark the task you start current, then done or drop it by id.',
     params: {
-      action: { type: 'enum', values: ['add', 'done', 'drop', 'priority', 'list'], required: true },
+      action: { type: 'enum', values: ['add', 'done', 'drop', 'priority', 'current', 'list'], required: true },
       text: { type: 'str', maxLen: 200 },
       who: { type: 'str', maxLen: NAME_CAP },
       id: { type: 'int', min: 1, max: 999999 },
@@ -746,7 +746,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
   function todo ({ action, text, who, id, priority }) {
     if (todoFile === undefined) return textResult('todos are off', true)
     if (action !== 'add' && (text !== undefined || who !== undefined)) return textResult('text and who are only for add', true)
-    if ((action === 'add' || action === 'list') && id !== undefined) return textResult('id is only for done, drop and priority', true)
+    if ((action === 'add' || action === 'list') && id !== undefined) return textResult('id is only for done, drop, priority and current', true)
     if (action !== 'add' && action !== 'priority' && priority !== undefined) return textResult('priority is only for add and priority', true)
     if (action === 'add' && text === undefined) return textResult('add needs text', true)
     if (action !== 'add' && action !== 'list' && id === undefined) return textResult(`${action} needs id`, true)
@@ -763,6 +763,9 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
       } else if (action === 'priority') {
         failed = !todos.setPriority(todoFile, id, priority)
         head = failed ? `No open todo has id ${id}.` : `#${id} is now ${priority}.`
+      } else if (action === 'current') {
+        failed = !todos.setCurrent(todoFile, id, now())
+        head = failed ? `No open todo has id ${id}.` : `#${id} is now current.`
       } else if (action !== 'list') {
         failed = !todos.remove(todoFile, id)
         head = failed ? `No open todo has id ${id}.` : `${action === 'done' ? 'Done' : 'Dropped'} #${id}.`

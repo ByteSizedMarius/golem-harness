@@ -4,6 +4,12 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+
+After a restart the pilot followed an old, generic todo item instead of the task it was finishing,
+since nothing marked that task. The `todo` tool now takes the action `current`, which marks one open
+item as the task in progress. The list and the boot reply show it first, with the time since it was
+marked, until it is done or dropped.
+
 ## 2026-10-30: hurt events name starvation by the 1.7.10 rule
 
 A hurt event called any small hit at food 0 starvation, so on a 1.7.10 server a hit the bot could
