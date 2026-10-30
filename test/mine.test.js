@@ -450,6 +450,26 @@ test('tidy keeps the scaffold blocks no carried tool harvests queued, tries thei
   assert.strictEqual(c.seen.digs, 0)
 })
 
+test('tidy tries the next block of a name again after a passing equip failure', async (t) => {
+  const pick = { name: 'stone_pickaxe', type: 7, count: 1 }
+  const stone = (x) => Object.assign(pickBlock('cobblestone', x, false), { canHarvest: (type) => type === 7 })
+  const c = collector(t, { blocks: { '1,64,0': stone(1), '2,64,0': stone(2) }, reach: () => true })
+  c.pockets.push(pick)
+  let equips = 0
+  c.bot.equip = async (item) => {
+    if (++equips <= 3) throw new Error('equip failed')
+    c.bot.heldItem = item
+  }
+  c.env.holdCollectTool = realHoldCollectTool(c.bot)
+  c.env.seenNow = () => true
+  c.env.navPlaced.push({ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 })
+  const reply = awaitRoute('/tidy', {}, c.env)
+  assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the second block drop')
+  c.bot.emit('entityGone', c.seen.drops[0])
+  assert.deepStrictEqual(await within(reply), { reclaimed: 1, alreadyGone: 0, failed: 1, remaining: 1, reason: 'refusing to dig cobblestone: the stone_pickaxe did not go into my hand (holding nothing)' })
+  assert.deepStrictEqual(c.env.navPlaced.map((p) => p.x), [1])
+})
+
 test('tidy reclaims the dirt around cobblestone no carried tool harvests', async (t) => {
   const dirt = (x) => Object.assign(new Block('dirt', new Vec3(x, 64, 0)), { digTime: () => 750, material: 'mineable/shovel' })
   const c = collector(t, { blocks: { '1,64,0': pickBlock('cobblestone', 1, false), '2,64,0': dirt(2), '3,64,0': pickBlock('cobblestone', 3, false), '4,64,0': dirt(4) }, reach: () => true })
