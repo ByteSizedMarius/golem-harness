@@ -82,7 +82,8 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
     goals,
     entityInCell,
     shared: { mcData: registry, forestryMoves: null },
-    resolveBlockIds: (name) => [registry.blocksByName[name].id],
+    // The exact block, else every block whose name holds it.
+    resolveBlockIds: (name) => registry.blocksByName[name] ? [registry.blocksByName[name].id] : Object.values(registry.blocksByName).filter((b) => b.name.includes(name)).map((b) => b.id),
     emitEvent () {},
     seesLit: () => true,
     cellKnown: () => true,
@@ -207,16 +208,36 @@ test('gather digs dirt in reach of the cell the pathfinder starts from beside a 
   assert.deepStrictEqual(r.digs, [{ at: '-5,63,0', head: 'air' }])
 })
 
-test('gather with silk names the silk refusal when the only ore it can dig dry is refused for it', async () => {
-  const pick = Object.assign(Item.fromNotch({
-    itemId: registry.itemsByName.stone_pickaxe.id,
-    itemCount: 1,
-    components: [{ type: 'enchantments', data: { enchantments: [{ id: registry.enchantmentsByName.silk_touch.id, level: 1 }] } }],
-    removeComponents: []
-  }), { slot: 36 })
-  const r = await gather(SHORE, [], { blocks: { '-6,63,0': 'diamond_ore', '2,62,0': 'diamond_ore' }, carried: [pick], query: { resource: 'diamond_ore', silk: '1' } })
+const stoneSilkPick = () => Object.assign(Item.fromNotch({
+  itemId: registry.itemsByName.stone_pickaxe.id,
+  itemCount: 1,
+  components: [{ type: 'enchantments', data: { enchantments: [{ id: registry.enchantmentsByName.silk_touch.id, level: 1 }] } }],
+  removeComponents: []
+}), { slot: 36 })
+
+test('gather with silk names the silk refusal and the ore under water when the only ore it can dig dry is refused for it', async () => {
+  const r = await gather(SHORE, [], { blocks: { '-6,63,0': 'diamond_ore', '2,62,0': 'coal_ore' }, carried: [stoneSilkPick()], query: { resource: 'ore', silk: '1' } })
   assert.deepStrictEqual(r.digs, [])
-  assert.strictEqual(r.result.reason, 'refusing to dig diamond_ore: the stone_pickaxe with silk touch does not harvest it')
+  assert.strictEqual(r.result.reason, 'refusing to dig diamond_ore: the stone_pickaxe with silk touch does not harvest it, 1 refused for silk touch, 1 ore seen under water (gathered 0/1)')
+})
+
+test('gather with silk never counts ore under water that the silk touch pick does not harvest', async () => {
+  const r = await gather(SHORE, [], { blocks: { '-6,63,0': 'diamond_ore', '2,62,0': 'diamond_ore' }, carried: [stoneSilkPick()], query: { resource: 'diamond_ore', silk: '1' } })
+  assert.deepStrictEqual(r.digs, [])
+  assert.strictEqual(r.result.reason, 'refusing to dig diamond_ore: the stone_pickaxe with silk touch does not harvest it, 1 refused for silk touch (gathered 0/1)')
+})
+
+test('gather with silk names both the ore refused for silk touch and the ore it could not reach', async () => {
+  const r = await gather(SHORE, [], { blocks: { '-6,63,0': 'diamond_ore', '-10,63,0': 'coal_ore' }, walk: 'noPath', carried: [stoneSilkPick()], query: { resource: 'ore', silk: '1' } })
+  assert.deepStrictEqual(r.digs, [])
+  assert.ok(r.progress.includes('skip @ -6,63,0: refusing to dig diamond_ore: the stone_pickaxe with silk touch does not harvest it'), r.progress.join('\n'))
+  assert.strictEqual(r.result.reason, 'no ore left that I can dig, 1 refused for silk touch and the rest unreachable or failed (gathered 0/1)')
+})
+
+test('gather with silk names the ore refused for silk touch beside the ore it could not reach and the ore under water', async () => {
+  const r = await gather(SHORE, [], { blocks: { '-6,63,0': 'diamond_ore', '-10,63,0': 'coal_ore', '2,62,0': 'coal_ore' }, walk: 'noPath', carried: [stoneSilkPick()], query: { resource: 'ore', silk: '1' } })
+  assert.deepStrictEqual(r.digs, [])
+  assert.strictEqual(r.result.reason, 'no ore among the nearest I see that I can dig without diving, 1 seen under water, 1 refused for silk touch (gathered 0/1)')
 })
 
 test('gather leaves bank dirt under grass whose only open face looks onto the water', async () => {

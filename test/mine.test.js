@@ -549,7 +549,7 @@ test('a gather with silk whose silk touch pick harvests no candidate says so', a
   const { job } = runRoute('/gather', { resource: 'ore', amount: '1', silk: '1' }, c.env)
   assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
   const { gathered, reason } = c.env.jobs.get(job).result
-  assert.deepStrictEqual([gathered, reason], [0, STONE_SILK(c.blocks['0,64,2'])])
+  assert.deepStrictEqual([gathered, reason], [0, `${STONE_SILK(c.blocks['0,64,2'])}, 2 refused for silk touch (gathered 0/1)`])
   assert.strictEqual(c.seen.digs, 0)
 })
 
@@ -561,5 +561,16 @@ test('a gather with silk stops before it walks once no silk touch pick is carrie
   const { gathered, reason } = c.env.jobs.get(job).result
   assert.deepStrictEqual([gathered, reason], [0, 'refusing to dig diamond_ore: no silk touch pick carried'])
   assert.strictEqual(toDiamond(), 0, 'no walk to the diamond ore')
+  assert.strictEqual(c.seen.digs, 0)
+})
+
+test('a gather with silk whose silk touch pick is gone after the walk stops at the block it walked to', async (t) => {
+  // The silk touch pick wears out on the walk to the diamond ore.
+  const { c, toDiamond } = silkGatherRig(t, (b) => toDiamond() ? `refusing to dig${b ? ` ${b.name}` : ''}: no silk touch pick carried` : null)
+  const { job } = runRoute('/gather', { resource: 'ore', amount: '1', silk: '1' }, c.env)
+  assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
+  const { gathered, reason } = c.env.jobs.get(job).result
+  assert.deepStrictEqual([gathered, reason], [0, 'refusing to dig diamond_ore: no silk touch pick carried'])
+  assert.ok(toDiamond() > 0, 'control: the body walked to the diamond ore')
   assert.strictEqual(c.seen.digs, 0)
 })
