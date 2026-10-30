@@ -4,6 +4,15 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-30: the buried rescue follows 1.7.10 suffocation
+
+The buried self-rescue judged a head by the 1.21 full-cube rule, so on a 1.7.10 server it dug out of
+redstone blocks, TNT, glowstone and retracted pistons, which do not suffocate there, and stayed put
+in soul sand and spawners, which do. It now follows the 1.7.10 rule. A head block that takes longer
+to dig than a rescue may run, obsidian by hand for one, gives up at once and holds until the block
+or the body changes, where the rescue used to restart the dig after every 30 s timeout. Once the
+head is clear, a feet block too slow for the time left ends the rescue instead of holding the legs.
+
 ## 2026-10-30: replies name only the blocks in sight
 
 Replies and decisions that named a block (lava, water, doors, floors, canopy, plan risk) went by

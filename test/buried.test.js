@@ -90,6 +90,7 @@ function body (head, feet = AIR, { cells = {}, pos, legacy = false, known = () =
     bot,
     digLock: botConstant('digLock'),
     RESCUE_MS: botConstant('RESCUE_MS'),
+    RESCUE_LEAD_MS: botConstant('RESCUE_LEAD_MS'),
     RESCUE_NAME: botConstant('RESCUE_NAME'),
     setTimeout,
     clearTimeout,
@@ -117,7 +118,7 @@ function body (head, feet = AIR, { cells = {}, pos, legacy = false, known = () =
     lastGiveUp: null,
     stuck: null
   }
-  if (legacy) env.LEGACY_SMOTHER_DY = botConstant('LEGACY_SMOTHER_DY')
+  if (legacy) Object.assign(env, { LEGACY_SMOTHER_DY: botConstant('LEGACY_SMOTHER_DY'), LEGACY_SMOTHERS: botConstant('LEGACY_SMOTHERS'), LEGACY_HAND_DIG: botConstant('LEGACY_HAND_DIG') })
   if (tools) {
     Object.assign(bot, { inventory: { items: () => tools, slots: [], hotbarStart: 36 }, async equip (it) { bot.heldItem = it } })
     Object.assign(env, { PICK_TIER: botConstant('PICK_TIER'), DIG_TOOL: botConstant('DIG_TOOL'), LEGACY_HAND_DIG: botConstant('LEGACY_HAND_DIG') })
@@ -197,6 +198,28 @@ test('on 1.7.10 a body whose eye sits just under gravel is buried, on 1.21 it is
   const at = { cells: { '0,66,0': GRAVEL }, pos: new Vec3(0.5, 64.35, 0.5) }
   assert.strictEqual(body(AIR, AIR, { ...at, legacy: true }).buried(), true, '1.7.10')
   assert.strictEqual(body(AIR, AIR, at).buried(), false, '1.21')
+})
+
+test('on 1.7.10 a head in a redstone block, tnt, glowstone or a retracted piston is not buried, on 1.21 it is', () => {
+  const heads = ['redstone_block', 'tnt', 'glowstone', 'piston', 'sticky_piston'].map(blockOf)
+  assert.ok(heads.every((h) => h.getProperties().extended !== true), 'control: the pistons are retracted')
+  const buried = (legacy) => Object.fromEntries(heads.map((h) => [h.name, body(h, AIR, { legacy }).buried()]))
+  assert.deepStrictEqual(buried(true), { redstone_block: false, tnt: false, glowstone: false, piston: false, sticky_piston: false }, '1.7.10')
+  assert.deepStrictEqual(buried(false), { redstone_block: true, tnt: true, glowstone: true, piston: true, sticky_piston: true }, '1.21')
+})
+
+test('on 1.7.10 a head in soul sand or a spawner is buried, on 1.21 it is not', () => {
+  for (const head of ['soul_sand', 'spawner'].map(blockOf)) {
+    assert.strictEqual(body(head, AIR, { legacy: true }).buried(), true, `${head.name} on 1.7.10`)
+    assert.strictEqual(body(head).buried(), false, `${head.name} on 1.21`)
+  }
+})
+
+test('on 1.7.10 a body standing on soul sand with gravel at its eye digs the gravel and leaves the soul sand', async () => {
+  const soulSand = blockOf('soul_sand')
+  const b = body(AIR, soulSand, { legacy: true, cells: { '0,66,0': GRAVEL }, pos: new Vec3(0.5, 64.875, 0.5) })
+  assert.deepStrictEqual(await rescue(b), { log: ['legs'], digs: ['gravel'] })
+  assert.strictEqual(b.at.get('0,64,0'), soulSand)
 })
 
 test('a sleeping body with its head in gravel is not buried', () => {
@@ -706,6 +729,70 @@ test('a rescue ends its dig at its deadline or at death and frees the dig lock f
   assert.ok(dying.lines.includes('[buried] gave up: died'), dying.lines.join('\n'))
 })
 
+test('a head block whose dig takes longer than a rescue runs gives up before digging and starts no rescue on the next hit', async () => {
+  const clock = fakeClock()
+  const b = body(blockOf('obsidian'), AIR, { cells: walled, hold: true, timers: { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout } })
+  assert.strictEqual(await b.digOutHead(), true, 'control: the rescue starts')
+  assert.notStrictEqual((await timed(b.stepped(), 1000)).out, HUNG, 'the rescue never gave up')
+  assert.deepStrictEqual({ digs: b.digs, events: b.events }, { digs: [], events: ['buried: the buried self-rescue gave up: the head block obsidian takes 250 s to dig, over the 28 s limit'] })
+  assert.strictEqual(await b.digOutHead(), false, 'the next hit started a rescue')
+})
+
+test('a head block whose dig fits in a rescue only without the time the rescue spends before it gives up before digging', async () => {
+  const concrete = blockOf('white_concrete')
+  const fatigue = { [registry.effectsByName.MiningFatigue.id]: { amplifier: 0 } }
+  const ms = concrete.digTime(null, false, false, false, [], fatigue)
+  assert.ok(ms > botConstant('RESCUE_MS') - botConstant('RESCUE_LEAD_MS') && ms <= botConstant('RESCUE_MS'), `control: concrete takes ${ms} ms`)
+  const b = body(concrete, AIR, { cells: walled })
+  b.bot.entity.effects = fatigue
+  assert.strictEqual(await b.digOutHead(), true, 'control: the rescue starts')
+  assert.notStrictEqual((await timed(b.stepped(), 1000)).out, HUNG, 'the rescue never ended')
+  assert.deepStrictEqual({ digs: b.digs, events: b.events }, { digs: [], events: ['buried: the buried self-rescue gave up: the head block white_concrete takes 30 s to dig, over the 28 s limit'] })
+  assert.strictEqual(await b.digOutHead(), false, 'the next hit started a rescue')
+})
+
+test('a stone head dug by hand while the body is off the ground is dug, since the body lands before the dig', async () => {
+  const b = body(STONE, AIR, { cells: walled })
+  b.bot.entity.onGround = false
+  b.bot.digTime = (blk) => blk.digTime(null, false, false, !b.bot.entity.onGround)
+  assert.ok(b.bot.digTime(STONE) > botConstant('RESCUE_MS'), `control: off the ground stone takes ${b.bot.digTime(STONE)} ms`)
+  assert.deepStrictEqual({ digs: (await rescue(b)).digs, events: b.events }, { digs: ['stone'], events: [] })
+})
+
+test('a body freed at the head whose feet block takes longer than the rescue has left ends out without digging it', async () => {
+  const clock = fakeClock()
+  const b = body(GRAVEL, STONE, { cells: walled, hold: true, timers: { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, Date: { now: clock.now } } })
+  assert.strictEqual(await b.digOutHead(), true)
+  assert.ok(await waitFor(() => b.releases.length === 1, 1000), 'the head dig never started')
+  clock.advance(25000)
+  b.releases[0].finish()
+  assert.ok(STONE.digTime(null, false, false, false) > 5000, 'control: stone takes longer than the 5 s left')
+  assert.notStrictEqual((await timed(b.stepped(), 1000)).out, HUNG, 'the rescue held the legs for the feet dig')
+  assert.deepStrictEqual({ digs: b.digs, events: b.events }, { digs: ['gravel'], events: [] })
+  assert.ok(b.lines.includes('[buried] out (head clear)'), b.lines.join('\n'))
+})
+
+test('a head block whose dig fits in a rescue but not in the time the rescue has left is dug, and the next rescue finishes it', async () => {
+  const clock = fakeClock()
+  const b = body(GRAVEL, AIR, { cells: walled, hold: true, timers: { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout } })
+  const started = async (n) => assert.ok(await waitFor(() => b.releases.length === n, 1000), `dig ${n} never started`)
+  assert.strictEqual(await b.digOutHead(), true)
+  await started(1)
+  clock.advance(25000)
+  b.releases[0].finish()
+  b.at.set('0,65,0', STONE)
+  await started(2)
+  assert.ok(b.bot.digTime(STONE) > 5000 && b.bot.digTime(STONE) <= botConstant('RESCUE_MS'), `control: stone takes ${b.bot.digTime(STONE)} ms`)
+  clock.advance(5000)
+  await b.stepped()
+  assert.match(b.events.join('\n'), /^buried: the buried self-rescue gave up: still buried after \d+ s$/)
+  assert.strictEqual(await b.digOutHead(), true, 'the next hit started no rescue')
+  await started(3)
+  b.releases[2].finish()
+  await b.stepped()
+  assert.deepStrictEqual({ digs: b.digs, head: b.at.get('0,65,0') }, { digs: ['gravel', 'stone', 'stone'], head: AIR })
+})
+
 test('a rescue dig still turning to look when the rescue ends at its deadline or at death never starts', async () => {
   for (const end of ['deadline', 'death']) {
     const clock = fakeClock()
@@ -756,7 +843,7 @@ function wiredBody (t, cells, { hold = false, equip = async () => {}, controls =
   const lines = []
   t.mock.method(console, 'log', (line) => lines.push(line))
   const { bot, at, digs, releases } = diggingBot(GRAVEL, AIR, cells, { hold })
-  const { suffocates, smotherBlock, waterState, holdsWater } = loadBotFunctions(['suffocates', 'waterState', 'holdsWater'], { bot, LEGACY_1710: false })
+  const { opaqueCube, smotherBlock, waterState, holdsWater } = loadBotFunctions(['opaqueCube', 'waterState', 'holdsWater'], { bot, LEGACY_1710: false })
   Object.assign(bot, { health: 20, food: 20 })
   const fight = { lastHit: null, lastAttrib: null, swingWait: null }
   const ctx = {
@@ -770,7 +857,7 @@ function wiredBody (t, cells, { hold = false, equip = async () => {}, controls =
     emitEvent: (kind, msg) => { if (kind === 'hurt') hurt.push(msg) },
     waterState,
     freezeBody: () => { log.push('freeze') },
-    suffocates,
+    opaqueCube,
     smotherBlock,
     holdsWater,
     holdDigTool: equip,
