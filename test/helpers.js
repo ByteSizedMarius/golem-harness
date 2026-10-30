@@ -802,6 +802,12 @@ function loadBotFunctions (names, env, code = '') {
     loaded.add(name)
     const body = functionSource(name)
     if (!/^(?:async\s+)?function\b/.test(body)) return
+    // Unless env has its own, fleeWorld sees every cell now.
+    if (name === 'fleeWorld') {
+      env.OPENABLE ??= botConstant('OPENABLE')
+      env.seenNow ??= () => true
+      env.seesShape ??= () => true
+    }
     sources.push(body)
     reach(body, name)
   }
@@ -823,7 +829,7 @@ function routeHandler (route, env) {
   assert.ok(handler, `the ${route} handler not found in bot.js`)
   const async = /\basync\b/.test(src.slice(at, arrow)) ? 'async ' : ''
   const code = `(${async}(req, res) => ${handler})`
-  const ctx = loadBotFunctions([], { ok: (res, body) => { res.body = body }, err: (res, e) => { res.error = e }, ...env }, code)
+  const ctx = loadBotFunctions([], { ok: (res, body) => { res.body = body }, err: (res, e) => { res.error = e }, OPENABLE: botConstant('OPENABLE'), ...env }, code)
   // Module code has Node's Buffer, a vm context does not.
   ctx.Buffer ??= Buffer
   return { handle: vm.runInContext(code, ctx), res: {} }
@@ -918,12 +924,15 @@ function bunkerReflexIn (env) {
   return vm.runInContext(`(${literal})`, vm.createContext(env))
 }
 
-// The combat reflex of bot.js, evaluated over env.
+// The combat reflex of bot.js, evaluated over env. Unless env has its own, every cell is in sight now.
 function combatReflexIn (env) {
   const src = botSource()
   const at = reflexAt('combat')
   const literal = at < 0 ? '' : balanced(src, src.lastIndexOf('{', at))
   assert.ok(literal, 'the combat reflex not found in bot.js')
+  env.OPENABLE ??= botConstant('OPENABLE')
+  env.seenNow ??= () => true
+  env.seesShape ??= () => true
   return vm.runInContext(`(${literal})`, vm.createContext(env))
 }
 

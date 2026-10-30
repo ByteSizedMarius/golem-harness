@@ -1097,6 +1097,52 @@ test('a door that opens gives the mob behind it and the body walks on the next c
   assert.deepStrictEqual(walks(), { mob: true, body: true })
 })
 
+// The mob's and the body's walks to a zombie across a ravine east of a room, the only way round through an oak door in
+// the south wall, open or shut, in sight or not.
+function ravineWalks (open, doorSeen) {
+  // Stone walls 3 high round the floor from (-2, -2) to (2, 2), the door at (0, 3), the ravine 14 deep at x 4 by the east wall.
+  const doorCell = (p) => p.x === 0 && p.z === 3 && p.y <= 65
+  const cell = (x, y, z) => {
+    if (x === 4 && Math.abs(z) <= 3 && y >= 50 && y <= 63) return ['air', {}]
+    if (y < 64 || y > 66 || Math.max(Math.abs(x), Math.abs(z)) !== 3) return null
+    return doorCell({ x, y, z }) ? ['oak_door', { half: y === 64 ? 'lower' : 'upper', open, facing: 'south', hinge: 'left' }] : ['stone', {}]
+  }
+  const sight = (p) => doorSeen || !doorCell(p)
+  const env = {
+    bot: { entity: { position: new Vec3(0.5, 64, 0.5) }, blockAt: realBlockAt(cell) },
+    Vec3,
+    ck,
+    isDoor,
+    walkersTo,
+    walkFlood,
+    groundCell,
+    cellKnown: () => true,
+    knownCell: () => true,
+    OPENABLE: botConstant('OPENABLE'),
+    seenNow: sight,
+    seesShape: sight,
+    Date: { now: () => 5000 },
+    WALK_MEMO: botConstant('WALK_MEMO'),
+    REACH_MEMO: botConstant('REACH_MEMO'),
+    WALK_STEPS: botConstant('WALK_STEPS'),
+    WALK_CAP: botConstant('WALK_CAP')
+  }
+  const { walksToBody, bodyWalksTo, walkBudget } = loadBotFunctions(['walksToBody', 'bodyWalksTo', 'walkBudget'], env)
+  const zombie = new Vec3(5.5, 64, 0.5)
+  return { mob: walksToBody(zombie, { steps: walkBudget(zombie), drop: 3 }), body: bodyWalksTo(zombie, walkBudget(zombie)) }
+}
+
+test('a zombie across a ravine whose only walk runs through a door shut out of sight still walks to the body', () => {
+  assert.strictEqual(ravineWalks(true, true).mob, true, 'control: the door open in sight')
+  assert.strictEqual(ravineWalks(false, true).mob, false, 'control: the door shut in sight')
+  assert.strictEqual(ravineWalks(false, false).mob, true)
+})
+
+test('the body takes no walk to a zombie across a ravine through a door open out of sight', () => {
+  assert.strictEqual(ravineWalks(true, true).body, true, 'control: the door open in sight')
+  assert.strictEqual(ravineWalks(true, false).body, false)
+})
+
 test('cover from a skeleton lies through an open door', () => {
   // Stone walls 3 high round the body's cell at (0, 64, 0), an open door in the west wall.
   const cell = (x, y, z) => {

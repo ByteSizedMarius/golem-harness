@@ -663,6 +663,27 @@ test('a mob is heard through shared known air within 20 blocks, beyond only on a
   assert.strictEqual(perceptible(25, true), true, '25 blocks down a straight corridor')
 })
 
+test('a mob is heard through a door seen before only while the door is in sight, lit or dark', () => {
+  // A seen lit corridor along x on y 64-65 with the door at x 4 and the zombie at x 6. No eye ray passes the door.
+  // sight is 'lit', 'dark' or 'none' for the door cells.
+  const perceptible = (open, sight) => {
+    const door = { name: 'oak_door', boundingBox: 'block', light: LIT, getProperties: () => ({ open }) }
+    const corridor = (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 8
+    const env = withCells(world({ open: corridor, light: () => LIT }), { '4,64,0': door, '4,65,0': door })
+    for (let x = 0; x <= 8; x++) for (const y of [64, 65]) env.SEEN.add(ck(x, y, 0))
+    Object.assign(env, { reflexes: [], seenNow: (p) => sight === 'lit' || p.x !== 4, seesShape: (p) => sight !== 'none' || p.x !== 4 })
+    loadBotFunctions(['airFlood', 'knownCell', 'entityPerceptible'], env)
+    const combat = combatReflexIn(env)
+    return env.entityPerceptible({ type: 'mob', name: 'zombie', position: new Vec3(6.5, 64, 0.5), metadata: [0] }, combat.fairFill(env.bot))
+  }
+  assert.strictEqual(perceptible(true, 'lit'), true, 'control: an open door in sight')
+  assert.strictEqual(perceptible(false, 'lit'), false, 'control: a closed door in sight')
+  assert.strictEqual(perceptible(true, 'dark'), true, 'an open door in dark sight')
+  assert.strictEqual(perceptible(false, 'dark'), false, 'a closed door in dark sight')
+  assert.strictEqual(perceptible(true, 'none'), false, 'a door opened out of sight')
+  assert.strictEqual(perceptible(false, 'none'), false, 'a door closed out of sight')
+})
+
 test('collect finds a drop in sight in a lit room, never one around the corner', () => {
   // A lit room east along z 0 to x 4 that turns south at x 4 to z 4.
   const drop = (x, y, z) => {
@@ -901,6 +922,54 @@ test('a dark door and dark water read the same whatever their kind', () => {
   const iron = replies(doorRoom('iron_door', false))
   assert.deepStrictEqual(replies(doorRoom('oak_door', false)), iron)
   assert.deepStrictEqual(replies(doorRoom('iron_door', true)), iron)
+})
+
+// A room at x 0..3 with the body at x = at and a passage south at x 3 from z 1, every block seen lit before and light
+// on it now. A door or gate of kind at 3,64..65,5 leads on to z 9, a trapdoor of kind at 3,63,4 covers a shaft down
+// to y 54, no kind leaves the passage open to z 9.
+function doorBeyond (kind, open, at, light = LIT) {
+  const trapdoor = !!kind && kind.endsWith('_trapdoor')
+  const env = world({
+    open: (x, y, z) => ((y === 64 || y === 65) && ((z === 0 && x >= 0 && x <= 3) || (x === 3 && z >= 1 && z <= (trapdoor ? 4 : 9)))) ||
+      (trapdoor && x === 3 && z === 4 && y >= 54 && y <= 62),
+    light: () => light,
+    at
+  })
+  const base = env.bot.blockAt
+  const panel = (x, y, z) => x === 3 && (trapdoor ? y === 63 && z === 4 : z === 5 && (y === 64 || y === 65))
+  if (kind) {
+    env.bot.blockAt = (pos) => {
+      const b = base(pos)
+      const { x, y, z } = b.position
+      return panel(x, y, z) ? { ...b, name: kind, getProperties: () => ({ open }) } : b
+    }
+  }
+  for (let x = -1; x <= 5; x++) for (let y = 50; y <= 67; y++) for (let z = -1; z <= 10; z++) env.SEEN.add(ck(x, y, z))
+  return env
+}
+
+test('passages walks a wooden door or gate out of sight, an iron door or trapdoor there reads the same whatever its kind or state', () => {
+  const passages = (kind, open, at = 0) => runRoute('/passages', { radius: '8' }, doorBeyond(kind, open, at))
+  const remembered = passages(null, false)
+  assert.match(remembered.summary, /^air continues S /, 'control: the remembered passage')
+  assert.match(passages('iron_door', true, 3).summary, /^air continues S /, 'control: an open door in sight')
+  assert.match(passages('iron_door', false, 3).summary, /^closed pocket/, 'control: a shut door in sight')
+  assert.strictEqual(passages('iron_trapdoor', true, 3).summary, 'air continues DOWN past -8', 'control: an open trapdoor in sight')
+  assert.match(passages('iron_trapdoor', false, 3).summary, /^closed pocket/, 'control: a shut trapdoor in sight')
+  for (const kind of ['oak_door', 'oak_fence_gate']) for (const open of [false, true]) assert.deepStrictEqual(passages(kind, open), remembered, `${kind} open ${open}`)
+  for (const [first, ...rest] of [['iron_door'], ['iron_trapdoor', 'oak_trapdoor']]) {
+    const shut = passages(first, false)
+    assert.strictEqual(shut.summary, 'no exit in sight within 8 blocks', first)
+    for (const kind of [first, ...rest]) for (const open of [false, true]) assert.deepStrictEqual(passages(kind, open), shut, `${kind} open ${open}`)
+  }
+})
+
+test('passages reads a shut iron door or trapdoor seen lit before by its shape in dark sight', () => {
+  const passages = (kind, open) => runRoute('/passages', { radius: '8' }, doorBeyond(kind, open, 3, DARK))
+  assert.match(passages('iron_door', true).summary, /^air continues S /, 'control: an open door in dark sight')
+  assert.strictEqual(passages('iron_trapdoor', true).summary, 'air continues DOWN past -8', 'control: an open trapdoor in dark sight')
+  assert.match(passages('iron_door', false).summary, /^closed pocket/)
+  assert.match(passages('iron_trapdoor', false).summary, /^closed pocket/)
 })
 
 // Which of eight one-second ticks run the ore sweep, the body stepping east each tick when moving.

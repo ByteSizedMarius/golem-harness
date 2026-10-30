@@ -10,7 +10,9 @@ Replies and decisions that named a block (lava, water, doors, floors, canopy, pl
 the cell as the bot remembered it, so a block changed out of sight was named as it was. They now go
 by what the bot sees right now, while remembered geometry still plans walks, pillars and dig-ins.
 Bunker pillars keep remembered ceilings and walls. A swim that starts afloat stays afloat over
-water out of sight. `/map` answers `underground: null` when no cover is in sight.
+water out of sight. `/map` answers `underground: null` when no cover is in sight. Doors, gates and
+trapdoors out of sight no longer reveal whether they are open: hearing and flee checks treat them as
+unknown, and `/passages` walks only wooden doors and gates, which open either way.
 
 ## 2026-10-30: digs stop only for gravel, sand, lava and water in sight
 
