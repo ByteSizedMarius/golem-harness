@@ -100,23 +100,24 @@ test('a hit with no attribution in lava freezes the body and names the lava', as
   assert.deepStrictEqual({ hurt, froze }, { hurt: ['took 2 damage (LAVA) — HP 18/20 — FROZE all action; assess before moving'], froze: 1 })
 })
 
-// The hurt events of a fresh alarms module wired to a dry or submerged body with the given food and oxygen, burning
-// or not and just landed from a fall or not, after one 1-damage environmental hit with the given attribution, by
-// default an untyped one with no hostile within 4. With hostile the hit is a sourceless damage_event with a zombie 2
-// west of the body, attributed by the damage wire, and knock is the horizontal velocity in blocks per tick the server
-// sends for the body right after it. cactus stands in the cell east of the body's, and x is the body's x.
-async function envHit ({ food, oxygen, submerged, burning = false, inFire = false, landed = false, attrib = { desc: 'no attacker named, no hostile within 4', untyped: true },
-  hostile = false, knock = null, cactus = false, x = 0.5 }) {
+// The hurt events of a fresh alarms module wired to a dry or submerged body at health hp on difficulty with the given
+// food and oxygen, burning or not and just landed from a fall or not, after one environmental hit of dmg with the
+// given attribution, by default an untyped one with no hostile within 4. With hostile the hit is a sourceless
+// damage_event with a zombie 2 west of the body, attributed by the damage wire, and knock is the horizontal velocity in
+// blocks per tick the server sends for the body right after it. cactus stands in the cell east of the body's, and x is
+// the body's x.
+async function envHit ({ food, oxygen, submerged, hp = 20, difficulty = 'easy', burning = false, inFire = false, landed = false, attrib = { desc: 'no attacker named, no hostile within 4', untyped: true },
+  hostile = false, knock = null, cactus = false, x = 0.5, dmg = 1 }) {
   const id = require.resolve('../lib/bot/alarms')
   delete require.cache[id]
   const { createAlarms, bindAlarms, wireBodyAlarms } = require(id)
   delete require.cache[id]
   const bot = new EventEmitter()
   Object.assign(bot, {
-    health: 20,
+    health: hp,
     food,
     oxygenLevel: oxygen,
-    game: { difficulty: 'easy' },
+    game: { difficulty },
     entity: { id: 1, position: new Vec3(x, 64, 0.5), onGround: true, metadata: [burning ? 0x01 : 0] },
     entities: {},
     _client: new EventEmitter(),
@@ -124,28 +125,26 @@ async function envHit ({ food, oxygen, submerged, burning = false, inFire = fals
   })
   const fight = { lastHit: null, lastAttrib: null, swingWait: null, damageTypes: ['generic'] }
   const waterState = () => ({ inWater: submerged, submerged, inLava: false, inFire, current: false, buried: false, oxygen })
-  if (hostile) {
-    const zombie = { id: 3, name: 'zombie', position: new Vec3(-1.5, 64, 0.5) }
-    const wire = loadBotFunctions(['wireDamageAttribution'], {
-      bot,
-      fight,
-      waterState,
-      Vec3,
-      setTimeout,
-      ...Object.fromEntries(['SWING_MS', 'KNOCK_SPEED', 'KNOCK_CONE', 'KNOCK_MS'].map(name => [name, botConstant(name)])),
-      console: { log () {} },
-      liveEntities: () => [zombie],
-      mobClass: () => 'hostile',
-      reflexes: [{ name: 'combat', fairFill: () => ({}) }],
-      entityPerceptible: () => true,
-      playersNear: () => [],
-      arrows: new Map(),
-      AGGRO_CONFIRMED: new Map(),
-      damageTypeMissed: false
-    })
-    wire.wireDamageAttribution()
-    bot.emit('spawn')
-  }
+  const zombie = { id: 3, name: 'zombie', position: new Vec3(-1.5, 64, 0.5) }
+  const wire = loadBotFunctions(['wireDamageAttribution', 'starves', 'starveDrop', 'drowns'], {
+    bot,
+    fight,
+    waterState,
+    Vec3,
+    setTimeout,
+    ...Object.fromEntries(['SWING_MS', 'KNOCK_SPEED', 'KNOCK_CONE', 'KNOCK_MS'].map(name => [name, botConstant(name)])),
+    console: { log () {} },
+    liveEntities: () => (hostile ? [zombie] : []),
+    mobClass: () => 'hostile',
+    reflexes: [{ name: 'combat', fairFill: () => ({}) }],
+    entityPerceptible: () => true,
+    playersNear: () => [],
+    arrows: new Map(),
+    AGGRO_CONFIRMED: new Map(),
+    damageTypeMissed: false
+  })
+  wire.wireDamageAttribution()
+  bot.emit('spawn')
   const hurt = []
   const ctx = {
     bot,
@@ -154,6 +153,9 @@ async function envHit ({ food, oxygen, submerged, burning = false, inFire = fals
     reflexes: [],
     mobClass: () => null,
     waterState,
+    starves: wire.starves,
+    starveDrop: wire.starveDrop,
+    drowns: wire.drowns,
     swimUp: () => {},
     emitEvent: (kind, msg) => { if (kind === 'hurt') hurt.push(msg) }
   }
@@ -170,7 +172,7 @@ async function envHit ({ food, oxygen, submerged, burning = false, inFire = fals
   }
   if (hostile) bot._client.emit('damage_event', { entityId: 1, sourceTypeId: 0, sourceCauseId: 0, sourceDirectId: 0 })
   if (knock) bot._client.emit('entity_velocity', { entityId: 1, velocity: { x: knock.x, y: 0.36, z: knock.z } })
-  bot.health -= 1
+  bot.health -= dmg
   if (!hostile) fight.lastAttrib = { t: Date.now(), entity: null, ranged: false, env: true, ...attrib }
   await update()
   return hurt
@@ -178,6 +180,25 @@ async function envHit ({ food, oxygen, submerged, burning = false, inFire = fals
 
 test('a hit with no attacker named says starving at food 0', async () => {
   assert.deepStrictEqual(await envHit({ food: 0, oxygen: 20, submerged: false }), ['took 1 damage (starving), HP 19/20'])
+})
+
+test('a hit with no attacker named at food 0 says starving only at a health the server starves on its difficulty', async () => {
+  const unnamed = 'no attacker named, no hostile within 4'
+  for (const [label, row, cause] of [
+    ['control: 11 on easy', { hp: 11 }, 'starving'],
+    ['control: 2 on normal', { hp: 2, difficulty: 'normal' }, 'starving'],
+    ['control: 1 on hard', { hp: 1, difficulty: 'hard' }, 'starving'],
+    ['10 on easy', { hp: 10 }, unnamed],
+    ['1 on normal', { hp: 1, difficulty: 'normal' }, unnamed]
+  ]) {
+    assert.deepStrictEqual(await envHit({ food: 0, oxygen: 20, submerged: false, ...row }), [`took 1 damage (${cause}), HP ${row.hp - 1}/20`], label)
+  }
+})
+
+test('a hit with no attacker named at food 0 that takes more than 1 is no starvation', async () => {
+  const hard = { food: 0, oxygen: 20, submerged: false, difficulty: 'hard' }
+  assert.deepStrictEqual(await envHit(hard), ['took 1 damage (starving), HP 19/20'], 'control: 1')
+  assert.deepStrictEqual(await envHit({ ...hard, dmg: 2 }), ['took 2 damage (no attacker named, no hostile within 4), HP 18/20'])
 })
 
 test('a hit with no attacker named keeps its text at food 0 right after a fall', async () => {

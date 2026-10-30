@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-30: hurt events name starvation by the 1.7.10 rule
+
+A hurt event called any small hit at food 0 starvation, so on a 1.7.10 server a hit the bot could
+not name read as hunger even at a health or a damage the server never starves at. It now names
+starvation only for a hit of 1 at a health the server starves on its difficulty, the rule the bot's
+other hit naming already used. The 1.7.10 manual now says how the bot names drowning, cactus,
+starvation and knockback hits.
+
 ## 2026-10-30: the buried rescue keeps its hand
 
 While the buried self-rescue dug the bot out, pilot routes, the combat reflex and `stop` could swap
