@@ -1477,7 +1477,7 @@ test('digat at a cell seen before and out of sight now walks there before it say
     env.SEEN.add(ck(6, 64, -2))
     const acts = []
     env.bot.pathfinder = { goto: async () => { acts.push('walk'); if (arrive) env.bot.entity.position = new Vec3(4.5, 64, -1.5) } }
-    Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, digLock: botConstant('digLock'), stopPath () {}, require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals: { GoalNear: function () {} } })
+    Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, digLock: botConstant('digLock'), stopPath () {}, require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals: require('mineflayer-pathfinder').goals })
     const { handle, res } = routeHandler('/digat', env)
     await handle({ query: { x: '6', y: '64', z: '-2' } }, res)
     return { body: res.body, error: res.error, acts }

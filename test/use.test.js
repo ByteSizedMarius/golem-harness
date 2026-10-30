@@ -4,7 +4,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
-const { awaitRoute, routeHandler, botConstant, claimRescue } = require('./helpers')
+const { awaitRoute, routeHandler, botConstant, claimRescue, fakeClock } = require('./helpers')
 
 const AT = { x: '1', y: '64', z: '0' }
 const AIR = { name: 'air', stateId: 0 }
@@ -156,6 +156,107 @@ test('bone meal on a sapling the server left as it was replies ok with its stage
   const reply = await awaitRoute('/use', AT, useCell(sapling, 'bone_meal', (s) => s))
   assert.deepStrictEqual([reply.ok, reply.on, reply.stage], [true, 'oak_sapling', 0])
   assert.strictEqual(typeof reply.note, 'string')
+})
+
+// Runs /use on a fake clock with hand in hotbar slot 36 beside cell, the server ticking every 50 ms unless ticks is false.
+// After the click the hand's slot turns to turned at turnMs, the cell to after at blockMs, and a reflex selects slot 37
+// holding swap at swapMs, each when given. Returns the reply and the ms it took.
+async function bucketUse (cell, hand, { turned = null, turnMs = 0, after = null, blockMs = 0, swap = null, swapMs = 0, ticks = true } = {}) {
+  const clock = fakeClock()
+  const p = new Vec3(1, 64, 0)
+  let now = cell
+  const inventory = Object.assign(new EventEmitter(), { hotbarStart: 36, slots: [], items: () => [] })
+  inventory.slots[36] = hand
+  inventory.slots[37] = swap
+  const bot = Object.assign(new EventEmitter(), {
+    entity: { position: new Vec3(0.5, 64, 0.5) },
+    inventory,
+    quickBarSlot: 0,
+    time: { age: 0 },
+    blockAt: (at) => block(at.equals(p) ? now : AIR, at),
+    pathfinder: { goto: async () => {} },
+    lookAt: async () => {},
+    activateItem () {
+      if (turned) clock.setTimeout(() => setSlot(36, turned), turnMs)
+      if (after) clock.setTimeout(() => { const old = block(now, p); now = after; bot.emit('blockUpdate', old, block(now, p)) }, blockMs)
+      if (swap) clock.setTimeout(() => { bot.quickBarSlot = 1; bot.emit('heldItemChanged', bot.heldItem) }, swapMs)
+    },
+    deactivateItem () {}
+  })
+  Object.defineProperty(bot, 'heldItem', { get: () => inventory.slots[inventory.hotbarStart + bot.quickBarSlot] })
+  const setSlot = (slot, item) => {
+    const old = inventory.slots[slot]
+    inventory.slots[slot] = item
+    inventory.emit('updateSlot', slot, old, item)
+    if (slot === inventory.hotbarStart + bot.quickBarSlot) bot.emit('heldItemChanged', item)
+  }
+  if (ticks) clock.setInterval(() => { bot.time.age++; bot.emit('time') }, 50)
+  const env = {
+    bot,
+    Vec3,
+    seesLit: () => true,
+    cellKnown: () => true,
+    goals: {},
+    round: (v) => v,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    Date: { now: clock.now },
+    BUCKET_WAIT_MS: botConstant('BUCKET_WAIT_MS'),
+    BUCKET_WAIT_CAP_MS: botConstant('BUCKET_WAIT_CAP_MS'),
+    ok: (res, body) => { res.body = { ok: true, ...body } }
+  }
+  const { handle, res } = routeHandler('/use', env)
+  const done = handle({ query: AT }, res)
+  while (res.body === undefined && res.error === undefined && clock.now() < 10000) {
+    await new Promise(setImmediate)
+    clock.advance(10)
+  }
+  const ms = clock.now()
+  await done
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  return { reply: res.body, ms }
+}
+
+const WATER = { name: 'water', stateId: 86 }
+const LAVA = { name: 'lava', stateId: 102 }
+
+test('a bucket use counts as done once the bucket in hand turns, before the cell\'s late update', async () => {
+  const late = { turnMs: 900, blockMs: 1500 }
+  for (const [liquid, full] of [[WATER, 'water_bucket'], [LAVA, 'lava_bucket']]) {
+    const pour = await bucketUse(AIR, { name: full, count: 1 }, { ...late, turned: { name: 'bucket', count: 1 }, after: liquid })
+    assert.strictEqual(pour.reply.ok, true, `a ${full} poured`)
+    const fill = await bucketUse(liquid, { name: 'bucket', count: 1 }, { ...late, turned: { name: full, count: 1 }, after: AIR })
+    assert.strictEqual(fill.reply.ok, true, `a ${full} filled`)
+  }
+  const stack = await bucketUse(WATER, { name: 'bucket', count: 3 }, { ...late, turned: { name: 'bucket', count: 2 }, after: AIR })
+  assert.strictEqual(stack.reply.ok, true, 'a fill from a stack of buckets')
+  const none = await bucketUse(AIR, { name: 'water_bucket', count: 1 })
+  assert.deepStrictEqual([none.reply.ok, none.reply.reason], [false, 'nothing changed at 1,64,0, still air'], 'control: neither turned')
+})
+
+test('a bucket use that changed nothing ends after 20 ticks of server age, well before the wall-clock cap', async () => {
+  const ticked = await bucketUse(AIR, { name: 'water_bucket', count: 1 })
+  assert.strictEqual(ticked.reply.ok, false)
+  assert.ok(ticked.ms < 2000, `ended after ${ticked.ms} ms`)
+  const silent = await bucketUse(AIR, { name: 'water_bucket', count: 1 }, { ticks: false })
+  assert.ok(silent.ms >= 5000, `control: with no server age it ended after ${silent.ms} ms`)
+})
+
+test('a bucket use names the cell\'s new block once its update follows the turn, and no block when the update never comes', async () => {
+  const pour = { turned: { name: 'bucket', count: 1 }, turnMs: 300 }
+  const updated = await bucketUse(AIR, { name: 'water_bucket', count: 1 }, { ...pour, after: WATER, blockMs: 600 })
+  assert.deepStrictEqual([updated.reply.ok, updated.reply.now], [true, 'water'])
+  const missed = await bucketUse(AIR, { name: 'water_bucket', count: 1 }, pour)
+  assert.strictEqual(missed.reply.ok, true)
+  assert.ok(!('now' in missed.reply), `named ${missed.reply.now}`)
+})
+
+test('a reflex that swaps the hand during a bucket wait neither hides the bucket\'s turn nor stands in for one', async () => {
+  const sword = { name: 'diamond_sword', count: 1 }
+  const pour = await bucketUse(AIR, { name: 'water_bucket', count: 1 }, { swap: sword, swapMs: 100, turned: { name: 'bucket', count: 1 }, turnMs: 600 })
+  assert.strictEqual(pour.reply.ok, true, 'a pour turned in the slot the reflex left')
+  const fill = await bucketUse(WATER, { name: 'bucket', count: 1 }, { swap: { name: 'water_bucket', count: 1 }, swapMs: 100 })
+  assert.deepStrictEqual([fill.reply.ok, fill.reply.reason], [false, 'nothing changed at 1,64,0, still water'], 'a failed fill while a reflex equips a full bucket')
 })
 
 test('a bucket on grass, a flower or a torch uses the item, other items click the block', async () => {

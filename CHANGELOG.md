@@ -5,6 +5,15 @@ and each says what happened and what the harness does now. A heading's date is t
 or the day of a release or removal, and the commit messages carry the detail.
 
 
+A water bucket poured on an air cell answered that nothing changed, though the water showed a moment
+later and the bucket was empty. A bucket use now counts once the bucket in the selected hotbar slot
+turns, waiting up to 20 server ticks, and names no block for the cell while its update has not come.
+Laying a floor cell by cell, `placeitem` refused because the bot stood in the cell. It now walks to a
+stand clear of the cell and centres a body that still hangs over it, and `digat` stands off the cell
+it digs and out of the way of a fall the dig sets off.
+
+## 2026-10-30: the task in progress survives a restart
+
 After a restart the pilot followed an old, generic todo item instead of the task it was finishing,
 since nothing marked that task. The `todo` tool now takes the action `current`, which marks one open
 item as the task in progress. The list and the boot reply show it first, with the time since it was

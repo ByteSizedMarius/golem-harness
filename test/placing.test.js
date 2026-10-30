@@ -87,11 +87,19 @@ test('place refuses busy while the buried self-rescue holds the hand, and equips
 
 // reachToPlace from a body at (0.5, 64, 0.5) over the floor, every cell known. planPath answers a successful search
 // along the cell centres in path (answering status instead when given), or null with the route ended for ended.
-// With fighting the combat reflex is busy. log records plans, route ends and walks.
-function reacher ({ path = [], ended = null, status = 'success', fighting = false } = {}) {
+// With fighting the combat reflex is busy. A walk puts the feet where arrive(goal) says, or leaves them. log records plans,
+// route ends, walks and centrings.
+function reacher ({ path = [], ended = null, status = 'success', fighting = false, arrive = () => null } = {}) {
   const log = []
   const env = placingEnv(body(0.5, 64, 0.5), ground(), {
-    bot: { pathfinder: { goto: async (g) => { log.push(`walk ${g.x},${g.y},${g.z} within ${Math.sqrt(g.rangeSq)}`) } } },
+    bot: {
+      pathfinder: {
+        goto: async (g) => {
+          log.push(`walk ${g.x},${g.y},${g.z} within ${Math.sqrt(g.rangeSq)}`)
+          env.bot.entity.position = arrive(g) || env.bot.entity.position
+        }
+      }
+    },
     env: {
       goals,
       walkRoute: () => ({ end () { log.push('end') } }),
@@ -104,10 +112,15 @@ function reacher ({ path = [], ended = null, status = 'success', fighting = fals
       summarizePlan,
       DROP_MAX,
       PLACE_WALK_MAX: botConstant('PLACE_WALK_MAX'),
-      reflexes: [{ name: 'combat', fightBusy: () => fighting, _threat: null }]
+      reflexes: [{ name: 'combat', fightBusy: () => fighting, _threat: null }],
+      centerOnCell: async (c) => {
+        log.push(`centre ${key(c)}`)
+        env.bot.entity.position = new Vec3(c.x + 0.5, c.y, c.z + 0.5)
+        return true
+      }
     }
   })
-  return { log, reachToPlace: loadBotFunctions(['reachToPlace'], env).reachToPlace }
+  return { log, bot: env.bot, reachToPlace: loadBotFunctions(['reachToPlace'], env).reachToPlace }
 }
 
 // The cells from x 1 to x on y 64, z 0.
@@ -169,6 +182,28 @@ test('placeitem refuses a cell the body overlaps after its walk, the head cell i
   for (const cell of [new Vec3(0, 64, 0), new Vec3(0, 65, 0)]) {
     await assert.rejects(reachToPlace(cell), /my body overlaps that cell/, key(cell))
   }
+})
+
+test('placeitem walks out of the cell it places into, the head cell included, when that cell is the nearest stand', async () => {
+  // The walk ends centred on the floor cell nearest the start that its goal takes.
+  const nearest = (g) => {
+    const ends = []
+    for (let x = -3; x <= 3; x++) for (let z = -3; z <= 3; z++) if (g.isEnd(new Vec3(x, 64, z))) ends.push(new Vec3(x + 0.5, 64, z + 0.5))
+    return ends.sort((a, b) => a.distanceTo(new Vec3(0.5, 64, 0.5)) - b.distanceTo(new Vec3(0.5, 64, 0.5)))[0]
+  }
+  for (const cell of [new Vec3(0, 64, 0), new Vec3(0, 65, 0)]) {
+    const { bot, reachToPlace } = reacher({ arrive: nearest })
+    await reachToPlace(cell)
+    assert.ok(!shelter.entityInCell(cell, [bot.entity]), `${key(cell)}: the walk ended at ${bot.entity.position}`)
+  }
+})
+
+test('placeitem centres a body that overhangs the cell it places into from the cell beside it', async () => {
+  const { bot, log, reachToPlace } = reacher()
+  bot.entity.position = new Vec3(0.9, 64, 0.5)
+  await reachToPlace(new Vec3(1, 64, 0))
+  assert.deepStrictEqual(log.at(-1), 'centre 0,64,0')
+  assert.ok(!shelter.entityInCell(new Vec3(1, 64, 0), [bot.entity]), `ended at ${bot.entity.position}`)
 })
 
 // craftItem over a body at (0.5, 64, 0.5) carrying a crafting table, with a placed table at tableAt or none,

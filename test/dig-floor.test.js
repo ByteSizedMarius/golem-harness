@@ -14,17 +14,18 @@ const ORE = new Vec3(2, 63, 0)
 // True when the body's box at pos lies over the ore's column.
 const overOre = (pos) => pos.x - 0.3 < ORE.x + 1 && pos.x + 0.3 > ORE.x && pos.z - 0.3 < ORE.z + 1 && pos.z + 0.3 > ORE.z
 
-// A stone floor at y 63 holding the ore, stone at walls, air at holes, and a walk that ends 0.35 short of the goal cell nearest the ore.
-function floorWorld (pos, walls = [], holes = []) {
+// A stone floor at y 63 holding the ore, stone at walls, air at holes, gravel at gravel, and a walk on the start's row that ends
+// short of the goal cell nearest the ore by short along the way, past it when negative.
+function floorWorld (pos, walls = [], holes = [], { gravel = [], short = 0.35 } = {}) {
   const solid = new Set(walls)
-  const cells = new Map(holes.map((k) => [k, 'air']))
+  const cells = new Map([...holes.map((k) => [k, 'air']), ...gravel.map((k) => [k, 'gravel'])])
   const blockAt = (p) => {
     const c = p.floored()
     const k = `${c.x},${c.y},${c.z}`
     const name = cells.get(k) || (c.equals(ORE) ? 'iron_ore' : c.y <= 63 || solid.has(k) ? 'stone' : 'air')
     return Object.assign(Block.fromStateId(registry.blocksByName[name].defaultState, 0), { position: c })
   }
-  const log = { walks: [], centred: [], digs: [] }
+  const log = { walks: [], goals: [], centred: [], digs: [] }
   const bot = {
     entity: { position: pos, width: 0.6, height: 1.8 },
     heldItem: null,
@@ -38,13 +39,14 @@ function floorWorld (pos, walls = [], holes = []) {
     pathfinder: {
       async goto (goal) {
         log.walks.push(goal.x === undefined ? 'look' : `${goal.x},${goal.y},${goal.z}`)
+        log.goals.push(goal)
         const here = bot.entity.position
         if (goal.isEnd(here.floored())) return
         const open = (c) => blockAt(c).name === 'air'
         const ends = []
         for (let x = ORE.x - 3; x <= ORE.x + 3; x++) {
           for (let z = ORE.z - 3; z <= ORE.z + 3; z++) {
-            const c = new Vec3(x, 64, z)
+            const c = new Vec3(x, Math.floor(pos.y), z)
             if (open(c) && open(c.offset(0, 1, 0)) && goal.isEnd(c)) ends.push(c)
           }
         }
@@ -54,7 +56,7 @@ function floorWorld (pos, walls = [], holes = []) {
         const mid = new Vec3(end.x + 0.5, end.y, end.z + 0.5)
         const way = mid.minus(here)
         const flat = Math.hypot(way.x, way.z)
-        bot.entity.position = new Vec3(mid.x - way.x / flat * 0.35, end.y, mid.z - way.z / flat * 0.35)
+        bot.entity.position = new Vec3(mid.x - way.x / flat * short, end.y, mid.z - way.z / flat * short)
       }
     },
     async dig (b) {
@@ -87,8 +89,8 @@ function floorWorld (pos, walls = [], holes = []) {
   return { bot, env, log }
 }
 
-async function digat (pos, walls, holes) {
-  const w = floorWorld(pos, walls, holes)
+async function digat (pos, walls, holes, opts) {
+  const w = floorWorld(pos, walls, holes, opts)
   const { handle, res } = routeHandler('/digat', w.env)
   await handle({ query: { x: String(ORE.x), y: String(ORE.y), z: String(ORE.z) } }, res)
   return { ...w.log, error: res.error, reply: res.body }
@@ -111,6 +113,38 @@ test('digat steps off a floor cell the body stands on before it digs', async () 
 test('digat steps off a floor cell under the edge of the body\'s box', async () => {
   const r = await digat(new Vec3(3.1, 64, 0.5))
   assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  assert.deepStrictEqual(r.digs, [{ at: '2,63,0', over: false }])
+})
+
+test('digat walks to a far floor cell and stands anywhere in reach of it but on it', async () => {
+  const r = await digat(new Vec3(-3.5, 64, 0.5))
+  assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  assert.deepStrictEqual([r.walks, r.centred], [['2,63,0'], []])
+  assert.deepStrictEqual(r.digs, [{ at: '2,63,0', over: false }])
+  assert.ok(!r.goals[0].isEnd(new Vec3(2, 64, 0)), 'on it')
+  // Feet two below the ore put it right over the head.
+  assert.ok(r.goals[0].isEnd(new Vec3(2, 61, 0)), 'under it')
+  assert.ok(r.goals[0].isEnd(new Vec3(1, 61, 0)), 'beside that')
+})
+
+// A tunnel 2 high along x at z 0 under the ore, from x -4 to 2.
+const TUNNEL = [-4, -3, -2, -1, 0, 1, 2].flatMap((x) => [`${x},61,0`, `${x},62,0`])
+
+test('digat digs a ceiling 2 above the feet in a tunnel from where it stands', async () => {
+  const r = await digat(new Vec3(2.5, 61, 0.5), [], TUNNEL)
+  assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  assert.deepStrictEqual([r.walks, r.centred], [[], []])
+  assert.deepStrictEqual(r.digs, [{ at: '2,63,0', over: true }])
+})
+
+test('digat centres a body whose walk ended where gravel over the ceiling would land on it', async () => {
+  const fall = { gravel: ['2,64,0'] }
+  const centred = await digat(new Vec3(-3.5, 61, 0.5), [], TUNNEL, { ...fall, short: 0.35 })
+  assert.strictEqual(centred.error, undefined, centred.error && centred.error.message)
+  assert.deepStrictEqual([centred.walks, centred.centred], [['2,63,0'], []], 'control: a walk that ends clear of the landing')
+  const r = await digat(new Vec3(-3.5, 61, 0.5), [], TUNNEL, { ...fall, short: -0.35 })
+  assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  assert.deepStrictEqual([r.walks, r.centred], [['2,63,0'], ['1,61,0']])
   assert.deepStrictEqual(r.digs, [{ at: '2,63,0', over: false }])
 })
 
