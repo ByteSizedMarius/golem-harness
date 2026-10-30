@@ -74,7 +74,7 @@ function floorWorld (pos, walls = [], holes = []) {
     cellKnown: () => true,
     seenNow: () => true,
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
-    canStepOutTo: loadBotFunctions(['canStepOutTo'], { bot, knownCell: () => true }).canStepOutTo,
+    canStepOutTo: loadBotFunctions(['canStepOutTo'], { bot, knownCell: () => true, seenNow: () => true }).canStepOutTo,
     centerOnCell: async (c) => { log.centred.push(`${c.x},${c.y},${c.z}`); bot.entity.position = new Vec3(c.x + 0.5, c.y, c.z + 0.5); return true },
     refuseWhileFighting () {},
     holdHand: () => ({ renew: () => true }),

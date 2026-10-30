@@ -38,6 +38,7 @@ async function pickJob (route, query, { blocks = {}, picks, held = null, stuck =
       const name = isOpen(p) ? 'air' : blocks[key(p)] || 'stone'
       return { name, boundingBox: name === 'air' ? 'empty' : 'block', shapes: name === 'air' ? [] : [[0, 0, 0, 1, 1, 1]], position: p, skyLight: 0 }
     },
+    async waitForTicks () {},
     async dig (b) {
       const held = bot.heldItem
       dug.push(key(b.position))
@@ -88,6 +89,9 @@ async function pickJob (route, query, { blocks = {}, picks, held = null, stuck =
     skyInSight: () => false,
     lightRange: () => Infinity,
     seesLit: (p) => NEIGHBOURS.some(([dx, dy, dz]) => isOpen(p.offset(dx, dy, dz))),
+    liveEntities: () => [],
+    FALL_TICKS: botConstant('FALL_TICKS'),
+    FALL_START_TICKS: botConstant('FALL_START_TICKS'),
     setTimeout,
     clearTimeout
   })

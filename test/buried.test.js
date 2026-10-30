@@ -80,7 +80,7 @@ function diggingBot (head, feet, cells, { hold = false, look = () => {}, pos = n
 // moved it. center(cell) stands in for centring on a cell and by default moves the body to its middle. tools are its
 // items, picked from by the real dig tool choice, and equip stands in for that choice without tools. legs gets the
 // reflex and the reason each time the rescue takes the legs. legacy makes it a 1.7.10 body.
-function body (head, feet = AIR, { cells = {}, pos, legacy = false, known = () => true, lastFeet = null, nudge = async () => true, center = null, hold = false, look, tools = null, equip = async () => {}, holdHand = () => ({ renew: () => true }), endHand = () => {}, stopPath = () => {}, legs = () => {}, timers = {} } = {}) {
+function body (head, feet = AIR, { cells = {}, pos, legacy = false, known = () => true, seen = known, lastFeet = null, nudge = async () => true, center = null, hold = false, look, tools = null, equip = async () => {}, holdHand = () => ({ renew: () => true }), endHand = () => {}, stopPath = () => {}, legs = () => {}, timers = {} } = {}) {
   const { bot, at, digs, releases } = diggingBot(head, feet, cells, { hold, look, pos })
   const centre = center || (async (c) => { bot.entity.position = middle(c, bot.entity.position.y); return true })
   const log = []
@@ -99,6 +99,7 @@ function body (head, feet = AIR, { cells = {}, pos, legacy = false, known = () =
     holdHand,
     endHand,
     knownCell: known,
+    seenNow: seen,
     LEGACY_1710: legacy,
     takeLegs: (reflex, why) => { log.push('legs'); legs(reflex, why) },
     stopPath,
@@ -303,11 +304,13 @@ test('a buried body with rock or unseen cells beside it digs the head block', as
   assert.deepStrictEqual(await rescue(unseen), { log: ['legs'], digs: ['gravel'] }, 'unseen')
 })
 
-test('a step-out skips a neighbour under gravel the body knows of', async () => {
+test('a step-out skips a neighbour under gravel the body sees now', async () => {
   const cells = { ...floors([1, 64, 0], [-1, 64, 0]), '1,66,0': GRAVEL }
   assert.deepStrictEqual(await rescue(body(GRAVEL, AIR, { cells })), { log: ['legs', 'step -1,64,0'], digs: [] }, 'seen')
   const unseen = body(GRAVEL, AIR, { cells, known: (p) => key(p) !== '1,66,0' })
   assert.deepStrictEqual(await rescue(unseen), { log: ['legs', 'step 1,64,0'], digs: [] }, 'unseen')
+  const remembered = body(GRAVEL, AIR, { cells, seen: (p) => key(p) !== '1,66,0' })
+  assert.deepStrictEqual(await rescue(remembered), { log: ['legs', 'step 1,64,0'], digs: [] }, 'known, out of sight now')
 })
 
 test('a step down beside the feet goes only where the cell above it is open', async () => {
@@ -776,6 +779,7 @@ function wiredBody (t, cells, { hold = false, equip = async () => {}, controls =
     markTrail: () => {},
     markBody: () => {},
     knownCell: () => true,
+    seenNow: () => true,
     takeLegs: () => { log.push('legs') },
     stopPath: () => {},
     nudgeInto: async (c) => { log.push(`step ${key(c)}`); bot.entity.position = middle(c, c.y); return true },

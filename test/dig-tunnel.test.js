@@ -3,7 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
-const { digJob, facings, awaitRoute, botConstant, claimRescue, routeJobs } = require('./helpers')
+const { digJob, facings, awaitRoute, botConstant, claimRescue, loadBotFunctions, routeJobs } = require('./helpers')
 
 const EAST = { dir: 'e', length: '2', torch: '0' }
 
@@ -18,6 +18,7 @@ async function tunnelOverGap (why) {
     entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 },
     inventory: { emptySlotCount: () => 30 },
     blockAt: (p) => ({ name: air(p) ? 'air' : 'stone', boundingBox: air(p) ? 'empty' : 'block', position: p, skyLight: 0 }),
+    async waitForTicks () {},
     async dig (b) { dug.push(key(b.position)); open.add(key(b.position)) }
   }
   const NEIGHBOURS = botConstant('NEIGHBOURS')
@@ -37,25 +38,108 @@ async function tunnelOverGap (why) {
     macroPlaceAt: async () => ({}),
     nudgeInto: async (cell) => { steps.push(key(cell)); bot.entity.position = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5); return true },
     knownCell: () => false,
-    seesLit: (p) => NEIGHBOURS.some(([dx, dy, dz]) => air(p.offset(dx, dy, dz)))
+    seesLit: (p) => NEIGHBOURS.some(([dx, dy, dz]) => air(p.offset(dx, dy, dz))),
+    liveEntities: () => [],
+    FALL_TICKS,
+    FALL_START_TICKS
   })
   return { ...(await job), dug, steps }
 }
 
 const NO_BOX = new Set(['air', 'cave_air', 'seagrass', 'kelp', 'kelp_plant', 'bubble_column'])
+const FALLS = new Set(['gravel', 'sand', 'red_sand'])
 const PICK_TYPE = { wooden_pickaxe: 1, stone_pickaxe: 2, iron_pickaxe: 3 }
+const FALL_TICKS = botConstant('FALL_TICKS')
+const FALL_START_TICKS = botConstant('FALL_START_TICKS')
+
+// Ticks after the dig under it that a 1.7.10 falling block lands d cells down: it starts falling 2 ticks after the dig,
+// then gains 0.04 of speed and keeps 0.98 of it each tick.
+function landsAfter (d) {
+  let bottom = 0.01
+  let v = 0
+  for (let t = 1; ; t++) {
+    v -= 0.04
+    if (bottom + v <= -d) return t + 1
+    bottom += v
+    v *= 0.98
+  }
+}
+// The ticks a 1.7.10 falling block d cells over its floor stays in the air.
+const AIRBORNE = (d) => landsAfter(d) - 2
 
 // Runs route for a body at (0, 64, 0) in stone, each pick breaking after its uses digs, and returns the result with the cells dug, the mine event texts and the feet cell it ends in.
 // The server's update of the held slot follows each dig after lag ms.
 // With legacy the server answers each dig after 2 ms, and resends a block dug without a pick that has uses left after 30 ms.
 // Each step into the next cell takes nudgeMs.
 // stepOut answers canStepOutTo, by default true for open feet and head cells over a solid floor.
-// The job gets cancelled during the dig of the cell cancelOn names, and a step whose route is stopped fails.
-// The dig of the cell abortOn names throws without digging it.
-async function watchedDig (route, query, { open = () => false, blocks = {}, picks = [{ name: 'iron_pickaxe' }], seen = () => true, unlit = [], lag = 0, legacy = false, nudgeMs = 0, stepOut = null, cancelOn = null, abortOn = null } = {}) {
+// The job gets cancelled during the dig of the cell cancelOn names or during the dig cancelAt counts, and a step whose route is stopped fails.
+// The dig of the cell abortOn names throws without digging it, and of the cell busyOn names the buried self-rescue takes the dig lock.
+// The dig of the cell rescueOn names starts the buried self-rescue, which takes the dig lock without refusing that dig.
+// Gravel and sand over open cells fall at the start of each dig, wait and step, or with slow only during a step. Water flows down with them.
+// The gravel and sand in the cells hung names never fall.
+// With flight, gravel and sand over an open cell start falling 2 ticks after the cell opens, as a falling_block that lands
+// flight(cells it falls) ticks later, under counts the steps into a cell something falls into, and the floor fill sets a
+// gravel block falling from the cell fillDrop names. The blocks landOnStep names land as the next step starts.
+async function watchedDig (route, query, { open = () => false, blocks = {}, picks = [{ name: 'iron_pickaxe' }], seen = () => true, unlit = [], lag = 0, legacy = false, nudgeMs = 0, stepOut = null, cancelOn = null, cancelAt = null, abortOn = null, busyOn = null, rescueOn = null, slow = false, flight = null, fillDrop = null, landOnStep = {}, hung = [] } = {}) {
   const key = (p) => `${p.x},${p.y},${p.z}`
+  const cell = (k) => new Vec3(...k.split(',').map(Number))
   const opened = new Set(['0,64,0', '0,65,0'])
-  const isOpen = (p) => opened.has(key(p)) || open(p)
+  const fallen = new Map()
+  const isOpen = (p) => !fallen.has(key(p)) && (opened.has(key(p)) || open(p))
+  const nameAt = (p) => fallen.get(key(p)) || (isOpen(p) ? 'air' : blocks[key(p)] || 'stone')
+  const lowest = (p) => { let to = p; while (isOpen(to.offset(0, -1, 0))) to = to.offset(0, -1, 0); return to }
+  const settle = () => {
+    const fally = [...new Set([...Object.keys(blocks), ...fallen.keys()])].map(cell)
+      .filter((p) => FALLS.has(nameAt(p)) && !hung.includes(key(p))).sort((a, b) => a.y - b.y)
+    for (const p of fally) {
+      const to = lowest(p)
+      if (to.equals(p)) continue
+      const name = nameAt(p)
+      fallen.delete(key(p))
+      opened.add(key(p))
+      fallen.set(key(to), name)
+    }
+    for (let flowed = true; flowed;) {
+      flowed = false
+      for (const p of [...Object.keys(blocks), ...fallen.keys()].map(cell)) {
+        if (nameAt(p) === 'water' && isOpen(p.offset(0, -1, 0))) { fallen.set(key(p.offset(0, -1, 0)), 'water'); flowed = true }
+      }
+    }
+  }
+  let tick = 0
+  const flying = []
+  const hangs = new Map()
+  const under = []
+  const hanging = () => [...new Set([...Object.keys(blocks), ...fallen.keys()])].map(cell)
+    .filter((p) => FALLS.has(nameAt(p)) && !hung.includes(key(p)) && isOpen(p.offset(0, -1, 0))).sort((a, b) => a.y - b.y)
+  const notice = () => {
+    const now = new Set(hanging().map(key))
+    for (const k of hangs.keys()) if (!now.has(k)) hangs.delete(k)
+    for (const k of now) if (!hangs.has(k)) hangs.set(k, tick)
+  }
+  // A block falling in the same column below lands first and shortens the fall.
+  const drop = (p, block) => {
+    const below = flying.filter((e) => e.from.x === p.x && e.from.z === p.z && e.from.y < p.y).length
+    flying.push({ name: 'falling_block', block, from: p, position: new Vec3(p.x + 0.5, p.y, p.z + 0.5), due: tick + flight(p.y - lowest(p).y - below) })
+  }
+  const tickOnce = () => {
+    tick++
+    for (const e of flying.filter((e) => e.due <= tick).sort((a, b) => a.from.y - b.from.y)) {
+      flying.splice(flying.indexOf(e), 1)
+      fallen.set(key(lowest(e.from)), e.block)
+    }
+    notice()
+    for (const p of hanging()) {
+      if (tick - hangs.get(key(p)) < 2) continue
+      const block = nameAt(p)
+      fallen.delete(key(p))
+      opened.add(key(p))
+      drop(p, block)
+    }
+    notice()
+  }
+  const fallsOn = (c) => flying.some((e) => e.from.x === c.x && e.from.z === c.z && e.from.y >= c.y) || hanging().some((p) => p.x === c.x && p.z === c.z && p.y > c.y)
+  const digLock = botConstant('digLock')
   const items = picks.map((p, i) => ({ uses: Infinity, slot: 36 + i, type: PICK_TYPE[p.name], ...p }))
   const dug = []
   const events = []
@@ -69,14 +153,29 @@ async function watchedDig (route, query, { open = () => false, blocks = {}, pick
     inventory,
     async equip (item) { bot.heldItem = item },
     blockAt: (p) => {
-      const name = isOpen(p) ? 'air' : blocks[key(p)] || 'stone'
+      const name = nameAt(p)
       return { name, boundingBox: NO_BOX.has(name) ? 'empty' : 'block', position: p, skyLight: 0 }
     },
+    async waitForTicks (n) {
+      if (flight) for (let i = 0; i < n; i++) tickOnce()
+      else {
+        tick += n
+        if (!slow) settle()
+      }
+    },
     async dig (b) {
+      if (!slow && !flight) settle()
       dug.push(key(b.position))
-      if (key(b.position) === cancelOn) state.cancelled = true
+      if (key(b.position) === cancelOn || dug.length === cancelAt) state.cancelled = true
+      if (key(b.position) === rescueOn) claimRescue(digLock)
       if (key(b.position) === abortOn) throw new Error('Digging aborted')
+      if (key(b.position) === busyOn) {
+        claimRescue(digLock)
+        loadBotFunctions(['digBusy'], { digLock }).digBusy()
+      }
+      fallen.delete(key(b.position))
       opened.add(key(b.position))
+      if (flight) notice()
       const held = bot.heldItem
       const refused = !(held && held.uses > 0)
       if (legacy) {
@@ -104,18 +203,27 @@ async function watchedDig (route, query, { open = () => false, blocks = {}, pick
     PICK_TIER: botConstant('PICK_TIER'),
     LEGACY_1710: legacy,
     LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
-    digLock: botConstant('digLock'),
+    digLock,
     bunker: { building: false },
     jobs: { start: (n, fn) => { job = fn(state); return { id: 1 } } },
     emitEvent: (kind, text) => { if (kind === 'mine') events.push(text) },
     refuseWhileBuilding () {},
-    fillFrom: async (p) => { fills.push(key(p)); return null },
+    fillFrom: async (p) => {
+      fills.push(key(p))
+      if (fillDrop) drop(cell(fillDrop), 'gravel')
+      fillDrop = null
+      return null
+    },
     macroPlaceAt: async () => ({}),
-    nudgeInto: async (cell, climbing, timeoutMs, route = null) => {
+    nudgeInto: async (to, climbing, timeoutMs, route = null) => {
       if (route && route.stopped()) return false
+      for (const [k, name] of Object.entries(landOnStep)) fallen.set(k, name)
+      landOnStep = {}
+      if (flight && fallsOn(to)) under.push(key(to))
+      if (!flight) settle()
       if (nudgeMs) await new Promise((resolve) => setTimeout(resolve, nudgeMs))
-      if ([cell, cell.offset(0, 1, 0)].some((p) => bot.blockAt(p).boundingBox === 'block')) return false
-      bot.entity.position = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5)
+      if ([to, to.offset(0, 1, 0)].some((p) => bot.blockAt(p).boundingBox === 'block')) return false
+      bot.entity.position = new Vec3(to.x + 0.5, to.y, to.z + 0.5)
       return true
     },
     canStepOutTo: stepOut || ((c) => isOpen(c) && isOpen(c.offset(0, 1, 0)) && !isOpen(c.offset(0, -1, 0))),
@@ -123,12 +231,15 @@ async function watchedDig (route, query, { open = () => false, blocks = {}, pick
     skyInSight: () => false,
     lightRange: (p) => (unlit.includes(key(p)) ? 4 : Infinity),
     seesLit: (p) => seen(p) && NEIGHBOURS.some(([dx, dy, dz]) => isOpen(p.offset(dx, dy, dz))),
+    liveEntities: () => flying,
+    FALL_TICKS,
+    FALL_START_TICKS,
     setTimeout,
     clearTimeout
   })
   const result = await job
   const listeners = bot.eventNames().filter((n) => String(n).startsWith('blockUpdate:')).length + bot.inventory.listenerCount('updateSlot')
-  return { ...result, dug, events, fills, listeners, at: key(bot.entity.position.floored()) }
+  return { ...result, dug, events, fills, listeners, at: key(bot.entity.position.floored()), ticks: tick, under }
 }
 
 const breaches = (r) => r.events.filter((t) => t.startsWith('breached'))
@@ -193,6 +304,13 @@ test('dig_tunnel fills nothing for a wall ore whose dig threw, and stops if the 
 
   const cancelled = await watchedDig('/dig_tunnel', WALL_ORE, { ...LAVA_BEHIND_ORE, abortOn: '1,64,1', cancelOn: '1,64,1' })
   assert.deepStrictEqual([cancelled.stopped, cancelled.fills], ['cancelled', []])
+})
+
+test('dig_tunnel stops naming the buried self-rescue when it aborts a wall ore dig', async () => {
+  const thrown = await watchedDig('/dig_tunnel', EAST, oreBeside([], { abortOn: '1,64,1' }))
+  assert.strictEqual(thrown.stopped, 'length reached', 'control: no rescue')
+  const r = await watchedDig('/dig_tunnel', EAST, oreBeside([], { abortOn: '1,64,1', rescueOn: '1,64,1' }))
+  assert.deepStrictEqual([r.stopped, r.dug], ['busy: the buried self-rescue is running, nothing dug', ['1,65,0', '1,64,0', '1,64,1']])
 })
 
 test('dig_tunnel names no open air it neither sees nor touches', async () => {
@@ -292,9 +410,9 @@ test('dig_tunnel stops at bedrock and at a floor gap it cannot fill', async () =
 
 test('dig_tunnel names lava behind unseen stone only once a dig lays it bare, and fills the hole back', async () => {
   const lava = { blocks: { '2,64,0': 'lava' } }
-  const known = await digJob('/dig_tunnel', EAST, { ...lava, known: ['2,64,0'] })
-  assert.match(known.stopped, /lava/, 'control: known lava ahead stops the tunnel')
-  assert.deepStrictEqual(known.dug, [], 'control: dug toward known lava')
+  const seen = await digJob('/dig_tunnel', EAST, { ...lava, air: ['0,64,0', '0,65,0', '3,64,0'] })
+  assert.match(seen.stopped, /lava/, 'control: lava in sight ahead stops the tunnel')
+  assert.deepStrictEqual(seen.dug, [], 'control: dug toward lava in sight')
 
   const r = await digJob('/dig_tunnel', EAST, lava)
   assert.deepStrictEqual(r.dug, ['1,65,0', '1,64,0'], 'the tunnel stopped before the dig that laid the lava bare')
@@ -317,9 +435,113 @@ test('dig_tunnel stops on gravel a face dig lays bare over its head cell and dig
   assert.deepStrictEqual([r.stopped, r.dug, r.at], ['gravel falling from 1,66,0, stopping', ['1,65,0'], '0,64,0'])
 })
 
-test('dig_tunnel stops short of known gravel over the head cell ahead', async () => {
-  const r = await digJob('/dig_tunnel', EAST, { blocks: { '1,66,0': 'gravel' }, known: ['1,66,0'] })
-  assert.deepStrictEqual([r.stopped, r.dug], ['gravel overhead, stopping (would bury me)', []])
+// The gravel over the head cell ahead shows through the air at 1,67,0.
+const FACE_IN_SIGHT = { open: (p) => p.x === 1 && p.y === 67 && p.z === 0, ...GRAVEL_OVER_FACE }
+
+test('dig_tunnel stops short of gravel in sight over the head cell ahead naming anyway, and with anyway digs out what falls in', async () => {
+  const r = await watchedDig('/dig_tunnel', EAST, FACE_IN_SIGHT)
+  assert.deepStrictEqual([r.stopped, r.dug], ['gravel overhead, stopping (would bury me), anyway digs through', []])
+  const through = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, FACE_IN_SIGHT)
+  assert.deepStrictEqual([through.stopped, through.dug, through.at], ['length reached', ['1,65,0', '1,64,0', '1,64,0', '2,65,0', '2,64,0'], '2,64,0'])
+})
+
+test('dig_tunnel with anyway stops after 8 digs of gravel that keeps falling into its passage', async () => {
+  const blocks = {}
+  for (let y = 66; y < 76; y++) blocks[`1,${y},0`] = 'gravel'
+  const r = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { blocks })
+  assert.strictEqual(r.stopped, 'gravel keeps falling into 1,65,0, stopped after 8 digs')
+  assert.strictEqual(r.dug.length, 2 + 8)
+  assert.match(r.events.at(-1), /^tunnel done: dug 10,/)
+  const cancelled = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { blocks, cancelAt: 2 + 8 })
+  assert.deepStrictEqual([cancelled.stopped, cancelled.dug.length], ['cancelled', 2 + 8], 'a cancel during the 8th re-dig')
+})
+
+test('dig_tunnel names the gravel that fell into its way when the step stalls', async () => {
+  const r = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { landOnStep: { '1,64,0': 'gravel' } })
+  assert.deepStrictEqual([r.stopped, r.at], ['cannot advance: gravel fell into 1,64,0', '0,64,0'])
+})
+
+test('dig_tunnel with anyway stops where gravel keeps hanging over its way', async () => {
+  const r = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { ...FACE_IN_SIGHT, slow: true })
+  assert.deepStrictEqual([r.stopped, r.at, r.ticks], [`gravel at 1,66,0 still falling after ${FALL_TICKS} ticks, stopping`, '0,64,0', FALL_TICKS])
+})
+
+// 1.7.10 starts gravel falling only when a neighbour changes, so the gravel at 1,66,0 over the open cells ahead stays put.
+test('dig_tunnel with anyway steps under gravel hanging over a cell it did not open', async () => {
+  const cave = (p) => p.x === 1 && p.z === 0 && (p.y === 64 || p.y === 65)
+  const r = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { ...GRAVEL_OVER_FACE, open: cave, hung: ['1,66,0'] })
+  assert.deepStrictEqual([r.stopped, r.dug, r.at], ['length reached', ['2,65,0', '2,64,0'], '2,64,0'])
+})
+
+// The gravel over the face falls 4 cells, through the passage into the 2-deep hole under it.
+const FACE_OVER_HOLE = { blocks: { '1,66,0': 'gravel' }, open: (p) => p.x === 1 && p.z === 0 && [62, 63, 67].includes(p.y) }
+
+test('dig_tunnel with anyway steps on only once the gravel falling through its way landed', async () => {
+  const r = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { ...FACE_OVER_HOLE, flight: AIRBORNE })
+  assert.deepStrictEqual([r.stopped, r.under, r.ticks], ['length reached', [], landsAfter(4) + FALL_START_TICKS])
+})
+
+test('dig_tunnel with anyway waits for gravel it cannot see falling into its way and digs it out', async () => {
+  const r = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { ...GRAVEL_OVER_FACE, seen: (p) => !(p.x === 1 && p.y === 66 && p.z === 0), flight: AIRBORNE })
+  assert.deepStrictEqual([r.stopped, r.under, r.dug], ['length reached', [], ['1,65,0', '1,64,0', '1,64,0', '2,65,0', '2,64,0']])
+})
+
+test('dig_tunnel with anyway stops when a block keeps falling over its way', async () => {
+  const r = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { ...GRAVEL_OVER_FACE, flight: () => 1000 })
+  assert.deepStrictEqual([r.stopped, r.at, r.under, r.ticks], [`a block at 1,66,0 still falling after ${FALL_TICKS} ticks, stopping`, '0,64,0', [], FALL_TICKS])
+})
+
+// The gravel at 1,66,0 stays out of sight.
+const UNSEEN_OVER_FACE = { ...GRAVEL_OVER_FACE, seen: (p) => !(p.x === 1 && p.y === 66 && p.z === 0) }
+
+test('dig_tunnel without anyway steps on only once gravel it cannot see falling through its way landed', async () => {
+  const r = await watchedDig('/dig_tunnel', EAST, { ...FACE_OVER_HOLE, ...UNSEEN_OVER_FACE, flight: AIRBORNE })
+  assert.deepStrictEqual([r.stopped, r.under, r.ticks], ['length reached', [], landsAfter(4) + FALL_START_TICKS])
+})
+
+test('dig_tunnel without anyway stops naming a block it cannot see that keeps falling over its way', async () => {
+  const r = await watchedDig('/dig_tunnel', EAST, { ...UNSEEN_OVER_FACE, flight: () => 1000 })
+  assert.deepStrictEqual([r.stopped, r.at, r.under], [`a block at 1,66,0 still falling after ${FALL_TICKS} ticks, stopping`, '0,64,0', []])
+})
+
+test('dig_tunnel without anyway stops on gravel it could not see that fell into its way and digs nothing more', async () => {
+  const r = await watchedDig('/dig_tunnel', EAST, { ...UNSEEN_OVER_FACE, flight: AIRBORNE })
+  assert.deepStrictEqual([r.stopped, r.dug, r.at], ['cannot advance: gravel fell into 1,64,0', ['1,65,0', '1,64,0'], '0,64,0'])
+})
+
+test('dig_tunnel names no gravel it cannot see hanging over its way', async () => {
+  const r = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { ...UNSEEN_OVER_FACE, slow: true })
+  assert.deepStrictEqual([r.stopped, r.at, r.ticks], ['cannot advance: gravel fell into 1,64,0', '0,64,0', FALL_START_TICKS])
+})
+
+test('dig_tunnel with anyway steps on only once a block that starts falling during the floor fill landed', async () => {
+  const shaft = (p) => p.x === 1 && p.z === 0 && (p.y === 63 || p.y >= 66)
+  const r = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { open: shaft, flight: AIRBORNE, fillDrop: '1,70,0' })
+  assert.deepStrictEqual([r.stopped, r.fills, r.under, r.ticks], ['length reached', ['1,63,0'], [], AIRBORNE(7) + 2 * FALL_START_TICKS])
+})
+
+// Water over a gravel column over the face follows the gravel down.
+test('dig_tunnel with anyway stops at water that follows the gravel it digs out, counting each dig', async () => {
+  const r = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { blocks: { '1,66,0': 'gravel', '1,67,0': 'water' } })
+  assert.deepStrictEqual([r.stopped, r.dug, r.at], ['struck water at 1,65,0, stopping', ['1,65,0', '1,64,0', '1,64,0'], '0,64,0'])
+  assert.match(r.events.at(-1), /^tunnel done: dug 3,/)
+})
+
+test('dig_tunnel names the buried self-rescue whole when it takes the dig lock mid-job', async () => {
+  const r = await watchedDig('/dig_tunnel', EAST, { busyOn: '1,64,0' })
+  assert.strictEqual(r.stopped, 'busy: the buried self-rescue is running, nothing dug')
+})
+
+test('dig_tunnel names the buried self-rescue whole when it aborts a dig mid-job', async () => {
+  const aborted = await watchedDig('/dig_tunnel', EAST, { abortOn: '1,64,0' })
+  assert.strictEqual(aborted.stopped, 'dig failed: Digging aborted', 'control: no rescue')
+  const r = await watchedDig('/dig_tunnel', EAST, { abortOn: '1,64,0', rescueOn: '1,64,0' })
+  assert.strictEqual(r.stopped, 'busy: the buried self-rescue is running, nothing dug')
+})
+
+test('dig_tunnel with anyway digs out no fallen gravel once the buried self-rescue runs', async () => {
+  const r = await watchedDig('/dig_tunnel', { ...EAST, anyway: '1' }, { ...FACE_IN_SIGHT, rescueOn: '1,64,0' })
+  assert.deepStrictEqual([r.stopped, r.dug], ['busy: the buried self-rescue is running, nothing dug', ['1,65,0', '1,64,0']])
 })
 
 test('dig_tunnel digs on past gravel over a wall ore it digs', async () => {

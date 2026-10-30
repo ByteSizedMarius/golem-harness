@@ -1278,6 +1278,7 @@ async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, 
       const name = nameAt(p)
       return { name, boundingBox: ['air', 'cave_air', 'lava', 'water'].includes(name) ? 'empty' : 'block', position: p, skyLight: 0 }
     },
+    async waitForTicks () {},
     async dig (b) { dug.push(key(b.position)); open.add(key(b.position)) }
   }
   const NEIGHBOURS = botConstant('NEIGHBOURS')
@@ -1300,7 +1301,10 @@ async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, 
     cellKnown: (p) => known.includes(key(p)),
     knownCell: (p) => known.includes(key(p)),
     skyInSight: () => sky(bot.entity.position),
-    seesLit: (p) => NEIGHBOURS.some(([dx, dy, dz]) => open.has(key(p.offset(dx, dy, dz))))
+    seesLit: (p) => NEIGHBOURS.some(([dx, dy, dz]) => open.has(key(p.offset(dx, dy, dz)))),
+    liveEntities: () => [],
+    FALL_TICKS: botConstant('FALL_TICKS'),
+    FALL_START_TICKS: botConstant('FALL_START_TICKS')
   })
   return { ...(await job), dug, fills, name }
 }

@@ -12,6 +12,15 @@ by what the bot sees right now, while remembered geometry still plans walks, pil
 Bunker pillars keep remembered ceilings and walls. A swim that starts afloat stays afloat over
 water out of sight. `/map` answers `underground: null` when no cover is in sight.
 
+## 2026-10-30: digs stop only for gravel, sand, lava and water in sight
+
+`digat`, `dig_tunnel` and `dig_stair` refused or stopped for gravel, sand, lava or water the bot
+remembered but could not see at that moment, which a player at the keyboard cannot know. They now
+decide on what is in sight. `anyway` lets `digat` dig under gravel or sand in sight, and lets
+`dig_tunnel` and `dig_stair` dig through it and dig out what falls into their way, up to 8 times a
+step. A `mine` refusal under such a column names the `digat` call that takes the fall. Before each
+step both jobs wait up to 2 s for falling blocks to land and stop when one is still falling.
+
 ## 2026-10-25: line of sight follows block shapes
 
 A drop on a slab floor read as out of sight to the bot standing on the same floor, since every block

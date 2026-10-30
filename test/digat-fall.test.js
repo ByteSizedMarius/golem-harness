@@ -12,7 +12,8 @@ const { entityInCell } = require('../lib/shelter')
 const noPath = () => Object.assign(new Error('No path to the goal!'), { name: 'NoPath' })
 
 // A cave of stone under y 64 and air above, with blocks at the given 'x,y,z' cells, each a name or [name, properties].
-function cave (pos, blocks, { unseen = [], hold = false, stuck = false } = {}) {
+// The bot sees and knows every cell but the unseen ones.
+function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = {} } = {}) {
   const cells = new Map(Object.entries(blocks))
   const digs = []
   const releases = []
@@ -65,6 +66,7 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false } = {}) {
     }
   }
   const known = (p) => !unseen.includes(`${p.x},${p.y},${p.z}`)
+  const { bodyTouches } = loadBotFunctions(['bodyTouches'], { bot })
   const env = {
     bot,
     require,
@@ -75,7 +77,7 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false } = {}) {
     digLock: botConstant('digLock'),
     cellKnown: known,
     knownCell: known,
-    seenNow: () => true,
+    seenNow: (p) => bodyTouches(p) || known(p),
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     refuseWhileFighting () {},
     stopPath () {},
@@ -90,7 +92,7 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false } = {}) {
     const { handle } = routeHandler('/digat', env)
     const res = {}
     const [x, y, z] = at.split(',')
-    return { res, done: handle({ query: { x, y, z } }, res) }
+    return { res, done: handle({ query: { x, y, z, ...query } }, res) }
   }
   const mine = async (name, count = 1) => {
     Object.assign(env, {
@@ -126,6 +128,14 @@ test('digat refuses an ore over the head with seen gravel on it, naming the grav
   const r = await digOnce(UNDER, CAPPED, '0,66,0')
   assert.match(r.error && r.error.message, /^refusing to dig iron_ore at 0,66,0: gravel at 0,67,0 would fall on me\b/)
   assert.deepStrictEqual(r.digs, [])
+})
+
+test('digat refuses under seen gravel naming anyway, and with anyway digs it', async () => {
+  const refused = await digOnce(UNDER, CAPPED, '0,66,0')
+  assert.match(refused.error && refused.error.message, /\banyway\b/)
+  const r = await digOnce(UNDER, CAPPED, '0,66,0', { query: { anyway: '1' } })
+  assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  assert.deepStrictEqual(r.digs, ['0,66,0 from (0, 64, 0)'])
 })
 
 test('digat refuses under a column of sand, naming the column from its lowest to its highest cell', async () => {
@@ -276,6 +286,8 @@ test('mine stops with the gravel named when its walk ends under the column', asy
   assert.deepStrictEqual(w.digs, [])
   assert.strictEqual(r.reply.mined, 0)
   assert.match(r.reply.reason, /^refusing to dig iron_ore at 0,66,0: gravel at 0,67,0 would fall on me\b/)
+  assert.match(r.reply.reason, /\bdigat 0,66,0 anyway\b/)
+  assert.doesNotMatch(r.reply.reason, /dig again/)
 })
 
 test('mine digs an ore whose gravel lands only in the dug cell when its walk away finds no path', async () => {
