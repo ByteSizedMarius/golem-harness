@@ -9,7 +9,7 @@ const { isDoor } = require('../lib/doors')
 const { takenText } = require('../lib/leg-ledger')
 const rules = require('../lib/combat-rules')
 const legacy1710 = require('../lib/bot/legacy-1710')
-const { loadBotFunctions, fakeClock, combatReflexIn, botConstant, botObject, laneAt, routeHandler, runRoute } = require('./helpers')
+const { loadBotFunctions, fakeClock, combatReflexIn, botConstant, botObject, laneAt, routeHandler, runRoute, claimRescue } = require('./helpers')
 const Block = require('prismarine-block')(require('prismarine-registry')('1.21.11'))
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
@@ -908,12 +908,79 @@ test('a renewed pilot lease holds the hand 2 s from the renewal, and a renewal a
   assert.strictEqual(guardState.hand, second)
 })
 
+test('under the buried self-rescue the hand goes to its claim alone, and a click keeps its lease', () => {
+  const clock = fakeClock()
+  const guardState = { hand: null }
+  const digLock = botConstant('digLock')
+  claimRescue(digLock)
+  const claim = digLock.holder
+  const bot = { _client: { write () {} } }
+  const { holdHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState, digLock, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout })
+  loadBotFunctions(['wireHandLease'], { bot, guardState }).wireHandLease()
+  const rescue = holdHand(claim)
+  assert.strictEqual(guardState.hand, rescue, 'control: the rescue leases the hand under its own claim')
+  assert.throws(() => holdHand(), { message: 'busy: the buried self-rescue is running, nothing done', reason: 'busy' })
+  bot._client.write('block_place', {})
+  assert.strictEqual(guardState.hand, rescue)
+  assert.strictEqual(rescue.renew(), true)
+})
+
+test('during the buried self-rescue the reflex puts no sword in hand and moves no body, without it does both', async () => {
+  for (const rescue of [false, true]) {
+    const digLock = botConstant('digLock')
+    if (rescue) claimRescue(digLock)
+    const shovel = { name: 'iron_shovel' }
+    const done = []
+    const fight = (health) => standoff(open, zombie(2.5), {
+      env: { ...IN_REACH, digLock },
+      bot: {
+        health,
+        heldItem: shovel,
+        inventory: { items: () => [{ name: 'iron_sword' }, shovel], slots: [] },
+        async equip (item) { done.push(`equip ${item.name}`); this.heldItem = item },
+        setControlState (c, on) { if (on) done.push(c) }
+      }
+    })
+    const melee = await fight(20)
+    const low = await fight(4)
+    const seen = { equips: done.filter((d) => d.startsWith('equip')).length > 0, moves: done.some((d) => !d.startsWith('equip')), swings: melee.swings > 0, raises: melee.raises > 0, fled: low.fled }
+    if (rescue) assert.deepStrictEqual(seen, { equips: false, moves: false, swings: false, raises: false, fled: [] }, JSON.stringify(done))
+    else assert.deepStrictEqual([seen.equips, seen.swings, seen.fled], [true, true, ['emergency']], 'control: no rescue')
+  }
+})
+
+test('the hand stays taken between the leases of the buried self-rescue and frees once its claim ends', async () => {
+  const guardState = { hand: null }
+  const digLock = botConstant('digLock')
+  claimRescue(digLock)
+  const bot = { waitForTicks: () => new Promise(setImmediate) }
+  const { handFree } = loadBotFunctions(['handFree'], { bot, guardState, digLock })
+  let freed = false
+  const free = handFree().then(() => { freed = true })
+  await settle()
+  assert.strictEqual(freed, false, 'the hand freed under the claim with no lease')
+  digLock.holder = null
+  await free
+})
+
 test('a stop ends the pilot lease on the hand at once', async () => {
   const guardState = botObject('guardState', { console })
   const lease = handLease(guardState).holdHand()
   runRoute('/stop', {}, { bot: { clearControlStates () {} }, bunker: {}, legs: { take () {} }, stopFollow () {}, stopPath () {}, clearLane () {}, jobs: { stopAll: () => 0 }, guardState })
   assert.strictEqual(guardState.hand, null)
   assert.strictEqual(await Promise.race([lease.then(() => 'ended'), new Promise(setImmediate).then(() => 'held')]), 'ended')
+})
+
+test('a stop leaves the hand lease of the buried self-rescue in place', () => {
+  const clock = fakeClock()
+  const guardState = botObject('guardState', { console })
+  const digLock = botConstant('digLock')
+  claimRescue(digLock)
+  const { holdHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState, digLock, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout })
+  const rescue = holdHand(digLock.holder)
+  runRoute('/stop', {}, { bot: { clearControlStates () {} }, bunker: {}, legs: { take () {} }, stopFollow () {}, stopPath () {}, clearLane () {}, jobs: { stopAll: () => 0 }, guardState })
+  assert.strictEqual(guardState.hand, rescue)
+  assert.strictEqual(rescue.renew(), true)
 })
 
 test('the bow goes into the hand only once the pilot lease on it ends', async () => {

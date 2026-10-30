@@ -4,7 +4,7 @@ const assert = require('node:assert')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const { GRAVESTONE } = require('../lib/server-overrides')
-const { awaitRoute, routeHandler, loadBotFunctions } = require('./helpers')
+const { awaitRoute, routeHandler, loadBotFunctions, botConstant, claimRescue } = require('./helpers')
 const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 
 const GRAVE_ID = 7
@@ -90,6 +90,17 @@ async function refusal (query, env) {
   assert.ok(res.error, `/grave answered ${JSON.stringify(res.body)}`)
   return res.error.message
 }
+
+test('grave refuses busy while the buried self-rescue holds the hand, before walking or opening anything', async () => {
+  const g = graveWindow([stack('cobblestone', 40)])
+  const { env, opened } = graveEnv(g.window)
+  let walked = false
+  env.bot.pathfinder.goto = async () => { walked = true }
+  env.digLock = botConstant('digLock')
+  claimRescue(env.digLock)
+  for (const query of [{}, { take: 'all' }]) assert.strictEqual(await refusal(query, env), 'busy: the buried self-rescue is running, nothing opened', JSON.stringify(query))
+  assert.deepStrictEqual([opened, walked, g.pocket('cobblestone')], [[], false, 0])
+})
 
 test('grave lists the items of the gravestone at x,y,z and of the nearest one in sight', async () => {
   const g = graveWindow([stack('iron_pickaxe', 1), stack('cobblestone', 40)])
@@ -198,6 +209,70 @@ test('a fight starting during the walk or a stack pause stops the take before it
   env.bot.pathfinder.goto = async () => { fight.busy = true }
   assert.strictEqual(await refusal({ take: 'all' }, env), 'took nothing: a fight started')
   assert.strictEqual(clicks.length, 1)
+})
+
+test('a bunker build starting during a stack pause stops the take before its next click, with what was taken kept in the reply', async () => {
+  const g = graveWindow([stack('cobblestone', 64), stack('cobblestone', 10), stack('bread', 5)])
+  const { env } = graveEnv(g.window)
+  const digLock = botConstant('digLock')
+  env.digLock = digLock
+  const { claimDig } = loadBotFunctions(['claimDig'], { digLock })
+  env.stackPause = async () => { claimDig('the bunker build', true).sole = true }
+  assert.deepStrictEqual(await awaitRoute('/grave', { take: 'all' }, env), {
+    at: { x: 5, y: 64, z: 0 },
+    took: ['64 cobblestone'],
+    stopped: 'busy: the bunker build is running, nothing more moved',
+    items: [{ name: 'cobblestone', count: 10 }, { name: 'bread', count: 5 }]
+  })
+})
+
+test('a buried self-rescue starting during the walk stops the grave at the hand, closes it and leaves its lease and shovel alone', async () => {
+  const g = graveWindow([stack('cobblestone', 10)])
+  const { env } = graveEnv(g.window)
+  const digLock = botConstant('digLock')
+  env.digLock = digLock
+  env.bot.heldItem = { name: 'iron_shovel' }
+  const { holdHand, endHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState: env.guardState, digLock, setTimeout, clearTimeout })
+  let rescue = null
+  env.bot.pathfinder.goto = async () => {
+    claimRescue(digLock)
+    rescue = holdHand(digLock.holder)
+  }
+  try {
+    for (const query of [{}, { take: 'all' }]) {
+      endHand(rescue)
+      digLock.holder = null
+      g.window.closed = false
+      assert.strictEqual(await refusal(query, env), 'busy: the buried self-rescue is running, nothing done', JSON.stringify(query))
+      assert.ok(g.window.closed, `${JSON.stringify(query)} left the grave open`)
+      assert.strictEqual(env.guardState.hand, rescue, `${JSON.stringify(query)} ended the rescue's lease`)
+    }
+    assert.deepStrictEqual([g.window.containerItems().length, g.pocket('cobblestone')], [1, 0])
+    assert.strictEqual(env.bot.heldItem.name, 'iron_shovel')
+  } finally { endHand(rescue) }
+})
+
+test('a buried self-rescue that stops the walk to the grave gets it refused busy, with the grave not opened', async () => {
+  const g = graveWindow([stack('cobblestone', 10)])
+  const { env, opened } = graveEnv(g.window)
+  const digLock = botConstant('digLock')
+  env.digLock = digLock
+  let rescue = false
+  // The rescue's stopPath clears the goal, and mineflayer-pathfinder's goto fails with GoalChanged.
+  env.bot.pathfinder.goto = async () => {
+    if (rescue) claimRescue(digLock)
+    throw Object.assign(new Error('The goal was changed before it could be completed!'), { name: 'GoalChanged' })
+  }
+  assert.strictEqual(await refusal({}, env), 'The goal was changed before it could be completed!', 'control: a goal changed with no claim')
+  rescue = true
+  for (const query of [{}, { take: 'all' }]) {
+    digLock.holder = null
+    const { handle, res } = routeHandler('/grave', env)
+    await handle({ query }, res)
+    assert.strictEqual(res.error && res.error.message, 'busy: the buried self-rescue is running, nothing opened', JSON.stringify(query))
+    assert.strictEqual(res.error.reason, 'busy', JSON.stringify(query))
+  }
+  assert.deepStrictEqual([opened, g.pocket('cobblestone')], [[], 0])
 })
 
 test('grave refuses a gravestone out of lit sight without naming it or opening it', async () => {

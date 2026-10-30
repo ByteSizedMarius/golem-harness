@@ -13,7 +13,7 @@ const { expireConfirmed, babyFlag } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const { createLane } = require('../lib/bot/lane')
 const vm = require('node:vm')
-const { routeHandler, runRoute, awaitRoute, fakeClock, toolNamed, botConstant, botSource, balanced, loadBotFunctions, combatReflexIn, wireListeners, botObject } = require('./helpers')
+const { routeHandler, runRoute, awaitRoute, fakeClock, toolNamed, botConstant, botSource, balanced, loadBotFunctions, combatReflexIn, wireListeners, botObject, claimRescue } = require('./helpers')
 const mcData = require('minecraft-data')('1.21.11')
 const registry = require('prismarine-registry')('1.21.11')
 const loadItem = require('prismarine-item')
@@ -1885,8 +1885,8 @@ test('a 1.7.10 strike with headroom swings on the way down from a jump, and unde
 
 // The /hold reply on query and the actions and hits of a body with a sword, on 1.7.10 when legacy is true. walls(p)
 // marks the stone cells above the floor, and a zombie that the body sees when seen is true steps from 6 off to 2 off
-// after 1 s. raise(world) runs on each raise of the sword block.
-async function holdAt (query, walls, seen = true, legacy = true, raise = () => {}) {
+// after 1 s. raise(world) runs on each raise of the sword block. extra goes into the route's env last.
+async function holdAt (query, walls, seen = true, legacy = true, raise = () => {}, extra = {}) {
   const world = verbWorld([zombie(0.5, seen)], { legacy })
   const { bot, env, clock } = world
   const z = bot.entities[7]
@@ -1911,9 +1911,9 @@ async function holdAt (query, walls, seen = true, legacy = true, raise = () => {
     HOLD_MAX_S: rules.HOLD_MAX_S,
     OPENABLE: botConstant('OPENABLE'),
     isDoor
-  })
+  }, extra)
   const res = await drive('/hold', query, world)
-  return { res, did: world.did, hits: world.hits }
+  return { res, did: world.did, hits: world.hits, bot }
 }
 
 test('hold on 1.7.10 strikes a zombie it sees step into reach in a 1-wide doorway, and refuses in the open without anywhere', async () => {
@@ -1930,6 +1930,51 @@ test('hold on 1.7.10 strikes a zombie it sees step into reach in a 1-wide doorwa
   assert.deepStrictEqual(field.did, [])
   const anywhere = await holdAt({ sec: '3', anywhere: '1' }, () => false)
   assert.strictEqual(anywhere.res.body && anywhere.res.body.spot, 'anywhere')
+})
+
+test('strike, shoot, useon and hold refuse busy while the buried self-rescue holds the dig lock, before any walk, equip or act', async () => {
+  const busy = (skipped) => `busy: the buried self-rescue is running, nothing ${skipped}`
+  for (const [route, query, skipped] of [
+    ['/strike', { name: 'zombie' }, 'struck'],
+    ['/shoot', { name: 'zombie' }, 'loosed'],
+    ['/useon', { name: 'zombie', item: 'shears' }, 'used']
+  ]) {
+    const world = verbWorld([zombie(6.5)])
+    world.env.digLock = botConstant('digLock')
+    claimRescue(world.env.digLock)
+    world.bot.heldItem = { name: 'iron_shovel' }
+    const res = await drive(route, query, world)
+    assert.strictEqual(res.error && res.error.message, busy(skipped), route)
+    assert.strictEqual(res.error.reason, 'busy', route)
+    assert.deepStrictEqual(world.did, [], route)
+    assert.strictEqual(world.bot.heldItem.name, 'iron_shovel', route)
+  }
+  const digLock = botConstant('digLock')
+  claimRescue(digLock)
+  const doorway = (p) => p.z === 0 && Math.abs(p.x) === 1 && (p.y === 64 || p.y === 65)
+  const held = await holdAt({ sec: '3' }, doorway, true, true, () => {}, { digLock })
+  assert.strictEqual(held.res.error && held.res.error.message, busy('held'))
+  assert.strictEqual(held.res.error.reason, 'busy')
+  assert.deepStrictEqual([held.did, held.bot.heldItem], [[], null])
+})
+
+test('useon uses nothing once the buried self-rescue takes the hand during its equip, and leaves the rescue\'s lease alone', async () => {
+  const world = verbWorld([zombie(6.5)])
+  const digLock = botConstant('digLock')
+  world.env.digLock = digLock
+  const { holdHand } = loadBotFunctions(['holdHand'], { guardState: world.env.guardState, digLock, setTimeout: world.clock.setTimeout, clearTimeout: world.clock.clearTimeout })
+  let rescue = null
+  world.bot.equip = async (item) => {
+    world.did.push(`equip ${item.name}`)
+    world.bot.heldItem = item
+    claimRescue(digLock)
+    rescue = holdHand(digLock.holder)
+  }
+  const res = await drive('/useon', { name: 'zombie', item: 'shears' }, world)
+  assert.strictEqual(res.error && res.error.message, 'busy: the buried self-rescue is running, nothing used')
+  assert.strictEqual(res.error.reason, 'busy')
+  assert.deepStrictEqual(world.did, ['walk', 'equip shears'])
+  assert.strictEqual(world.env.guardState.hand, rescue)
 })
 
 test('a 1.7.10 sword block a hold raised holds through an update of the held sword and ends when another sword takes its slot', async () => {

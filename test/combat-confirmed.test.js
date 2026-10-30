@@ -6,14 +6,14 @@ const { Vec3 } = require('vec3')
 const { expireConfirmed } = require('../lib/shelter')
 const { STANCES } = require('../lib/bot/stances')
 const { CREEPER_ZONE_SLACK } = require('../lib/plan')
-const { loadBotFunctions, combatReflexIn, botConstant } = require('./helpers')
+const { loadBotFunctions, combatReflexIn, botConstant, claimRescue } = require('./helpers')
 
 const CLASSES = { zombie: 'hostile', skeleton: 'hostile', creeper: 'creeper' }
 const ARROW_ID = 50
 
 // The combat reflex and the damage wire of a body at the origin among mobs, over one AGGRO_CONFIRMED. A mob carries
-// seen (the body perceives it), reach (in melee reach) and watched (a floor away, not engageable).
-function fightAmong (mobs) {
+// seen (the body perceives it), reach (in melee reach) and watched (a floor away, not engageable). over replaces env entries.
+function fightAmong (mobs, over = {}) {
   const bot = Object.assign(new EventEmitter(), {
     entity: { id: 1, position: new Vec3(0.5, 64, 0.5) },
     entities: Object.fromEntries(mobs.map((e) => [e.id, e])),
@@ -47,7 +47,8 @@ function fightAmong (mobs) {
     damageTypeMissed: false,
     ...Object.fromEntries(['CONFIRMED_HORIZON', 'CONFIRMED_MS', 'CONFIRMED_COOL_MS', 'SHOOTERS', 'ARROWS', 'ARROW_RANGE',
       'ARROW_LOOSE', 'ARROW_FLIGHT_MS', 'ARROW_HIT_MS', 'SWING_MS', 'SWING_GAP_MS', 'SWING_FACING']
-      .map((name) => [name, botConstant(name)]))
+      .map((name) => [name, botConstant(name)])),
+    ...over
   }
   const wire = loadBotFunctions(['wireDamageAttribution'], env)
   const combat = combatReflexIn(env)
@@ -121,6 +122,16 @@ test('a confirmed skeleton behind cover lapses 20 s after its last arrow, and it
   f.hit(skeleton, true)
   assert.strictEqual(f.confirmed.get(5).ranged, true, 'the next arrow')
   assert.strictEqual(f.check(), true)
+})
+
+test('a zombie that hits the body during the buried self-rescue starts no fight, and its hit counts once the rescue ends', () => {
+  const digLock = botConstant('digLock')
+  claimRescue(digLock)
+  const f = fightAmong([zombie(1.5, true)], { digLock })
+  f.hit(f.bot.entities[9])
+  assert.strictEqual(f.check(), false)
+  digLock.holder = null
+  assert.strictEqual(f.check(), true, 'control: the rescue over')
 })
 
 const creeper = (id, x, y, more) => ({ id, name: 'creeper', reach: false, position: new Vec3(x, y, 0.5), ...more })

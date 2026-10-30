@@ -4,7 +4,7 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const registry = require('prismarine-registry')('1.21.11')
 const Item = require('prismarine-item')(registry)
-const { loadBotFunctions, botConstant, routeHandler, fakeClock } = require('./helpers')
+const { loadBotFunctions, botConstant, routeHandler, fakeClock, claimRescue } = require('./helpers')
 
 const stack = (name, count) => new Item(registry.itemsByName[name].id, count)
 
@@ -24,6 +24,7 @@ function body (stacks, server = () => {}) {
     FOOD_UPDATE_MS: botConstant('FOOD_UPDATE_MS'),
     jobs: { list: () => [] },
     guardState: { hand: null },
+    digLock: botConstant('digLock'),
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout
   }
@@ -108,6 +109,124 @@ test('eat answers ok with unconfirmed when the pockets lose the one eaten and no
   assert.strictEqual(res.error, undefined, res.error && res.error.message)
   assert.strictEqual(res.body.foodNow, 6)
   assert.match(res.body.unconfirmed, /no food update/)
+})
+
+// A body holding an iron shovel under the hand lease of the buried self-rescue, recording its equips and bites.
+function rescueBody (server) {
+  const b = body([stack('iron_shovel', 1), stack('cooked_beef', 18)], server)
+  b.bot.heldItem = b.items[0]
+  b.done = []
+  const consume = b.bot.consume
+  b.bot.equip = async (item) => { b.done.push(`equip ${item.name}`); b.bot.heldItem = item }
+  b.bot.consume = async () => { b.done.push('bite'); await consume() }
+  b.lease = { end: () => b.done.push('lease ended') }
+  b.env.guardState.hand = b.lease
+  return b
+}
+
+test('eat refuses busy while the buried self-rescue holds the hand and leaves its shovel and lease alone', async () => {
+  const b = rescueBody()
+  claimRescue(b.env.digLock)
+  const res = await eat(b)
+  assert.strictEqual(res.body, undefined, `eat answered ${JSON.stringify(res.body)}`)
+  assert.strictEqual(res.error.reason, 'busy')
+  assert.strictEqual(res.error.message, 'busy: the buried self-rescue is running, nothing eaten')
+  assert.deepStrictEqual(b.done, [])
+  assert.strictEqual(b.bot.heldItem.name, 'iron_shovel')
+  assert.strictEqual(b.env.guardState.hand, b.lease)
+})
+
+test('eat takes the hand and eats once the buried self-rescue ends', async () => {
+  const b = rescueBody(slotAt(0, 1, 17))
+  const { holdHand, endHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState: b.env.guardState, digLock: b.env.digLock, setTimeout: b.clock.setTimeout, clearTimeout: b.clock.clearTimeout })
+  b.env.guardState.hand = null
+  claimRescue(b.env.digLock)
+  const rescue = holdHand(b.env.digLock.holder)
+  // The rescue's own end: its lease, then its claim.
+  endHand(rescue)
+  b.env.digLock.holder = null
+  const res = await eat(b)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.strictEqual(res.body.ate, 'cooked_beef')
+  assert.deepStrictEqual(b.done, ['equip cooked_beef', 'bite', 'equip iron_shovel'])
+  assert.strictEqual(b.env.guardState.hand, null)
+})
+
+test('eat refuses busy and puts nothing back once the buried self-rescue takes the hand mid-bite, naming the unconfirmed meal', async () => {
+  const b = body([stack('iron_sword', 1), stack('cooked_beef', 18), stack('iron_shovel', 1)])
+  b.bot.heldItem = b.items[0]
+  const { holdHand } = loadBotFunctions(['holdHand'], { guardState: b.env.guardState, digLock: b.env.digLock, setTimeout: b.clock.setTimeout, clearTimeout: b.clock.clearTimeout })
+  let rescue = null
+  b.bot.consume = async () => {
+    slotAt(0, 1, 17)(b.bot, b.items, b.clock)
+    claimRescue(b.env.digLock)
+    rescue = holdHand(b.env.digLock.holder)
+    // The rescue renews its lease for each dig, past the food update wait.
+    rescue.renew(10000)
+    b.bot.heldItem = b.items[2]
+  }
+  const res = await eat(b)
+  assert.strictEqual(res.body, undefined, `eat answered ${JSON.stringify(res.body)}`)
+  assert.strictEqual(res.error.reason, 'busy')
+  assert.strictEqual(res.error.message, `ate cooked_beef, food 6/20 (no food update from the server within ${b.env.FOOD_UPDATE_MS} ms, food may predate the meal), then busy: the buried self-rescue is running, nothing put back in hand`)
+  assert.strictEqual(b.bot.heldItem.name, 'iron_shovel')
+  assert.strictEqual(b.env.guardState.hand, rescue)
+  assert.strictEqual(b.bot.listenerCount('health'), 0)
+})
+
+test('eat refuses busy and bites nothing once the buried self-rescue takes the hand during the food equip', async () => {
+  const b = body([stack('iron_sword', 1), stack('cooked_beef', 18), stack('iron_shovel', 1)])
+  b.bot.heldItem = b.items[0]
+  const { holdHand } = loadBotFunctions(['holdHand'], { guardState: b.env.guardState, digLock: b.env.digLock, setTimeout: b.clock.setTimeout, clearTimeout: b.clock.clearTimeout })
+  const done = []
+  let rescue = null
+  b.bot.equip = async (item) => {
+    done.push(`equip ${item.name}`)
+    b.bot.heldItem = item
+    claimRescue(b.env.digLock)
+    rescue = holdHand(b.env.digLock.holder)
+  }
+  b.bot.consume = async () => { done.push('bite') }
+  const res = await eat(b)
+  assert.strictEqual(res.body, undefined, `eat answered ${JSON.stringify(res.body)}`)
+  assert.strictEqual(res.error.reason, 'busy')
+  assert.strictEqual(res.error.message, 'busy: the buried self-rescue is running, nothing eaten')
+  assert.deepStrictEqual(done, ['equip cooked_beef'])
+  assert.strictEqual(b.env.guardState.hand, rescue)
+  assert.strictEqual(b.bot.listenerCount('health'), 0)
+})
+
+// A body holding an iron sword whose bite, run by server, starts the bunker build. done records its equips and bites.
+function bunkerBite (server) {
+  const b = body([stack('iron_sword', 1), stack('cooked_beef', 18)])
+  b.bot.heldItem = b.items[0]
+  const { claimDig } = loadBotFunctions(['claimDig'], { digLock: b.env.digLock })
+  b.done = []
+  b.bot.equip = async (item) => { b.done.push(`equip ${item.name}`); b.bot.heldItem = item }
+  b.bot.consume = async () => {
+    b.done.push('bite')
+    server(b.bot, b.items, b.clock)
+    claimDig('the bunker build', true).sole = true
+  }
+  return b
+}
+
+test('eat refuses busy and puts nothing back once the bunker build starts mid-bite, naming the meal the server confirmed', async () => {
+  const b = bunkerBite(fedAt(100, 9))
+  const res = await eat(b)
+  assert.strictEqual(res.body, undefined, `eat answered ${JSON.stringify(res.body)}`)
+  assert.strictEqual(res.error.reason, 'busy')
+  assert.strictEqual(res.error.message, 'ate cooked_beef, food 9/20, then busy: the bunker build is running, nothing put back in hand')
+  assert.deepStrictEqual(b.done, ['equip cooked_beef', 'bite'])
+  assert.strictEqual(b.bot.listenerCount('health'), 0)
+})
+
+test('eat refuses busy once the bunker build starts mid-bite, naming a bite the server never answered', async () => {
+  const b = bunkerBite(() => {})
+  const res = await eat(b)
+  assert.strictEqual(res.error.reason, 'busy')
+  assert.strictEqual(res.error.message, `no meal seen within ${b.env.FOOD_UPDATE_MS} ms: cooked_beef 18 before and 18 after, food 6/20 before and after, then busy: the bunker build is running, nothing put back in hand. The pockets may show items the server does not hold.`)
+  assert.deepStrictEqual(b.done, ['equip cooked_beef', 'bite'])
 })
 
 test('refuel after a fight reports a bite that changed nothing', async () => {

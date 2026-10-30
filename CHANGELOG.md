@@ -4,6 +4,16 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-30: the buried rescue keeps its hand
+
+While the buried self-rescue dug the bot out, pilot routes, the combat reflex and `stop` could swap
+the tool in its hand or end its hold on the hand, and two failed digs left the bot held stuck in the
+block. While the rescue or a bunker build runs, routes that use the hand now refuse with `busy` and
+name what they skipped: before they walk or act, between their equip and their click, and when the
+rescue stops their walk. A transfer or a meal already under way stops before its next step and says
+what it got done. The combat reflex neither swaps the hand nor moves the body during a rescue, `stop`
+leaves the rescue's hold alone, and `equip` still puts on armor.
+
 ## 2026-10-30: the buried rescue follows 1.7.10 suffocation
 
 The buried self-rescue judged a head by the 1.21 full-cube rule, so on a 1.7.10 server it dug out of

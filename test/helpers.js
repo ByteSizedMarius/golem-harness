@@ -808,6 +808,8 @@ function loadBotFunctions (names, env, code = '') {
       env.seenNow ??= () => true
       env.seesShape ??= () => true
     }
+    // Unless env has its own, soleClaim reads a free dig lock.
+    if (name === 'soleClaim') env.digLock ??= botConstant('digLock')
     sources.push(body)
     reach(body, name)
   }
@@ -924,7 +926,8 @@ function bunkerReflexIn (env) {
   return vm.runInContext(`(${literal})`, vm.createContext(env))
 }
 
-// The combat reflex of bot.js, evaluated over env. Unless env has its own, every cell is in sight now.
+// The combat reflex of bot.js, evaluated over env. Unless env has its own, every cell is in sight now and soleClaim
+// reads env.digLock, a free one when env has none.
 function combatReflexIn (env) {
   const src = botSource()
   const at = reflexAt('combat')
@@ -933,6 +936,7 @@ function combatReflexIn (env) {
   env.OPENABLE ??= botConstant('OPENABLE')
   env.seenNow ??= () => true
   env.seesShape ??= () => true
+  env.soleClaim ??= loadBotFunctions(['soleClaim'], { digLock: env.digLock || botConstant('digLock') }).soleClaim
   return vm.runInContext(`(${literal})`, vm.createContext(env))
 }
 

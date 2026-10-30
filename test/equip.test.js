@@ -1,7 +1,7 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
-const { routeHandler, awaitRoute } = require('./helpers')
+const { routeHandler, awaitRoute, botConstant, claimRescue, loadBotFunctions } = require('./helpers')
 
 // mineflayer 4.37.1's inventory window: armor in 5 to 8, pockets from 9, the hotbar from 36, the off-hand at 45.
 const ARMOR = { head: 5, torso: 6, legs: 7, feet: 8 }
@@ -19,10 +19,10 @@ function body (names, worn = {}, held = null) {
   return bot
 }
 
-const env = (bot, legacy = false) => ({ bot, LEGACY_1710: legacy })
+const env = (bot, legacy = false, digLock = botConstant('digLock')) => ({ bot, LEGACY_1710: legacy, digLock })
 
-async function refusal (query, bot, legacy = false) {
-  const { handle, res } = routeHandler('/equip', env(bot, legacy))
+async function refusal (query, bot, legacy = false, digLock) {
+  const { handle, res } = routeHandler('/equip', env(bot, legacy, digLock))
   await handle({ query }, res)
   assert.ok(res.error, 'equip did not refuse')
   return res.error.message
@@ -72,4 +72,30 @@ test('on 1.7.10 equip refuses the off-hand and puts a shield without dest in the
   assert.strictEqual(await refusal({ name: 'shield', dest: 'off-hand' }, bot, true), '1.7.10 has no off-hand')
   await awaitRoute('/equip', { name: 'shield' }, env(bot, true))
   assert.deepStrictEqual(bot.equips, [['shield', 'hand']])
+})
+
+test('during the buried self-rescue equip refuses busy for the hand and still puts armor on, leaving the shovel and the rescue\'s lease alone', async () => {
+  const bot = body(['diamond_sword', 'iron_helmet'], {}, 'iron_shovel')
+  const digLock = botConstant('digLock')
+  const guardState = { hand: null }
+  const { holdHand, endHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState, digLock, setTimeout, clearTimeout })
+  claimRescue(digLock)
+  const rescue = holdHand(digLock.holder)
+  try {
+    assert.strictEqual(await refusal({ name: 'diamond_sword' }, bot, false, digLock), 'busy: the buried self-rescue is running, nothing equipped')
+    assert.strictEqual(await refusal({ name: 'iron_helmet', dest: 'hand' }, bot, false, digLock), 'busy: the buried self-rescue is running, nothing equipped')
+    assert.deepStrictEqual(await awaitRoute('/equip', { name: 'iron_helmet' }, { ...env(bot, false, digLock), guardState }), { equipped: 'iron_helmet', dest: 'head' })
+    assert.deepStrictEqual(bot.equips, [['iron_helmet', 'head']])
+    assert.strictEqual(bot.inventory.slots[36].name, 'iron_shovel')
+    assert.strictEqual(guardState.hand, rescue, 'equip ended the rescue\'s lease')
+  } finally { endHand(rescue) }
+})
+
+test('equip puts the item in the hand once the buried self-rescue ends', async () => {
+  const bot = body(['diamond_sword'], {}, 'iron_shovel')
+  const digLock = botConstant('digLock')
+  claimRescue(digLock)
+  digLock.holder = null
+  assert.deepStrictEqual(await awaitRoute('/equip', { name: 'diamond_sword' }, env(bot, false, digLock)), { equipped: 'diamond_sword', dest: 'hand' })
+  assert.deepStrictEqual(bot.equips, [['diamond_sword', 'hand']])
 })

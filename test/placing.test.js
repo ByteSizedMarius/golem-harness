@@ -64,6 +64,27 @@ test('place names the cell it placed in and the block under it', async () => {
   assert.deepStrictEqual(clicks, ['1,64,0'])
 })
 
+test('place refuses busy while the buried self-rescue holds the hand, and equips and places nothing', async () => {
+  const done = []
+  const digLock = botConstant('digLock')
+  claimRescue(digLock)
+  const env = placingEnv(body(0.5, 64, 0.5), ground(), {
+    items: [{ name: 'crafting_table', count: 1 }],
+    bot: {
+      heldItem: { name: 'iron_shovel' },
+      async equip (item) { done.push(`equip ${item.name}`); this.heldItem = item },
+      async placeBlock (ref, face) { done.push(`place ${key(ref.position.plus(face))}`) }
+    },
+    env: { require, clearSoftCover: async () => {}, round: botConstant('round'), digLock }
+  })
+  const { handle, res } = routeHandler('/place', env)
+  await handle({ query: { name: 'crafting_table' } }, res)
+  assert.strictEqual(res.error && res.error.message, 'busy: the buried self-rescue is running, nothing placed')
+  assert.strictEqual(res.error.reason, 'busy')
+  assert.deepStrictEqual(done, [])
+  assert.strictEqual(env.bot.heldItem.name, 'iron_shovel')
+})
+
 // reachToPlace from a body at (0.5, 64, 0.5) over the floor, every cell known. planPath answers a successful search
 // along the cell centres in path (answering status instead when given), or null with the route ended for ended.
 // With fighting the combat reflex is busy. log records plans, route ends and walks.
@@ -266,6 +287,37 @@ test('a pilot pillar holds the hand from the equip to the click of every try, an
   assert.strictEqual(await jumpPlace({ position: new Vec3(0, 63, 0) }, dirt), true)
   assert.deepStrictEqual(log, ['equip dirt leased=true', 'equip dirt leased=true', 'click dirt leased=true'])
   assert.strictEqual(guardState.hand, null, 'the lease outlived the placement')
+})
+
+// The hand lease of a buried self-rescue holding the sole claim on digLock, set in guardState. ended records its end.
+function rescueLease (digLock, guardState) {
+  claimRescue(digLock)
+  const lease = { ended: false, end () { lease.ended = true }, renew: () => true }
+  guardState.hand = lease
+  return lease
+}
+
+test('a pilot pillar refuses busy while the buried self-rescue holds the hand, and leaves its lease and shovel alone', async () => {
+  const guardState = { hand: null }
+  const digLock = botConstant('digLock')
+  const rescue = rescueLease(digLock, guardState)
+  const log = []
+  const env = placingEnv(body(0.5, 64, 0.5), ground(), {
+    bot: {
+      heldItem: { name: 'iron_shovel' },
+      async equip (item) { this.heldItem = item; log.push(`equip ${item.name}`) },
+      setControlState (c, on) { log.push(`${c} ${on}`) },
+      async waitForTicks () {},
+      async placeBlock () { log.push('click') }
+    },
+    env: { setTimeout, clearTimeout, blockers: () => [], guardState, digLock }
+  })
+  const { jumpPlace } = loadBotFunctions(['jumpPlace'], env)
+  await assert.rejects(jumpPlace({ position: new Vec3(0, 63, 0) }, { name: 'dirt' }), { message: 'busy: the buried self-rescue is running, nothing done', reason: 'busy' })
+  assert.deepStrictEqual(log, [])
+  assert.strictEqual(env.bot.heldItem.name, 'iron_shovel')
+  assert.strictEqual(guardState.hand, rescue)
+  assert.strictEqual(rescue.ended, false)
 })
 
 test('a dig step fills from any filler carried, cobbled deepslate included', async () => {
@@ -473,7 +525,57 @@ test('build during the buried self-rescue answers busy naming it and starts no j
   claimRescue(env.digLock)
   const r = await routeJobs('/build', CABIN, env)
   assert.deepStrictEqual([r.error && r.error.reason, r.started], ['busy', []])
-  assert.match(r.error.message, /^busy: the buried self-rescue is running\b/)
+  assert.strictEqual(r.error.message, 'busy: the buried self-rescue is running, nothing built')
+})
+
+test('outline, walls and roof refuse busy while the buried self-rescue holds the dig lock, before any walk, equip or place', async () => {
+  const cell = { x: '2', z: '0', w: '1', d: '1', y: '64', name: 'cobblestone' }
+  for (const [route, query] of [['/outline', cell], ['/walls', RING], ['/roof', cell]]) {
+    const control = wallsRig()
+    await awaitRoute(route, query, control.env)
+    assert.ok(control.placed().length, `${route} control: placed nothing`)
+    const rig = wallsRig()
+    claimRescue(rig.env.digLock)
+    const { handle, res } = routeHandler(route, rig.env)
+    await handle({ query }, res)
+    assert.strictEqual(res.error && res.error.message, 'busy: the buried self-rescue is running, nothing built', route)
+    assert.strictEqual(res.error.reason, 'busy', route)
+    assert.deepStrictEqual(rig.log, [], route)
+  }
+})
+
+test('a buried self-rescue starting during a cell walk or its soft cover dig stops outline, walls and roof before the equip, and leaves its lease and shovel alone', async () => {
+  const snow = { name: 'snow', boundingBox: 'empty' }
+  const cases = [
+    ['/roof', { x: '8', z: '0', w: '1', d: '1', y: '64', name: 'cobblestone' }, 'walk', {}],
+    ['/outline', { x: '2', z: '0', w: '1', d: '1', y: '64', name: 'cobblestone' }, 'dig', { '2,64,0': snow }],
+    ['/walls', RING, 'dig', { '1,64,-1': snow }],
+    ['/roof', { x: '2', z: '0', w: '1', d: '1', y: '64', name: 'cobblestone' }, 'dig', { '2,64,0': snow }]
+  ]
+  for (const [route, query, during, extra] of cases) {
+    const guardState = { hand: null }
+    const rig = wallsRig({ extra, env: { isSoftCover: (b) => !!b && b.name === 'snow' } })
+    const { holdHand, endHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState, digLock: rig.env.digLock, setTimeout, clearTimeout })
+    let rescue = null
+    // As digOutHead does: the sole claim, the legs, then the hand with the shovel in it.
+    const startRescue = () => {
+      claimRescue(rig.env.digLock)
+      rig.env.legs.take('buried self-rescue', 'free a head buried in a block')
+      rescue = holdHand(rig.env.digLock.holder)
+      rig.bot.heldItem = { name: 'iron_shovel' }
+    }
+    if (during === 'walk') rig.bot.pathfinder.goto = async () => { rig.bot.entity.position = new Vec3(8.5, 64, 2.5); startRescue() }
+    else rig.bot.dig = async () => { startRescue(); throw new Error('Digging aborted') }
+    try {
+      const reply = await awaitRoute(route, query, rig.env)
+      const where = `${route} during the ${during}`
+      assert.strictEqual(reply.stopped, 'the buried self-rescue reflex took the legs to free a head buried in a block', where)
+      assert.deepStrictEqual([reply.placed, reply.failed], [0, 0], where)
+      assert.deepStrictEqual(rig.log.filter((l) => !l.startsWith('goto')), [], where)
+      assert.strictEqual(rig.bot.heldItem.name, 'iron_shovel', where)
+      assert.strictEqual(guardState.hand, rescue, where)
+    } finally { endHand(rescue) }
+  }
 })
 
 // placeitem by a body at (-1.5, 64, 0.5) carrying name over the floor plus extra, blind to the cells in hidden,
@@ -603,6 +705,83 @@ async function placeitemRefusal (rig) {
   assert.deepStrictEqual(rig.log.filter((l) => l.startsWith('place')), [])
   return res.error.message
 }
+
+// placeitemRig for name over digLock, holding an iron shovel. done records the walk into reach and the soft cover cleared.
+function rescueRig (name, digLock) {
+  const rig = placeitemRig(name)
+  rig.done = []
+  Object.assign(rig.env, { digLock, reachToPlace: async () => { rig.done.push('walk') }, clearSoftCover: async () => { rig.done.push('clear') } })
+  rig.env.bot.heldItem = { name: 'iron_shovel' }
+  return rig
+}
+
+test('placeitem and sign refuse busy while the buried self-rescue holds the hand, before the walk, and leave its lease and shovel alone', async () => {
+  for (const [route, refusal, name] of [['/placeitem', placeitemRefusal, 'oak_planks'], ['/sign', signRefusal, 'oak_sign']]) {
+    const digLock = botConstant('digLock')
+    const rig = rescueRig(name, digLock)
+    const rescue = rescueLease(digLock, rig.env.guardState)
+    assert.strictEqual(await refusal(rig), 'busy: the buried self-rescue is running, nothing placed', route)
+    assert.deepStrictEqual(rig.done, [], route)
+    assert.strictEqual(rig.env.bot.heldItem.name, 'iron_shovel', route)
+    assert.strictEqual(rig.env.guardState.hand, rescue, route)
+    assert.strictEqual(rescue.ended, false, route)
+  }
+})
+
+test('placeitem and sign refuse busy at the hand when the buried self-rescue starts during the walk, and leave its lease and shovel alone', async () => {
+  for (const [route, refusal, name] of [['/placeitem', placeitemRefusal, 'oak_planks'], ['/sign', signRefusal, 'oak_sign']]) {
+    const digLock = botConstant('digLock')
+    const rig = rescueRig(name, digLock)
+    let rescue = null
+    rig.env.reachToPlace = async () => {
+      rescue = rescueLease(digLock, rig.env.guardState)
+    }
+    const equips = []
+    rig.env.bot.equip = async (item) => { equips.push(item.name) }
+    assert.strictEqual(await refusal(rig), 'busy: the buried self-rescue is running, nothing done', route)
+    assert.deepStrictEqual(equips, [], route)
+    assert.strictEqual(rig.env.bot.heldItem.name, 'iron_shovel', route)
+    assert.strictEqual(rig.env.guardState.hand, rescue, route)
+    assert.strictEqual(rescue.ended, false, route)
+  }
+})
+
+test('placeitem and sign refuse busy when the buried self-rescue stops their walk into reach, and leave its lease and shovel alone', async () => {
+  for (const [route, refusal, name] of [['/placeitem', placeitemRefusal, 'oak_planks'], ['/sign', signRefusal, 'oak_sign']]) {
+    const digLock = botConstant('digLock')
+    const rig = rescueRig(name, digLock)
+    delete rig.env.reachToPlace
+    let rescue = null
+    // The rescue's stopPath clears the goal, and mineflayer-pathfinder's goto fails with GoalChanged.
+    rig.env.bot.pathfinder.goto = async () => {
+      rig.done.push('walk')
+      rescue = rescueLease(digLock, rig.env.guardState)
+      throw Object.assign(new Error('The goal was changed before it could be completed!'), { name: 'GoalChanged' })
+    }
+    assert.strictEqual(await refusal(rig), 'busy: the buried self-rescue is running, nothing placed', route)
+    assert.deepStrictEqual(rig.done, ['walk'], route)
+    assert.strictEqual(rig.env.bot.heldItem.name, 'iron_shovel', route)
+    assert.strictEqual(rig.env.guardState.hand, rescue, route)
+    assert.strictEqual(rescue.ended, false, route)
+  }
+})
+
+test('placeitem and sign click nothing once the buried self-rescue takes the hand during their equip, and leave its lease alone', async () => {
+  for (const [route, refusal, name] of [['/placeitem', placeitemRefusal, 'oak_planks'], ['/sign', signRefusal, 'oak_sign']]) {
+    const digLock = botConstant('digLock')
+    const rig = rescueRig(name, digLock)
+    let rescue = null
+    rig.env.bot.equip = async (item) => {
+      rig.done.push(`equip ${item.name}`)
+      rig.env.bot.heldItem = item
+      rescue = rescueLease(digLock, rig.env.guardState)
+    }
+    assert.strictEqual(await refusal(rig), 'busy: the buried self-rescue is running, nothing placed', route)
+    assert.deepStrictEqual(rig.done, ['walk', 'clear', `equip ${name}`], route)
+    assert.strictEqual(rig.env.guardState.hand, rescue, route)
+    assert.strictEqual(rescue.ended, false, route)
+  }
+})
 
 test('placeitem refuses a fight that starts while it clears soft cover, before the item goes into the hand', async () => {
   let fighting = false

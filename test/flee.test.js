@@ -11,7 +11,7 @@ const { expireConfirmed } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const vm = require('node:vm')
 const { EventEmitter } = require('node:events')
-const { loadBotFunctions, combatReflexIn, botConstant, botSource, balanced, reflexIn, fakeClock, laneAt } = require('./helpers')
+const { loadBotFunctions, combatReflexIn, botConstant, botSource, balanced, reflexIn, fakeClock, laneAt, claimRescue } = require('./helpers')
 
 const HERE = new Vec3(0, 64, 0)
 const near = (a, b) => Math.abs(a - b) < 1e-9
@@ -933,8 +933,9 @@ test('a creeper within the flee distance over ground the body has not seen is fl
   assert.ok(r.bot.pathfinder.goal instanceof goals.GoalBlock, `no flee goal, ${JSON.stringify(r.logs)}`)
 })
 
-test('cover from a skeleton shooting through a window stays inside the room, never in a hidden cell beyond its wall', () => {
-  // A window runs the length of the east wall at eye height, and a stone post 2 high stands at (2, 2).
+// A body in a room whose east wall has a window at eye height, a skeleton 6 east outside it, and the env takeCover runs over.
+// A stone post 2 high stands at (2, 2). over adds env entries.
+function windowRoom (over = {}) {
   const room = walledRoom(0, -2, 2, 2, (x, y, z) => x === 3 && y === 65 && Math.abs(z) <= 2)
   const w = plateau({ solid: (x, y, z) => room.solid(x, y, z) || (x === 2 && z === 2 && y >= 64 && y <= 65) })
   const skeleton = { id: 5, name: 'skeleton', position: new Vec3(6.5, 64, 0.5) }
@@ -959,14 +960,28 @@ test('cover from a skeleton shooting through a window stays inside the room, nev
     laneNarrate () {},
     takeLegs () {},
     stopPath () {},
-    emitEvent () {}
+    emitEvent () {},
+    ...over
   }
   loadBotFunctions(['compass', 'losClear', 'threatWhy', 'fleeWorld'], env)
+  return { bot, env, skeleton }
+}
+
+test('cover from a skeleton shooting through a window stays inside the room, never in a hidden cell beyond its wall', () => {
+  const { bot, env, skeleton } = windowRoom()
   const eye =skeleton.position.offset(0, 1.62, 0)
   assert.strictEqual(env.losClear(eye, new Vec3(-1.5, 65.62, 0.5)), false, 'control: the cell 2 west, beyond the wall, is hidden')
   combatReflexIn(env).takeCover(bot, skeleton, 'skeleton E ~6')
   const g = bot.pathfinder.goal
   assert.deepStrictEqual(g && { x: g.x, y: g.y, z: g.z }, { x: 1, y: 64, z: 2 })
+})
+
+test('an arrow during the buried self-rescue moves the body to no cover', () => {
+  const digLock = botConstant('digLock')
+  claimRescue(digLock)
+  const { bot, env, skeleton } = windowRoom({ digLock })
+  combatReflexIn(env).takeCover(bot, skeleton, 'skeleton E ~6')
+  assert.strictEqual(bot.pathfinder.goal, null)
 })
 
 // A real 1.21.11 block: cell(x, y, z) as [name, properties], stone below y 64 and air above where it gives null.

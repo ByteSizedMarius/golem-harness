@@ -4,7 +4,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
-const { awaitRoute, routeHandler } = require('./helpers')
+const { awaitRoute, routeHandler, botConstant, claimRescue } = require('./helpers')
 
 const AT = { x: '1', y: '64', z: '0' }
 const AIR = { name: 'air', stateId: 0 }
@@ -165,4 +165,69 @@ test('a bucket on grass, a flower or a torch uses the item, other items click th
       assert.deepStrictEqual(await clicksOn(cell, bucket), ['item'], `${bucket} on ${cell}`)
     }
   }
+})
+
+// A body holding an iron shovel beside a seen dirt cell at 1,64,0, an iron hoe in its pockets, over digLock. done records walks, looks, equips and clicks.
+function rescueBody (digLock) {
+  const done = []
+  const bot = Object.assign(new EventEmitter(), {
+    entity: { position: new Vec3(0.5, 64, 0.5) },
+    heldItem: { name: 'iron_shovel' },
+    inventory: { items: () => [{ name: 'iron_hoe' }] },
+    blockAt: (p) => block({ name: 'dirt', stateId: 1 }, p),
+    pathfinder: { goto: async () => { done.push('walk') } },
+    lookAt: async () => { done.push('look') },
+    waitForTicks: async () => {},
+    equip: async (it) => { done.push(`equip ${it.name}`); bot.heldItem = it },
+    activateBlock: async () => { done.push('click') },
+    activateItem: () => { done.push('use item') },
+    deactivateItem: () => {}
+  })
+  const env = { bot, Vec3, require, seesLit: () => true, cellKnown: () => true, goals: { GoalNear: class {} }, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {}, digLock }
+  return { bot, env, done }
+}
+
+test('use and activate refuse busy while the buried self-rescue holds the hand, and equip and click nothing', async () => {
+  const digLock = botConstant('digLock')
+  claimRescue(digLock)
+  const { bot, env, done } = rescueBody(digLock)
+  for (const [route, query, skipped] of [['/use', { ...AT, item: 'iron_hoe' }, 'used'], ['/activate', AT, 'activated']]) {
+    const { handle, res } = routeHandler(route, env)
+    await handle({ query }, res)
+    assert.strictEqual(res.error && res.error.message, `busy: the buried self-rescue is running, nothing ${skipped}`, route)
+    assert.strictEqual(res.error.reason, 'busy', route)
+  }
+  assert.deepStrictEqual(done, [])
+  assert.strictEqual(bot.heldItem.name, 'iron_shovel')
+})
+
+test('use and activate equip and click once the buried self-rescue ends', async () => {
+  const digLock = botConstant('digLock')
+  claimRescue(digLock)
+  digLock.holder = null
+  const { env, done } = rescueBody(digLock)
+  await awaitRoute('/use', { ...AT, item: 'iron_hoe' }, env)
+  await awaitRoute('/activate', AT, env)
+  assert.deepStrictEqual(done, ['equip iron_hoe', 'look', 'click', 'look', 'click'])
+})
+
+test('fish refuses busy while the buried self-rescue holds the hand and starts no job, and starts one once the rescue ends', async () => {
+  const digLock = botConstant('digLock')
+  claimRescue(digLock)
+  const started = []
+  const env = {
+    bot: { inventory: { items: () => [{ name: 'fishing_rod' }] } },
+    shared: { ready: true },
+    jobs: { start: (name) => { started.push(name); return { id: 1 } } },
+    require,
+    digLock
+  }
+  const { handle, res } = routeHandler('/fish', env)
+  await handle({ query: {} }, res)
+  assert.strictEqual(res.error && res.error.message, 'busy: the buried self-rescue is running, nothing cast')
+  assert.strictEqual(res.error.reason, 'busy')
+  assert.deepStrictEqual(started, [])
+  digLock.holder = null
+  assert.deepStrictEqual(await awaitRoute('/fish', {}, env), { job: 1, casts: 1, aimed: false })
+  assert.deepStrictEqual(started, ['fish x1'])
 })

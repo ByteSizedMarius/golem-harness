@@ -3,7 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
-const { awaitRoute, routeHandler, botConstant, loadBotFunctions } = require('./helpers')
+const { awaitRoute, routeHandler, botConstant, loadBotFunctions, claimRescue } = require('./helpers')
 const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 
 const CHEST_ID = 54
@@ -113,11 +113,15 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
   return { env, opened, fight }
 }
 
-async function refusal (route, query, env) {
+async function refused (route, query, env) {
   const { handle, res } = routeHandler(route, env)
   await handle({ query }, res)
   assert.ok(res.error, `${route} answered ${JSON.stringify(res.body)}`)
-  return res.error.message
+  return res.error
+}
+
+async function refusal (route, query, env) {
+  return (await refused(route, query, env)).message
 }
 
 // The route with the real stack pause, on t's mock clock stepped 5 ms at a time.
@@ -364,6 +368,127 @@ test('withdraw and deposit refuse during a fight before walking or opening anyth
   assert.match(await refusal('/withdraw', { name: 'cobblestone' }, env), /^refused: fighting something, /)
   assert.match(await refusal('/deposit', { name: 'stone' }, env), /^refused: fighting something, /)
   assert.deepStrictEqual([opened, walked], [[], false])
+})
+
+test('withdraw and deposit refuse busy while the buried self-rescue holds the hand, before walking or opening anything', async () => {
+  const { env, opened } = chestEnv([NEAR], { '5,64,0': chestWindow([stack('cobblestone', 10)]) }, [stack('stone', 5)])
+  let walked = false
+  env.bot.pathfinder.goto = async () => { walked = true }
+  env.digLock = botConstant('digLock')
+  claimRescue(env.digLock)
+  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone' }, env), 'busy: the buried self-rescue is running, nothing withdrawn')
+  assert.strictEqual(await refusal('/deposit', { name: 'stone' }, env), 'busy: the buried self-rescue is running, nothing deposited')
+  assert.deepStrictEqual([opened, walked], [[], false])
+})
+
+test('a buried self-rescue starting during the walk stops withdraw and deposit at the hand, closes the chest and leaves its lease and shovel alone', async () => {
+  const chest = chestWindow([stack('cobblestone', 10)])
+  const { env } = chestEnv([NEAR], { '5,64,0': chest }, [stack('stone', 5)])
+  const digLock = botConstant('digLock')
+  env.digLock = digLock
+  env.bot.heldItem = { name: 'iron_shovel' }
+  const { holdHand, endHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState: env.guardState, digLock, setTimeout, clearTimeout })
+  let rescue = null
+  env.bot.pathfinder.goto = async () => {
+    claimRescue(digLock)
+    rescue = holdHand(digLock.holder)
+  }
+  try {
+    for (const [route, name] of [['/withdraw', 'cobblestone'], ['/deposit', 'stone']]) {
+      endHand(rescue)
+      digLock.holder = null
+      chest.closed = false
+      assert.strictEqual(await refusal(route, { name }, env), 'busy: the buried self-rescue is running, nothing done', route)
+      assert.ok(chest.closed, `${route} left the chest open`)
+      assert.strictEqual(env.guardState.hand, rescue, `${route} ended the rescue's lease`)
+    }
+    assert.deepStrictEqual(chest.containerItems(), [stack('cobblestone', 10)])
+    assert.strictEqual(env.bot.heldItem.name, 'iron_shovel')
+  } finally { endHand(rescue) }
+})
+
+test('a buried self-rescue taking the hand during a stack pause stops withdraw and deposit before their next click, and leaves its lease and shovel alone', async () => {
+  const chest = chestWindow([stack('cobblestone', 64), stack('cobblestone', 64)])
+  const { env } = chestEnv([NEAR], { '5,64,0': chest }, [stack('stone', 64), stack('stone', 20)])
+  const digLock = botConstant('digLock')
+  env.digLock = digLock
+  const { holdHand, endHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState: env.guardState, digLock, setTimeout, clearTimeout })
+  const clicks = []
+  for (const method of ['withdraw', 'deposit']) {
+    const real = chest[method]
+    chest[method] = async (type, metadata, count) => {
+      clicks.push(method)
+      return real(type, metadata, count)
+    }
+  }
+  let rescue = null
+  env.stackPause = async () => {
+    claimRescue(digLock)
+    rescue = holdHand(digLock.holder)
+    env.bot.heldItem = { name: 'iron_shovel' }
+  }
+  try {
+    const withdrew = await refused('/withdraw', { name: 'cobblestone', count: '128' }, env)
+    assert.strictEqual(withdrew.message, 'withdrew cobblestone 64; then cobblestone: busy: the buried self-rescue is running, nothing more moved')
+    assert.strictEqual(withdrew.reason, 'busy')
+    assert.strictEqual(env.guardState.hand, rescue, 'withdraw ended the rescue\'s lease')
+    endHand(rescue)
+    digLock.holder = null
+    const deposited = await refused('/deposit', { name: 'stone' }, env)
+    assert.match(deposited.message, /^deposited 64 then failed: busy: the buried self-rescue is running, nothing more moved; stone in chest now 64; /)
+    assert.strictEqual(deposited.reason, 'busy')
+    assert.strictEqual(env.guardState.hand, rescue, 'deposit ended the rescue\'s lease')
+    assert.deepStrictEqual(clicks, ['withdraw', 'deposit'])
+    assert.strictEqual(env.bot.heldItem.name, 'iron_shovel')
+    assert.ok(chest.closed, 'the window stays open')
+  } finally { endHand(rescue) }
+})
+
+test('a buried self-rescue that stops the walk of withdraw and deposit gets them refused busy, with no chest opened', async () => {
+  const { env, opened } = chestEnv([NEAR], { '5,64,0': chestWindow([stack('cobblestone', 10)]) }, [stack('stone', 5)])
+  const digLock = botConstant('digLock')
+  env.digLock = digLock
+  let rescue = false
+  // The rescue's stopPath clears the goal, and mineflayer-pathfinder's goto fails with GoalChanged.
+  env.bot.pathfinder.goto = async () => {
+    if (rescue) claimRescue(digLock)
+    throw Object.assign(new Error('The goal was changed before it could be completed!'), { name: 'GoalChanged' })
+  }
+  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone' }, env), 'The goal was changed before it could be completed!', 'control: a goal changed with no claim')
+  rescue = true
+  for (const [route, name, skipped] of [['/withdraw', 'cobblestone', 'withdrawn'], ['/deposit', 'stone', 'deposited']]) {
+    digLock.holder = null
+    const e = await refused(route, { name }, env)
+    assert.strictEqual(e.message, `busy: the buried self-rescue is running, nothing ${skipped}`, route)
+    assert.strictEqual(e.reason, 'busy', route)
+  }
+  assert.deepStrictEqual(opened, [])
+})
+
+test('a bunker build starting during a stack pause stops withdraw and deposit before their next click', async () => {
+  const chest = chestWindow([stack('cobblestone', 64), stack('cobblestone', 64)])
+  const { env } = chestEnv([NEAR], { '5,64,0': chest }, [stack('stone', 64), stack('stone', 20)])
+  const digLock = botConstant('digLock')
+  env.digLock = digLock
+  const { claimDig } = loadBotFunctions(['claimDig'], { digLock })
+  const clicks = []
+  for (const method of ['withdraw', 'deposit']) {
+    const real = chest[method]
+    chest[method] = async (type, metadata, count) => {
+      clicks.push(method)
+      return real(type, metadata, count)
+    }
+  }
+  env.stackPause = async () => { claimDig('the bunker build', true).sole = true }
+  const withdrew = await refused('/withdraw', { name: 'cobblestone', count: '128' }, env)
+  assert.strictEqual(withdrew.message, 'withdrew cobblestone 64; then cobblestone: busy: the bunker build is running, nothing more moved')
+  assert.strictEqual(withdrew.reason, 'busy')
+  digLock.holder = null
+  const deposited = await refused('/deposit', { name: 'stone' }, env)
+  assert.match(deposited.message, /^deposited 64 then failed: busy: the bunker build is running, nothing more moved; stone in chest now 64; /)
+  assert.strictEqual(deposited.reason, 'busy')
+  assert.deepStrictEqual(clicks, ['withdraw', 'deposit'])
+  assert.ok(chest.closed, 'the window stays open')
 })
 
 test('a fight starting during the walk or a stack pause stops withdraw and deposit before their next click, and the chest closes before the hand lease ends', async () => {
