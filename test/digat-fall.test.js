@@ -185,7 +185,21 @@ test('digat refuses a cell over gravel that hangs over the head, naming the colu
   assert.match(under.error && under.error.message, /^refusing to dig iron_ore at 0,67,0: gravel at 0,66,0 would fall on me\b/)
   assert.deepStrictEqual(under.digs, [])
   const both = await digOnce(UNDER, { '0,66,0': 'gravel', '0,67,0': 'iron_ore', '0,68,0': 'sand' }, '0,67,0')
-  assert.match(both.error && both.error.message, /^refusing to dig iron_ore at 0,67,0: gravel and sand at 0,66,0 to 0,68,0 would fall on me\b/)
+  assert.match(both.error && both.error.message, /^refusing to dig iron_ore at 0,67,0: gravel at 0,66,0 plus sand at 0,68,0 would fall on me\b/)
+  const runs = await digOnce(UNDER, { '0,66,0': 'gravel', '0,67,0': 'iron_ore', '0,68,0': 'gravel', '0,69,0': 'sand' }, '0,67,0')
+  assert.match(runs.error && runs.error.message, /^refusing to dig iron_ore at 0,67,0: gravel at 0,66,0 plus gravel and sand at 0,68,0 to 0,69,0 would fall on me\b/)
+})
+
+// Cobblestone walls round the feet and head cells of a body at UNDER, so no cell beside the stone at 0,63,0 holds it.
+const SHAFT = {}
+for (const [x, z] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) for (const y of [64, 65]) SHAFT[`${x},${y},${z}`] = 'cobblestone'
+// Gravel at 0,62,0 hangs over air down to 0,60,0.
+const HANGING = { ...SHAFT, '0,62,0': 'gravel', '0,61,0': 'air', '0,60,0': 'air' }
+
+test('digat digs the cell under the feet in a shaft over hanging gravel the stone hides', async () => {
+  const r = await digOnce(UNDER, HANGING, '0,63,0', { unseen: ['0,62,0', '0,61,0', '0,60,0'] })
+  assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  assert.deepStrictEqual(r.digs, ['0,63,0 from (0, 64, 0)'])
 })
 
 test('digat digs under gravel that would land on a torch in the feet cell and break', async () => {
