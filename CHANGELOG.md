@@ -59,6 +59,27 @@ A bed action sends `leave_bed` only while the body is still within half a block 
 put the sleeper. A body moved off that spot since (knockback, water, a fall) forgets the bed without
 a packet, because a `leave_bed` sent awake teleports the body back beside its last bed.
 
+## 2026-10-30: the pilot keeps its plans in books
+
+A session ended mid-build with no turn to hand over, and the plan agreed in chat was gone. The new
+`book` tool turns the books and quills the bot carries into notebooks: page 1 names the notebook,
+`list` and `read` show the pages, `write` replaces one page, `new` starts a notebook in a blank book
+and `restore` writes the pilot's copy back into a book. The bot keeps that copy in the file
+`GOLEM_BOOKS` names and reports a page that differs from it, since any player can edit a book and
+quill. A write over such a page is refused unless the pilot passes `over` or writes the page's own
+text. The bot edits a hotbar book where it lies and moves a pocket book only into an empty hotbar
+slot, because the server swaps two books where the client predicts a merge. It sends the edit packet
+itself, because mineflayer's `writeBook` sends a packet 1.21.11 cannot encode, and counts an edit as
+written only once the server sends the edited book back with the new pages. The manual topic
+`notebook` says when to write and where the books go.
+
+## 2026-10-30: memory notes hold 30 of 300 characters and take updates
+
+A session ended mid-build with no turn to hand over, and the plan agreed in chat was lost with the
+pilot's context. Memory now keeps 30 notes of up to 300 characters, and `note` takes
+`action: "update"`, which replaces a note's text by id and keeps its id and who. The memory manual
+tells the pilot to write a plan down the moment it is agreed.
+
 ## 2026-10-30: the bot leaves a bed the server holds it in
 
 A bed used while another player stayed up kept the bot asleep on the server while it walked off on

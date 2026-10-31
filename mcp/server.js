@@ -5,7 +5,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const readline = require('node:readline')
 const { signRequest, verifyProof } = require('../lib/sig')
-const { flatText } = require('../lib/flat-text')
+const { INVISIBLE, flatText } = require('../lib/flat-text')
 const { quietText } = require('../lib/server-msg')
 const todos = require('../lib/todo')
 const memories = require('../lib/memory')
@@ -31,8 +31,11 @@ const PRIMED_BY = new Map([
   ['placeitem', { topic: 'building', when: ({ name }) => name.toLowerCase().includes('chest') }],
   ...['smelt', 'furnace'].map((name) => [name, { topic: 'jobs' }]),
   ...['dig_tunnel', 'dig_stair'].map((name) => [name, { topic: 'mining' }]),
-  ['grave', { topic: 'graves' }]
+  ['grave', { topic: 'graves' }],
+  ['book', { topic: 'notebook' }]
 ])
+// The book actions that move items and hold the hand.
+const BOOK_EDITS = ['write', 'new', 'restore']
 // A topic's key rules go out once, with the first reply of any tool that passes when.
 const PRIMED_BY_REPLY = [
   // A takenBy, the reply's own or a listed job's, that names a creeper.
@@ -72,10 +75,10 @@ const LOCAL_TOOLS = [
   },
   {
     name: 'note',
-    description: 'Write a note, or list and drop memory notes. memory: kept for this server across sessions and shown at boot, at most 20 of 200 characters, who naming whose word it is. Drop one by id to make room. lesson: what a future player should know (a game fact, a rule, a better tool text), for names a manual topic, a tool or rules. papercut: what made playing harder (a workaround, a misleading reply). A tool that fought you is a papercut, not a lesson. The owner reads lessons and papercuts later. When in doubt, note it.',
+    description: 'Write a note, or list, update and drop memory notes. memory: kept for this server across sessions and shown at boot, at most 30 of 300 characters, who naming whose word it is. update replaces the text of a note by id. Drop one by id to make room. lesson: what a future player should know (a game fact, a rule, a better tool text), for names a manual topic, a tool or rules. papercut: what made playing harder (a workaround, a misleading reply). A tool that fought you is a papercut, not a lesson. The owner reads lessons and papercuts later. When in doubt, note it.',
     params: {
       kind: { type: 'enum', values: ['memory', 'lesson', 'papercut'], required: true },
-      action: { type: 'enum', values: ['add', 'list', 'drop'] },
+      action: { type: 'enum', values: ['add', 'list', 'update', 'drop'] },
       text: { type: 'str', maxLen: 600 },
       for: { type: 'str', maxLen: NAME_CAP },
       who: { type: 'str', maxLen: NAME_CAP },
@@ -177,6 +180,20 @@ function redact (value, structural = []) {
       [redact(k), structural.includes(k) && typeof v === 'string' ? redactString(v, STRUCTURAL_CAP) : redact(v)]))
   }
   return value
+}
+
+// Page text keeps its paths, wherever a book reply carries it.
+const BOOK_TEXT = ['text', 'yours']
+const BOOK_PAGE_LISTS = ['pages', 'changed', 'replaced']
+const bookField = (k, v) => (BOOK_TEXT.includes(k) && typeof v === 'string' ? capString(v.replace(INVISIBLE, ''), STRING_CAP) : redact(v))
+const bookPage = (v) => (v !== null && typeof v === 'object' && !Array.isArray(v)
+  ? Object.fromEntries(Object.entries(v).map(([k, x]) => [redact(k), bookField(k, x)]))
+  : redact(v))
+
+function redactBook (body) {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return redact(body)
+  return Object.fromEntries(Object.entries(body).map(([k, v]) =>
+    [redact(k), BOOK_PAGE_LISTS.includes(k) && Array.isArray(v) ? v.map(bookPage) : bookField(k, v)]))
 }
 
 // Keeps the leading fields and items of value that fit in budget units of JSON. Null for a scalar over budget.
@@ -299,13 +316,13 @@ function toQuery (tool, values) {
 }
 
 const textResult = (text, isError = false) => (isError ? { content: [{ type: 'text', text }], isError: true } : { content: [{ type: 'text', text }] })
-// value cut to the cap the tails leave, and the cut's note or null.
+// value cut to the cap the tails leave ({} when they leave none), and the cut's note or null.
 function fitResult (value, tails = []) {
   const size = JSON.stringify(value).length
-  const cap = RESULT_CAP - tails.reduce((n, t) => n + t.length, 0)
+  const cap = Math.max(0, RESULT_CAP - tails.reduce((n, t) => n + t.length, 0))
   if (size <= cap) return { value, note: null }
   const note = `Trimmed: the reply was ${size} characters, over the ${cap}-character limit. Fields and list items after the cut are left out.`
-  return { value: fitJson(value, cap - note.length).value, note }
+  return { value: fitJson(value, cap - note.length)?.value ?? {}, note }
 }
 
 function jsonResult (value, isError = false, tails = [], fit = fitResult(value, tails)) {
@@ -535,7 +552,8 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
       }
     }
     if (last !== null) tails.push(last)
-    const shown = redact(trimLists(body, tool.lists), tool.structural)
+    const trimmed = trimLists(body, tool.lists)
+    const shown = tool.name === 'book' ? redactBook(trimmed) : redact(trimmed, tool.structural)
     const fit = fitResult(shown, tails)
     if (listed !== null) tickDelivered(values, listed, body, shown, fit.value)
     return jsonResult(shown, reply.status !== 200, tails, fit)
@@ -798,10 +816,15 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
   function memory (action, text, who, id) {
     if (memoryFile === undefined) return textResult('memory notes are off', true)
     try {
-      if (action === 'add') {
+      if (action === 'add' || action === 'update') {
         const line = flatText(text)
         if (!line) return textResult('memory note text is empty', true)
         if ([...line].length > memories.TEXT_CAP) return textResult(`memory note text is over ${memories.TEXT_CAP} characters`, true)
+        if (action === 'update') {
+          const updated = memories.update(memoryFile, id, line, now())
+          if (updated === false) return textResult(`No memory note has id ${id}.`, true)
+          return updated.existing ? textResult(`Already #${updated.id}, by ${updated.who ?? 'nobody'}.`, true) : textResult(`Updated #${id}.`)
+        }
         const added = memories.add(memoryFile, line, who === undefined ? '' : flatText(who), now())
         return textResult(added.existing ? `Already #${added.id}, by ${added.who ?? 'nobody'}.` : `Noted #${added.id}, ${added.count} of ${memories.MEMORY_CAP}.`)
       }
@@ -822,13 +845,13 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
   }
 
   function noteCall ({ kind, action = 'add', text, for: place, who, id }) {
-    if (action !== 'add' && kind !== 'memory') return textResult('list and drop are only for kind memory', true)
+    if (action !== 'add' && kind !== 'memory') return textResult('list, update and drop are only for kind memory', true)
     if (place !== undefined && kind !== 'lesson') return textResult('for is only for kind lesson', true)
     if (who !== undefined && (kind !== 'memory' || action !== 'add')) return textResult('who is only for memory add', true)
-    if (id !== undefined && action !== 'drop') return textResult('id is only for drop', true)
-    if (text !== undefined && action !== 'add') return textResult('text is only for add', true)
-    if (action === 'drop' && id === undefined) return textResult('drop needs id', true)
-    if (action === 'add' && text === undefined) return textResult('add needs text', true)
+    if (id !== undefined && action !== 'drop' && action !== 'update') return textResult('id is only for update and drop', true)
+    if (text !== undefined && action !== 'add' && action !== 'update') return textResult('text is only for add and update', true)
+    if ((action === 'drop' || action === 'update') && id === undefined) return textResult(`${action} needs id`, true)
+    if ((action === 'add' || action === 'update') && text === undefined) return textResult(`${action} needs text`, true)
     if (kind === 'memory') return memory(action, text, who, id)
     return note(kind, kind === 'lesson' ? lessonsFile : papercutsFile, text, place)
   }
@@ -858,7 +881,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
       if (todoFile !== undefined) tails.push(todoListing() ?? 'the todo list could not be read')
       return rpcResult(id, await callRouted(tool, values, tails.join('\n\n')))
     }
-    if (tool.body) return rpcResult(id, await bodyCall(tool, values))
+    if (tool.body || (tool.name === 'book' && BOOK_EDITS.includes(values.action))) return rpcResult(id, await bodyCall(tool, values))
     const result = await callRouted(tool, values)
     if (tool.name === 'stop' && !result.isError && running && running.cut) running = null
     return rpcResult(id, result)

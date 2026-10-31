@@ -147,7 +147,8 @@ GOLEM_TOKEN=<token> MC_HOST=<host> MC_PORT=<port> node bot.js
 | `GOLEM_MC_1710` | off | `1` for 1.7.10 behind ViaProxy |
 
 `.env.example` describes the rest: `MC_OWNER` (the default player for `where`),
-`GOLEM_SERVER_OVERRIDES`, `GOLEM_CHAT_MAX`, and the MCP server's `GOLEM_PAPERCUTS`,
+`GOLEM_SERVER_OVERRIDES`, `GOLEM_CHAT_MAX`, `GOLEM_BOOKS` (the file of the pilot's copy of the
+books it writes, for the `book` tool), and the MCP server's `GOLEM_PAPERCUTS`,
 `GOLEM_LESSONS`, `GOLEM_MEMORY`, `GOLEM_TODO` and `GOLEM_TOPICS` (the gated manual topics to
 serve).
 
@@ -189,10 +190,10 @@ An optional second argument names a wake log. The server appends a line for ever
 call, delivery and tool call, and after a restart it resumes chat and events where the log left
 off.
 
-The pilot sees 76 tools: 72 that each call one bot route (`goto` calls `/goto`), plus
+The pilot sees 77 tools: 73 that each call one bot route (`goto` calls `/goto`), plus
 
 - `wait_events`: new chat, whispers and bot events.
-- `note`: a note of kind `memory`, `lesson` or `papercut`. Memory notes, at most 20, are kept in
+- `note`: a note of kind `memory`, `lesson` or `papercut`. Memory notes, at most 30, are kept in
   the JSON file `GOLEM_MEMORY` names and shown at `boot`. Lessons (what a future player should
   know) and papercuts (what made playing harder) are for the owner, appended to the files
   `GOLEM_LESSONS` and `GOLEM_PAPERCUTS` name.

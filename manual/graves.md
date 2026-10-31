@@ -2,7 +2,7 @@
 
 ## Key rules
 
-- `goto(waypoint: "lastdeath")` after a death, then `grave(take: "all")` empties the nearest gravestone in sight into your pockets.
+- `goto(waypoint: "lastdeath")` after a death, then `grave(take: "all")` empties the nearest gravestone in sight into your pockets, the notebooks too.
 - Only you can take all the items from your gravestone. Anyone else takes one item.
 - A gravestone holding items cannot be broken.
 

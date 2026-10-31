@@ -150,7 +150,7 @@ const DUMMY_ROUTES = [
   '/strike', '/shoot', '/brace', '/hold', '/pillar', '/pathdebug', '/threatdebug', '/journal', '/lookat', '/stance', '/gaze',
   '/scene', '/section', '/passages', '/map', '/entities', '/listen', '/blockat', '/pulse', '/events', '/bridging', '/tidy',
   '/dig_tunnel', '/dig_stair', '/digat', '/enchant', '/placeitem', '/equip', '/activate', '/use', '/fish', '/reflexes',
-  '/gesture', '/job', '/job_stop', '/guard', '/where', '/place', '/eat', '/useon', '/grave'
+  '/gesture', '/job', '/job_stop', '/guard', '/where', '/place', '/eat', '/useon', '/grave', '/book'
 ]
 
 function parseResponse (buf) {
