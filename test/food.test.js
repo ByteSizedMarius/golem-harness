@@ -57,6 +57,16 @@ test('eat refuses rotten flesh unless the pilot names it', async () => {
   assert.deepStrictEqual(bot.eaten, ['rotten_flesh'])
 })
 
+test('eat of a named food takes only its exact name and refuses naming the food the name is a word of', async () => {
+  const bot = body(['golden_apple', 'bread'], fed(14, 1))
+  for (const [food, message] of [['apple', 'no apple in inventory (names containing apple: golden_apple)'], ['carrot', 'no carrot in inventory']]) {
+    const { handle, res } = routeHandler('/eat', env(bot))
+    await handle({ query: { food } }, res)
+    assert.deepStrictEqual([res.error?.message, res.error?.reason], [message, 'no_match'], food)
+  }
+  assert.deepStrictEqual(bot.eaten, [])
+})
+
 test('eat replies with the food level of the update that follows the meal', async () => {
   const bot = body(['bread'], fed(15, 6))
   const reply = await awaitRoute('/eat', {}, env(bot))

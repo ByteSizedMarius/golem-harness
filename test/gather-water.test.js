@@ -82,8 +82,8 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
     goals,
     entityInCell,
     shared: { mcData: registry, forestryMoves: null },
-    // The exact block, else every block whose name holds it.
-    resolveBlockIds: (name) => registry.blocksByName[name] ? [registry.blocksByName[name].id] : Object.values(registry.blocksByName).filter((b) => b.name.includes(name)).map((b) => b.id),
+    // The exact block, else every block holding it as whole _-separated words.
+    resolveBlockIds: (name) => registry.blocksByName[name] ? [registry.blocksByName[name].id] : Object.values(registry.blocksByName).filter((b) => `_${b.name}_`.includes(`_${name}_`)).map((b) => b.id),
     emitEvent () {},
     seesLit: () => true,
     cellKnown: () => true,

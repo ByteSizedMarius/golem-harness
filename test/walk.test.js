@@ -568,8 +568,11 @@ test('the /goto walk replies the reason it did not start', async () => {
     { arrived: false, kind: 'coordinate', target: { x: 5, z: 5 }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: null, reason: 'no-floor', hint: null })
   assert.deepStrictEqual(await goto({ waypoint: 'home' }),
     { arrived: false, kind: 'waypoint', target: { waypoint: 'home' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: null, reason: 'unknown', hint: null })
-  assert.deepStrictEqual(await goto({ block: 'chset' }, { over: { resolveBlockIds: () => [] } }),
-    { arrived: false, kind: 'block', target: { block: 'chset' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: null, reason: 'unknown', hint: null })
+  const names = { resolveBlockIds: undefined, shared: { mcData: registry } }
+  assert.deepStrictEqual(await goto({ block: 'chset' }, { over: names }),
+    { arrived: false, kind: 'block', target: { block: 'chset' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: null, reason: 'unknown', hint: 'unknown block: chset' })
+  const cobble = await goto({ block: 'cobble' }, { over: names })
+  assert.deepStrictEqual([cobble.reason, cobble.hint], ['unknown', 'unknown block: cobble (names containing cobble: cobblestone, cobblestone_slab, cobblestone_wall, cobbled_deepslate, mossy_cobblestone, cobblestone_stairs, infested_cobblestone, cobbled_deepslate_slab)'])
 })
 
 test('a walled /goto reply names the iron door ahead after the dig advice, and keeps the dig advice alone without one', async () => {

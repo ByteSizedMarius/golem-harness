@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: item and block names match whole words
+
+A `withdraw` of `stick` took a sticky piston. `withdraw`, `deposit`, `toss` and `grave` take an
+exact item name or whole underscore-separated words of exactly one item name, show the name taken in
+`asked`, and refuse a name that fits several items or none, naming candidates. `eat` takes only an
+exact food name. Block names for `find`, `goto`, `mine` and `gather` take the exact block or every
+block holding the name as whole words, so `log` still takes every log while `cobble` is refused.
+
 ## 2026-10-31: gather stops when cancelled and leaves unripe crops standing
 
 A stopped gather walked on to its next pick, and a `gather` or `mine` of potatoes walked until the

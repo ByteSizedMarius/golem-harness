@@ -121,11 +121,19 @@ test('grave take all moves every item into the pockets', async () => {
 
 test('grave take by name moves that item and leaves the rest', async () => {
   const g = graveWindow([stack('cobblestone', 30), stack('torch', 8), stack('cobblestone', 5)])
-  const reply = await awaitRoute('/grave', { take: 'cobble' }, graveEnv(g.window).env)
+  const reply = await awaitRoute('/grave', { take: 'cobblestone' }, graveEnv(g.window).env)
   assert.deepStrictEqual(reply.took, ['35 cobblestone'])
   assert.deepStrictEqual(reply.items, [{ name: 'torch', count: 8 }])
   assert.strictEqual(g.pocket('cobblestone'), 35)
   assert.match(await refusal({ take: 'bread' }, graveEnv(g.window).env), /no bread in the gravestone/)
+})
+
+test('grave take of whole words of one item name takes it, and of part of a word refuses naming the closest', async () => {
+  const g = graveWindow([stack('cobblestone', 30), stack('iron_pickaxe', 1)])
+  assert.strictEqual(await refusal({ take: 'cobble' }, graveEnv(g.window).env), 'no cobble in the gravestone (names containing cobble: cobblestone)')
+  assert.strictEqual(g.pocket('cobblestone'), 0)
+  const reply = await awaitRoute('/grave', { take: 'pickaxe' }, graveEnv(g.window).env)
+  assert.deepStrictEqual([reply.took, reply.asked], [['1 iron_pickaxe'], 'pickaxe'])
 })
 
 test('grave reports what it took before full pockets stopped it', async () => {

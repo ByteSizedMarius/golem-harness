@@ -4,13 +4,13 @@ const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const { legLedger, takenText } = require('../lib/leg-ledger')
-const { awaitRoute, loadBotFunctions, walkingBody } = require('./helpers')
+const { awaitRoute, routeHandler, loadBotFunctions, walkingBody } = require('./helpers')
 
 const START = new Vec3(0.5, 64, 0.5)
 // Where items thrown by a body at START facing north land.
 const DROP = new Vec3(0, 64, -2)
 const ck = (x, y, z) => `${x},${y},${z}`
-const TYPES = { cobblestone: 1, dirt: 2, diamond: 3, diamond_pickaxe: 4 }
+const TYPES = { cobblestone: 1, dirt: 2, diamond: 3, diamond_pickaxe: 4, diamond_sword: 5 }
 const stack = (name, count) => ({ name, type: TYPES[name], count, stackSize: 64 })
 
 // A body at at (START) facing north on the real pathfinder over the floor plus cells, walking by body.moves. tossed holds
@@ -62,6 +62,14 @@ test('toss throws the item named exactly before one whose name only contains it'
   const reply = await awaitRoute('/toss', { name: 'diamond' }, (await tossingBody(t, stacks)).env)
   assert.deepStrictEqual(reply, { tossed: 'diamond', count: 5, toward: null })
   assert.deepStrictEqual(stacks.map((s) => s.count), [1, 0])
+})
+
+test('toss refuses a name several items hold as whole words, naming them and tossing nothing', async (t) => {
+  const body = await tossingBody(t, [stack('diamond_pickaxe', 1), stack('diamond_sword', 1)])
+  const { handle, res } = routeHandler('/toss', body.env)
+  await handle({ query: { name: 'diamond' } }, res)
+  assert.deepStrictEqual([res.error?.message, res.error?.reason], ['refused: diamond matches several items in inventory (diamond_sword, diamond_pickaxe), name one in full', 'ambiguous'])
+  assert.deepStrictEqual(body.tossed, [])
 })
 
 test('toss drops a count over one stack from several stacks, a stack pause apart', async (t) => {
