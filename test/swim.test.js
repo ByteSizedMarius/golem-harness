@@ -40,8 +40,8 @@ const FAST = {
 }
 
 // The fake walk reaches every goal with a y and finds no path to the others. planned replaces every plan.
-// seen(p, feet) tells the cells in sight now from the body's position, by default the known ones.
-async function swimGoto (q, walkOpts, { blockAt, start = new Vec3(0.5, 64, 0.5), known = () => true, seen = known, planned }) {
+// seen(p, feet) tells the cells in sight from the body's position (the known ones by default), shapeNear the shapes it makes out.
+async function swimGoto (q, walkOpts, { blockAt, start = new Vec3(0.5, 64, 0.5), known = () => true, seen = known, shapeNear, planned }) {
   const set = []
   const bot = new EventEmitter()
   bot.entity = { position: start }
@@ -71,7 +71,7 @@ async function swimGoto (q, walkOpts, { blockAt, start = new Vec3(0.5, 64, 0.5),
     for (let x = Math.floor(bot.entity.position.x) + 1; x <= g.x; x++) path.push(pathNode(x, feet(x), 0))
     return { status: 'success', path }
   }
-  const ctx = loadBotFunctions(['walkRoute', 'stagedGoto'], { ...gotoEnv(bot), planPath, knownCell: known, seenNow: (p) => seen(p, bot.entity.position) })
+  const ctx = loadBotFunctions(['walkRoute', 'stagedGoto', 'planKnown', 'planBlock'], { ...gotoEnv(bot), planPath, knownCell: known, seenNow: (p) => seen(p, bot.entity.position), ...(shapeNear && { shapeNear }) })
   const route = ctx.walkRoute()
   try {
     return { r: JSON.parse(JSON.stringify(await ctx.stagedGoto(q, route, walkOpts))), walks: set.length }
@@ -200,7 +200,7 @@ test('a ford with a seen bed counts no swim, and one whose bed is unseen counts 
   assert.deepStrictEqual([swim(() => true), swim((p) => p.y !== 62)], [undefined, 4])
 })
 
-test('water in cells the bot has not seen leaves the preview and the risky reply as they are without it', async () => {
+test('water in cells the bot neither sees nor makes out leaves the preview and the risky reply as they are without it', async () => {
   const scenes = [
     // Above a ford before a lake.
     { world: terrain([1, 3, 62], [5, 10, 60]), hidden: (p) => p.x >= 1 && p.x <= 3 && p.y === 64, swim: 6 },
@@ -212,9 +212,9 @@ test('water in cells the bot has not seen leaves the preview and the risky reply
     const air = (p) => (hidden(p) ? AIR : world(p))
     const water = (p) => (hidden(p) ? WATER : world(p))
     for (const [q, opts] of [[{ x: 12, y: 64, z: 0 }, { preview: true }], [FAR, {}]]) {
-      const control = await swimGoto(q, opts, { blockAt: air, known, start })
+      const control = await swimGoto(q, opts, { blockAt: air, known, start, shapeNear: () => null })
       assert.strictEqual(control.r.plan.swim, swim, 'control: the plan swims the lake')
-      assert.deepStrictEqual(await swimGoto(q, opts, { blockAt: water, known, start }), control)
+      assert.deepStrictEqual(await swimGoto(q, opts, { blockAt: water, known, start, shapeNear: () => null }), control)
     }
   }
 })
@@ -274,7 +274,7 @@ async function bodyGoto (bot, q) {
     })
   }
   bot.on('goal_updated', walk)
-  const ctx = loadBotFunctions(['walkRoute', 'stagedGoto'], gotoEnv(bot))
+  const ctx = loadBotFunctions(['walkRoute', 'stagedGoto', 'planKnown', 'planBlock'], gotoEnv(bot))
   const route = ctx.walkRoute()
   try {
     return { r: JSON.parse(JSON.stringify(await ctx.stagedGoto(q, route))), walked }

@@ -4,6 +4,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { entityInCell } = require('../lib/shelter')
+const { GRAVESTONE } = require('../lib/server-overrides')
 const { botConstant, digJob, groundMemory, loadBotFunctions, routeHandler } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
@@ -48,6 +49,7 @@ function pocket (cells, { sky = true } = {}) {
     SIGHT_MEMO: { t: 0, cells: new Map() },
     SIGHT_MS: botConstant('SIGHT_MS'),
     LEGACY_1710: false,
+    GRAVESTONE,
     ...groundMemory()
   }
   return { env, acts }

@@ -72,6 +72,7 @@ async function dig (route, query, { open = [], blocks = {}, lit = DARK, refuse =
     knownCell: () => false,
     skyInSight: () => false,
     lightRange: () => Infinity,
+    lightReach: () => Infinity,
     seesLit: (p) => lit(p, bot.entity.position.floored()) && NEIGHBOURS.some(([dx, dy, dz]) => opened.has(key(p.offset(dx, dy, dz)))),
     liveEntities: () => [],
     FALL_TICKS: botConstant('FALL_TICKS'),

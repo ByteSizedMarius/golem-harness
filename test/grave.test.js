@@ -73,6 +73,7 @@ function graveEnv (window, { hidden = false, graves = true } = {}) {
     ...timers,
     stackPause: async () => {},
     shared: { mcData: { blocksByName: graves ? { [GRAVESTONE]: { id: GRAVE_ID, name: GRAVESTONE } } : {} }, ready: true },
+    lightReach: () => Infinity,
     seesLit: (p) => !(hidden && p.x === AT.x && p.y === AT.y && p.z === AT.z),
     goals,
     Vec3,

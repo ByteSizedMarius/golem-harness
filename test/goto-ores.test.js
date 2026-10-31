@@ -7,6 +7,7 @@ const { Vec3 } = require('vec3')
 const { sameVein } = require('../lib/wake')
 const { routeDeadline } = require('../lib/walk')
 const { legLedger, takenText } = require('../lib/leg-ledger')
+const { GRAVESTONE } = require('../lib/server-overrides')
 const { botConstant, groundMemory, awaitRoute } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
@@ -25,11 +26,12 @@ function world ({ len = 20, open = [], ores = {}, light = LIT }) {
   bot.game = { minY: -64, height: 384 }
   bot.time = { timeOfDay: 6000, age: 100000, doDaylightCycle: true }
   bot.inventory = { slots: [] }
+  bot.registry = { blocks: Object.fromEntries(Object.values(IDS).map((id) => [id, { emitLight: 0 }])) }
   bot.blockAt = (pos) => {
     const p = pos.floored()
     const name = ores[ck(p.x, p.y, p.z)] || (isOpen(p.x, p.y, p.z) ? 'air' : 'stone')
     const air = name === 'air'
-    return { name, type: IDS[name], boundingBox: air ? 'empty' : 'block', shapes: air ? [] : [[0, 0, 0, 1, 1, 1]], position: p, light: air ? light : 0, skyLight: 0 }
+    return { name, type: IDS[name], boundingBox: air ? 'empty' : 'block', shapes: air ? [] : [[0, 0, 0, 1, 1, 1]], position: p, light: air ? light : 0, skyLight: 0, getProperties: () => ({}) }
   }
   bot.findBlocks = ({ matching, maxDistance, count }) => Object.keys(ores)
     .map((k) => new Vec3(...k.split(',').map(Number)))
@@ -81,6 +83,7 @@ async function walkEast (scene) {
     SIGHT_MEMO: { t: 0, cells: new Map() },
     SIGHT_MS: botConstant('SIGHT_MS'),
     LEGACY_1710: false,
+    GRAVESTONE,
     ...groundMemory()
   }
   const reply = await awaitRoute('/goto', { x: String(len), z: '0' }, env)

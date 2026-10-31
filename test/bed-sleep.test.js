@@ -427,6 +427,7 @@ test('grave names a gravestone out of reach after the walk instead of waiting fo
     reflexes: [{ name: 'combat', fightBusy: () => false, _threat: null }],
     bunkerHolds: () => false,
     guardState: { hand: null },
+    lightReach: () => Infinity,
     seesLit: () => true,
     goals,
     Vec3,

@@ -1,6 +1,6 @@
 # Perception
 
-You perceive the world only through what the tools say. The usual failure is acting blind: `mine(name: "stone")` with no stone nearby, or `goto` to a coordinate you made up. Look first, then move. `goto` walks the open surface whether you have seen it or not, and below it only seen cells.
+You perceive the world only through what the tools say. The usual failure is acting blind: `mine(name: "stone")` with no stone nearby, or `goto` to a coordinate you made up. Look first, then move. `goto` walks the open surface seen or not, and below it only seen cells and shapes within 4.
 
 ## No x-ray
 
@@ -10,7 +10,7 @@ A block shows only when a player standing where you stand could see it: exposed 
 
 How far you see a block or a mob depends on the light where it is, block or sky light, whichever is brighter. Light 0: 2 blocks, 1: 4, 2: 6, 3: 8, 4: 12, 5: 16, 6: 24, 7 and up: any distance.
 
-Sky light falls to 4 at midnight, so blocks, ore and mobs on open ground show 12 out. A dark cave shows 2 blocks around you until lit, but `section` and `passages` read its shape. A placed torch shows its surroundings at once.
+At midnight sky light falls to 4: open ground shows 12 out. A dark cave shows 2 blocks until lit. `section` and `passages` read its shape. In the dark you make out air, water and solid within 4, never names. Lava shows by its glow. A torch lights its surroundings at once.
 
 A day lasts 20 minutes, with dusk at t=12000 halfway through. Check the time before outdoor work and be inside by dusk. Without sky, `scene` and `state` estimate it: "probably <phase> now". A clock (4 gold ingots, 1 redstone) in hand shows the time in the overworld.
 

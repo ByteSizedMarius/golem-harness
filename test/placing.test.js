@@ -6,7 +6,7 @@ const { Vec3 } = require('vec3')
 const registry = require('prismarine-registry')('1.21.11')
 const Block = require('prismarine-block')(registry)
 const shelter = require('../lib/shelter')
-const { overrideRecipes } = require('../lib/server-overrides')
+const { overrideRecipes, GRAVESTONE } = require('../lib/server-overrides')
 const { deathLedger } = require('../lib/deaths')
 const { summarizePlan, DROP_MAX } = require('../lib/plan')
 const { goals } = require('mineflayer-pathfinder')
@@ -108,7 +108,7 @@ function reacher ({ path = [], ended = null, status = 'success', fighting = fals
         return path && { status, path: path.map(([x, y, z]) => new Vec3(x + 0.5, y, z + 0.5)) }
       },
       routeEnd: () => ended,
-      knownCell: () => true,
+      planKnown: () => true,
       summarizePlan,
       DROP_MAX,
       PLACE_WALK_MAX: botConstant('PLACE_WALK_MAX'),
@@ -645,7 +645,7 @@ function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen 
     walkRoute: () => ({ end () {} }),
     planPath: async () => ({ status: 'success', path: path.map(([x, y, z]) => new Vec3(x + 0.5, y, z + 0.5)) }),
     routeEnd: () => null,
-    knownCell: () => true,
+    planKnown: () => true,
     summarizePlan,
     DROP_MAX,
     PLACE_WALK_MAX: botConstant('PLACE_WALK_MAX')
@@ -911,20 +911,38 @@ test('placeitem and sign place only against a block they know', async () => {
   assert.match(await signRefusal(placeitemRig('oak_sign', { hidden: ['1,63,0'] })), /^nothing solid I can see below or beside/)
 })
 
+// Air, stone and diamond ore by type, as heldRig's registry has them.
+const HELD_TYPES = { air: 0, stone: 1, diamond_ore: 2 }
+const heldBlock = (name, p) => ({ name, type: HELD_TYPES[name], boundingBox: name === 'air' ? 'empty' : 'block', position: p, light: 0, skyLight: 0, getProperties: () => ({}) })
+
 // A walled stone platform, roofed when asked, where every cell holds light 0 and sky light 0.
 function heldPlatformRig (roofed) {
-  const placed = []
   const solid = (x, y, z) => Math.abs(x) <= 4 && Math.abs(z) <= 4 &&
     (y === 63 || (roofed && y === 66) || ((Math.abs(x) === 4 || Math.abs(z) === 4) && (y === 64 || y === 65)))
   const blockAt = (pos) => {
     const p = pos.floored()
-    const s = solid(p.x, p.y, p.z)
-    return { name: s ? 'stone' : 'air', type: s ? 1 : 0, boundingBox: s ? 'block' : 'empty', position: p, light: 0, skyLight: 0 }
+    return heldBlock(solid(p.x, p.y, p.z) ? 'stone' : 'air', p)
   }
-  const env = placingEnv(body(0.5, 64, 1.5), blockAt, {
+  return heldRig(body(0.5, 64, 1.5), blockAt, ['0,64,-2'])
+}
+
+// A dark corridor along z 0 with name in its south wall at 3,64,1, 2.6 blocks from the eye, and 3,64,0 seen.
+function darkWallRig (name, entity = body(0.5, 64, 0.5)) {
+  const blockAt = (pos) => {
+    const p = pos.floored()
+    const open = p.z === 0 && p.x >= -1 && p.x <= 9 && (p.y === 64 || p.y === 65)
+    return heldBlock(p.x === 3 && p.y === 64 && p.z === 1 ? name : open ? 'air' : 'stone', p)
+  }
+  return heldRig(entity, blockAt, ['3,64,0'])
+}
+
+// placingEnv over blockAt with one cobblestone, SEEN starting as seen.
+function heldRig (entity, blockAt, seen) {
+  const placed = []
+  const env = placingEnv(entity, blockAt, {
     items: [{ name: 'cobblestone', count: 1 }],
     bot: {
-      registry: { blocks: { 0: { emitLight: 0, filterLight: 0 }, 1: { emitLight: 0, filterLight: 15 } } },
+      registry: { blocks: { 0: { emitLight: 0, filterLight: 0 }, 1: { emitLight: 0, filterLight: 15 }, 2: { emitLight: 0, filterLight: 15 } } },
       time: { timeOfDay: 6000 },
       game: { minY: -64, height: 384, dimension: 'overworld' },
       pathfinder: { goto: async () => {} },
@@ -934,12 +952,13 @@ function heldPlatformRig (roofed) {
       require,
       ck: (x, y, z) => `${x},${y},${z}`,
       goals,
-      SEEN: new Set(['0,64,-2']),
+      SEEN: new Set(seen),
       SIGHT_MEMO: { t: 0, cells: new Map() },
       SIGHT_MS: botConstant('SIGHT_MS'),
       ESTIMATED_LIGHT: new Map(),
       ...groundMemory(),
       LEGACY_1710: false,
+      GRAVESTONE,
       clearSoftCover: async () => {},
       stampOwnEdit () {},
       reflexes: [],
@@ -961,6 +980,21 @@ test('placeitem goes against a floor in open sky that the client holds no sky li
   await handle({ query: at }, res)
   assert.strictEqual(res.error && res.error.message, 'nothing solid I can see below or beside the target to place against')
   assert.deepStrictEqual(roofed.placed, [])
+})
+
+test('placeitem at or against a dark wall cell within 4 blocks refuses alike whatever it holds, and never names it', async () => {
+  const refusal = async (rig, x, y, z) => {
+    const { handle, res } = routeHandler('/placeitem', rig.env)
+    await handle({ query: { x: String(x), y: String(y), z: String(z), name: 'cobblestone' } }, res)
+    assert.deepStrictEqual(rig.placed, [])
+    return res.error && res.error.message
+  }
+  assert.match(await refusal(darkWallRig('diamond_ore', body(3.5, 64, 0.5)), 3, 64, 1), /diamond_ore/, 'control: the cell beside the body')
+  for (const [x, y, z] of [[3, 64, 1], [3, 64, 0]]) {
+    const stone = await refusal(darkWallRig('stone'), x, y, z)
+    assert.doesNotMatch(String(stone), /stone|diamond|ore|undefined/)
+    assert.strictEqual(await refusal(darkWallRig('diamond_ore'), x, y, z), stone)
+  }
 })
 
 test('placeitem and sign answer a remembered support out of sight the same whatever holds it now', async () => {

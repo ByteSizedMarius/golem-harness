@@ -494,7 +494,7 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     zoneCrossed,
     ...over
   })
-  return { env, bot, ctx: loadBotFunctions(['walkRoute', 'stagedGoto', 'collectDrops'], env) }
+  return { env, bot, ctx: loadBotFunctions(['walkRoute', 'stagedGoto', 'collectDrops', 'planKnown', 'planBlock'], env) }
 }
 
 async function goto (q, opts) {
@@ -818,9 +818,9 @@ test('a retry pause never outlasts the route deadline', async () => {
 })
 
 test('the goto precheck calls a goal walled only when every cell its flood read is known, else names the unseen edge', () => {
-  // Two air rooms in stone, joined at x 3 and 4 by a tunnel when open.
-  const tunnel = (p) => (p.x === 3 || p.x === 4) && p.z === 0 && (p.y === 64 || p.y === 65)
-  const room = (p) => (p.y === 64 || p.y === 65) && p.z === 0 && ((p.x >= 0 && p.x <= 2) || (p.x >= 5 && p.x <= 7))
+  // Two air rooms in stone, joined at x 6 and 7 by a tunnel when open, past the 4 blocks the bot makes out shapes in.
+  const tunnel = (p) => (p.x === 6 || p.x === 7) && p.z === 0 && (p.y === 64 || p.y === 65)
+  const room = (p) => (p.y === 64 || p.y === 65) && p.z === 0 && ((p.x >= 0 && p.x <= 5) || (p.x >= 8 && p.x <= 10))
   let open = false
   const env = {
     bot: { entity: { position: new Vec3(0.5, 64, 0.5) }, blockAt: (p) => (room(p) || (open && tunnel(p)) ? AIR : STONE) },
@@ -831,13 +831,13 @@ test('the goto precheck calls a goal walled only when every cell its flood read 
   }
   const { airPrecheck } = loadBotFunctions(['airPrecheck'], env)
   const precheck = () => {
-    const { verdict, edge, cells } = airPrecheck(new Vec3(6, 64, 0), 0)
+    const { verdict, edge, cells } = airPrecheck(new Vec3(9, 64, 0), 0)
     return { verdict, edge: edge && edge.toString(), cells }
   }
   assert.strictEqual(precheck().verdict, 'walled', 'control: every cell known')
-  env.cellKnown = (p) => !(p.x === 3 && p.y === 64 && p.z === 0)
+  env.cellKnown = (p) => !(p.x === 6 && p.y === 64 && p.z === 0)
   const pre = precheck()
-  assert.deepStrictEqual([pre.verdict, pre.edge], ['unseen', '(2, 64, 0)'])
+  assert.deepStrictEqual([pre.verdict, pre.edge], ['unseen', '(5, 64, 0)'])
   env.cellKnown = (p) => !tunnel(p)
   const sealed = precheck()
   open = true
@@ -864,9 +864,9 @@ test('a /goto whose known way leaves the precheck radius is walked, not refused 
 })
 
 test('a /goto walks past open ground it has not seen, and the same way under rock replies unseen-way', async () => {
-  // The bot has seen the ground round itself at x -2 to 1 and round the goal at x 5 to 8. A hill stands beside the way at x 2 to 4.
+  // Seen: x -2 to 1 round the body and 9 to 12 round the goal, made out to x 4. A hill stands beside the way at x 2 to 4.
   const hill = (p) => p.x >= 2 && p.x <= 4 && p.z >= 2 && p.z <= 4 && p.y <= 66
-  const cellKnown = (p) => Math.abs(p.z) <= 2 && p.y >= 63 && p.y <= 67 && ((p.x >= -2 && p.x <= 1) || (p.x >= 5 && p.x <= 8))
+  const cellKnown = (p) => Math.abs(p.z) <= 2 && p.y >= 63 && p.y <= 67 && ((p.x >= -2 && p.x <= 1) || (p.x >= 9 && p.x <= 12))
   const replyFor = (underRock) => {
     const solid = (p) => p.y <= 63 || hill(p) || (underRock && p.y >= 66)
     let precheck = null
@@ -874,11 +874,11 @@ test('a /goto walks past open ground it has not seen, and the same way under roc
       bot.blockAt = (p) => ({ ...(solid(p) ? STONE : AIR), skyLight: underRock || solid(p) ? 0 : 15 })
       precheck = loadBotFunctions(['airPrecheck'], { bot, cellKnown, heldLight: (p, b) => b, ck: (x, y, z) => x + ',' + y + ',' + z, Vec3 }).airPrecheck
     }
-    return goto({ x: 6, y: 64, z: 0 }, { setup, answer: arrive, over: { cellKnown, airPrecheck: (...a) => precheck(...a) } })
+    return goto({ x: 10, y: 64, z: 0 }, { setup, answer: arrive, over: { cellKnown, airPrecheck: (...a) => precheck(...a) } })
   }
   assert.strictEqual((await replyFor(false)).arrived, true)
   const buried = await replyFor(true)
-  assert.deepStrictEqual([buried.arrived, buried.reason, buried.edge], [false, 'unseen-way', { x: 1, y: 64, z: 0 }])
+  assert.deepStrictEqual([buried.arrived, buried.reason, buried.edge], [false, 'unseen-way', { x: 4, y: 64, z: 0 }])
 })
 
 test('a /goto into a rock column beside the bot replies no-floor only when it knows the column, else unseen-way with the target as edge', async () => {

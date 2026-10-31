@@ -210,6 +210,16 @@ test('a flee runs to a safe cell, never into a ravine, beside a drop, near lava 
   assert.strictEqual(r.logs.filter((l) => l.startsWith('[flee]')).length, 1, 'one [flee] line')
 })
 
+test('a flee takes no cell it only makes out in the dark for a known one', () => {
+  const w = plateau({ unknown: (x) => x === -3 })
+  const flee = (shapeNear) => fleeIn(w, creeper(5.5, 64, 0.5), null, { knownCell: (p) => !w.unknown(p.x, p.y, p.z), shapeNear })
+  const blind = flee(() => null)
+  assert.ok(blind.goal, 'control: a flee goal')
+  const shapes = flee((p) => (p.x === -3 ? 'air' : null))
+  assert.deepStrictEqual(shapes.goal, blind.goal)
+  assert.notStrictEqual(shapes.goal.x, -3)
+})
+
 test('a flee never ends under water, and wades across water one deep', () => {
   // West of x -4 water stands depth deep on a floor that low.
   const lake = (depth) => plateau({

@@ -491,7 +491,7 @@ test('a goto finds its way back up a dark stair the body just walked down', asyn
   assert.deepStrictEqual(bot.entity.position, new Vec3(5.5, 59, 0.5), 'control: the walk ends at the bottom')
   const top = new goals.GoalBlock(0, 64, 0)
   assert.strictEqual(plan(top).status, 'success', 'control: the stair climbs with every cell known')
-  const { knownMoves } = loadBotFunctions(['knownMoves'], { ck, knownCell: (p) => SEEN.has(ck(p.x, p.y, p.z)), PLAN_KNOWN: new Map() })
+  const { knownMoves } = loadBotFunctions(['knownMoves'], { bot, Vec3, ck, knownCell: (p) => SEEN.has(ck(p.x, p.y, p.z)), PLAN_KNOWN: new Map() })
   const result = plan(top, knownMoves(bot.pathfinder.movements))
   assert.strictEqual(result.status, 'success')
   assert.deepStrictEqual(result.path.map((p) => [Math.floor(p.x), p.y, Math.floor(p.z)]), [[4, 60, 0], [3, 61, 0], [2, 62, 0], [1, 63, 0], [0, 64, 0]])

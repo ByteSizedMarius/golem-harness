@@ -3,6 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { sectionColumns, floorPhrase } = require('../lib/section')
+const { GRAVESTONE } = require('../lib/server-overrides')
 const { botConstant, facings, runRoute } = require('./helpers')
 
 const O = { x: 0, y: 64, z: 0 }
@@ -97,7 +98,8 @@ function closedRoom (light, yaw = 0) {
   return {
     bot: {
       entity: { position: new Vec3(0.5, 64, 0.5), yaw },
-      blockAt: (p) => (air(p) ? { name: 'air', boundingBox: 'empty', light, skyLight: 0 } : { name: 'stone', boundingBox: 'block', light: 0, skyLight: 0 }),
+      blockAt: (p) => (air(p) ? { name: 'air', type: 0, boundingBox: 'empty', light, skyLight: 0, getProperties: () => ({}) } : { name: 'stone', type: 1, boundingBox: 'block', light: 0, skyLight: 0, getProperties: () => ({}) }),
+      registry: { blocks: { 0: { emitLight: 0 }, 1: { emitLight: 0 } } },
       time: { timeOfDay: 6000 },
       game: { minY: -64, height: 384 }
     },
@@ -108,7 +110,8 @@ function closedRoom (light, yaw = 0) {
     SEEN: new Set(),
     ESTIMATED_LIGHT: new Map(),
     SIGHT_MEMO: { t: 0, cells: new Map() },
-    SIGHT_MS: botConstant('SIGHT_MS')
+    SIGHT_MS: botConstant('SIGHT_MS'),
+    GRAVESTONE
   }
 }
 

@@ -12,7 +12,7 @@ const { flatText } = require('../lib/flat-text')
 const { balanced, botConstant, wiredSource, groundMemory, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn, claimRescue } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
-const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4, wheat: 5, chest: 6 }
+const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4, wheat: 11, chest: 12 }
 const NOON = 6000
 const MIDNIGHT = 18000
 
@@ -23,7 +23,7 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     const p = pos.floored()
     const name = ores[ck(p.x, p.y, p.z)] || (open(p.x, p.y, p.z) ? 'air' : 'stone')
     const air = name === 'air'
-    return { name, type: IDS[name], boundingBox: air ? 'empty' : 'block', shapes: air ? [] : [[0, 0, 0, 1, 1, 1]], position: new Vec3(p.x, p.y, p.z), light: air ? light(p.x, p.z) : 0, skyLight: air ? skyLight(p.x, p.z) : 0 }
+    return { name, type: IDS[name], boundingBox: air ? 'empty' : 'block', shapes: air ? [] : [[0, 0, 0, 1, 1, 1]], position: new Vec3(p.x, p.y, p.z), light: air ? light(p.x, p.z) : 0, skyLight: air ? skyLight(p.x, p.z) : 0, getProperties: () => ({}) }
   }
   const position = new Vec3(at + 0.5, 64, 0.5)
   const findBlocks = ({ matching, maxDistance, count }) => Object.keys(ores)
@@ -31,10 +31,10 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     .filter((p) => matching.includes(IDS[ores[ck(p.x, p.y, p.z)]]) && p.distanceTo(position) <= maxDistance)
     .sort((a, b) => a.distanceTo(position) - b.distanceTo(position))
     .slice(0, count)
-  const blocks = [{ id: 1, name: 'coal_ore' }, { id: 2, name: 'iron_ore' }, { id: 4, name: 'diamond_ore' }, { id: 5, name: 'wheat', states: [{ name: 'age', num_values: 8 }] }]
+  const blocks = [{ id: 1, name: 'coal_ore' }, { id: 2, name: 'iron_ore' }, { id: 4, name: 'diamond_ore' }, { id: 11, name: 'wheat', states: [{ name: 'age', num_values: 8 }] }]
   return {
     shared: { ready: true, mcData: { blocksArray: blocks, blocksByName: Object.fromEntries(blocks.map((b) => [b.name, b])), blocks: Object.fromEntries(blocks.map((b) => [b.id, b])) } },
-    bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay, age: 100000, doDaylightCycle: true }, game: { minY: -64, height: 384 }, inventory: { slots: [] } },
+    bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay, age: 100000, doDaylightCycle: true }, game: { minY: -64, height: 384 }, inventory: { slots: [] }, registry: REGISTRY },
     ck,
     Vec3,
     SEEN: new Set(),
@@ -44,6 +44,7 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     SIGHT_MEMO: { t: 0, cells: new Map() },
     SIGHT_MS: botConstant('SIGHT_MS'),
     LEGACY_1710: false,
+    GRAVESTONE,
     ...groundMemory()
   }
 }
@@ -83,9 +84,9 @@ test('find gives each crop in sight its age and whether it is fully grown', () =
   assert.deepStrictEqual(found, [[2, 7, true], [4, 3, false]])
 })
 
-const LAVA = { name: 'lava', boundingBox: 'empty', light: 15, metadata: 0 }
-const current = (light) => ({ name: 'water', boundingBox: 'empty', light, metadata: 3 })
-const still = (light) => ({ name: 'water', boundingBox: 'empty', light, metadata: 0 })
+const LAVA = { name: 'lava', type: 8, boundingBox: 'empty', light: 15, metadata: 0, getProperties: () => ({ level: '0' }) }
+const current = (light) => ({ name: 'water', type: 9, boundingBox: 'empty', light, metadata: 3 })
+const still = (light) => ({ name: 'water', type: 9, boundingBox: 'empty', light, metadata: 0 })
 const AIR = { name: 'air', boundingBox: 'empty', light: LIT }
 // An air pocket at 1,64,-2 behind the room's north wall, beside the cell at 2,64,-2.
 const behindWall = (block) => ({ '1,64,-2': AIR, '2,64,-2': block })
@@ -152,9 +153,8 @@ test('ore facing the bot from behind a wall stays hidden in every reply', async 
   }
 })
 
-// The light data of the block types in world, a torch as type 5, an end_rod as type 6, fire as type 7, lava as type 8 and
-// water as type 9.
-const REGISTRY = { blocks: { 0: { emitLight: 0, filterLight: 0 }, 1: { emitLight: 0, filterLight: 15 }, 2: { emitLight: 0, filterLight: 15 }, 3: { emitLight: 0, filterLight: 15 }, 4: { emitLight: 0, filterLight: 15 }, 5: { emitLight: 14, filterLight: 0 }, 6: { emitLight: 14, filterLight: 0 }, 7: { emitLight: 15, filterLight: 0 }, 8: { emitLight: 15, filterLight: 1 }, 9: { emitLight: 0, filterLight: 1 } } }
+// Light data by block type: 5 torch, 6 end_rod, 7 fire, 8 lava, 9 water, 11 wheat, 12 chest.
+const REGISTRY = { blocks: { 0: { emitLight: 0, filterLight: 0 }, 1: { emitLight: 0, filterLight: 15 }, 2: { emitLight: 0, filterLight: 15 }, 3: { emitLight: 0, filterLight: 15 }, 4: { emitLight: 0, filterLight: 15 }, 5: { emitLight: 14, filterLight: 0 }, 6: { emitLight: 14, filterLight: 0 }, 7: { emitLight: 15, filterLight: 0 }, 8: { emitLight: 15, filterLight: 1 }, 9: { emitLight: 0, filterLight: 1 }, 11: { emitLight: 0, filterLight: 0 }, 12: { emitLight: 0, filterLight: 0 } } }
 const block = (name, type, boundingBox) => (p) => ({ name, type, stateId: type, boundingBox, position: new Vec3(...p), getProperties: () => ({}) })
 const stoneAt = block('stone', 3, 'block')
 const airAt = block('air', 0, 'empty')
@@ -497,6 +497,102 @@ test('ore under lava or more than three cells of water is not named', () => {
   const flooded = (len) => withCells(tunnel(len + 1, LIT), Object.fromEntries([64, 65].flatMap((y) => Array.from({ length: len }, (_, i) => [`${i + 1},${y},0`, still(LIT)]))))
   assert.strictEqual(findsCoal(flooded(3)), true, 'control: three cells of water')
   assert.strictEqual(findsCoal(flooded(4)), false)
+})
+
+// A tunnel along z 0 to x 12, walled at x 5 with wall, with lava at chunk light 0 at each key of lava, at its level.
+function lavaTunnel (lava, { wall = false, light = DARK } = {}) {
+  const cells = Object.fromEntries(Object.entries(lava).map(([k, level]) => [k, { ...LAVA, light: DARK, getProperties: () => ({ level: String(level) }) }]))
+  const env = withCells(world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 12 && !(wall && x === 5), light: () => light }), cells)
+  env.shared.mcData.blocksByName.lava = { id: LAVA.type, name: 'lava' }
+  const at = env.bot.entity.position
+  env.bot.findBlocks = ({ matching, maxDistance, count }) => Object.keys(lava)
+    .map((k) => new Vec3(...k.split(',').map(Number)))
+    .filter((p) => matching.includes(LAVA.type) && p.distanceTo(at) <= maxDistance)
+    .sort((a, b) => a.distanceTo(at) - b.distanceTo(at))
+    .slice(0, count)
+  return env
+}
+
+test('lava, still or flowing, shows 10 blocks out by its own glow in find and blockat, never behind a wall', async () => {
+  const blockat = async (env) => {
+    const { handle, res } = routeHandler('/blockat', { ...env, require })
+    await handle({ query: { x: '10', y: '64', z: '0' } }, res)
+    return res
+  }
+  for (const level of [0, 3]) {
+    const open = lavaTunnel({ '10,64,0': level })
+    assert.deepStrictEqual(runRoute('/find', { name: 'lava' }, open).blocks.map((b) => [b.name, b.pos.x]), [['lava', 10]], `level ${level}`)
+    assert.strictEqual((await blockat(open)).body.name, 'lava', `level ${level}`)
+    const walled = lavaTunnel({ '10,64,0': level }, { wall: true })
+    assert.strictEqual(runRoute('/find', { name: 'lava' }, walled).count, 0, `level ${level} behind a wall`)
+    const hidden = await blockat(walled)
+    assert.match(hidden.error.message, UNSEEN)
+    assert.strictEqual(hidden.body, undefined)
+  }
+})
+
+test('find names lava in sight past more than 300 nearer cells of lava sealed in rock', () => {
+  // A lit tunnel with lava at x 10, over a lake of lava sealed in rock from y 50 to 58.
+  const lava = { '10,64,0': 0 }
+  for (let x = -8; x <= 8; x++) for (let y = 50; y <= 58; y++) for (let z = -8; z <= 8; z++) lava[ck(x, y, z)] = 0
+  const env = lavaTunnel(lava, { light: LIT })
+  const at = env.bot.entity.position
+  const sealed = Object.keys(lava).filter((k) => new Vec3(...k.split(',').map(Number)).distanceTo(at) < at.distanceTo(new Vec3(10, 64, 0)))
+  assert.ok(sealed.length > 300, `control: ${sealed.length} sealed cells nearer`)
+  assert.deepStrictEqual(runRoute('/find', { name: 'lava' }, env).blocks.map((b) => [b.pos.x, b.pos.y, b.pos.z]), [[10, 64, 0]])
+})
+
+test('gaze names lava past the light on its way by its own glow, and a dark coal wall there stays unnamed', () => {
+  // A dark tunnel north along x 0 to z -12, closed across at z -6 by block.
+  const looking = (block) => {
+    const env = world({ open: (x, y, z) => x === 0 && (y === 64 || y === 65) && z <= 0 && z >= -12, light: () => DARK })
+    return gaze(withCells(env, { '0,64,-6': block, '0,65,-6': block })).reply
+  }
+  assert.match(JSON.stringify(looking({ ...LAVA, light: DARK }).surfaces), /lava/)
+  assert.doesNotMatch(JSON.stringify(looking({ name: 'coal_ore', type: IDS.coal_ore, boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 1]], light: DARK })), /coal/)
+})
+
+// A coal-lined gallery at z, y 64, from x -half to half: coal under, over and on both sides of every open cell.
+function coalGallery (ores, z, half) {
+  for (let x = -half; x <= half; x++) for (const [y, dz] of [[63, 0], [65, 0], [64, 1], [64, -1]]) ores[ck(x, y, z + dz)] = 'coal_ore'
+}
+
+test('find runs a sight line for at most the nearest 256 lit candidates with an open face', () => {
+  // A dark tunnel at z 0 from x 0 to 3, and a lit gallery out of sight at z 40 from x -40 to 40.
+  // Nearer than the lit gallery lie 325 sealed coal cells and a dark gallery at z 12 beyond its light's reach.
+  const ores = {}
+  const sealed = []
+  for (let x = -6; x <= 6; x++) for (let y = 56; y <= 60; y++) for (let z = -6; z <= -2; z++) { ores[ck(x, y, z)] = 'coal_ore'; sealed.push(ck(x, y, z)) }
+  coalGallery(ores, 12, 35)
+  coalGallery(ores, 40, 40)
+  const env = world({
+    open: (x, y, z) => (z === 0 && x >= 0 && x <= 3 && (y === 64 || y === 65)) || (y === 64 && ((z === 12 && Math.abs(x) <= 35) || (z === 40 && Math.abs(x) <= 40))),
+    ores,
+    light: (x, z) => (z === 40 ? LIT : DARK)
+  })
+  const { sightCell } = loadBotFunctions(['sightCell'], { ...env })
+  let lines = 0
+  const { findVisible } = loadBotFunctions(['findVisible'], { ...env, sightCell: (...a) => { lines++; return sightCell(...a) } })
+  assert.strictEqual(sealed.length, 325, 'control: sealed cells beyond the cap')
+  assert.strictEqual(Object.keys(ores).length - sealed.length, 284 + 324, 'control: dark and lit gallery cells')
+  assert.strictEqual(findVisible([IDS.coal_ore], 64, 10).length, 0)
+  assert.strictEqual(lines, 256)
+})
+
+test('find names a lit coal in sight behind more than 256 nearer dark candidates with an open face', () => {
+  // A tunnel at z 0 to x 40, dark until x 30, ending in coal at x 41, beside a dark gallery at z 4 from x -35 to 35 (284 cells, out of sight).
+  const ores = { '41,65,0': 'coal_ore' }
+  coalGallery(ores, 4, 35)
+  const env = world({
+    open: (x, y, z) => (z === 0 && x >= 0 && x <= 40 && (y === 64 || y === 65)) || (z === 4 && y === 64 && Math.abs(x) <= 35),
+    ores,
+    light: (x, z) => (z === 0 && x >= 30 ? LIT : DARK)
+  })
+  const { findVisible } = loadBotFunctions(['findVisible'], env)
+  assert.strictEqual(Object.keys(ores).length, 285, 'control: more dark candidates than the cap')
+  const found = findVisible([IDS.coal_ore], 64, 10)
+  assert.strictEqual(found.length, 1)
+  assert.strictEqual(found[0].pos.x, 41)
 })
 
 test('a mob shows only as far as the light on its body carries', () => {
@@ -1083,12 +1179,65 @@ test('blockat answers the cells the body fills and touches in the dark, never a 
   }
 })
 
+// A corridor at z 0 from x 0 to 9 at light level light, with name in its south wall at 3,64,1, 2.6 blocks from the eye.
+const wallCell = (name, light) => withHands(world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 9 && (y === 64 || y === 65), ores: { '3,64,1': name }, light: () => light }))
+
+test('blockat and digat refuse a dark wall cell within 4 blocks alike whatever it holds, and never name it', async () => {
+  const at = { x: '3', y: '64', z: '1' }
+  const blockat = async (env) => {
+    const { handle, res } = routeHandler('/blockat', env)
+    await handle({ query: at }, res)
+    return { body: res.body, error: res.error && res.error.message }
+  }
+  const digat = async (env) => {
+    const acts = []
+    const base = env.bot.blockAt
+    env.bot.blockAt = (p) => ({ ...base(p), digTime: () => 750 })
+    env.bot.pathfinder.goto = async () => { acts.push('walk') }
+    Object.assign(env.bot, { equip: async () => { acts.push('equip') }, dig: async () => { acts.push('dig') }, digTime: () => 750 })
+    Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, digLock: botConstant('digLock'), stopPath () {}, setTimeout, clearTimeout, PICK_TIER: botConstant('PICK_TIER'), DIG_TOOL: botConstant('DIG_TOOL') })
+    const { handle, res } = routeHandler('/digat', env)
+    await handle({ query: at }, res)
+    return { body: res.body, error: res.error && res.error.message, acts }
+  }
+  assert.strictEqual((await blockat(wallCell('diamond_ore', LIT))).body.name, 'diamond_ore', 'control: in lit sight')
+  for (const route of [blockat, digat]) {
+    const stone = await route(wallCell('stone', DARK))
+    assert.match(stone.error, UNSEEN)
+    assert.doesNotMatch(JSON.stringify(stone), /stone|diamond|ore|"(walk|equip|dig)"/)
+    assert.deepStrictEqual(await route(wallCell('diamond_ore', DARK)), stone)
+  }
+})
+
+test('making out shapes, a goto precheck and a plan in the dark leave the seen cells and the sight verdicts as passages does', () => {
+  const dark = () => world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 9 && (y === 64 || y === 65), light: () => DARK })
+  const verdicts = (env) => {
+    const { cellKnown } = loadBotFunctions(['cellKnown'], { ...env })
+    return [[3, 64, 0], [3, 65, 0], [3, 63, 0], [3, 64, 1], [3, 66, 0]].map(([x, y, z]) => cellKnown(new Vec3(x, y, z)))
+  }
+  const control = dark()
+  runRoute('/passages', { radius: '8' }, control)
+  const env = dark()
+  const fns = loadBotFunctions(['shapeNear', 'airPrecheck', 'knownMoves'], { ...env, PLAN_KNOWN: new Map() })
+  const m = fns.knownMoves({ getBlock: (pos, dx, dy, dz) => env.bot.blockAt(new Vec3(pos.x + dx, pos.y + dy, pos.z + dz)), getNeighbors: () => [] })
+  let shapes = 0
+  for (let x = -1; x <= 6; x++) for (let y = 62; y <= 67; y++) for (let z = -2; z <= 2; z++) {
+    if (fns.shapeNear(new Vec3(x, y, z))) shapes++
+    m.getBlock(new Vec3(x, y, z), 0, 0, 0)
+  }
+  assert.ok(shapes > 0, 'control: shapes made out')
+  fns.airPrecheck(new Vec3(3, 64, 0), 0)
+  runRoute('/passages', { radius: '8' }, env)
+  assert.deepStrictEqual([...env.SEEN].sort(), [...control.SEEN].sort())
+  assert.deepStrictEqual(verdicts(env), verdicts(dark()))
+})
+
 // env with the blocks at the 'x,y,z' keys of cells in place of its own.
 function withCells (env, cells) {
   const base = env.bot.blockAt
   env.bot.blockAt = (p) => {
     const c = cells[ck(p.x, p.y, p.z)]
-    return c ? { position: new Vec3(p.x, p.y, p.z), skyLight: 0, ...c } : base(p)
+    return c ? { position: new Vec3(p.x, p.y, p.z), skyLight: 0, type: 0, getProperties: () => ({}), ...c } : base(p)
   }
   return env
 }
@@ -1571,7 +1720,7 @@ test('the lay of the land in a remembered cave takes water as a floor only while
     const env = world({ open: (x, y, z) => z === 0 && ((y === 64 || y === 65) && x >= -3 && x <= 2 || pit(x, z) && y >= 55), light: () => light })
     env.bot.entity.position = new Vec3(1.95, 64, 0.5)
     const base = env.bot.blockAt
-    env.bot.blockAt = (p) => (pit(p.x, p.z) && p.y >= 55 && p.y <= 58 ? { name: 'water', boundingBox: 'empty', shapes: [], light, skyLight: 0, metadata: 0, position: new Vec3(p.x, p.y, p.z) } : base(p))
+    env.bot.blockAt = (p) => (pit(p.x, p.z) && p.y >= 55 && p.y <= 58 ? { name: 'water', type: 9, boundingBox: 'empty', shapes: [], light, skyLight: 0, metadata: 0, getProperties: () => ({ level: '0' }), position: new Vec3(p.x, p.y, p.z) } : base(p))
     for (let x = -4; x <= 3; x++) for (let y = 58; y <= 66; y++) for (let z = -1; z <= 1; z++) env.SEEN.add(ck(x, y, z))
     return loadBotFunctions(['spatial3D'], env).spatial3D()
   }
@@ -1579,17 +1728,17 @@ test('the lay of the land in a remembered cave takes water as a floor only while
   assert.match(around(DARK), /falls away E at 1, floor out of sight;/)
 })
 
-test('the lay of the land names lava at feet level only while the bot sees it', () => {
-  // A corridor at x -3..6, z 0 with lava at x 5 filling the feet cell, all of it seen once.
-  const around = (light) => {
-    const env = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= -3 && x <= 6, light: () => LIT })
+test('the lay of the land names lava at feet level in sight by its own glow, never behind a wall', () => {
+  // A dark corridor at x -3..6, z 0 with lava at x 5 filling the feet cell, all of it seen once, walled across at x 3 with wall.
+  const around = (wall) => {
+    const env = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= -3 && x <= 6 && !(wall && x === 3), light: () => DARK })
     const base = env.bot.blockAt
-    env.bot.blockAt = (p) => (p.x === 5 && p.y === 64 && p.z === 0 ? { name: 'lava', boundingBox: 'empty', shapes: [], light, skyLight: 0, metadata: 0, position: new Vec3(p.x, p.y, p.z) } : base(p))
+    env.bot.blockAt = (p) => (p.x === 5 && p.y === 64 && p.z === 0 ? { ...LAVA, shapes: [], light: DARK, skyLight: 0, position: new Vec3(p.x, p.y, p.z) } : base(p))
     for (let x = -4; x <= 7; x++) for (let y = 62; y <= 66; y++) for (let z = -1; z <= 1; z++) env.SEEN.add(ck(x, y, z))
     return loadBotFunctions(['spatial3D'], env).spatial3D()
   }
-  assert.match(around(LIT), /LAVA E 5/, 'control: the lava in sight')
-  assert.doesNotMatch(around(DARK), /LAVA|lava/)
+  assert.match(around(false), /LAVA E 5/)
+  assert.doesNotMatch(around(true), /LAVA|lava/)
 })
 
 test('map draws a floor changed out of sight as last seen, and the new block once in sight', () => {
@@ -1599,7 +1748,7 @@ test('map draws a floor changed out of sight as last seen, and the new block onc
   const env = world({ open: (x, y, z) => Math.abs(x) <= 5 && Math.abs(z) <= 5 && y >= 64 && y <= 70, light: () => light })
   const base = env.bot.blockAt
   env.bot.blockAt = (p) => (planked.has(ck(p.x, p.y, p.z)) ? { ...base(p), name: 'oak_planks', type: 9 } : base(p))
-  env.bot.registry = { blocks: { 3: { name: 'stone' }, 9: { name: 'oak_planks' } } }
+  env.bot.registry = { blocks: { 0: { name: 'air', emitLight: 0 }, 3: { name: 'stone', emitLight: 0 }, 9: { name: 'oak_planks', emitLight: 0 } } }
   Object.assign(env, { require, SEEN_CAP: 1000, seenEdits: 0, SURFACE: new Map(), SURFACE_CAP: 1000, surfaceEdits: 0, ...stationMemory(), indoors: () => false })
   loadBotFunctions(['markTrail'], env).markTrail(new Vec3(0, 64, 0))
   // The glyph of column x 3, z 0.

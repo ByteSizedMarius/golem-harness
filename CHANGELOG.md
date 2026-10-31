@@ -4,6 +4,18 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: goto makes out shapes in the dark, and lava shows by its glow
+
+In a lake at night every goto failed with `no-path` or `unseen-way` while the bot sank to oxygen 8,
+and in a cave `find` named no lava that `gaze` saw 3 blocks out. Goto planning now makes out air,
+water, a ladder and solid blocks within 4 blocks of the eye, lit or not, by their shape alone: such a
+cell shows no name and no ore, and a walk never digs or opens it. A goto now climbs a ladder it makes
+out in the dark within 4 blocks, as it would a ladder it has seen, and the goto precheck calls a way
+past a dark wall it knows only by shape unseen instead of reachable only by digging. A walk out of
+water 2 deep onto a level shore still finds no plan. Lava shows by its own glow to `find` and `gaze`,
+and `find` reaches past the nearest 256 candidates, since only those with an open face within their
+light's reach use up its 256 sight lines.
+
 ## 2026-10-31: the bot pours its water bucket when it burns
 
 A burning bot only took the damage, though a water bucket in its pockets puts the fire out. A new
