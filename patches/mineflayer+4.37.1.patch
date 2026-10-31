@@ -1,16 +1,3 @@
-diff --git a/node_modules/mineflayer/lib/plugins/bed.js b/node_modules/mineflayer/lib/plugins/bed.js
-index 9b526f6..017b06d 100644
---- a/node_modules/mineflayer/lib/plugins/bed.js
-+++ b/node_modules/mineflayer/lib/plugins/bed.js
-@@ -70,7 +70,7 @@ function inject (bot) {
-     } else {
-       bot._client.write('entity_action', {
-         entityId: bot.entity.id,
--        actionId: 2,
-+        actionId: bot.registry.version['>=']('1.21.6') ? 'leave_bed' : 2,
-         jumpBoost: 0
-       })
-     }
 diff --git a/node_modules/mineflayer/lib/plugins/entities.js b/node_modules/mineflayer/lib/plugins/entities.js
 index 507a618..73d608f 100644
 --- a/node_modules/mineflayer/lib/plugins/entities.js

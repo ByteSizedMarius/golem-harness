@@ -4,6 +4,18 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-30: the bot leaves a bed the server holds it in
+
+A bed used while another player stayed up kept the bot asleep on the server while it walked off on
+its own screen, so every chest and furnace window timed out after 20 s and `stop` did not clear it.
+The bot now tracks the bed it sleeps in from its own bed click and the server's answer, shows it as
+`sleeping` in `state` and sends `sleep` and `wake` events. Every body tool, click and window, and
+every walk a reflex or a follow starts, first leaves the bed and waits up to 3 s for the server to
+stand the bot up, else refuses with `in bed at x,y,z`. A reflex strike or item use is dropped while
+the bot is in bed, and `stop` or a death forgets the bed. On a 1.7.10 server a window 6 or more
+blocks from the feet is refused by name instead of timing out.
+
+## 2026-10-30: tunnels and stairs name the ore they pass
 
 A tunnel passed redstone in its floor without a word. `dig_tunnel` and `dig_stair` replies now carry
 `ores` as `goto` does: the veins within 4 of the way that the bot saw lit or touched, floor and

@@ -41,6 +41,7 @@ const { createSenses, bindSenses, wireSoundTablePin, wireHearing, wireOwnEditSta
 const { createAlarms, bindAlarms, wireWearAlarm, wirePocketAlarm, wireTrailMarks, wireBodyAlarms } = require('./lib/bot/alarms')
 const { bindDigLock, wireDigGuard } = require('./lib/bot/dig-lock')
 const { createConnection, bindConnection, wireConnectionSpawn, wireConnectionEvents, wireLookPaceGoto } = require('./lib/bot/connection')
+const { createBed, bindBed, wireBed } = require('./lib/bot/bed')
 const { createReply, bindReply } = require('./lib/routes/reply')
 const { createDebugRoutes, bindDebugRoutes } = require('./lib/routes/debug')
 const { createSocialRoutes, bindSocialRoutes } = require('./lib/routes/social')
@@ -114,6 +115,9 @@ wireEarly()
 createLegs(ctx)
 
 createConnection(ctx)
+
+createBed(ctx)
+const { installBedGate } = ctx
 
 createStreams(ctx)
 
@@ -209,6 +213,7 @@ function wireRuntime () {
   wireLegacyDigTime()
   wireRespawnHeldSlot()
   wireLookPaceGoto()
+  wireBed()
   wireGateManners()
   wireWorldChangeNotes()
   wireWorldChangeEvents()
@@ -244,6 +249,7 @@ function installReflexes () {
 }
 function installRoutes () {
   installFightGate(app)
+  installBedGate(app)
   installDebugRoutes(app)
   installSocialRoutes(app)
   installBuildingRoutes(app)
@@ -278,6 +284,7 @@ function bindAll () {
   bindAlarms(ctx)
   bindDigLock(ctx)
   bindConnection(ctx)
+  bindBed(ctx)
   bindReply(ctx)
   bindDebugRoutes(ctx)
   bindSocialRoutes(ctx)

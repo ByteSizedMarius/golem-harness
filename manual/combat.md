@@ -25,7 +25,7 @@ You are the strategist, the combat reflex is the trigger finger. It runs every 3
 - A creeper 8 or more off with no walk to you within your flee distance is `watched:`. `goto` walks around a watched creeper or answers `creeper` with its cell.
 - Break a skeleton's line of sight. Spiders climb walls. At night, get inside early and stay in. Before `strike`, check the hostile is on your side of the wall: `strike` and the reflex treat walls and doors you never saw as open.
 - How each mob notices you, paths and attacks: `manual(topic: "mobs")`.
-- Night is survivable by civics, not swordplay. Claim a bed spawn by day (`activate` the bed), and at night sleep (`activate` it again, with no monsters within about 8).
+- Night is survivable by civics, not swordplay. `activate` a bed by day to set spawn, at night to sleep (no monsters within 8), until day if another player is up. Body calls wake you.
 - The bunker is the last resort: `manual(topic: "bunker")`.
 
 ## Beside a teammate
