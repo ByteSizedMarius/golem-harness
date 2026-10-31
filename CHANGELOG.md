@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: gather stops when cancelled and leaves unripe crops standing
+
+A stopped gather walked on to its next pick, and a `gather` or `mine` of potatoes walked until the
+planner gave up and dug nothing, since a crop has no collision box for the walk's line-of-sight goal.
+A gather now checks for a cancel before each walk and dig. Blocks without a collision box are dug
+from within reach and their drops picked up, and unripe crops are left standing and counted as
+`unripe`.
+
 ## 2026-10-31: the fire reflex holds the hand until its pour ends
 
 A chest, a book, a meal, an equip, a goto or a stop asked for while the fire reflex poured its water

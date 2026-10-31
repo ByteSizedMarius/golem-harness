@@ -258,6 +258,44 @@ test('gather stops the pathfinder when the walk to a target fails', async () => 
   assert.strictEqual(r.goal, null)
 })
 
+// A gather of the nearer of two shore dirt blocks whose walks run walk(goal, job, goto), goto being the rig's own walk.
+async function cancelledGather (walk) {
+  const w = lakeWorld(SHORE, [new Vec3(-6, 63, 0), new Vec3(-8, 63, 0)], { hidden: [], blocks: {} })
+  const job = { name: 'gather dirt x1', cancelled: false, progress () {} }
+  const seen = { walks: 0, collects: 0 }
+  const goto = w.env.bot.pathfinder.goto
+  w.env.bot.pathfinder.goto = async (goal) => { seen.walks++; await walk(goal, job, goto) }
+  const collect = w.env.collectSafely
+  w.env.collectSafely = async (b) => { seen.collects++; await collect(b) }
+  let run = null
+  w.env.jobs = { start: (name, fn) => { run = fn(job); return { id: 1 } } }
+  const { handle, res } = routeHandler('/gather', w.env)
+  handle({ query: { resource: 'dirt', amount: '1' } }, res)
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  return { result: await run, ...seen, ...w.log }
+}
+
+test('a gather whose walk a /stop cuts short walks nowhere else and ends cancelled', async () => {
+  const r = await cancelledGather(async (goal, job) => {
+    job.cancelled = true
+    throw new Error('Path was stopped before it could be completed!')
+  })
+  assert.strictEqual(r.walks, 1)
+  assert.deepStrictEqual(r.digs, [])
+  assert.strictEqual(r.result.reason, 'cancelled')
+})
+
+test('a gather cancelled by the end of a walk that arrived digs nothing', async () => {
+  const r = await cancelledGather(async (goal, job, goto) => {
+    await goto(goal)
+    job.cancelled = true
+  })
+  assert.strictEqual(r.collects, 0)
+  assert.strictEqual(r.walks, 1)
+  assert.deepStrictEqual(r.digs, [])
+  assert.strictEqual(r.result.reason, 'cancelled')
+})
+
 test('gather during the buried self-rescue answers busy naming it and starts no job', async () => {
   const { env } = lakeWorld(SHORE, [new Vec3(-6, 63, 0)], { hidden: [], blocks: {} })
   const query = { resource: 'dirt', amount: '1' }

@@ -7,6 +7,8 @@ const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const gotoGoal = require('mineflayer-pathfinder/lib/goto')
 const { goals } = require('mineflayer-pathfinder')
+const registry = require('prismarine-registry')('1.21.11')
+const PBlock = require('prismarine-block')(registry)
 const { CollectBlock } = require('mineflayer-collectblock/lib/CollectBlock')
 const { Targets } = require('mineflayer-collectblock/lib/Targets')
 const { guardWork } = require('../lib/walk')
@@ -15,9 +17,9 @@ const { deathLedger } = require('../lib/deaths')
 const { entityInCell } = require('../lib/shelter')
 const { HUNG, awaitRoute, botConstant, claimRescue, fakeClock, loadBotFunctions, routeHandler, runRoute, timed, waitFor } = require('./helpers')
 
-// The collect plugin switches on the class names.
+// The collect plugin switches on the class names. Every block but air is a full cube.
 class Block {
-  constructor (name, position, type = 1) { Object.assign(this, { name, type, position }) }
+  constructor (name, position, type = 1) { Object.assign(this, { name, type, position, shapes: type ? [[0, 0, 0, 1, 1, 1]] : [] }) }
 }
 class Entity {
   constructor (position) { Object.assign(this, { position, isValid: true }) }
@@ -96,7 +98,7 @@ function collector (t, { blocks, reach, plan = () => ({ status: 'success', path:
     bot,
     require,
     goals,
-    shared: { mcData: { blocksArray: [], blocks: { 1: { name: 'iron_ore', drops: [903] } }, items: { 903: { name: 'raw_iron' } }, itemsByName: { raw_iron: {}, iron_ore: {} } } },
+    shared: { mcData: { blocksArray: [], blocks: { 1: { name: 'iron_ore', drops: [903], states: [] } }, items: { 903: { name: 'raw_iron' } }, itemsByName: { raw_iron: {}, iron_ore: {} } } },
     Movements,
     navPlaced: [],
     collectLock: botConstant('collectLock'),
@@ -301,9 +303,9 @@ test('tidy counts a scaffold block as gone only when the body sees it gone', asy
   assert.deepStrictEqual(unseen.queued, [{ x: 1, y: 64, z: 0 }])
 })
 
-// A collector for test t that runs gather jobs, wired to stop as bot.js wires them, and answers /stop.
-function jobRig (t) {
-  const c = collector(t, { blocks: ORE, reach: () => true, holdDig: true })
+// A collector for test t over the rig options that runs gather jobs, wired to stop as bot.js wires them, and answers /stop.
+function jobRig (t, rig = { blocks: ORE, reach: () => true, holdDig: true }) {
+  const c = collector(t, rig)
   c.bot.findBlocks = () => [new Vec3(1, 64, 0)]
   c.bot.world = { raycast: () => ({ position: new Vec3(1, 64, 0) }) }
   c.bot.clearControlStates = () => {}
@@ -383,7 +385,7 @@ test('a wood gather that replaces a running one keeps its forestry movements unt
   const considerateMoves = new Movements()
   const forestryMoves = new Movements()
   Object.assign(c.env.shared, {
-    mcData: { blocksArray: [], blocks: { 1: { name: 'oak_log', drops: [900] } }, items: { 900: { name: 'oak_log' } }, itemsByName: { oak_log: {} } },
+    mcData: { blocksArray: [], blocks: { 1: { name: 'oak_log', drops: [900], states: [] } }, items: { 900: { name: 'oak_log' } }, itemsByName: { oak_log: {} } },
     considerateMoves,
     forestryMoves,
     thinkTimeout: 10000
@@ -484,6 +486,144 @@ test('tidy reclaims the dirt around cobblestone no carried tool harvests', async
   assert.deepStrictEqual(await within(reply), { reclaimed: 2, alreadyGone: 0, failed: 1, remaining: 2, reason: 'no carried tool harvests cobblestone' })
   assert.deepStrictEqual(c.env.navPlaced.map((p) => p.x).sort(), [1, 3])
   assert.strictEqual(c.seen.digs, 2)
+})
+
+// A 1.21.11 block of name with properties at x,y,z.
+const realBlock = (name, x, y, z, properties = {}) => Object.assign(PBlock.fromProperties(registry.blocksByName[name].id, properties, 0), { position: new Vec3(x, y, z) })
+
+// Potatoes at x,64,z of the given ages from [x, z, age] cells, on farmland under open air, beside the body at 0,64,0 on rig.
+// A walk goal holds where its isEnd does, judged with a ray that passes through cells without a shape: at the body's
+// cell, else at the nearest cell at the feet's height, where the body goes. The body reaches a drop at once.
+function potatoRig (t, field, rig = collector) {
+  const blocks = {}
+  const potatoes = field.map(([x, z, age]) => {
+    blocks[`${x},63,${z}`] = realBlock('farmland', x, 63, z, { moisture: '7' })
+    return (blocks[`${x},64,${z}`] = realBlock('potatoes', x, 64, z, { age: String(age) })).position
+  })
+  const reach = (g) => {
+    const here = c.bot.entity.position
+    if (g instanceof goals.GoalFollow || g.isEnd(here.floored())) return true
+    const ends = []
+    for (let x = -3; x <= 45; x++) for (let z = -6; z <= 6; z++) if (g.isEnd(new Vec3(x, 64, z))) ends.push(new Vec3(x + 0.5, 64, z + 0.5))
+    const end = ends.sort((a, b) => here.distanceTo(a) - here.distanceTo(b))[0]
+    if (end) c.bot.entity.position = end
+    return !!end
+  }
+  const c = rig(t, { blocks, reach })
+  c.bot.entity = { width: 0.6, height: 1.8, position: new Vec3(0, 64, 0) }
+  const at = (p) => {
+    const b = c.blocks[`${p.x},${p.y},${p.z}`]
+    return b && b.name !== 'air' ? b : realBlock(p.y >= 64 ? 'air' : 'dirt', p.x, p.y, p.z)
+  }
+  c.bot.blockAt = (p) => at(p.floored())
+  c.bot.world = {
+    raycast (from, dir, range) {
+      for (let d = 0; d <= range; d += 0.02) {
+        const p = from.plus(dir.scaled(d)).floored()
+        if (at(p).shapes.length) return { position: p, face: 1 }
+      }
+      return null
+    }
+  }
+  // mineflayer's search, nearest first: the states of the world's palette, which have no position, decide whether it
+  // looks at the cells at all.
+  c.bot.findBlocks = ({ matching, count = 1 }) => {
+    const matches = Array.isArray(matching) ? (b) => !!b && matching.includes(b.type) : matching
+    const here = c.bot.entity.position
+    const cells = potatoes.filter((p) => at(p).name === 'potatoes').sort((a, b) => here.distanceTo(a) - here.distanceTo(b))
+    if (![...new Set(cells.map((p) => at(p).stateId))].some((s) => matches(PBlock.fromStateId(s, 0)))) return []
+    return cells.filter((p) => matches(at(p))).slice(0, count)
+  }
+  // Every potato shows a lit face, so sight lines go to the first 256 candidates.
+  const findVisible = (matching, radius, count) => c.bot.findBlocks({ matching, count: 4096 }).slice(0, 256).slice(0, count)
+    .map((pos) => ({ pos, dist: pos.distanceTo(c.bot.entity.position) }))
+  c.env.shared.mcData = registry
+  Object.assign(c.env, {
+    resolveBlockIds: () => [registry.blocksByName.potatoes.id],
+    findVisible,
+    nearestVisible: (matching, radius) => {
+      const v = findVisible(matching, radius, 1)
+      return v.length ? at(v[0].pos) : null
+    },
+    seesLit: () => true,
+    seenNow: () => true,
+    entityInCell
+  })
+  return c
+}
+
+// Potatoes of the given ages from x 1 along x.
+const row = (...ages) => ages.map((age, i) => [i + 1, 0, age])
+
+// 280 unripe potatoes at x 1 to 40 and z -3 to 3, nearer the body than one ripe potato at 41,64,0.
+const PAST_UNRIPE = [...Array(40).keys()].flatMap((i) => [-3, -2, -1, 0, 1, 2, 3].map((z) => [i + 1, z, 3])).concat([[41, 0, 7]])
+
+// Picks up the first drop as potato.
+async function pickUpPotato (c) {
+  assert.ok(await waitFor(() => c.seen.followed === 1, 2000), `the body went to the drop of a dug potato (${c.seen.digs} digs, ${c.seen.planned} walks planned short of their goal)`)
+  c.pockets.push({ name: 'potato', count: 1 })
+  c.bot.emit('entityGone', c.seen.drops[0])
+}
+
+// The result of a potato gather job on c with query, its drop picked up unless dug is false.
+async function potatoGather (c, query = {}, dug = true) {
+  const { job } = runRoute('/gather', { resource: 'potatoes', amount: '1', ...query }, c.env)
+  if (dug) await pickUpPotato(c)
+  assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
+  return { ...c.env.jobs.get(job).result }
+}
+
+test('mine digs ripe potatoes on farmland and picks up the drop', async (t) => {
+  const c = potatoRig(t, row(7))
+  const reply = awaitRoute('/mine', { name: 'potatoes' }, c.env)
+  await pickUpPotato(c)
+  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 1, reason: null })
+})
+
+test('a gather digs ripe potatoes on farmland and picks up the drop', async (t) => {
+  const c = potatoRig(t, row(7), jobRig)
+  assert.deepStrictEqual(await potatoGather(c), { gathered: 1, dug: 1, requested: 1, inventoryMatching: 1 })
+})
+
+test('mine skips an unripe potato, counts it and digs the ripe one beside it', async (t) => {
+  const c = potatoRig(t, row(3, 7))
+  const reply = awaitRoute('/mine', { name: 'potatoes' }, c.env)
+  await pickUpPotato(c)
+  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 1, reason: null, unripe: 1 })
+  assert.deepStrictEqual([c.bot.blockAt(new Vec3(1, 64, 0)).name, c.bot.blockAt(new Vec3(2, 64, 0)).name], ['potatoes', 'air'])
+})
+
+test('a gather skips an unripe potato, counts it and digs the ripe one beside it', async (t) => {
+  const c = potatoRig(t, row(3, 7), jobRig)
+  assert.deepStrictEqual(await potatoGather(c), { gathered: 1, dug: 1, requested: 1, inventoryMatching: 1, unripe: 1 })
+  assert.deepStrictEqual([c.bot.blockAt(new Vec3(1, 64, 0)).name, c.bot.blockAt(new Vec3(2, 64, 0)).name], ['potatoes', 'air'])
+})
+
+test('mine digs a ripe potato past more unripe ones than it has sight lines for', async (t) => {
+  const c = potatoRig(t, PAST_UNRIPE)
+  const reply = awaitRoute('/mine', { name: 'potatoes' }, c.env)
+  await pickUpPotato(c)
+  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 1, reason: null, unripe: 280 })
+  assert.strictEqual(c.bot.blockAt(new Vec3(41, 64, 0)).name, 'air')
+})
+
+test('a gather digs a ripe potato past more unripe ones than one pass of candidates holds', async (t) => {
+  const c = potatoRig(t, PAST_UNRIPE, jobRig)
+  assert.deepStrictEqual(await potatoGather(c, { radius: '64' }), { gathered: 1, dug: 1, requested: 1, inventoryMatching: 1, unripe: 280 })
+  assert.strictEqual(c.bot.blockAt(new Vec3(41, 64, 0)).name, 'air')
+})
+
+test('mine with only unripe potatoes in sight says none is ripe', async (t) => {
+  const c = potatoRig(t, row(3, 3))
+  const reply = await within(awaitRoute('/mine', { name: 'potatoes' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 0, requested: 1, gathered: 0, reason: 'no ripe potatoes left, 2 unripe', unripe: 2 })
+  assert.strictEqual(c.seen.digs, 0)
+})
+
+test('a gather with only unripe potatoes in sight says none is ripe', async (t) => {
+  const c = potatoRig(t, row(3, 3), jobRig)
+  assert.deepStrictEqual(await potatoGather(c, {}, false), { gathered: 0, dug: 0, requested: 1, inventoryMatching: 0, unripe: 2, ok: false, reason: 'no ripe potatoes left, 2 unripe (gathered 0/1)' })
+  assert.strictEqual(c.seen.digs, 0)
 })
 
 const STONE_SILK = (b) => `refusing to dig ${b.name}: the stone_pickaxe with silk touch does not harvest it`

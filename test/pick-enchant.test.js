@@ -214,7 +214,7 @@ test('digat digs stone with the fortune pick when no plain pick is left', async 
 test('a collect digs with the fork\'s tool choice and gives the tool plugin and the pathfinder their own back', async () => {
   const stock = { equip: async () => 'stock', harvest: () => 'stock' }
   const held = []
-  const target = { type: 7, name: 'coal_ore' }
+  const target = { type: 7, name: 'coal_ore', shapes: [[0, 0, 0, 1, 1, 1]] }
   const bot = {
     pathfinder: { movements: null, bestHarvestTool: stock.harvest, setMovements () {} },
     tool: { equipForBlock: stock.equip },
@@ -274,7 +274,7 @@ test('a collect during the buried self-rescue answers busy naming it before any 
     digToolFor: () => null
   }
   const { collectSafely } = loadBotFunctions(['collectSafely'], env)
-  const coal = { type: 7, name: 'coal_ore' }
+  const coal = { type: 7, name: 'coal_ore', shapes: [[0, 0, 0, 1, 1, 1]] }
   await collectSafely(coal, 'mine coal_ore')
   assert.deepStrictEqual(calls, ['hold', 'collect'], 'control: no rescue')
   calls.length = 0
