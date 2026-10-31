@@ -4,7 +4,8 @@ const assert = require('node:assert')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const { smeltYield, burnItems, COOK_PROBE_TICKS } = require('../lib/furnace')
-const { HUNG, awaitRoute, routeHandler, timed } = require('./helpers')
+const { LEGACY_CLICK_REACH } = require('../lib/bot/legacy-1710')
+const { HUNG, awaitRoute, loadBotFunctions, routeHandler, timed } = require('./helpers')
 
 const IDS = { iron_ore: 1, iron_ingot: 2, coal: 3, sand: 4, glass: 5, stone: 6, stick: 7, blaze_rod: 8, deepslate_bricks: 9 }
 const stack = (name, count) => ({ name, type: IDS[name], count, stackSize: 64 })
@@ -12,9 +13,9 @@ const HERE = new Vec3(0.5, 64, 0.5)
 const AT = new Vec3(3, 64, 0)
 const UNSEEN = /not in my sight, blocked or unlit/
 
-// A fake furnace window whose transfer picks slots the way mineflayer's does. While input and fuel
-// are loaded, cook progress shows from tick cookFrom on, and never when cookFrom is null.
-function furnaceWindow ({ input = null, fuel = null, output = null, pockets = [], cookFrom = 0 }) {
+// A fake furnace window with mineflayer's slot picks, cooking from tick cookFrom (never when null), lighting its fuel
+// with lights.
+function furnaceWindow ({ input = null, fuel = null, output = null, pockets = [], cookFrom = 0, lights = false }) {
   const slots = [input, fuel, output, ...pockets]
   while (slots.length < 39) slots.push(null)
   const set = (i, item) => { slots[i] = item && { ...item, slot: i } }
@@ -43,6 +44,10 @@ function furnaceWindow ({ input = null, fuel = null, output = null, pockets = []
     closed: false,
     tick (n) {
       window.ticks += n
+      if (lights && slots[0] && slots[1] && !(window.fuel > 0)) {
+        window.fuel = 1
+        set(1, slots[1].count > 1 ? { ...slots[1], count: slots[1].count - 1 } : null)
+      }
       if (cookFrom !== null && window.ticks >= cookFrom && slots[0] && (slots[1] || window.fuel > 0)) window.progress = Math.max(window.progress || 0, 0.01)
     },
     inputItem: () => slots[0],
@@ -168,6 +173,9 @@ test('furnace by x,y,z and smelt refuse an unseen furnace without walking to it 
   const nearError = await refusal('/smelt', { item: 'iron_ore' }, env)
   assert.match(nearError, /no furnace seen within 8/)
   assert.doesNotMatch(nearError, /3,64,0|iron/)
+  const smeltAtError = await refusal('/smelt', { item: 'iron_ore', at: '3,64,0' }, env)
+  assert.match(smeltAtError, UNSEEN)
+  assert.doesNotMatch(smeltAtError, /furnace|iron/)
   assert.deepStrictEqual(walks, [])
   assert.deepStrictEqual([f.window.inputItem().count, f.pocket('iron_ore'), f.pocket('coal')], [10, 4, 5])
 })
@@ -209,8 +217,71 @@ test('smelt reports the burn time only for what its fuel covers, a stick half an
 })
 
 test('smelt counts the fuel the flame shows still burning', async () => {
+  const f = furnaceWindow({ fuel: stack('coal', 1), pockets: [stack('iron_ore', 12), stack('coal', 5)] })
+  f.window.fuel = 0.5
+  const reply = await awaitRoute('/smelt', { item: 'iron_ore', count: '12' }, furnaceEnv(f).env)
+  assert.deepStrictEqual([reply.fuel, reply.burning, reply.doneInSec, f.pocket('coal')], ['1 coal', 'coal', 120, 5])
+})
+
+test('smelt neither names nor counts a flame it found burning over an empty fuel slot', async () => {
   const f = furnaceWindow({ pockets: [stack('iron_ore', 12), stack('coal', 5)] })
   f.window.fuel = 0.5
   const reply = await awaitRoute('/smelt', { item: 'iron_ore', count: '12' }, furnaceEnv(f).env)
-  assert.deepStrictEqual([reply.fuel, reply.doneInSec, f.pocket('coal')], ['1 coal', 120, 4])
+  assert.deepStrictEqual([reply.fuel, reply.burning, reply.doneInSec, f.pocket('coal')], ['2 coal', undefined, 120, 3])
+})
+
+test('smelt with at walks from the floor into click reach of a furnace stacked two over it', async () => {
+  const f = furnaceWindow({ pockets: [stack('iron_ore', 8), stack('coal', 1)] })
+  const { env, walks } = furnaceEnv(f)
+  const upper = { name: 'furnace', position: new Vec3(3, 66, 0) }
+  const blockAt = env.bot.blockAt
+  env.bot.blockAt = (p) => (p.equals(upper.position) ? upper : blockAt(p))
+  // The walk ends on the nearest floor cell that ends the goal, outside the furnace column.
+  env.bot.pathfinder.goto = async (goal) => {
+    walks.push(goal)
+    const floor = []
+    for (let x = -2; x <= 8; x++) for (let z = -5; z <= 5; z++) if (x !== 3 || z !== 0) floor.push(new Vec3(x, 64, z))
+    const end = floor.filter((c) => goal.isEnd(c)).sort((a, b) => a.distanceTo(HERE) - b.distanceTo(HERE))[0]
+    if (!end) throw Object.assign(new Error('No path to the goal!'), { name: 'NoPath' })
+    env.bot.entity.position = end.offset(0.5, 0, 0.5)
+  }
+  const { inClickReach } = loadBotFunctions(['inClickReach'], { bot: env.bot, LEGACY_1710: true, LEGACY_CLICK_REACH })
+  env.bot.openFurnace = inClickReach(async (b) => { assert.strictEqual(b, upper); return f.window })
+  const reply = await awaitRoute('/smelt', { item: 'iron_ore', count: '8', at: '3,66,0' }, env)
+  assert.deepStrictEqual([reply.at, reply.input], [{ x: 3, y: 66, z: 0 }, '8 iron_ore'])
+  assert.strictEqual(walks.length, 1)
+})
+
+test('smelt at a remembered furnace in an unloaded chunk refuses it as too far to load', async () => {
+  const f = furnaceWindow({ pockets: [stack('iron_ore', 8), stack('coal', 1)] })
+  const { env, walks } = furnaceEnv(f, false)
+  env.STATIONS.set('3,64,0', 61)
+  env.bot.blockAt = (p) => (p.equals(AT) ? null : { name: 'stone', position: p })
+  assert.strictEqual(await refusal('/smelt', { item: 'iron_ore', at: '3,64,0' }, env), 'the furnace at 3,64,0 is too far to load')
+  assert.deepStrictEqual(walks, [])
+})
+
+test('smelt without item loads only fuel, what the input in the furnace needs or count items', async () => {
+  const f = furnaceWindow({ input: stack('iron_ore', 16), pockets: [stack('coal', 5)], lights: true })
+  const topUp = await awaitRoute('/smelt', { fuel: 'coal' }, furnaceEnv(f).env)
+  assert.deepStrictEqual(topUp, { at: { x: 3, y: 64, z: 0 }, loaded: 2, input: '16 iron_ore', fuel: '1 coal', output: null, burning: 'coal', doneInSec: 160 })
+  const counted = await awaitRoute('/smelt', { fuel: 'coal', count: '3' }, furnaceEnv(f).env)
+  assert.deepStrictEqual([counted.loaded, counted.fuel, counted.burning], [3, '4 coal', 'coal'])
+  assert.deepStrictEqual([f.window.inputItem().count, f.pocket('coal')], [16, 0])
+})
+
+test('smelt without item refuses when it can add no fuel, and moves nothing', async () => {
+  const covered = furnaceWindow({ input: stack('iron_ore', 8), fuel: stack('coal', 1), pockets: [stack('coal', 5)] })
+  assert.match(await refusal('/smelt', { fuel: 'coal' }, furnaceEnv(covered).env), /already covers its 8 iron_ore/)
+  assert.deepStrictEqual([covered.window.fuelItem().count, covered.pocket('coal')], [1, 5])
+
+  const full = furnaceWindow({ input: stack('iron_ore', 8), fuel: stack('coal', 64), pockets: [stack('coal', 5)] })
+  assert.match(await refusal('/smelt', { fuel: 'coal', count: '3' }, furnaceEnv(full).env), /fuel slot is full with 64 coal/)
+  assert.deepStrictEqual([full.window.fuelItem().count, full.pocket('coal')], [64, 5])
+})
+
+test('smelt names the fuel burning in the flame once the furnace took its only fuel item', async () => {
+  const f = furnaceWindow({ pockets: [stack('iron_ore', 8), stack('coal', 3)], lights: true })
+  const reply = await awaitRoute('/smelt', { item: 'iron_ore', count: '8' }, furnaceEnv(f).env)
+  assert.deepStrictEqual([reply.fuel, reply.burning, reply.doneInSec, reply.fuelFor], [null, 'coal', 80, undefined])
 })

@@ -4,6 +4,18 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: smelt picks its furnace and toss spans stacks
+
+`smelt` always took the nearest furnace in sight, so furnaces stacked two high needed a pillar, and
+it could not top up fuel alone. `toss(count: 192)` dropped one stack, and the next walk picked it up
+again. `smelt` now takes `at`, walks to within 4 blocks of the furnace, in click reach of one stacked
+two over the floor, and refuses a remembered furnace in a chunk too far to load. Without `item` it
+loads only fuel, `count` items or what the input in the furnace needs, reports them as `loaded` and
+refuses when it can add none. The reply names the fuel in `burning` only when the flame's fuel is
+known. `toss` now spans stacks, one throw per stack, and stops between stacks on a `stop` or a reflex
+move. It then steps back more than 3 blocks from the drop, ending within 1 block of its height and
+never crossing the drop, else says why it could not in `stayed`.
+
 ## 2026-10-31: the bot forgets a bed it was moved off
 
 A bed action sends `leave_bed` only while the body is still within half a block of where the server

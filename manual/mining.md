@@ -30,7 +30,7 @@
 ## Pockets
 
 - A full inventory makes pickups fail silently: a gather reports success and your pockets stay empty. Check `emptySlots` in `inventory` before a collection run. An alarm warns at 4 free slots or fewer.
-- Overloaded: stop, read the whole inventory once, then act once. Wear armor instead of carrying it: one `equip(name: "iron_helmet")` per piece. Toss true junk, then walk away at once.
+- Overloaded: stop, read the whole inventory once, then act once. Wear armor instead of carrying it: one `equip(name: "iron_helmet")` per piece. Toss true junk, and walk away on `stayed`.
 - Drops despawn after about 5 minutes. When a drop that matters lies there and your pack is full, free one slot the fastest way, such as a `toss` of junk to a teammate. A tidy trip to the chest costs more than it saves.
 - A drop that `collect` reports enclosed lies where no body fits within pickup reach, such as a one-high gap. Dig to it, or `placeitem` a block into its cell, which pushes the drop into an open neighbouring cell.
 - Workstations belong at bases. Do not scatter crafting tables, furnaces and chests. Toss junk or carry it home.

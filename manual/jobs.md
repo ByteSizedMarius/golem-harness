@@ -21,6 +21,6 @@
 
 ## Smelting
 
-- `smelt` uses fuel already in the slot and takes the finished output of the same input into your pockets. It refuses a furnace busy with another input and leaves an output of another item in place.
+- `smelt` uses fuel already in the slot and takes the finished output of the same input into your pockets. Without `item` it refuses a slot holding another fuel. It refuses a furnace busy with another input and leaves an output of another item in place.
 - If the furnace has not started cooking within 3 s with its output empty, `smelt` takes the input back, leaves the fuel in the slot and fails with `no-recipe`.
 - `furnace` shows a furnace's slots, and with `take` moves one into your pockets.

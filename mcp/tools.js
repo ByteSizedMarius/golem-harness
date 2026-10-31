@@ -8,6 +8,7 @@
 // body marks a route that moves or uses the body, combat a body route a fight leaves open (the rest is world work).
 
 const { strikeBudgetMs, STRIKE_SWING_MS, HOLD_MAX_S } = require('../lib/combat-rules')
+const { STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 
 const required = (spec) => ({ ...spec, required: true })
 
@@ -92,7 +93,7 @@ const TOOLS = [
   { name: 'digat', route: '/digat', body: true, description: 'Dig one block, a no-op on air. It takes the best pick up to iron that keeps the drop for stone and ore, an axe for wood, a shovel for dirt, sand and gravel, and the bare hand for crops, plants and leaves. A fortune pick goes on ore it multiplies, a plain pick elsewhere, and a silk touch pick unasked only when no other pick keeps the drop. silk digs with a silk touch pick, refused without one. Gravel or sand in sight that would fall on you refuses it unless anyway. ok:false if the server keeps the block.', params: { ...XYZ, silk: FLAG, then: THEN, anyway: FLAG }, timeoutMs: LONGEST },
   { name: 'craft', route: '/craft', body: true, description: 'Craft at a crafting table seen within 16, else in the 2x2 grid. It never places one: a 3x3 recipe with none is refused. Counts are unreliable for some recipes: craft small batches and check inventory between them.', params: { item: required(NAME), count: COUNT }, timeoutMs: LONGEST },
   // The window opens, then the output, input and fuel moves wait for their slot updates.
-  { name: 'smelt', route: '/smelt', body: true, description: 'Load input and fuel from your pockets into the nearest furnace seen within 8. Input that does not cook comes back if the output is empty.', params: { item: required(NAME), fuel: NAME, count: COUNT }, timeoutMs: WALK + 4 * EVENT + LEAVE_BED_MS },
+  { name: 'smelt', route: '/smelt', body: true, description: 'Load input and fuel from your pockets into the furnace at x,y,z or the nearest seen within 8. Without item, load only fuel: count items, else what its input needs. Input that does not cook comes back if the output is empty.', params: { item: NAME, fuel: NAME, count: COUNT, at: POINT }, timeoutMs: WALK + 4 * EVENT + LEAVE_BED_MS },
   // The window opens, and the take waits for its slot updates.
   { name: 'furnace', route: '/furnace', body: true, description: 'The slots of the furnace at x,y,z or the nearest seen within 8. take moves one into your pockets.', params: { at: POINT, take: { type: 'enum', values: ['output', 'input', 'fuel'] }, count: COUNT }, timeoutMs: WALK + 2 * EVENT + LEAVE_BED_MS },
   // The table window opens, the offers get 6 s and a commit 1 s, and the lapis goes back.
@@ -108,7 +109,8 @@ const TOOLS = [
   { name: 'activate', route: '/activate', body: true, description: 'Right-click a block in sight (bed, lever, button, door, gate), walking into reach. Aims at the block centre: name the upper half of a door to aim level, the fence gate block itself to aim down.', params: XYZ, timeoutMs: LONGEST },
   { name: 'use', route: '/use', body: true, description: 'Right-click a block: till, sow, fill or pour a bucket.', params: { ...XYZ, item: NAME }, timeoutMs: LONGEST },
   { name: 'useon', route: '/useon', body: true, description: 'Use item on a creature or item frame in sight within 16: shears on a sheep, a bucket on a cow.', params: { name: required(NAME), item: required(NAME), at: { ...POINT, desc: 'frame cell x,y,z' } }, timeoutMs: LONGEST },
-  { name: 'toss', route: '/toss', body: true, description: 'Drop items, or throw them toward a player with to. Walk away afterwards or you pick them up again.', params: { name: required(NAME), count: COUNT, to: PLAYER }, timeoutMs: EVENT + LEAVE_BED_MS },
+  // One toss per stack, a stack pause apart, at most one per pocket slot, then the walk off the drop.
+  { name: 'toss', route: '/toss', body: true, description: 'Drop items, or throw them toward a player with to, then step back from them. count may span stacks. A walk across the drop picks it up again.', params: { name: required(NAME), count: COUNT, to: PLAYER }, timeoutMs: EVENT + 36 * (STACK_GAP_MS + STACK_JITTER_MS) + WALK + LEAVE_BED_MS },
   { name: 'fish', route: '/fish', body: true, description: 'Job: cast the fishing rod count times, at seen water (x, y and z together) or ahead. Each catch arrives as an event.', params: { count: { type: 'int', min: 1, max: 32 }, ...AT } },
   { name: 'chest', route: '/chest', body: true, description: 'List the chest at x, y and z together. Without them, list every chest seen within radius (default 12), nearest first, and the items of the nearest. A double chest shows both cells.', params: { ...AT, radius: CHEST_RADIUS }, timeoutMs: WALK + EVENT + LEAVE_BED_MS },
   // The walk, the window and one window wait per stack moved, up to the 54 of a double chest.
