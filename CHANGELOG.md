@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: the bot swims up out of deep water and keeps its head above it
+
+A body on the bed of water 2 deep could plan no way out, and its drown reflex let go of jump 4 s
+after surfacing, so it sank and bobbed on the bed. The pathfinder now swims up a cell from water
+with water above it, and the drown reflex holds jump until the body stands with its head above
+water, a walk sets a goal, or something else takes the legs.
+
 ## 2026-10-31: mine and gather leave built logs standing
 
 A `mine` for logs with radius 32 walked about 46 blocks from its start and cut a log that held up a

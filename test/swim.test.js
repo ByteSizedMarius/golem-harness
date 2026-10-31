@@ -396,7 +396,41 @@ test('a jump measures from the floor below unless both the feet and the cell und
   assert.deepStrictEqual(stepsUp(overAir.shared.considerateMoves, 63), [], 'from 1-deep water over air')
 })
 
-const FULL_REFLEX = ['stopDigging', 'takeLegs', ['setGoal', null], 'swimUp', 'drowning']
+const BED = new Vec3(0.5, 62, 0.5)
+const pathCells = (out) => [out.status, out.path.map((n) => ck(Math.floor(n.x), n.y, Math.floor(n.z)))]
+const OUT = new goals.GoalBlock(1, 64, 0)
+
+test('a body on the bed of 2-deep water swims up a cell, then jumps out onto the floor beside it', async (t) => {
+  const { plan, shared } = await walkingBody(t, BED, hole([62, 63]))
+  assert.deepStrictEqual(stepsUp(shared.considerateMoves, 62), [ck(0, 63, 0)])
+  assert.deepStrictEqual(pathCells(plan(OUT)), ['success', [ck(0, 63, 0), ck(1, 64, 0)]])
+})
+
+test('a body on the bed of a 4-deep shaft of water swims up through it and jumps out', async (t) => {
+  const { plan } = await walkingBody(t, new Vec3(0.5, 60, 0.5), hole([60, 61, 62, 63]))
+  assert.deepStrictEqual(pathCells(plan(OUT)), ['success', [ck(0, 61, 0), ck(0, 62, 0), ck(0, 63, 0), ck(1, 64, 0)]])
+})
+
+test('a body swims up from no water with air above it, no lava and no water under a block', async (t) => {
+  const ford = await walkingBody(t, AFLOAT, hole([63]))
+  assert.deepStrictEqual(stepsUp(ford.shared.considerateMoves, 63), around(64), 'jumps only, onto the floor around')
+  const lava = await walkingBody(t, BED, { [ck(0, 62, 0)]: ['lava', {}], [ck(0, 63, 0)]: ['lava', {}] })
+  assert.deepStrictEqual(stepsUp(lava.shared.considerateMoves, 62), [], 'lava')
+  const roofed = await walkingBody(t, BED, hole([62, 63], { [ck(0, 64, 0)]: ['stone', {}] }))
+  assert.deepStrictEqual(stepsUp(roofed.shared.considerateMoves, 62), [], 'a block over the water')
+})
+
+test('a swim up takes a cell above made out as water by its shape, and none the body neither sees nor makes out', async (t) => {
+  const UNSEEN = ck(0, 62, 0)
+  const steps = await Promise.all([(p) => (ck(p.x, p.y, p.z) === UNSEEN ? 'water' : null), () => null].map(async (shapeNear) => {
+    const { bot, shared } = await walkingBody(t, new Vec3(0.5, 61, 0.5), hole([60, 61, 62, 63]))
+    const env = { bot, ck, knownCell: (p) => ck(p.x, p.y, p.z) !== UNSEEN, shapeNear, PLAN_KNOWN: new Map() }
+    return stepsUp(loadBotFunctions(['knownMoves'], env).knownMoves(shared.considerateMoves), 61)
+  }))
+  assert.deepStrictEqual(steps, [[UNSEEN], []])
+})
+
+const FULL_REFLEX = ['stopDigging', 'takeLegs', ['setGoal', null], 'holdAfloat', 'drowning']
 const START = 1e6
 
 // A submerged body on the real connection wiring, beside a /pillar sharing its legs and perch.
@@ -422,7 +456,7 @@ async function drowningBody (t) {
     emitEvent: (kind, text, data) => mark(data.oxygen === undefined ? kind : `${kind} ${data.oxygen}`),
     waterState: () => ({ submerged: true }),
     takeLegs: (reflex, why) => { mark('takeLegs'); legs.take(reflex, why) },
-    swimUp: () => mark('swimUp'),
+    holdAfloat: () => mark('holdAfloat'),
     perch: rig.perch
   }
   createConnection(ctx)
@@ -500,4 +534,87 @@ test('the drown reflex runs in full once the pillar has ended', async (t) => {
   assert.deepStrictEqual(await rig.pillar(RISING), { placed: 3, rose: 3, y: 66 }, 'control: the pillar rose')
   rig.breathe(1000, 6)
   assert.deepStrictEqual(rig.log, [[1000, 'drowning 6'], [4000, 'drowning 6'], ...rig.fired(4000)])
+})
+
+// A body on the bed of the 2-deep hole at the origin, beside 1-deep water at x 2, with holdAfloat and swimUp on a fake clock.
+function afloatBody (t) {
+  const cells = hole([62, 63], { [ck(2, 63, 0)]: ['water', {}] })
+  const controls = {}
+  const bot = new EventEmitter()
+  bot.entity = { position: BED, onGround: true }
+  bot.setControlState = (k, v) => { controls[k] = v }
+  bot.blockAt = (p) => {
+    const c = p.floored()
+    return { name: (cells[ck(c.x, c.y, c.z)] || [c.y <= 63 ? 'stone' : 'air'])[0] }
+  }
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: START })
+  const legs = legLedger()
+  const ctx = loadBotFunctions(['holdAfloat', 'swimUp'], { bot, legs, swimUpUntil: 0, afloat: null, Date, setTimeout })
+  let steps = 0
+  return {
+    bot,
+    controls,
+    legs,
+    ctx,
+    at (position, onGround) { Object.assign(bot.entity, { position, onGround }) },
+    // Steps the clock ms in 10 ms steps with a physics tick every 50 ms, and returns jump after each step.
+    run (ms) {
+      const jumps = []
+      for (let step = 1; step <= ms / 10; step++) {
+        t.mock.timers.tick(10)
+        if (++steps % 5 === 0) bot.emit('physicsTick')
+        jumps.push(controls.jump)
+      }
+      return jumps
+    }
+  }
+}
+
+test('the drown hold keeps jump held past 4 s on the bed and at the surface, where a timed swim-up lets go', (t) => {
+  const rig = afloatBody(t)
+  rig.ctx.swimUp(4000)
+  assert.strictEqual(rig.run(4050).at(-1), false, 'control: the swim-up let go')
+  rig.ctx.holdAfloat()
+  const jumps = rig.run(2000)
+  rig.at(new Vec3(0.5, 63.4, 0.5), false)
+  // The swim-up below lets go between two physics ticks.
+  jumps.push(...rig.run(3020))
+  rig.ctx.swimUp(3000)
+  jumps.push(...rig.run(4000))
+  assert.deepStrictEqual([jumps.length, jumps.every((j) => j === true)], [902, true])
+})
+
+test('the drown hold keeps jump held while the body pops above the water without touching ground and falls back', (t) => {
+  const rig = afloatBody(t)
+  rig.ctx.holdAfloat()
+  const jumps = rig.run(500)
+  // A live pop beside ice lifted the feet 0.09 and 0.44 above the surface.
+  for (const y of [63.4, 64.09, 64.44, 64.2, 63.6]) {
+    rig.at(new Vec3(0.5, y, 0.5), false)
+    jumps.push(...rig.run(200))
+  }
+  rig.at(BED, true)
+  jumps.push(...rig.run(500))
+  assert.deepStrictEqual([jumps.length, jumps.every((j) => j === true), rig.bot.listenerCount('physicsTick')], [200, true, 1])
+})
+
+test('the drown hold lets go once the feet stand on land or in 1-deep water, when a goto sets a goal, and when the legs are taken', (t) => {
+  const rig = afloatBody(t)
+  const releases = [
+    () => rig.at(new Vec3(1.5, 64, 0.5), true),
+    () => rig.at(new Vec3(2.5, 63, 0.5), true),
+    () => rig.bot.emit('goal_updated', new goals.GoalBlock(5, 64, 0)),
+    () => rig.legs.take('combat', 'chase')
+  ]
+  const seen = releases.map((release) => {
+    rig.at(BED, true)
+    rig.ctx.holdAfloat()
+    rig.run(500)
+    rig.bot.emit('goal_updated', null)
+    const held = rig.run(100).at(-1)
+    release()
+    rig.run(100)
+    return [held, rig.controls.jump, rig.bot.listenerCount('physicsTick'), rig.bot.listenerCount('goal_updated')]
+  })
+  assert.deepStrictEqual(seen, releases.map(() => [true, false, 0, 0]))
 })
