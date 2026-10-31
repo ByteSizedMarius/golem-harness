@@ -101,6 +101,7 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
     legs: { mark: () => 0 },
     bunker: { building: false },
     watchedWork: (work) => work(),
+    pastUnstuck: (walk) => walk(),
     stopPath () { log.stops++; bot.pathfinder.goal = null },
     centerOnCell: async () => true,
     canStepOutTo: () => false,

@@ -67,7 +67,8 @@ function stuckBot ({ known = true, lit = known, yaw = Math.PI / 2, planks = new 
     watchScope: new AsyncLocalStorage(),
     cellKnown: () => known,
     seesLit: () => lit,
-    console: { log: (line) => seen.logs.push(line) }
+    console: { log: (line) => seen.logs.push(line) },
+    reflexes: [{ name: 'unstuck', active: false }]
   }
   const { watchGoto } = loadBotFunctions(['watchGoto', 'stopPath'], env)
   bot.pathfinder.goto = watchGoto((g) => gotoGoal(bot, g))

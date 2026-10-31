@@ -217,6 +217,8 @@ test('a collect digs with the fork\'s tool choice and gives the tool plugin and 
   const held = []
   const target = { type: 7, name: 'coal_ore', shapes: [[0, 0, 0, 1, 1, 1]] }
   const bot = {
+    on () {},
+    removeListener () {},
     pathfinder: { movements: null, bestHarvestTool: stock.harvest, setMovements () {} },
     tool: { equipForBlock: stock.equip },
     collectBlock: {
@@ -235,6 +237,7 @@ test('a collect digs with the fork\'s tool choice and gives the tool plugin and 
     shared: { mcData: { blocksArray: [] } },
     knownMoves: (m) => m,
     watchedWork: (work) => work(),
+    pastUnstuck: (walk) => walk(),
     abandonCollect () {},
     collectLock: botConstant('collectLock'),
     digLock: botConstant('digLock'),
@@ -251,6 +254,8 @@ test('a collect digs with the fork\'s tool choice and gives the tool plugin and 
 test('a collect during the buried self-rescue answers busy naming it before any tool or collect', async () => {
   const calls = []
   const bot = {
+    on () {},
+    removeListener () {},
     pathfinder: { movements: null, setMovements () {} },
     tool: {},
     collectBlock: {
@@ -268,6 +273,7 @@ test('a collect during the buried self-rescue answers busy naming it before any 
     shared: { mcData: { blocksArray: [] } },
     knownMoves: (m) => m,
     watchedWork: (work) => work(),
+    pastUnstuck: (walk) => walk(),
     abandonCollect () {},
     collectLock: botConstant('collectLock'),
     digLock: botConstant('digLock'),

@@ -78,7 +78,7 @@ test('a collect of a tree log plans around a built log of its kind, and cuts thr
     let cage = null
     bot.collectBlock = { movements: null, async collect () { cage = this.movements } }
     bot.tool = { equipForBlock: async () => {} }
-    const env = { bot, collectLock: botConstant('collectLock'), digLock: botConstant('digLock'), knownMoves: (m) => m, Movements, shared, watchedWork: (work) => work(), abandonCollect () {}, cellKnown: () => true, ck, Vec3 }
+    const env = { bot, collectLock: botConstant('collectLock'), digLock: botConstant('digLock'), knownMoves: (m) => m, Movements, shared, watchedWork: (work) => work(), pastUnstuck: (walk) => walk(), abandonCollect () {}, cellKnown: () => true, ck, Vec3 }
     const fns = loadBotFunctions(['collectSafely', 'naturalLogsOnly'], env)
     const logs = natural ? fns.naturalLogsOnly() : null
     await fns.collectSafely(bot.blockAt(new Vec3(6, 64, 0)), 'mine oak_log', { exclude: logs?.weight })

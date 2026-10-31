@@ -106,6 +106,7 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = 
       resolveBlockIds: (n) => [registry.blocksByName[n].id],
       collectLock: { done: null },
       watchedWork: (work) => work(),
+      pastUnstuck: (walk) => walk(),
       digScope: new AsyncLocalStorage(),
       LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
       legs: { mark: () => 0 },

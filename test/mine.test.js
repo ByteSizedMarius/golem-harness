@@ -165,7 +165,8 @@ function collector (t, { blocks, reach, plan = () => ({ status: 'success', path:
     resolveBlockIds: () => [1],
     nearestVisible: () => blocks['1,64,0'],
     leafInTheWay: () => null,
-    holdCollectTool: async () => {}
+    holdCollectTool: async () => {},
+    reflexes: [{ name: 'unstuck', active: false }]
   }
   // collectSafely hands abandonCollect on uncalled, so the route loader would not find it.
   const { watchGoto } = loadBotFunctions(['abandonCollect', 'watchGoto'], env)
@@ -702,6 +703,241 @@ test('mine with no path to the block it would dig replies with the NoPath error 
   assert.notStrictEqual(await within(handle({ query: { name: 'iron_ore' } }, res)), HUNG, 'the /mine replied')
   assert.strictEqual(res.error && res.error.name, 'NoPath')
   assert.strictEqual(c.seen.digs, 0)
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('a goto through the watch clears its own goal when it finds no path or no plan in time', async (t) => {
+  for (const [status, name] of [['noPath', 'NoPath'], ['timeout', 'Timeout']]) {
+    const c = collector(t, { blocks: ORE, reach: () => false, plan: () => ({ status, path: [new Vec3(0, 64, 0)] }) })
+    await assert.rejects(c.bot.pathfinder.goto(new goals.GoalBlock(5, 64, 0)), { name })
+    assert.strictEqual(c.bot.pathfinder.goal, null, status)
+  }
+})
+
+test('a goto through the watch that finds no path leaves the goal another caller set before it rejected', async (t) => {
+  const c = collector(t, { blocks: ORE, reach: () => false, plan: () => ({ status: 'noPath', path: [new Vec3(0, 64, 0)] }) })
+  const other = new goals.GoalBlock(9, 64, 0)
+  const walk = c.bot.pathfinder.goto(new goals.GoalBlock(5, 64, 0))
+  c.bot.once('path_update', () => c.bot.pathfinder.setGoal(other))
+  await assert.rejects(walk, { name: 'NoPath' })
+  assert.strictEqual(c.bot.pathfinder.goal, other)
+})
+
+test('a goto through the watch that the goal change ends leaves its own goal set again by another caller', async (t) => {
+  const c = collector(t, { blocks: ORE, reach: () => false })
+  const goal = new goals.GoalBlock(5, 64, 0)
+  const walk = c.bot.pathfinder.goto(goal)
+  // The unstuck ladder stops the walk and sets the same goal again.
+  setImmediate(() => {
+    c.bot.pathfinder.setGoal(null)
+    c.bot.pathfinder.setGoal(goal)
+  })
+  await assert.rejects(walk, { name: 'GoalChanged' })
+  assert.strictEqual(c.bot.pathfinder.goal, goal)
+})
+
+test('mine clears the goal of a collect walk that ended on an empty path', async (t) => {
+  const c = collector(t, { blocks: ORE, reach: () => false, plan: () => ({ status: 'noPath', path: [] }), drop: () => null })
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 1, requested: 1, gathered: 0, reason: null })
+  assert.strictEqual(c.seen.digs, 1)
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+// The unstuck ladder on the first takes walks to a goal of kind: on the next turn it takes the legs and stops the walk,
+// stays active for ticks physics ticks, calls during(i) on each and sets the walk's goal again before it ends, as
+// replanWatch does. Counts the walks to goals of kind and those set while it was active, its own set left out.
+function unstuckLadder (c, kind, { takes = 1, ticks = 3, during = () => {} } = {}) {
+  const unstuck = c.env.reflexes.find((r) => r.name === 'unstuck')
+  const seen = { walks: 0, whileActive: 0 }
+  let replan = false
+  c.bot.on('goal_updated', (g) => {
+    if (replan || !(g instanceof kind)) return
+    seen.walks++
+    if (unstuck.active) seen.whileActive++
+    if (seen.walks > takes) return
+    setImmediate(async () => {
+      unstuck.active = true
+      c.env.legs.take('unstuck', 'free the body from a wedge')
+      c.bot.pathfinder.setGoal(null)
+      for (let i = 0; i < ticks; i++) {
+        await new Promise((resolve) => c.bot.once('physicsTick', resolve))
+        during(i)
+      }
+      replan = true
+      c.bot.pathfinder.setGoal(g)
+      replan = false
+      unstuck.active = false
+    })
+  })
+  return seen
+}
+
+const COMBAT_TAKEN = 'the combat reflex took the legs to fight the zombie'
+
+test('mine digs the block after the unstuck reflex stopped its collect walk, walking again only once the reflex ended', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 2 })
+  const ladder = unstuckLadder(c, goals.GoalLookAtBlock, { ticks: 6 })
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '2' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 2, requested: 2, gathered: 2, reason: null })
+  assert.deepStrictEqual([c.seen.digs, ladder.walks, ladder.whileActive], [2, 3, 0])
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('mine digs the block after an unstuck rescue of its collect walk that outlasts the stall watch', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 1 })
+  const ladder = unstuckLadder(c, goals.GoalLookAtBlock, { ticks: 6, during: (i) => { if (i === 2) c.clock.advance(botConstant('COLLECT_STALL_MS') + 500) } })
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 1, requested: 1, gathered: 1, reason: null })
+  assert.deepStrictEqual([c.seen.digs, ladder.walks], [1, 2])
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('mine walks to the block only once the unstuck reflex freeing the body from an earlier walk ended, and digs it', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 1 })
+  const unstuck = c.env.reflexes.find((r) => r.name === 'unstuck')
+  // The ladder stops a walk to the block set while it runs.
+  let whileActive = 0
+  c.bot.on('goal_updated', (g) => {
+    if (!(g instanceof goals.GoalLookAtBlock) || !unstuck.active) return
+    whileActive++
+    setImmediate(() => c.bot.pathfinder.setGoal(null))
+  })
+  const { collectSafely } = loadBotFunctions(['collectSafely'], c.env)
+  c.env.collectSafely = (...a) => {
+    // The ladder of a walk before the collect runs 6 more ticks and then sets that walk's goal again.
+    unstuck.active = true
+    c.env.legs.take('unstuck', 'free the body from a wedge')
+    ;(async () => {
+      for (let i = 0; i < 6; i++) await new Promise((resolve) => c.bot.once('physicsTick', resolve))
+      c.bot.pathfinder.setGoal(new goals.GoalBlock(0, 64, 3))
+      unstuck.active = false
+    })()
+    return collectSafely(...a)
+  }
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 1, requested: 1, gathered: 1, reason: null })
+  assert.deepStrictEqual([c.seen.digs, whileActive], [1, 0])
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('mine digs the block after the unstuck reflex stopped its own walk to the block', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 1 })
+  // Open sky over the ore sends mine on its own walk before the collect.
+  Object.assign(c.blocks, { '1,65,0': air(1, 65, 0), '1,66,0': air(1, 66, 0) })
+  const ladder = unstuckLadder(c, goals.GoalLookAtBlock)
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 1, requested: 1, gathered: 1, reason: null })
+  assert.deepStrictEqual([c.seen.digs, ladder.whileActive], [1, 0])
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('mine stops when another reflex takes the legs while the unstuck reflex frees the body, names it and walks no more', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 2 })
+  const ladder = unstuckLadder(c, goals.GoalLookAtBlock, { during: (i) => { if (i === 1) c.env.legs.take('combat', 'fight the zombie') } })
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '2' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 0, requested: 2, gathered: 0, reason: 'stopped', takenBy: COMBAT_TAKEN })
+  assert.deepStrictEqual([c.seen.digs, ladder.walks], [0, 1])
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('/stop while the unstuck reflex frees the body during a mine collect stops the mine and walks no more', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 2, rig: jobRig })
+  const ladder = unstuckLadder(c, goals.GoalLookAtBlock, { during: (i) => { if (i === 1) runRoute('/stop', {}, c.env) } })
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '2' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 0, requested: 2, gathered: 0, reason: 'stopped' })
+  assert.deepStrictEqual([c.seen.digs, ladder.walks], [0, 1])
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('mine does not walk back to the dug block after the unstuck reflex stopped the walk to its drop', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 1 })
+  let blockWalks = 0
+  c.bot.on('goal_updated', (g) => { if (g instanceof goals.GoalLookAtBlock) blockWalks++ })
+  unstuckLadder(c, goals.GoalFollow)
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 1, requested: 1, gathered: 1, reason: null })
+  // The walk to the drop the ladder set again picks it up.
+  assert.deepStrictEqual(c.seen.chases, [])
+  assert.strictEqual(blockWalks, 1)
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('mine stops as stalled, naming the unstuck reflex, after that reflex stopped its collect walk 4 times', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 1 })
+  const ladder = unstuckLadder(c, goals.GoalLookAtBlock, { takes: 4 })
+  const { collectSafely } = loadBotFunctions(['collectSafely'], c.env)
+  let thrown = null
+  c.env.collectSafely = (...a) => collectSafely(...a).catch((e) => {
+    thrown = e
+    throw e
+  })
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 0, requested: 1, gathered: 0, reason: 'stalled' })
+  assert.strictEqual(thrown.message, 'the unstuck reflex took the legs to free the body from a wedge')
+  assert.deepStrictEqual([c.seen.digs, ladder.walks], [0, 4])
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('tidy reclaims a scaffold block whose collect walk the unstuck reflex stopped and counts no failure', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 1 })
+  c.blocks['1,64,0'] = new Block('cobblestone', new Vec3(1, 64, 0))
+  c.env.seenNow = () => true
+  c.env.navPlaced.push({ x: 1, y: 64, z: 0 })
+  unstuckLadder(c, goals.GoalLookAtBlock)
+  assert.deepStrictEqual(await within(awaitRoute('/tidy', {}, c.env)), { reclaimed: 1, alreadyGone: 0, failed: 0, remaining: 0, reason: null })
+  assert.strictEqual(c.seen.digs, 1)
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+// A gather rig over unreachedRig with opts whose search finds the ores still standing.
+function gatherOres (t, ores, opts = {}) {
+  const c = unreachedRig(t, { out: 0, ores, rig: jobRig, ...opts })
+  const left = () => Object.values(c.blocks).filter((b) => b.type)
+  c.bot.findBlocks = () => left().map((b) => b.position)
+  c.bot.world = { raycast: () => ({ position: left()[0]?.position }) }
+  c.bot.pathfinder.startCell = (p) => p.floored()
+  return c
+}
+
+test('a gather digs the block after the unstuck reflex stopped its walk to the block', async (t) => {
+  const c = gatherOres(t, 1)
+  const ladder = unstuckLadder(c, goals.GoalNear)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 1, dug: 1, requested: 1, inventoryMatching: 1 })
+  assert.deepStrictEqual([ladder.walks, ladder.whileActive], [2, 0])
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('a gather starts its collect with no walk left after the unstuck reflex stopped its walk to a block out of the world for a while', async (t) => {
+  // The walk the ladder sets again goes on while the ore's cell is out of the world.
+  const c = gatherOres(t, 1, { status: 'success', reach: (g) => !(g instanceof goals.GoalNear) || !!c.blocks['1,64,0'] })
+  c.bot.world = { raycast: () => ({ position: new Vec3(1, 64, 0) }) }
+  const ore = c.blocks['1,64,0']
+  unstuckLadder(c, goals.GoalNear, { during: (i) => { if (i === 0) delete c.blocks['1,64,0'] } })
+  const { collectSafely } = loadBotFunctions(['collectSafely'], c.env)
+  let atCollect
+  c.env.collectSafely = (...a) => {
+    atCollect = c.bot.pathfinder.goal
+    // The cell comes back with its chunk.
+    c.blocks['1,64,0'] = ore
+    return collectSafely(...a)
+  }
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 1, dug: 1, requested: 1, inventoryMatching: 1 })
+  assert.strictEqual(atCollect, null)
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('a gather is cancelled for another reflex taking the legs while the unstuck reflex frees the body, and digs no block', async (t) => {
+  const c = gatherOres(t, 2)
+  const { takeLegs } = loadBotFunctions(['takeLegs'], c.env)
+  const ladder = unstuckLadder(c, goals.GoalNear, { during: (i) => { if (i === 1) takeLegs('combat', 'fight the zombie') } })
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 0, dug: 0, requested: 2, inventoryMatching: 0, ok: false, reason: 'cancelled' })
+  assert.deepStrictEqual(c.env.jobs.list().find((j) => j.id === job), { id: job, name: 'gather iron_ore x2', status: 'cancelled', note: 'cancelled', cancelled: true, takenBy: COMBAT_TAKEN })
+  assert.deepStrictEqual([c.seen.digs, ladder.walks], [0, 1])
+  assert.strictEqual(c.bot.pathfinder.goal, null)
 })
 
 const air = (x, y, z) => Object.assign(new Block('air', new Vec3(x, y, z), 0), { boundingBox: 'empty' })

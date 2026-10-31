@@ -244,7 +244,7 @@ test('the walk and a collect take a causeway over a swim that is shorter only wi
   bot.collectBlock = { movements: null, async collect () { cages.push(this.movements) } }
   bot.tool = { equipForBlock: async () => {} }
   for (const legs of [(m) => m, knownMoves()]) {
-    const env = { bot, collectLock: botConstant('collectLock'), digLock: botConstant('digLock'), knownMoves: legs, Movements, shared, watchedWork: (work) => work(), abandonCollect () {} }
+    const env = { bot, collectLock: botConstant('collectLock'), digLock: botConstant('digLock'), knownMoves: legs, Movements, shared, watchedWork: (work) => work(), pastUnstuck: (walk) => walk(), abandonCollect () {} }
     await loadBotFunctions(['collectSafely'], env).collectSafely({ type: bot.registry.blocksByName.iron_ore.id, shapes: [[0, 0, 0, 1, 1, 1]] }, 'iron_ore')
   }
   const control = [crossing(bot, plan, shared.considerateMoves), crossing(bot, plan, cages[0])]
