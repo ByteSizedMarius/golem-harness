@@ -1,6 +1,8 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const { AsyncLocalStorage } = require('node:async_hooks')
+const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const { goals, Movements, startCell } = require('mineflayer-pathfinder')
 const registry = require('prismarine-registry')('1.21.11')
@@ -23,7 +25,7 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = 
     const b = props ? Block.fromProperties(name, props, 0) : Block.fromStateId(registry.blocksByName[name].defaultState, 0)
     return Object.assign(b, { position: c })
   }
-  const bot = {
+  const bot = Object.assign(new EventEmitter(), {
     entity: { position: pos, width: 0.6, height: 1.8 },
     heldItem: null,
     inventory: { items: () => [] },
@@ -64,7 +66,7 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = 
       if (hold) await new Promise((resolve, reject) => releases.push({ resolve, reject }))
       cells.set(at, 'air')
     }
-  }
+  })
   const known = (p) => !unseen.includes(`${p.x},${p.y},${p.z}`)
   const { bodyTouches } = loadBotFunctions(['bodyTouches'], { bot })
   const env = {
@@ -95,16 +97,23 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = 
     const [x, y, z] = at.split(',')
     return { res, done: handle({ query: { x, y, z, ...query } }, res) }
   }
+  // The collect digs through the dig guard, and the server answers each dig with air.
   const mine = async (name, count = 1) => {
+    loadBotFunctions(['wireDigGuard'], { bot, digLock: env.digLock }).wireDigGuard()
+    bot.emit('spawn')
     Object.assign(env, {
       shared: { mcData: registry },
       resolveBlockIds: (n) => [registry.blocksByName[n].id],
       collectLock: { done: null },
       watchedWork: (work) => work(),
+      digScope: new AsyncLocalStorage(),
+      LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
+      legs: { mark: () => 0 },
       nearestVisible: (ids) => [...cells].map(([k]) => blockAt(new Vec3(...k.split(',').map(Number)))).find((b) => ids.includes(b.type)) || null,
       collectSafely: async (b) => {
         await bot.pathfinder.goto(new goals.GoalLookAtBlock(b.position, bot.world))
         await bot.dig(b)
+        bot.emit(`blockUpdate:${b.position}`, b, blockAt(b.position))
       }
     })
     const { handle, res } = routeHandler('/mine', env)

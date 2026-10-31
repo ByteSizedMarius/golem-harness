@@ -1,6 +1,8 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const { AsyncLocalStorage } = require('node:async_hooks')
+const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const registry = require('prismarine-registry')('1.21.11')
@@ -26,7 +28,7 @@ function floorWorld (pos, walls = [], holes = [], { gravel = [], short = 0.35 } 
     return Object.assign(Block.fromStateId(registry.blocksByName[name].defaultState, 0), { position: c })
   }
   const log = { walks: [], goals: [], centred: [], digs: [] }
-  const bot = {
+  const bot = Object.assign(new EventEmitter(), {
     entity: { position: pos, width: 0.6, height: 1.8 },
     heldItem: null,
     inventory: { items: () => [] },
@@ -63,7 +65,7 @@ function floorWorld (pos, walls = [], holes = [], { gravel = [], short = 0.35 } 
       log.digs.push({ at: `${b.position.x},${b.position.y},${b.position.z}`, over: overOre(bot.entity.position) })
       cells.set(`${b.position.x},${b.position.y},${b.position.z}`, 'air')
     }
-  }
+  })
   const env = {
     bot,
     require,
@@ -170,21 +172,27 @@ test('digat digs the top block of a pillar the body stands on in place', async (
   assert.deepStrictEqual(r.digs, [{ at: '2,63,0', over: true }])
 })
 
-// The collect walks to mineflayer-collectblock's own goal and digs from where that walk ends.
+// The collect digs through the dig guard from where collectblock's own walk ends, and the server answers with air.
 async function mine (pos, walls) {
   const w = floorWorld(pos, walls)
   const collected = []
+  loadBotFunctions(['wireDigGuard'], { bot: w.bot, digLock: w.env.digLock }).wireDigGuard()
+  w.bot.emit('spawn')
   Object.assign(w.env, {
     shared: { mcData: registry },
     resolveBlockIds: (name) => [registry.blocksByName[name].id],
     collectLock: { done: null },
     watchedWork: (work) => work(),
     stopPath () {},
+    digScope: new AsyncLocalStorage(),
+    LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
+    legs: { mark: () => 0 },
     nearestVisible: () => (w.bot.blockAt(ORE).name === 'iron_ore' ? w.bot.blockAt(ORE) : null),
     collectSafely: async (b) => {
       await w.bot.pathfinder.goto(new goals.GoalLookAtBlock(b.position, w.bot.world))
       collected.push(overOre(w.bot.entity.position))
       await w.bot.dig(b)
+      w.bot.emit(`blockUpdate:${b.position}`, b, w.bot.blockAt(b.position))
     }
   })
   const { handle, res } = routeHandler('/mine', w.env)
@@ -227,6 +235,9 @@ async function gather (pos) {
     GATHER_MAX_RISE: 4,
     watchedWork: (work) => work(),
     stopPath () {},
+    digScope: new AsyncLocalStorage(),
+    LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
+    legs: { mark: () => 0 },
     collectSafely: async (b) => {
       await w.bot.pathfinder.goto(new goals.GoalLookAtBlock(b.position, w.bot.world))
       await w.bot.dig(b)

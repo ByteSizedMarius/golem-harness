@@ -1,6 +1,8 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const { AsyncLocalStorage } = require('node:async_hooks')
+const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const { goals, Movements, startCell } = require('mineflayer-pathfinder')
 const registry = require('prismarine-registry')('1.21.11')
@@ -28,7 +30,7 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
   const solid = (c) => blockAt(c).boundingBox === 'block'
   const log = { digs: [], stops: 0 }
   const pocket = { name: 'dirt', count: 0 }
-  const bot = {
+  const bot = Object.assign(new EventEmitter(), {
     entity: { position: feet, width: 0.6, height: 1.8, onGround },
     heldItem: null,
     inventory: { items: () => [pocket, ...carried] },
@@ -75,7 +77,7 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
       cells.set(`${b.position.x},${b.position.y},${b.position.z}`, 'air')
       pocket.count++
     }
-  }
+  })
   const env = {
     bot,
     require,
@@ -94,6 +96,10 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
     PICK_TIER: botConstant('PICK_TIER'),
     LEGACY_1710: false,
     digLock: botConstant('digLock'),
+    digScope: new AsyncLocalStorage(),
+    LEGACY_DIG_CONFIRM_MS: botConstant('LEGACY_DIG_CONFIRM_MS'),
+    legs: { mark: () => 0 },
+    bunker: { building: false },
     watchedWork: (work) => work(),
     stopPath () { log.stops++; bot.pathfinder.goal = null },
     centerOnCell: async () => true,
