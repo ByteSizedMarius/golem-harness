@@ -5,6 +5,7 @@ const { EventEmitter, once } = require('node:events')
 const { Vec3 } = require('vec3')
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
+const { Physics } = require('prismarine-physics')
 const fs = require('node:fs')
 const { isDoor, panelAcross, doorCrossing, partnerLeaf, PLATE_WAIT_TICKS } = require('../lib/doors')
 const { legLedger } = require('../lib/leg-ledger')
@@ -25,7 +26,8 @@ const blocksX = (shapes) => shapes.some((s) => s[2] < 0.78 && s[5] > 0.22)
 // A plate puts that plate under the body. With lag, the server presses it and opens the door from the start,
 // and the client sees both at the end of tick lag. A click reaches the server and comes back at once.
 // With known, the walk plans through knownMoves over that knownCell.
-async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x', turnTicks = 1, refuse = false, plate, pressed = false, lag, known } = {}) {
+// A partner ({ hinge, open }) stands a second leaf with the same facing at across 1, its clicks kept apart.
+async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x', turnTicks = 1, refuse = false, plate, pressed = false, lag, known, partner } = {}) {
   const at = (along, y, across = 0) => (axis === 'x' ? new Vec3(along, y, across) : new Vec3(across, y, along))
   const door = [at(2, 64), at(2, 65)]
   const plateAt = at(1, 64)
@@ -34,6 +36,12 @@ async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x'
   for (let s = -2; s <= 2; s++) for (const y of [64, 65]) cells[key(at(2, y, s))] = ['stone', {}]
   for (const [p, half] of [[door[0], 'lower'], [door[1], 'upper']]) {
     cells[key(p)] = ['oak_door', { facing, half, hinge, open: String(open), powered: 'false' }]
+  }
+  const leaf = [at(2, 64, 1), at(2, 65, 1)]
+  if (partner) {
+    for (const [p, half] of [[leaf[0], 'lower'], [leaf[1], 'upper']]) {
+      cells[key(p)] = ['oak_door', { facing, half, hinge: partner.hinge, open: String(partner.open), powered: 'false' }]
+    }
   }
   if (plate) cells[key(plateAt)] = [plate, plateProps(plate, pressed)]
   const server = { door: lag === undefined ? open : true }
@@ -74,6 +82,7 @@ async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x'
 
   // Each click with the server's door state when it was written.
   const writes = []
+  const partnerWrites = []
   let looks = 0
   let firstLook = null
   let reached = null
@@ -105,6 +114,12 @@ async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x'
     async activateBlock (block) {
       await bot.lookAt(block.position.offset(0.5, 0.5, 0.5))
       if (refuse) throw new Error('click refused')
+      if (leaf.some((p) => p.equals(block.position))) {
+        const was = cells[key(leaf[0])][1].open === 'true'
+        partnerWrites.push(was)
+        for (const p of leaf) show(p, { open: String(!was) })
+        return
+      }
       writes.push(server.door)
       setDoor(!server.door)
     }
@@ -115,7 +130,7 @@ async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x'
   moves.canOpenDoors = true
   moves.canDig = false
   if (known) {
-    const env = { bot, knownCell: known, shapeNear: () => null, ck: (x, y, z) => `${x},${y},${z}`, PLAN_KNOWN: new Map() }
+    const env = { bot, knownCell: known, shapeNear: () => null, ck: (x, y, z) => `${x},${y},${z}`, PLAN_KNOWN: new Map(), panelAcross }
     moves = loadBotFunctions(['knownMoves'], env).knownMoves(moves)
   }
   // The walk shifts each node's toPlace as it acts on it.
@@ -153,6 +168,7 @@ async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x'
     reachDoor,
     updates,
     writes,
+    partnerWrites,
     doorOpen,
     serverOpen: () => server.door,
     plate: () => setDoor(true),
@@ -353,6 +369,42 @@ test('a walk through a door whose floor the bot cannot see plans a click on the 
   assert.deepStrictEqual({ status: plan.status, door: doorNode(plan) }, { status: 'success', door: { x: 2, y: 64, z: 0, dx: 0, dy: 0, dz: 0, useOne: true } })
   for (let i = 0; i < 20; i++) await w.tick()
   assert.deepStrictEqual(w.writes, [false])
+})
+
+// The cells of the first plan, after the body stood 4 ticks on each of its nodes in turn.
+async function walkPlan (w) {
+  // The pathfinder's walk simulations off a door cell read these.
+  const { bot } = w
+  Object.assign(bot.entity, { yaw: 0, pitch: 0, effects: {}, attributes: {} })
+  Object.assign(bot, {
+    physics: Physics(bot.registry, { getBlock: (p) => bot.blockAt(p) }),
+    jumpTicks: 0,
+    jumpQueued: false,
+    controlState: { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false }
+  })
+  bot.inventory.slots = []
+  await w.tick()
+  const plan = w.updates[0]
+  for (const node of plan.path) {
+    w.bot.entity.position = new Vec3(node.x, node.y, node.z)
+    for (let i = 0; i < 4; i++) await w.tick()
+  }
+  return plan.path.map((n) => key(new Vec3(n.x, n.y, n.z).floored()))
+}
+
+test('a walk to a door pair with one leaf open goes through the open leaf without a click', async () => {
+  const w = await body({ known: () => true, partner: { hinge: 'right', open: true } })
+  const cells = await walkPlan(w)
+  assert.ok(cells.includes('2,64,1'), `through the open leaf: ${cells.join(' ')}`)
+  assert.deepStrictEqual({ writes: w.writes, partner: w.partnerWrites }, { writes: [], partner: [] })
+  assert.strictEqual(cells.at(-1), '4,64,0')
+})
+
+test('a walk to a door pair with both leaves closed goes through one leaf with one click', async () => {
+  const w = await body({ known: () => true, partner: { hinge: 'right', open: false } })
+  const cells = await walkPlan(w)
+  assert.strictEqual(cells.filter((c) => c === '2,64,0' || c === '2,64,1').length, 1, cells.join(' '))
+  assert.deepStrictEqual([...w.writes, ...w.partnerWrites], [false])
 })
 
 test('planKnown reads the cell under the lower half of a door the bot knows as solid, and under any other block as unknown', () => {

@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: goto takes the open leaf of a double door
+
+With one leaf of a double door open, goto planned through the closed leaf and clicked it open. The
+planner now charges a step through a door or gate 2 more when its panel stands across the way, so a
+walk takes the open leaf without a click. With both leaves closed it still crosses one leaf with one
+click.
+
 ## 2026-10-31: the bot walks through double doors and ends a walk that loops at one
 
 A goto went back and forth beside a closed oak double door for 91 s without a click, until the pilot

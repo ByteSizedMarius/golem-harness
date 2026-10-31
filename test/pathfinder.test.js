@@ -7,6 +7,7 @@ const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
 const { Physics } = require('prismarine-physics')
 const { GRAVESTONE } = require('../lib/server-overrides')
+const { panelAcross } = require('../lib/doors')
 const { CREEPER_ZONE_SLACK, inCreeperZone, zoneCrossed, summarizePlan } = require('../lib/plan')
 const { botConstant, groundMemory, loadBotFunctions, walkingBody } = require('./helpers')
 
@@ -338,6 +339,7 @@ async function lit (pos, cells, ground, sky) {
     SIGHT_MS: botConstant('SIGHT_MS'),
     GRAVESTONE,
     LEGACY_1710: false,
+    panelAcross,
     ...groundMemory()
   }
   const fns = loadBotFunctions(['knownMoves', 'lightChanged', 'airPrecheck', 'planKnown', 'planBlock'], env)
