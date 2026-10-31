@@ -8,8 +8,7 @@ const { loadBotFunctions } = require('./helpers')
 
 const WATER = ['water', { level: 0 }]
 
-// A body at feet y over a trampled farm cell: dirt at 0,149,0 over water, farmland beside it, stone below y 149, plus
-// cells ('x,y,z' -> [name, properties]). The tick hooks of bot.js are wired.
+// A body at feet y on dirt over water between farmland, stone below y 149, plus cells, with bot.js's tick hooks wired.
 function wedged (y, { cells = {}, inWater = false } = {}) {
   const world = { '0,149,0': ['dirt', {}], '0,148,0': WATER, '-1,149,0': ['farmland', { moisture: 7 }], '1,149,0': ['farmland', { moisture: 7 }], ...cells }
   const bot = new EventEmitter()

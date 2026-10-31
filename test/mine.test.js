@@ -490,12 +490,9 @@ test('tidy reclaims the dirt around cobblestone no carried tool harvests', async
   assert.strictEqual(c.seen.digs, 2)
 })
 
-// A 1.21.11 block of name with properties at x,y,z.
 const realBlock = (name, x, y, z, properties = {}) => Object.assign(PBlock.fromProperties(registry.blocksByName[name].id, properties, 0), { position: new Vec3(x, y, z) })
 
-// Potatoes at x,64,z of the given ages from [x, z, age] cells, on farmland under open air, beside the body at 0,64,0 on rig.
-// A walk goal holds where its isEnd does, judged with a ray that passes through cells without a shape: at the body's
-// cell, else at the nearest cell at the feet's height, where the body goes. The body reaches a drop at once.
+// Potatoes of [x, z, age] on farmland beside the body at 0,64,0 on rig, walks ending at the nearest cell their goal accepts.
 function potatoRig (t, field, rig = collector) {
   const blocks = {}
   const potatoes = field.map(([x, z, age]) => {
@@ -527,8 +524,7 @@ function potatoRig (t, field, rig = collector) {
       return null
     }
   }
-  // mineflayer's search, nearest first: the states of the world's palette, which have no position, decide whether it
-  // looks at the cells at all.
+  // mineflayer's search, nearest first, gated by the palette states, which have no position.
   c.bot.findBlocks = ({ matching, count = 1 }) => {
     const matches = Array.isArray(matching) ? (b) => !!b && matching.includes(b.type) : matching
     const here = c.bot.entity.position
@@ -536,7 +532,7 @@ function potatoRig (t, field, rig = collector) {
     if (![...new Set(cells.map((p) => at(p).stateId))].some((s) => matches(PBlock.fromStateId(s, 0)))) return []
     return cells.filter((p) => matches(at(p))).slice(0, count)
   }
-  // Every potato shows a lit face, so sight lines go to the first 256 candidates.
+  // Every potato shows a lit face, leaving findVisible's cap of 256 sight lines as the only filter.
   const findVisible = (matching, radius, count) => c.bot.findBlocks({ matching, count: 4096 }).slice(0, 256).slice(0, count)
     .map((pos) => ({ pos, dist: pos.distanceTo(c.bot.entity.position) }))
   c.env.shared.mcData = registry
@@ -717,9 +713,7 @@ test('a gather with silk whose silk touch pick is gone after the walk stops at t
   assert.strictEqual(c.seen.digs, 0)
 })
 
-// Blocks of 1.21.11 from cells ('x,y,z' -> name), air above y 63 and dirt below elsewhere, beside the body at 0.5,64,0.5 on rig,
-// every cell known but the hidden ones. Every block with a face open shows it lit. findBlocks searches around its point,
-// nearest first. A walk goal holds as in potatoRig, at the nearest cell at the feet's height where it ends.
+// 1.21.11 blocks from cells beside the body at 0.5,64,0.5 on rig, all lit and known but the hidden ones, walks as in potatoRig.
 function woodRig (t, cells, { hidden = [], rig = collector } = {}) {
   const props = (name) => name.endsWith('_log') ? { axis: 'y' } : name.endsWith('_leaves') ? { distance: '1', persistent: 'false', waterlogged: 'false' } : {}
   const blocks = {}

@@ -1,5 +1,5 @@
 'use strict'
-// mine and gather take logs from trees only: a log joined to a build block or with no leaves in sight stays, and no walk cuts it.
+// mine and gather take logs from trees only.
 const test = require('node:test')
 const assert = require('node:assert')
 const { performance } = require('node:perf_hooks')
