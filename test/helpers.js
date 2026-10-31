@@ -1317,7 +1317,11 @@ async function digJob (route, query, { air = ['0,64,0', '0,65,0'], blocks = {}, 
     seesLit: (p) => NEIGHBOURS.some(([dx, dy, dz]) => open.has(key(p.offset(dx, dy, dz)))),
     liveEntities: () => [],
     FALL_TICKS: botConstant('FALL_TICKS'),
-    FALL_START_TICKS: botConstant('FALL_START_TICKS')
+    FALL_START_TICKS: botConstant('FALL_START_TICKS'),
+    ck: botConstant('ck'),
+    sameVein: require('../lib/wake').sameVein,
+    shared: {},
+    ORE_IDS: botConstant('ORE_IDS')
   })
   return { ...(await job), dug, fills, name }
 }

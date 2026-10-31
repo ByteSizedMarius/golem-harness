@@ -41,7 +41,11 @@ async function tunnelOverGap (why) {
     seesLit: (p) => NEIGHBOURS.some(([dx, dy, dz]) => air(p.offset(dx, dy, dz))),
     liveEntities: () => [],
     FALL_TICKS,
-    FALL_START_TICKS
+    FALL_START_TICKS,
+    ck: botConstant('ck'),
+    sameVein: require('../lib/wake').sameVein,
+    shared: {},
+    ORE_IDS: botConstant('ORE_IDS')
   })
   return { ...(await job), dug, steps }
 }
@@ -234,6 +238,10 @@ async function watchedDig (route, query, { open = () => false, blocks = {}, pick
     liveEntities: () => flying,
     FALL_TICKS,
     FALL_START_TICKS,
+    ck: botConstant('ck'),
+    sameVein: require('../lib/wake').sameVein,
+    shared: {},
+    ORE_IDS: botConstant('ORE_IDS'),
     setTimeout,
     clearTimeout
   })

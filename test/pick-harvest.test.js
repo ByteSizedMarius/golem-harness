@@ -92,6 +92,10 @@ async function pickJob (route, query, { blocks = {}, picks, held = null, stuck =
     liveEntities: () => [],
     FALL_TICKS: botConstant('FALL_TICKS'),
     FALL_START_TICKS: botConstant('FALL_START_TICKS'),
+    ck: botConstant('ck'),
+    sameVein: require('../lib/wake').sameVein,
+    shared: {},
+    ORE_IDS: botConstant('ORE_IDS'),
     setTimeout,
     clearTimeout
   })

@@ -5,6 +5,13 @@ and each says what happened and what the harness does now. A heading's date is t
 or the day of a release or removal, and the commit messages carry the detail.
 
 
+A tunnel passed redstone in its floor without a word. `dig_tunnel` and `dig_stair` replies now carry
+`ores` as `goto` does: the veins within 4 of the way that the bot saw lit or touched, floor and
+ceiling included, and did not dig, also when the job stops before its first step. The progress line
+and the done event count the ore the tunnel dug as `found`.
+
+## 2026-10-30: goto keeps a food floor and eats on the way
+
 A long goto cost about 15 food, sprinting and sprint-jumping down to food 2, and `eat` was refused as
 busy while it ran. No walk sprints at food 6 or below any more, flees included. A goto sprints, and
 any walk sprint-jumps, only above food 14 (a goto in a fight sprints from food 7). A goto at food 14
