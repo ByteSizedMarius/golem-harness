@@ -14,7 +14,7 @@ function fightGate (busy, { seen = true, inBunker = () => false, err = (res, e) 
   const combat = { name: 'combat', fightBusy: busy, _threat: { e: zombie, cls: 'hostile' }, fairFill: () => ({}) }
   const gates = new Map()
   const app = { all: (route, gate) => gates.set(route, gate) }
-  const env = { TOOLS, err, reflexes: [combat], bot: { entities: { 7: zombie } }, entityPerceptible: () => seen, bunkerHolds: inBunker }
+  const env = { TOOLS, err, reflexes: [combat], bot: { entities: { 7: zombie } }, entityPerceptible: () => seen, bunkerHolds: inBunker, guardState: { hand: null } }
   loadBotFunctions(['installFightGate'], env).installFightGate(app)
   return gates
 }

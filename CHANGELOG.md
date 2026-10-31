@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: the fire reflex holds the hand until its pour ends
+
+A chest, a book, a meal, an equip, a goto or a stop asked for while the fire reflex poured its water
+bucket took the hand or the legs, so the water stayed on the ground. The pour now holds the hand until
+it ends. Those actions are refused with a hint to retry, a stop leaves the pour running, a goto at the
+food floor walks on without a meal, and the combat tools are not held back.
+
 ## 2026-10-31: the bot jumps out of deep water onto a shore at its surface
 
 The pathfinder planned no way out of water 2 deep onto a shore one block above the water the body

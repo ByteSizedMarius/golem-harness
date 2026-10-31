@@ -5,6 +5,7 @@ const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const { awaitRoute, routeHandler, botConstant, loadBotFunctions, claimRescue } = require('./helpers')
 const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
+const { TOOLS } = require('../mcp/tools')
 
 const CHEST_ID = 54
 const IDS = { stone: 1, cobblestone: 4, diamond: 264, iron_sword: 267, wheat_seeds: 295, wheat: 296, ender_pearl: 368, cobbled_deepslate: 1101 }
@@ -442,6 +443,26 @@ test('a buried self-rescue taking the hand during a stack pause stops withdraw a
     assert.strictEqual(env.bot.heldItem.name, 'iron_shovel')
     assert.ok(chest.closed, 'the window stays open')
   } finally { endHand(rescue) }
+})
+
+test('withdraw during the pour of the fire reflex is refused at the gate before it walks or opens a chest, and the pour keeps the hand', async () => {
+  const { env, opened } = chestEnv([NEAR], { '5,64,0': chestWindow([stack('cobblestone', 10)]) })
+  let walked = false
+  env.bot.pathfinder.goto = async () => { walked = true }
+  const { holdHand, endHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState: env.guardState, setTimeout, clearTimeout })
+  const gates = new Map()
+  const gateEnv = { TOOLS, err: (res, e) => { res.error = e }, reflexes: env.reflexes, bot: env.bot, entityPerceptible: () => true, bunkerHolds: env.bunkerHolds, guardState: env.guardState }
+  loadBotFunctions(['installFightGate'], gateEnv).installFightGate({ all: (route, gate) => gates.set(route, gate) })
+  const pour = holdHand('fire')
+  try {
+    const { handle, res } = routeHandler('/withdraw', env)
+    let passed = false
+    gates.get('/withdraw')({ query: { name: 'cobblestone' } }, res, () => { passed = true })
+    if (passed) await handle({ query: { name: 'cobblestone' } }, res)
+    assert.deepStrictEqual([res.error?.message, res.error?.reason], ['refused: pouring water on the fire, the fire reflex holds the hand. Retry in a moment.', 'busy'])
+    assert.deepStrictEqual([opened, walked], [[], false])
+    assert.strictEqual(pour.renew(), true, 'the pour lost the hand')
+  } finally { endHand(pour) }
 })
 
 test('a buried self-rescue that stops the walk of withdraw and deposit gets them refused busy, with no chest opened', async () => {

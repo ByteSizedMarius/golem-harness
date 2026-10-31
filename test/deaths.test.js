@@ -9,6 +9,7 @@ function gotoEnv (walk) {
   return {
     bot: { entity: { position: new Vec3(3.5, 64, 2.5) } },
     shared: { ready: true },
+    guardState: { hand: null },
     bunker: { building: false },
     claimLane: () => ({}),
     releaseLane () {},

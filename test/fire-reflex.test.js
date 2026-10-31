@@ -4,7 +4,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
-const { reflexIn, botConstant, fakeClock, loadBotFunctions } = require('./helpers')
+const { reflexIn, botConstant, fakeClock, loadBotFunctions, runRoute, routeHandler, claimRescue } = require('./helpers')
 const { QUIET_MS, LONG_QUIET_MS, legLedger } = require('../lib/leg-ledger')
 const { ambientChange } = require('../lib/wake')
 const BIOMES = require('minecraft-data')('1.21.11').biomesByName
@@ -25,7 +25,8 @@ const ck = (x, y, z) => x + ',' + y + ',' + z
 
 // A burning body at 0,64,0 in biome standing on under, roof at y 70, its water bucket in hotbar slot 1 or with fullHotbar
 // in the pockets. pour, take and outMs (null: none) time the server's answers. Poured water flows beside the feet.
-function fireRig ({ feet = AIR, under = STONE, roof = AIR, raining = false, biome = BIOMES.plains, dimension = 'overworld', bucket = true, fullHotbar = false, ws = {}, bed = null, building = false, pour = { turnMs: 100, blockMs: 50 }, take = { turnMs: 100, blockMs: 50 }, outMs = 60, handTaken = false } = {}) {
+// hand(clock) returns the holdHand and endHand the reflex uses instead of the recorded lease.
+function fireRig ({ feet = AIR, under = STONE, roof = AIR, raining = false, biome = BIOMES.plains, dimension = 'overworld', bucket = true, fullHotbar = false, ws = {}, bed = null, building = false, pour = { turnMs: 100, blockMs: 50 }, take = { turnMs: 100, blockMs: 50 }, outMs = 60, handTaken = false, hand = null } = {}) {
   const clock = fakeClock()
   const cells = new Map([[FEET.toString(), feet], [FEET.offset(0, -1, 0).toString(), under]])
   const blockAt = (p) => ({ ...(cells.get(p.toString()) ?? (p.y < 64 ? STONE : p.y === 70 ? roof : AIR)), position: p, biome })
@@ -94,6 +95,7 @@ function fireRig ({ feet = AIR, under = STONE, roof = AIR, raining = false, biom
   const combat = { name: 'combat', _fleeUntil: 0, _coverUntil: 0, _holdUntil: 0 }
   const lease = { over: false, renew (ms) { seen.renews.push(ms); return !this.over && !(handTaken && seen.renews.length > 1) } }
   const recentOwnEdits = new Map()
+  const real = hand && hand(clock)
   const env = {
     bot,
     Vec3,
@@ -104,8 +106,8 @@ function fireRig ({ feet = AIR, under = STONE, roof = AIR, raining = false, biom
     takeLegs: (reflex, why) => { seen.takes.push(reflex); legs.take(reflex, why, clock.now()) },
     stopPath () {},
     waterState: () => ({ inWater: false, inLava: false, ...ws }),
-    holdHand: () => lease,
-    endHand: (l) => { seen.ended.push(l === lease); l.over = true },
+    holdHand: real ? real.holdHand : () => lease,
+    endHand: real ? real.endHand : (l) => { seen.ended.push(l === lease); l.over = true },
     emitEvent: (kind, msg) => { seen.events.push(`${kind}: ${msg}`) },
     perceived: () => true,
     seenNow: () => true,
@@ -267,7 +269,7 @@ test('a hand taken during the pour leaves the water and the hand to the taker', 
 
 test('a hand lease ended or a bucket gone from the hand before the pour pours nothing', async () => {
   const rows = {
-    'a stop ends the hand lease': (rig) => { rig.lease.over = true },
+    'the hand lease ends': (rig) => { rig.lease.over = true },
     'the sword goes back in hand': (rig) => { rig.bot.quickBarSlot = 0 }
   }
   for (const [row, during] of Object.entries(rows)) {
@@ -335,4 +337,116 @@ test('a pour raises no world change or current event, while a change it did not 
   await kept.act(() => { if (kept.current.check(kept.bot)) keptCurrents.push(kept.clock.now()) })
   kept.clock.advance(botConstant('FIRE_FLOW_MS'))
   assert.deepStrictEqual([keptCurrents, kept.current.check(kept.bot)], [[], true])
+})
+
+const POURING = 'refused: pouring water on the fire, the fire reflex holds the hand. Retry in a moment.'
+
+// fireRig on the real hand lease, with the pilot's stop and a block_place of the client.
+function handRig () {
+  const guardState = { hand: null }
+  const digLock = botConstant('digLock')
+  const client = { write () {} }
+  let hand
+  const rig = fireRig({
+    hand: (clock) => {
+      hand = loadBotFunctions(['holdHand', 'endHand', 'wireHandLease'], { bot: { _client: client }, guardState, digLock, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout })
+      hand.wireHandLease()
+      return hand
+    }
+  })
+  const stop = () => runRoute('/stop', {}, { bot: { clearControlStates () {} }, bunker: {}, legs: { take () {} }, stopFollow () {}, stopPath () {}, clearLane () {}, jobs: { stopAll: () => 0 }, guardState })
+  return { ...rig, guardState, digLock, hand, stop, click: () => client.write('block_place', {}) }
+}
+
+test('a stop or a click during the pour leaves the hand to the fire reflex, which picks the water up again', async () => {
+  const rig = handRig()
+  let lease = null
+  await rig.act(() => {
+    if (rig.seen.uses.length !== 1 || lease) return
+    lease = rig.guardState.hand
+    rig.stop()
+    rig.click()
+  })
+  assert.ok(lease, 'control: the pour holds the hand')
+  assert.deepStrictEqual(rig.seen.uses, ['water_bucket', 'bucket'])
+  assert.deepStrictEqual(rig.seen.events, ['fire: on fire, poured water at 0,64,0 and picked it up again'])
+  assert.strictEqual(rig.guardState.hand, null, 'the pour ends its lease')
+})
+
+test('a pilot action asking for the hand during the pour is refused busy, and the pour goes on', async () => {
+  const rig = handRig()
+  let refusal = null
+  await rig.act(() => {
+    if (rig.seen.uses.length !== 1 || refusal) return
+    try {
+      rig.hand.holdHand()
+      refusal = 'none'
+    } catch (e) { refusal = [e.message, e.reason] }
+  })
+  assert.deepStrictEqual(refusal, [POURING, 'busy'])
+  assert.deepStrictEqual(rig.seen.uses, ['water_bucket', 'bucket'])
+  assert.deepStrictEqual(rig.seen.events, ['fire: on fire, poured water at 0,64,0 and picked it up again'])
+})
+
+test('a sole claim takes the hand from the pour, which leaves the water to it', async () => {
+  const rig = handRig()
+  let held = null
+  await rig.act(() => {
+    if (rig.seen.uses.length !== 1 || held) return
+    claimRescue(rig.digLock)
+    const rescue = rig.hand.holdHand(rig.digLock.holder)
+    held = rig.guardState.hand === rescue
+  })
+  assert.strictEqual(held, true, 'the claim holds the hand')
+  assert.deepStrictEqual(rig.seen.uses, ['water_bucket'])
+  assert.deepStrictEqual(rig.seen.events, ['fire: on fire, poured water at 0,64,0, the hand was taken before the water came back'])
+})
+
+test('an equip asked for during the pour is refused, and the water bucket stays in hand', async () => {
+  const rig = handRig()
+  let asked = null
+  await rig.act(() => {
+    if (rig.seen.uses.length !== 1 || asked) return
+    const { handle, res } = routeHandler('/equip', { bot: rig.bot, LEGACY_1710: false, guardState: rig.guardState, digLock: rig.digLock })
+    handle({ query: { name: 'iron_sword' } }, res)
+    asked = [res.error?.message, rig.bot.heldItem.name]
+  })
+  assert.deepStrictEqual(asked, [POURING, 'water_bucket'])
+  assert.deepStrictEqual(rig.seen.events, ['fire: on fire, poured water at 0,64,0 and picked it up again'])
+})
+
+test('a goto or a follow asked for during the pour is refused before it walks, and the pour picks the water up again', async () => {
+  for (const [route, query] of [['/goto', { x: '9', z: '0' }], ['/follow', { name: 'Alex' }]]) {
+    const rig = handRig()
+    const walks = []
+    const env = {
+      bot: rig.bot,
+      guardState: rig.guardState,
+      shared: { ready: true },
+      bunker: { building: false },
+      gotoQuery: (q) => ({ x: Number(q.x), z: Number(q.z) }),
+      claimLane: () => 'goto',
+      releaseLane () {},
+      memory: { lastWaypoint: null },
+      walkRoute: () => ({ end: () => ({}), walked: () => 0, mark: null }),
+      stagedGoto: async () => { walks.push(route); return { arrived: true } },
+      namedStop: (r) => r,
+      doorBeside: () => null,
+      follow: {},
+      stopFollow () {},
+      followTarget: () => ({ id: 1 }),
+      armFollow: () => { walks.push(route) },
+      followTick: async () => {},
+      setInterval: rig.clock.setInterval
+    }
+    let res = null
+    await rig.act(() => {
+      if (rig.seen.uses.length !== 1 || res) return
+      const run = routeHandler(route, env)
+      res = run.res
+      run.handle({ query }, res)
+    })
+    assert.deepStrictEqual([res.error?.message, res.error?.reason, walks], [POURING, 'busy', []], route)
+    assert.deepStrictEqual(rig.seen.events, ['fire: on fire, poured water at 0,64,0 and picked it up again'], route)
+  }
 })

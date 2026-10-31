@@ -59,6 +59,7 @@ async function walkEast (scene) {
   const env = {
     bot,
     shared: { ready: true, mcData: { blocksByName: BLOCKS_BY_NAME } },
+    guardState: { hand: null },
     bunker: { building: false },
     claimLane: () => ({}),
     releaseLane () {},

@@ -19,7 +19,7 @@ function body (names, worn = {}, held = null) {
   return bot
 }
 
-const env = (bot, legacy = false, digLock = botConstant('digLock')) => ({ bot, LEGACY_1710: legacy, digLock })
+const env = (bot, legacy = false, digLock = botConstant('digLock')) => ({ bot, LEGACY_1710: legacy, digLock, guardState: { hand: null } })
 
 async function refusal (query, bot, legacy = false, digLock) {
   const { handle, res } = routeHandler('/equip', env(bot, legacy, digLock))

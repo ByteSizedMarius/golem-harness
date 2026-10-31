@@ -62,6 +62,7 @@ test('a goto to coordinates forgets the last waypoint, so the next waypoint reac
   const env = {
     bot: { entity: { position: new Vec3(3.5, 64, 2.5) } },
     shared: { ready: true },
+    guardState: { hand: null },
     bunker: { building: false },
     claimLane: () => ({}),
     releaseLane () {},
@@ -88,6 +89,7 @@ test('a waypoint goto links the edge from the last waypoint only when the walk b
   const env = {
     bot,
     shared: { ready: true },
+    guardState: { hand: null },
     bunker: { building: false },
     claimLane: () => ({}),
     releaseLane () {},

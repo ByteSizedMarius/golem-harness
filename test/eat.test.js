@@ -5,6 +5,7 @@ const { EventEmitter } = require('node:events')
 const registry = require('prismarine-registry')('1.21.11')
 const Item = require('prismarine-item')(registry)
 const { loadBotFunctions, botConstant, routeHandler, fakeClock, claimRescue } = require('./helpers')
+const { SPRINT_FLOOR } = require('../lib/sprint')
 
 const stack = (name, count) => new Item(registry.itemsByName[name].id, count)
 
@@ -243,6 +244,41 @@ test('eat refuses busy once the bunker build starts mid-bite, naming a bite the 
   assert.strictEqual(res.error.reason, 'busy')
   assert.strictEqual(res.error.message, `no meal seen within ${b.env.FOOD_UPDATE_MS} ms: cooked_beef 18 before and 18 after, food 6/20 before and after, then busy: the bunker build is running, nothing put back in hand. The pockets may show items the server does not hold.`)
   assert.deepStrictEqual(b.done, ['equip cooked_beef', 'bite'])
+})
+
+test('a goto at the food floor during the pour of the fire reflex walks on without a meal, naming the pour, and the pour keeps the hand', async () => {
+  const b = body([stack('iron_sword', 1), stack('cooked_beef', 18)], fedAt(0, 20))
+  b.bot.heldItem = b.items[0]
+  let food = b.bot.food
+  let reads = 0
+  // A meal stop retrying without a pause reads the food level without end.
+  Object.defineProperty(b.bot, 'food', {
+    get () {
+      if (++reads > 100) throw new Error('the meal stop read the food level 100 times')
+      return food
+    },
+    set (v) { food = v }
+  })
+  b.bot.entity = { onGround: true, isInWater: false }
+  b.bot.pathfinder = { isMoving: () => false, thinkTimeout: 5000, goal: null }
+  const env = {
+    ...b.env,
+    reflexes: [{ name: 'combat', fightBusy: () => false, fairFill: () => ({}), _seenAt: new Map() }],
+    nearHostiles: () => [],
+    bunker: { building: false },
+    SPRINT_FLOOR,
+    stopPath () {},
+    serverSettled: async () => {},
+    walkAttempt: async () => 'done'
+  }
+  const { walkOnce, holdHand, endHand } = loadBotFunctions(['walkOnce', 'holdHand', 'endHand'], env)
+  const pour = holdHand('fire')
+  const route = { meal: { meals: [], failed: 0, block: null }, expired: () => false, stopped: () => false }
+  try {
+    assert.strictEqual(await settle(b.clock, walkOnce({ x: 9, y: 64, z: 0 }, route, 1000)), 'done')
+    assert.deepStrictEqual([route.meal.meals, route.meal.block], [[], 'the fire reflex held the hand, no meal'])
+    assert.strictEqual(pour.renew(), true, 'the meal took the hand from the pour')
+  } finally { endHand(pour) }
 })
 
 test('refuel after a fight reports a bite that changed nothing', async () => {
