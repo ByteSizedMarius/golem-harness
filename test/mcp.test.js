@@ -115,6 +115,18 @@ test('the signature covers the query as sent, also with characters URLSearchPara
   assert.deepStrictEqual(calls[0].url.searchParams.getAll('msg'), ['Tōkyō & /me | 100%'])
 })
 
+test('a false goes out for a flag that defaults to true, and stays out for one that defaults to false', async () => {
+  const sent = async (args) => {
+    const { srv, calls } = mcpServer()
+    assertOk(await call(srv, 'mine', { name: 'oak_log', ...args }))
+    assert.strictEqual(calls.length, 1)
+    return Object.fromEntries(calls[0].url.searchParams)
+  }
+  assert.deepStrictEqual(await sent({ natural: false, silk: false }), { name: 'oak_log', natural: '0' })
+  assert.deepStrictEqual(await sent({ natural: true, silk: true }), { name: 'oak_log', natural: '1', silk: '1' })
+  assert.deepStrictEqual(await sent({}), { name: 'oak_log' })
+})
+
 test('every request carries a fresh nonce', async () => {
   const { srv, calls } = mcpServer()
   for (let i = 0; i < 20; i++) assertOk(await call(srv, chatTool().name, { msg: `m${i}` }))

@@ -26,7 +26,7 @@ class Entity {
 }
 
 class Movements {
-  constructor () { this.openable = new Set() }
+  constructor () { Object.assign(this, { openable: new Set(), exclusionAreasBreak: [] }) }
   getBlock () { return {} }
   safeToBreak () { return true }
 }
@@ -108,6 +108,7 @@ function collector (t, { blocks, reach, plan = () => ({ status: 'success', path:
     guardWork: (work, o) => guardWork(work, { ...o, clock }),
     watchScope: new AsyncLocalStorage(),
     Vec3,
+    ck: (x, y, z) => x + ',' + y + ',' + z,
     cellKnown: () => true,
     console: { log: () => {} },
     resolveBlockIds: () => [1],
@@ -382,6 +383,7 @@ test('/stop ends the collect of a gather job at once and frees the collect for t
 test('a wood gather that replaces a running one keeps its forestry movements until it ends itself', async (t) => {
   const c = jobRig(t)
   c.blocks['1,64,0'] = new Block('oak_log', new Vec3(1, 64, 0))
+  c.blocks['1,65,0'] = new Block('oak_leaves', new Vec3(1, 65, 0), 2)
   const considerateMoves = new Movements()
   const forestryMoves = new Movements()
   Object.assign(c.env.shared, {
@@ -713,4 +715,161 @@ test('a gather with silk whose silk touch pick is gone after the walk stops at t
   assert.deepStrictEqual([gathered, reason], [0, 'refusing to dig diamond_ore: no silk touch pick carried'])
   assert.ok(toDiamond() > 0, 'control: the body walked to the diamond ore')
   assert.strictEqual(c.seen.digs, 0)
+})
+
+// Blocks of 1.21.11 from cells ('x,y,z' -> name), air above y 63 and dirt below elsewhere, beside the body at 0.5,64,0.5 on rig,
+// every cell known but the hidden ones. Every block with a face open shows it lit. findBlocks searches around its point,
+// nearest first. A walk goal holds as in potatoRig, at the nearest cell at the feet's height where it ends.
+function woodRig (t, cells, { hidden = [], rig = collector } = {}) {
+  const props = (name) => name.endsWith('_log') ? { axis: 'y' } : name.endsWith('_leaves') ? { distance: '1', persistent: 'false', waterlogged: 'false' } : {}
+  const blocks = {}
+  for (const [k, name] of Object.entries(cells)) blocks[k] = realBlock(name, ...k.split(',').map(Number), props(name))
+  const reach = (g) => {
+    const here = c.bot.entity.position
+    if (g instanceof goals.GoalFollow || g.isEnd(here.floored())) return true
+    const ends = []
+    for (let x = -12; x <= 24; x++) for (let z = -6; z <= 6; z++) if (g.isEnd(new Vec3(x, 64, z))) ends.push(new Vec3(x + 0.5, 64, z + 0.5))
+    const end = ends.sort((a, b) => here.distanceTo(a) - here.distanceTo(b))[0]
+    if (end) c.bot.entity.position = end
+    return !!end
+  }
+  const c = rig(t, { blocks, reach })
+  c.bot.entity = { width: 0.6, height: 1.8, position: new Vec3(0.5, 64, 0.5) }
+  const at = (p) => {
+    const b = c.blocks[`${p.x},${p.y},${p.z}`]
+    return b && b.name !== 'air' ? b : realBlock(p.y >= 64 ? 'air' : 'dirt', p.x, p.y, p.z)
+  }
+  c.bot.blockAt = (p) => at(p.floored())
+  c.bot.world = {
+    raycast (from, dir, range) {
+      for (let d = 0; d <= range; d += 0.02) {
+        const p = from.plus(dir.scaled(d)).floored()
+        if (at(p).shapes.length) return { position: p, face: 1 }
+      }
+      return null
+    }
+  }
+  c.bot.findBlocks = ({ matching, maxDistance = 16, count = 1, point = c.bot.entity.position }) => {
+    const matches = Array.isArray(matching) ? (b) => !!b && matching.includes(b.type) : matching
+    const o = point.floored()
+    return Object.keys(c.blocks).map((k) => new Vec3(...k.split(',').map(Number)))
+      .filter((p) => p.distanceTo(o) <= maxDistance && matches(at(p)))
+      .sort((a, b) => a.distanceTo(o) - b.distanceTo(o)).slice(0, count)
+  }
+  c.env.shared.mcData = registry
+  delete c.env.nearestVisible
+  Object.assign(c.env, {
+    resolveBlockIds: (name) => [registry.blocksByName[name].id],
+    cellKnown: (p) => !hidden.includes(`${p.x},${p.y},${p.z}`),
+    sightFace: () => true,
+    eyeDist: () => 0,
+    lightReach: () => 15,
+    seesLit: () => true,
+    seenNow: () => true,
+    entityInCell
+  })
+  return c
+}
+
+// Picks up drop k (from 1) of a dug log.
+async function pickUpLog (c, k = 1) {
+  assert.ok(await waitFor(() => c.seen.followed === k, 2000), `the body went to drop ${k} of a dug log (${c.seen.digs} digs)`)
+  c.pockets.length = 0
+  c.pockets.push({ name: 'oak_log', count: k })
+  c.bot.emit('entityGone', c.seen.drops[k - 1])
+}
+
+const SKIP_HINT = 'built logs touch a build block, unclear ones show no leaves in sight or join more than 128 logs. Look at an unclear tree\'s crown, or natural: false takes every log'
+// An oak pillar under nothing beside oak planks at x 3, and an oak tree with its crown at x -5.
+const PILLAR_AND_TREE = {
+  '3,64,0': 'oak_log', '3,65,0': 'oak_log', '3,64,1': 'oak_planks', '3,65,1': 'oak_planks',
+  '-5,64,0': 'oak_log', '-5,65,0': 'oak_log', '-5,66,0': 'oak_leaves', '-4,65,0': 'oak_leaves', '-6,65,0': 'oak_leaves'
+}
+
+test('mine passes over a pillar log beside planks, counts it built, takes the tree log beyond it, and natural 0 takes the pillar', async (t) => {
+  const c = woodRig(t, PILLAR_AND_TREE)
+  const reply = awaitRoute('/mine', { name: 'oak_log' }, c.env)
+  await pickUpLog(c)
+  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 1, reason: null, skipped: { built: 2, unclear: 0 }, hint: SKIP_HINT })
+  assert.deepStrictEqual(['3,64,0', '-5,64,0'].map((k) => c.bot.blockAt(new Vec3(...k.split(',').map(Number))).name), ['oak_log', 'air'])
+
+  const any = woodRig(t, PILLAR_AND_TREE)
+  const all = awaitRoute('/mine', { name: 'oak_log', natural: '0' }, any.env)
+  await pickUpLog(any)
+  assert.deepStrictEqual(await within(all), { mined: 1, requested: 1, gathered: 1, reason: null })
+  assert.strictEqual(any.bot.blockAt(new Vec3(3, 64, 0)).name, 'air')
+})
+
+test('mine passes over a tree whose crown it has not seen, counts its logs unclear and says no natural log is left', async (t) => {
+  const tree = { '2,64,0': 'oak_log', '2,65,0': 'oak_log', '2,66,0': 'oak_leaves' }
+  const c = woodRig(t, tree, { hidden: ['2,66,0'] })
+  const reply = await within(awaitRoute('/mine', { name: 'oak_log' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 0, requested: 1, gathered: 0, reason: 'no natural oak_log left, skipped 0 built and 2 unclear', skipped: { built: 0, unclear: 2 }, hint: SKIP_HINT })
+  assert.strictEqual(c.seen.digs, 0)
+})
+
+test('mine takes logs only within radius of where it started, though the body walked on toward more', async (t) => {
+  const c = woodRig(t, { '6,64,0': 'oak_log', '6,65,0': 'oak_leaves', '10,64,0': 'oak_log', '10,65,0': 'oak_leaves' })
+  const reply = awaitRoute('/mine', { name: 'oak_log', count: '2', radius: '8' }, c.env)
+  await pickUpLog(c)
+  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 2, gathered: 1, reason: null })
+  assert.ok(c.bot.entity.position.floored().distanceTo(new Vec3(10, 64, 0)) <= 8, 'control: the second log lies within radius of the body')
+  assert.strictEqual(c.bot.blockAt(new Vec3(10, 64, 0)).name, 'oak_log')
+})
+
+test('mine takes next the log nearest the body among those within radius of where it started', async (t) => {
+  // Trees at x 7, then at -8,0 (nearer the start) and 8,4 (nearer where the walk to the first one ends).
+  const c = woodRig(t, {
+    '7,64,0': 'oak_log', '7,65,0': 'oak_leaves', '-8,64,0': 'oak_log', '-8,65,0': 'oak_leaves', '8,64,4': 'oak_log', '8,65,4': 'oak_leaves'
+  })
+  const reply = awaitRoute('/mine', { name: 'oak_log', count: '2', radius: '10' }, c.env)
+  assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the first drop')
+  const body = c.bot.entity.position.floored()
+  await pickUpLog(c)
+  assert.ok(body.distanceTo(new Vec3(8, 64, 4)) < body.distanceTo(new Vec3(-8, 64, 0)), 'control: the body stands nearer the tree at 8,4')
+  await pickUpLog(c, 2)
+  assert.deepStrictEqual(await within(reply), { mined: 2, requested: 2, gathered: 2, reason: null })
+  assert.deepStrictEqual(['8,64,4', '-8,64,0'].map((k) => c.bot.blockAt(new Vec3(...k.split(',').map(Number))).name), ['air', 'oak_log'])
+})
+
+test('a gather passes over a pillar log beside planks, counts it built and gathers the tree log beyond it', async (t) => {
+  const c = woodRig(t, PILLAR_AND_TREE, { rig: jobRig })
+  const { job } = runRoute('/gather', { resource: 'oak_log', amount: '1' }, c.env)
+  await pickUpLog(c)
+  assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(c.env.jobs.get(job).result)), { gathered: 1, dug: 1, requested: 1, inventoryMatching: 1, skipped: { built: 2, unclear: 0 }, hint: SKIP_HINT })
+  assert.strictEqual(c.bot.blockAt(new Vec3(3, 64, 0)).name, 'oak_log')
+})
+
+test('a wood gather keeps built logs out of its collect walk and of the forestry walk while it holds the forestry movements, and natural 0 lets them be cut', async (t) => {
+  // The gather digs the tree log at 1,64,0, and a pillar log beside planks stands at 1,64,3.
+  const run = async (query) => {
+    const c = jobRig(t)
+    Object.assign(c.blocks, {
+      '1,64,0': new Block('oak_log', new Vec3(1, 64, 0)),
+      '1,65,0': new Block('oak_leaves', new Vec3(1, 65, 0), 2),
+      '1,64,3': new Block('oak_log', new Vec3(1, 64, 3)),
+      '1,64,4': new Block('oak_planks', new Vec3(1, 64, 4), 3)
+    })
+    const forestryMoves = new Movements()
+    Object.assign(c.env.shared, {
+      mcData: { blocksArray: [], blocks: { 1: { name: 'oak_log', drops: [900], states: [] } }, items: { 900: { name: 'oak_log' } }, itemsByName: { oak_log: {} } },
+      considerateMoves: new Movements(),
+      forestryMoves,
+      thinkTimeout: 10000
+    })
+    const { job } = runRoute('/gather', { resource: 'oak_log', amount: '1', ...query }, c.env)
+    assert.ok(await waitFor(() => c.seen.finishDig, 2000), 'control: the gather digs')
+    const weigh = (list) => Array.from(list, (entry) => ['1,64,3', '1,64,0', '1,65,0'].map((k) => entry(c.bot.blockAt(new Vec3(...k.split(',').map(Number))))))
+    const weights = weigh(forestryMoves.exclusionAreasBreak)
+    const cage = weigh(c.bot.collectBlock.movements.exclusionAreasBreak)
+    c.seen.finishDig()
+    assert.ok(await waitFor(() => c.seen.followed === 1, 2000), 'control: the body went to the drop')
+    c.pockets.push({ name: 'oak_log', count: 1 })
+    c.bot.emit('entityGone', c.seen.drops[0])
+    assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
+    return { weights, cage, after: forestryMoves.exclusionAreasBreak.length }
+  }
+  assert.deepStrictEqual(await run({}), { weights: [[100, 0, 0]], cage: [[100, 0, 0]], after: 0 })
+  assert.deepStrictEqual(await run({ natural: '0' }), { weights: [], cage: [], after: 0 })
 })

@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: mine and gather leave built logs standing
+
+A `mine` for logs with radius 32 walked about 46 blocks from its start and cut a log that held up a
+base. `mine` and `gather` now count their radius from where they start, skip logs whose group
+touches a build block or shows no leaves in sight and count them in `skipped`, and their walks no
+longer cut such logs. `natural: false` takes every log as before.
+
 ## 2026-10-31: item and block names match whole words
 
 A `withdraw` of `stick` took a sticky piston. `withdraw`, `deposit`, `toss` and `grave` take an

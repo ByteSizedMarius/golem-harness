@@ -39,3 +39,11 @@ test('/find refuses a block name no block holds as whole words, naming the close
   assert.strictEqual(looked.length, 0)
   assert.strictEqual(findRoute('chset').res.error.message, 'unknown block: chset')
 })
+
+test('mine and gather refuse a block name no block holds as whole words, naming the closest names containing it', () => {
+  for (const [route, query] of [['/mine', { name: 'cobble' }], ['/gather', { resource: 'cobble' }]]) {
+    const { handle, res } = routeHandler(route, { require, shared: { ready: true, mcData: registry } })
+    handle({ query }, res)
+    assert.deepStrictEqual([res.error && res.error.message, res.error && res.error.reason], [COBBLE_REFUSAL, 'no_match'], route)
+  }
+})

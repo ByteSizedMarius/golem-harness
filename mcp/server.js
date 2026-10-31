@@ -307,10 +307,11 @@ function checkArgs (tool, args) {
 
 function toQuery (tool, values) {
   const query = new URLSearchParams()
-  for (const name of Object.keys(tool.params)) {
+  for (const [name, spec] of Object.entries(tool.params)) {
     const v = values[name]
-    if (v === undefined || v === false) continue
-    query.set(name, v === true ? '1' : String(v))
+    // A false goes out only for a flag that defaults to true.
+    if (v === undefined || (v === false && spec.default !== true)) continue
+    query.set(name, v === true ? '1' : v === false ? '0' : String(v))
   }
   return query
 }

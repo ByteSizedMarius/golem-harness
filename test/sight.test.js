@@ -595,6 +595,24 @@ test('find names a lit coal in sight behind more than 256 nearer dark candidates
   assert.strictEqual(found[0].pos.x, 41)
 })
 
+test('findVisible looks within maxDist of the point it is given, nearest the body first, and sees what lies there however far the body stands from it', () => {
+  // A lit tunnel along z 0 from x -6 to 12, coal in its floor at x -3, 3 and 9, the body at x 0.
+  const ores = { '-3,63,0': 'coal_ore', '3,63,0': 'coal_ore', '9,63,0': 'coal_ore' }
+  const env = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= -6 && x <= 12, ores, light: () => LIT })
+  const matches = (matching, p) => Array.isArray(matching) ? matching.includes(IDS[ores[ck(p.x, p.y, p.z)]]) : matching(env.bot.blockAt(p))
+  // mineflayer's search, nearest its point first.
+  env.bot.findBlocks = ({ matching, maxDistance, count, point = env.bot.entity.position }) => Object.keys(ores)
+    .map((k) => new Vec3(...k.split(',').map(Number)))
+    .filter((p) => matches(matching, p) && p.distanceTo(point.floored()) <= maxDistance)
+    .sort((a, b) => a.distanceTo(point.floored()) - b.distanceTo(point.floored()))
+    .slice(0, count)
+  const { findVisible } = loadBotFunctions(['findVisible'], env)
+  const xs = (found) => Array.from(found, (f) => f.pos.x).sort((a, b) => a - b)
+  assert.deepStrictEqual(xs(findVisible([IDS.coal_ore], 4, 10)), [-3, 3], 'control: around the body')
+  assert.deepStrictEqual(xs(findVisible([IDS.coal_ore], 4, 10, new Vec3(6, 64, 0))), [3, 9])
+  assert.deepStrictEqual(xs(findVisible([IDS.coal_ore], 5, 1, new Vec3(7, 64, 0))), [3], 'the coal at x 9 lies nearer the point')
+})
+
 test('a mob shows only as far as the light on its body carries', () => {
   const seen = (x, light) => {
     const env = tunnel(20, light)
