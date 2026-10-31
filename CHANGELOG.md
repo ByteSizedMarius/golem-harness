@@ -4,6 +4,12 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: the bot forgets a bed it was moved off
+
+A bed action sends `leave_bed` only while the body is still within half a block of where the server
+put the sleeper. A body moved off that spot since (knockback, water, a fall) forgets the bed without
+a packet, because a `leave_bed` sent awake teleports the body back beside its last bed.
+
 ## 2026-10-30: the bot leaves a bed the server holds it in
 
 A bed used while another player stayed up kept the bot asleep on the server while it walked off on

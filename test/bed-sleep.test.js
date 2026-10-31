@@ -84,6 +84,7 @@ function sleeper ({ version = '1.21.11', legacy = false, answerMs = botConstant(
     BED_CLICK: botConstant('BED_CLICK'),
     BED_ANSWER_MS: answerMs,
     BED_TOP: botConstant('BED_TOP'),
+    BED_SPOT_DRIFT: botConstant('BED_SPOT_DRIFT'),
     LEAVE_BED_MS: LEAVE_MS,
     LEGACY_1710: legacy,
     LEGACY_CLICK_REACH,
@@ -306,6 +307,52 @@ test('a body route refuses in bed at the bed cell when the server keeps the body
     assert.deepStrictEqual(await through(gates, route), { ok: false, error: 'in bed at 30,150,40' }, route)
   }
   assert.deepStrictEqual({ ...s.shared.bed }, FOOT_CELL)
+})
+
+test('a bed the body was moved 3 blocks away from since is forgotten without leave_bed by a goal, a route or a click', async () => {
+  const acts = [
+    ['goal', async (s) => { s.bot.pathfinder.setGoal(new goals.GoalBlock(20, 150, 40)) }],
+    ['route', async (s) => assert.strictEqual(await through(bedGates(s), '/chest'), 'passed')],
+    ['click', async (s) => { await s.bot.activateBlock(CHEST) }]
+  ]
+  for (const [kind, act] of acts) {
+    const s = sleeper()
+    await goToBed(s)
+    s.bot.entity.position = IN_BED.offset(3, 0, 0)
+    await act(s)
+    await settle()
+    assert.deepStrictEqual(leaves(s.written), [], kind)
+    assert.strictEqual(s.shared.bed, null, kind)
+    assert.deepStrictEqual(s.logs, ['[bed] forgot the bed at 30,150,40, the body is 3.0 blocks off its sleeping spot'], kind)
+  }
+})
+
+test('a body at the spot the server last put the sleeper at leaves the bed with one leave_bed, settled onto the bed top or teleported asleep', async () => {
+  const cases = [
+    ['settled', (s) => { s.bot.entity.position = new Vec3(30.5, 150.5625, 41.9) }],
+    ['teleported', (s) => s.place(new Vec3(26.5, 150, 40.5))]
+  ]
+  for (const [label, move] of cases) {
+    const s = sleeper()
+    const gates = bedGates(s)
+    await goToBed(s)
+    move(s)
+    assert.strictEqual(await through(gates, '/chest'), 'passed', label)
+    assert.strictEqual(leaves(s.written).length, 1, label)
+    assert.strictEqual(s.shared.bed, null, label)
+  }
+})
+
+test('a leave_bed that timed out is not sent again once the body was moved off the sleeping spot', async () => {
+  const s = sleeper()
+  const gates = bedGates(s)
+  await goToBed(s)
+  s.server.stands = false
+  assert.deepStrictEqual(await through(gates, '/chest'), { ok: false, error: 'in bed at 30,150,40' })
+  s.bot.entity.position = IN_BED.offset(3, 0, 0)
+  assert.strictEqual(await through(gates, '/chest'), 'passed')
+  assert.strictEqual(leaves(s.written).length, 1)
+  assert.strictEqual(s.shared.bed, null)
 })
 
 test('an awake body passes every body route without a packet, and routes that leave the body alone have no bed gate', async () => {
