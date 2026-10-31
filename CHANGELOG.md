@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: the bot jumps out of deep water onto a shore at its surface
+
+The pathfinder planned no way out of water 2 deep onto a shore one block above the water the body
+floats in, because water has no top and the jump was measured from the bed. With both the feet and
+the cell under them in water, the jump is now measured from the feet. A body that has sunk to the
+bed still finds no way out.
+
 ## 2026-10-31: goto takes the open leaf of a double door
 
 With one leaf of a double door open, goto planned through the closed leaf and clicked it open. The

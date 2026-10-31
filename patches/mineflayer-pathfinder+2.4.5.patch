@@ -288,7 +288,7 @@ index b38bd30..10ed8a9 100644
    goals: require('./lib/goals')
  }
 diff --git a/node_modules/mineflayer-pathfinder/lib/movements.js b/node_modules/mineflayer-pathfinder/lib/movements.js
-index a7e3505..355546a 100644
+index a7e3505..3a53536 100644
 --- a/node_modules/mineflayer-pathfinder/lib/movements.js
 +++ b/node_modules/mineflayer-pathfinder/lib/movements.js
 @@ -1,6 +1,8 @@
@@ -308,7 +308,31 @@ index a7e3505..355546a 100644
  
      this.dontCreateFlow = true
      this.dontMineUnderFallingBlock = true
-@@ -384,8 +387,15 @@ class Movements {
+@@ -298,6 +301,12 @@ class Movements {
+     return cost
+   }
+ 
++  // LOCAL PATCH (Golem 10-31): the height a jump from node starts at, the feet for a body afloat over water.
++  jumpBase (node) {
++    const block0 = this.getBlock(node, 0, -1, 0)
++    return block0.liquid && this.getBlock(node, 0, 0, 0).liquid ? node.y : block0.height
++  }
++
+   getMoveJumpUp (node, dir, neighbors) {
+     const blockA = this.getBlock(node, 0, 2, 0)
+     const blockH = this.getBlock(node, dir.x, 2, dir.z)
+@@ -345,8 +354,8 @@ class Movements {
+       blockC.height += 1
+     }
+ 
+-    const block0 = this.getBlock(node, 0, -1, 0)
+-    if (blockC.height - block0.height > 1.2) return // Too high to jump
++    // LOCAL PATCH (Golem 10-31)
++    if (blockC.height - this.jumpBase(node) > 1.2) return // Too high to jump
+ 
+     cost += this.safeOrBreak(blockA, toBreak)
+     if (cost > 100) return
+@@ -384,8 +393,15 @@ class Movements {
        cost += this.placeCost // additional cost for placing a block
      }
  
@@ -326,7 +350,7 @@ index a7e3505..355546a 100644
  
      // Open fence gates
      if (this.canOpenDoors && blockC.openable && blockC.shapes && blockC.shapes.length !== 0) {
-@@ -397,7 +407,8 @@ class Movements {
+@@ -397,7 +413,8 @@ class Movements {
  
      if (this.getBlock(node, 0, 0, 0).liquid) cost += this.liquidCost
  
@@ -336,7 +360,43 @@ index a7e3505..355546a 100644
    }
  
    getMoveDiagonal (node, dir, neighbors) {
-@@ -454,6 +465,7 @@ class Movements {
+@@ -407,7 +424,7 @@ class Movements {
+     const blockC = this.getBlock(node, dir.x, 0, dir.z) // Landing block or standing on block when jumping up by 1
+     const y = blockC.physical ? 1 : 0
+ 
+-    const block0 = this.getBlock(node, 0, -1, 0)
++    const base = this.jumpBase(node) // LOCAL PATCH (Golem 10-31)
+ 
+     let cost1 = 0
+     const toBreak1 = []
+@@ -416,7 +433,7 @@ class Movements {
+     const blockD1 = this.getBlock(node, 0, y - 1, dir.z)
+     cost1 += this.safeOrBreak(blockB1, toBreak1)
+     cost1 += this.safeOrBreak(blockC1, toBreak1)
+-    if (blockD1.height - block0.height > 1.2) cost1 += this.safeOrBreak(blockD1, toBreak1)
++    if (blockD1.height - base > 1.2) cost1 += this.safeOrBreak(blockD1, toBreak1)
+ 
+     let cost2 = 0
+     const toBreak2 = []
+@@ -425,7 +442,7 @@ class Movements {
+     const blockD2 = this.getBlock(node, dir.x, y - 1, 0)
+     cost2 += this.safeOrBreak(blockB2, toBreak2)
+     cost2 += this.safeOrBreak(blockC2, toBreak2)
+-    if (blockD2.height - block0.height > 1.2) cost2 += this.safeOrBreak(blockD2, toBreak2)
++    if (blockD2.height - base > 1.2) cost2 += this.safeOrBreak(blockD2, toBreak2)
+ 
+     if (cost1 < cost2) {
+       cost += cost1
+@@ -445,7 +462,7 @@ class Movements {
+ 
+     const blockD = this.getBlock(node, dir.x, -1, dir.z)
+     if (y === 1) { // Case jump up by 1
+-      if (blockC.height - block0.height > 1.2) return // Too high to jump
++      if (blockC.height - base > 1.2) return // Too high to jump
+       cost += this.safeOrBreak(this.getBlock(node, 0, 2, 0), toBreak)
+       if (cost > 100) return
+       cost += 1
+@@ -454,6 +471,7 @@ class Movements {
        neighbors.push(new Move(blockC.position.x, blockC.position.y, blockC.position.z, node.remainingBlocks, cost, toBreak))
      } else if (this.getBlock(node, dir.x, -2, dir.z).physical || blockD.liquid) {
        if (!blockD.safe) return // don't self-immolate
@@ -344,7 +404,7 @@ index a7e3505..355546a 100644
        cost += this.getNumEntitiesAt(blockC.position, 0, -1, 0) * this.entityCost
        neighbors.push(new Move(blockC.position.x, blockC.position.y - 1, blockC.position.z, node.remainingBlocks, cost, toBreak))
      }
-@@ -473,6 +485,11 @@ class Movements {
+@@ -473,6 +491,11 @@ class Movements {
      return null
    }
  
@@ -356,7 +416,7 @@ index a7e3505..355546a 100644
    getMoveDropDown (node, dir, neighbors) {
      const blockB = this.getBlock(node, dir.x, 1, dir.z)
      const blockC = this.getBlock(node, dir.x, 0, dir.z)
-@@ -495,6 +512,7 @@ class Movements {
+@@ -495,6 +518,7 @@ class Movements {
  
      if (blockC.liquid) return // dont go underwater
  
@@ -364,7 +424,7 @@ index a7e3505..355546a 100644
      cost += this.getNumEntitiesAt(blockLand.position, 0, 0, 0) * this.entityCost // add cost for entities
  
      neighbors.push(new Move(blockLand.position.x, blockLand.position.y, blockLand.position.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
-@@ -515,6 +533,7 @@ class Movements {
+@@ -515,6 +539,7 @@ class Movements {
  
      if (this.getBlock(node, 0, 0, 0).liquid) return // dont go underwater
  
@@ -372,7 +432,7 @@ index a7e3505..355546a 100644
      cost += this.getNumEntitiesAt(blockLand.position, 0, 0, 0) * this.entityCost // add cost for entities
  
      neighbors.push(new Move(blockLand.position.x, blockLand.position.y, blockLand.position.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
-@@ -564,6 +583,8 @@ class Movements {
+@@ -564,6 +589,8 @@ class Movements {
      if (this.getBlock(node, 0, 0, 0).liquid) return // cant jump from water
  
      let cost = 1
@@ -381,7 +441,7 @@ index a7e3505..355546a 100644
  
      // Leaving entities at the ceiling level (along path) out for now because there are few cases where that will be important
      cost += this.getNumEntitiesAt(node, dir.x, 0, dir.z) * this.entityCost
-@@ -588,6 +609,7 @@ class Movements {
+@@ -588,6 +615,7 @@ class Movements {
  
        if (ceilingClear && blockB.safe && blockC.safe && blockD.physical) {
          cost += this.exclusionStep(blockB)
@@ -389,7 +449,7 @@ index a7e3505..355546a 100644
          // Forward
          neighbors.push(new Move(blockC.position.x, blockC.position.y, blockC.position.z, node.remainingBlocks, cost, [], [], true))
          break
-@@ -606,7 +628,8 @@ class Movements {
+@@ -606,7 +634,8 @@ class Movements {
          if (blockE.physical) {
            cost += this.exclusionStep(blockD)
            cost += this.getNumEntitiesAt(blockD.position, 0, 0, 0) * this.entityCost

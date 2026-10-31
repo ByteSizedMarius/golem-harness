@@ -358,6 +358,44 @@ test('a creeper zone laid over the water cost keeps it, and leaves it in place w
   assert.deepStrictEqual([zoned, extra(entryCosts(m), control)], [[c, c, 0], [c, c, 0]])
 })
 
+// A 1-wide hole at the origin with water in the cells ys, walled by the stone floor, plus cells.
+const hole = (ys, cells = {}) => ({ ...Object.fromEntries(ys.map((y) => [ck(0, y, 0), ['water', {}]])), ...cells })
+// The cells above y that a node at x 0, z 0 and height y moves to.
+const stepsUp = (m, y) => m.getNeighbors({ x: 0, y, z: 0, remainingBlocks: 0 }).filter((move) => move.y > y).map((move) => ck(move.x, move.y, move.z)).sort()
+const around = (y) => [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]].map(([x, z]) => ck(x, y, z)).sort()
+const AFLOAT = new Vec3(0.5, 63, 0.5)
+const EAST_SHORE = { [ck(1, 64, 0)]: ['stone', {}] }
+
+test('a body afloat in 2-deep water jumps out onto a shore one block above the water it floats in, straight and diagonally', async (t) => {
+  const { plan, shared } = await walkingBody(t, AFLOAT, hole([62, 63]))
+  assert.deepStrictEqual(stepsUp(shared.considerateMoves, 63), around(64))
+  const out = plan(new goals.GoalBlock(1, 64, 0))
+  assert.deepStrictEqual([out.status, out.path.map((n) => ck(Math.floor(n.x), n.y, Math.floor(n.z)))], ['success', [ck(1, 64, 0)]])
+})
+
+test('a body afloat in 2-deep water jumps onto no shore two blocks above the water it floats in', async (t) => {
+  const { shared } = await walkingBody(t, AFLOAT, hole([62, 63], EAST_SHORE))
+  assert.deepStrictEqual(stepsUp(shared.considerateMoves, 63), around(64).filter((c) => c !== ck(1, 64, 0)))
+})
+
+test('a body afloat in 2-deep water jumps onto no block whose top is 1.5 above the water it floats in', async (t) => {
+  // A closed fence gate is 1.5 tall and, unlike a fence or wall, is a solid block to the pathfinder.
+  const gate = { [ck(1, 63, 0)]: ['oak_fence_gate', { facing: 'north', open: 'false', in_wall: 'false', powered: 'false' }] }
+  const { shared } = await walkingBody(t, AFLOAT, hole([62, 63], gate))
+  assert.deepStrictEqual(stepsUp(shared.considerateMoves, 63), around(64).filter((c) => c !== ck(1, 64, 0)))
+})
+
+test('a jump measures from the floor below unless both the feet and the cell under them hold water', async (t) => {
+  const ground = await walkingBody(t, ORIGIN, EAST_SHORE)
+  assert.deepStrictEqual(stepsUp(ground.shared.considerateMoves, 64), [ck(1, 65, 0)], 'control: from stone onto the shore')
+  const surface = await walkingBody(t, ORIGIN, hole([62, 63], EAST_SHORE))
+  assert.deepStrictEqual(stepsUp(surface.shared.considerateMoves, 64), [], 'from the air over the water')
+  const ford = await walkingBody(t, AFLOAT, hole([63]))
+  assert.deepStrictEqual(stepsUp(ford.shared.considerateMoves, 63), around(64), 'control: from 1-deep water over stone')
+  const overAir = await walkingBody(t, AFLOAT, hole([63], { [ck(0, 62, 0)]: ['air', {}] }))
+  assert.deepStrictEqual(stepsUp(overAir.shared.considerateMoves, 63), [], 'from 1-deep water over air')
+})
+
 const FULL_REFLEX = ['stopDigging', 'takeLegs', ['setGoal', null], 'swimUp', 'drowning']
 const START = 1e6
 
