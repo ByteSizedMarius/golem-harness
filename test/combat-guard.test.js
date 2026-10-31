@@ -1049,3 +1049,41 @@ test('a death or a dimension change logs the lowering of a raised guard and ends
   assert.deepStrictEqual([guardState.up, guardState.pilot], [false, false])
   assert.deepStrictEqual(lines, ['[combat] guard down for a death or a dimension change'])
 })
+
+test('a 1.7.10 melee swing waits for the hand another action holds before it aims and strikes', async () => {
+  const z = zombie(1.5)
+  const did = []
+  let release
+  const bot = {
+    entity: { position: HERE, onGround: true },
+    entities: { [z.id]: z },
+    blockAt: blockAt(open),
+    pathfinder: { isMoving: () => false },
+    lookAt: async () => { did.push('look') },
+    attack () { did.push('attack') },
+    waitForTicks: async () => {}
+  }
+  const env = {
+    bot,
+    Vec3,
+    console: { log () {} },
+    fight: { lastAttackT: 0 },
+    LEGACY_HIT_MS: botConstant('LEGACY_HIT_MS'),
+    mobHurt: { wait: () => 0 },
+    inMeleeReach: () => true,
+    meleeAim: (e) => e.position,
+    knownCell: () => true,
+    perched: () => true,
+    noCritReason: rules.noCritReason,
+    JUMP_TICKS: rules.JUMP_TICKS,
+    JUMP_FALL_TICKS: rules.JUMP_FALL_TICKS,
+    guardState: { hand: new Promise((resolve) => { release = () => { env.guardState.hand = null; resolve() } }) }
+  }
+  const { meleeSwing } = loadBotFunctions(['meleeSwing'], env)
+  const swung = meleeSwing(z)
+  for (let i = 0; i < 20; i++) await new Promise(setImmediate)
+  assert.deepStrictEqual(did, [], 'aimed or struck while the hand was held')
+  release()
+  assert.strictEqual(await swung, true)
+  assert.deepStrictEqual(did, ['look', 'attack'])
+})

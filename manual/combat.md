@@ -13,7 +13,7 @@ You are the strategist, the combat reflex is the trigger finger. It runs every 3
 - Behaviour gate: sustained closing at pursuit pace. A zombie charges at about 2.3 blocks/s, and the trigger is 0.6.
 - Attribution: an attacker you perceive is named ("hit by zombie SW ~2"), any other reads as "something", and both are engaged past both gates. An arrow names the nearest skeleton you see within 15 that faces you, else it reads "hit by an arrow", with a bearing only if you saw the arrow.
 - It kites what it cannot afford to trade with (creepers always, and wither skeletons) and disengages on a tripwire scaled to the last hit taken.
-- Damage with no attribution at all freezes all action. A fall, lava, fire, or a sourceless hit with no hostile within 4 only raises a hurt event.
+- Damage with no attribution at all freezes all action. A fall, lava, or a sourceless hit with no hostile within 4 only raises a hurt event.
 - Perception may flow through the floor, urgency must flow through the path. Enemies a storey away with no eye line are `watched:`: narrated, never driving the legs or the pack count.
 - The legs have one owner. Your movement tools hold a soft lane the reflex's moves defer to, and `brace` holds a hard one that only a creeper, low health, lava, drowning, an unexplained hit or the bunker overrides. `follow` yields to combat mid-fight.
 - `stance` sets the reflex's posture. It flees a creeper within 16 (12 vanguard, 8 skirmish), and farther out shoots it given a bow and a clear line, else flees.

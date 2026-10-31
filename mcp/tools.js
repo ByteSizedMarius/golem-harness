@@ -49,7 +49,7 @@ const FACE = { type: 'enum', values: ['N', 'S', 'E', 'W'] }
 const THEN = { type: 'enum', values: ['blockat'] }
 const TUNNEL_DIR = { type: 'enum', values: ['n', 's', 'e', 'w', 'north', 'south', 'east', 'west'] }
 // The reflexes the bot runs, in the order it checks them.
-const REFLEXES = ['lava_watch', 'bunker', 'combat', 'unstuck', 'current_watch', 'narrator', 'trek', 'flee_to_player']
+const REFLEXES = ['lava_watch', 'bunker', 'fire', 'combat', 'unstuck', 'current_watch', 'narrator', 'trek', 'flee_to_player']
 
 const TOOLS = [
   // Seeing
@@ -69,7 +69,7 @@ const TOOLS = [
   { name: 'where', route: '/where', description: 'A player in sight: position, distance and bearing. By the nametag only (not sneaking, within 64): bearing and distance rounded to 5. Else the last-seen breadcrumb.', params: { name: required(PLAYER) } },
   { name: 'pulse', route: '/pulse', description: 'Change-gated narrator lines since a cursor.', params: { since: CURSOR }, lists: ['pulses'] },
   { name: 'chatlog', route: '/chatlog', description: 'Chat lines since a cursor, and the next cursor. A stale high cursor silently skips lines.', params: { since: CURSOR }, lists: ['messages'] },
-  { name: 'events', route: '/events', description: 'Interrupt events since a cursor: hurt, health_critical, low_food, death, hostile (a mob in sight within 16), nightfall, combat, refuel (a meal after a fight), lane (a reflex move deferred to you or a job), bunker, job ends, gather and build milestones, player and server, sleep and wake (in and out of a bed), and follow.', params: { since: CURSOR }, lists: ['events'] },
+  { name: 'events', route: '/events', description: 'Interrupt events since a cursor: hurt, health_critical, low_food, death, hostile (a mob in sight within 16), nightfall, combat, refuel (a meal after a fight), lane (a reflex move deferred to you or a job), bunker, job ends, gather and build milestones, player and server, sleep and wake (in and out of a bed), fire (on fire, a carried water bucket poured at your feet and picked up again, or what failed, not in the Nether), and follow.', params: { since: CURSOR }, lists: ['events'] },
 
   // Moving
   { name: 'goto', route: '/goto', body: true, combat: true, description: 'Walk to x,z (y optional: without it the surface, with it the floor nearest y), a waypoint, a player you can see or last saw, or the nearest block type in sight (stops adjacent). range N stops within N, 0 on the cell. It drops at most 3 (into water 4) and shuts doors it opened. It says why it gave up and what blocks the way. A plan ending over 2 (or range) off the y you asked for or dropping over 3 needs accept. preview only plans. ores lists veins seen within 4 of the way walked (name xN cell, unreached unless seen from dig reach). It names at most 8 and counts the rest in oresMore. At food 14 or less it walks without sprinting and stops to eat safe food when no hostile is near. meals lists what it ate, hungry why it ate no more.', params: { ...AT, waypoint: WAYPOINT, player: PLAYER, block: NAME, range: { type: 'int', min: 0, max: 32 }, preview: FLAG, accept: FLAG }, timeoutMs: LONGEST },

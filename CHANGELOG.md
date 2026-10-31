@@ -4,6 +4,16 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: the bot pours its water bucket when it burns
+
+A burning bot only took the damage, though a water bucket in its pockets puts the fire out. A new
+fire reflex pours the bucket at the feet of a burning body on the ground and picks the water up
+again, and a `fire` event says how it went. It stays off in the Nether, in water, in lava, in rain
+where the biome rains, in bed, while a bunker is built, during a sole claim on the hand, and while
+another reflex or a combat flee, cover or hold keeps the legs. A pour it could not pick up again, or
+one that left the body burning, rests the reflex for 10 s. A melee swing waits for the hand the pour
+holds, and the pour's water raises no world change and no current alarm.
+
 ## 2026-10-31: smelt picks its furnace and toss spans stacks
 
 `smelt` always took the nearest furnace in sight, so furnaces stacked two high needed a pillar, and

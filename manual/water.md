@@ -8,3 +8,4 @@
 - The pathfinder drops at most 3 blocks, into water at most 4, and a drop over 3 needs `accept`. A deep pool at the foot of a cliff is no way down.
 - Drops drift in rivers. Never chase a drop into water, and `collect` walks onto drops in water too. Fell trees inland and collect after each tree.
 - The current_watch reflex raises an alarm on flowing water you see lit or stand in, and drowning raises one on its own.
+- Carry a water bucket near lava. When you burn, the fire reflex pours it at your feet and picks the water up again (not in the Nether).

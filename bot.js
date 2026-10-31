@@ -132,7 +132,7 @@ createUnstuck(ctx)
 const { unstuckReflex } = ctx
 
 createWatchReflexes(ctx)
-const { currentWatchReflex, narratorReflex, trekReflex, lavaWatchReflex } = ctx
+const { currentWatchReflex, narratorReflex, trekReflex, lavaWatchReflex, fireReflex } = ctx
 
 createJobBoard(ctx)
 const { deaths } = ctx
@@ -243,9 +243,8 @@ function wireRuntime () {
   wirePathLog()
   wireUnstuckHeartbeat()
 }
-// Priority order: lava_watch, bunker, combat, unstuck, current_watch, narrator, trek, flee_to_player.
 function installReflexes () {
-  reflexes.push(lavaWatchReflex, bunkerReflex, combatReflex, unstuckReflex, currentWatchReflex, narratorReflex, trekReflex, fleeToPlayerReflex)
+  reflexes.push(lavaWatchReflex, bunkerReflex, fireReflex, combatReflex, unstuckReflex, currentWatchReflex, narratorReflex, trekReflex, fleeToPlayerReflex)
 }
 function installRoutes () {
   installFightGate(app)

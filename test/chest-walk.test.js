@@ -269,6 +269,7 @@ function openerIn (body) {
     noRunReason: rules.noRunReason,
     noCritReason: rules.noCritReason,
     mobHurt: { wait: () => 0 },
+    guardState: { hand: null },
     inMeleeReach: () => false,
     meleeAim: (e) => e.position.offset(0, 1.2, 0),
     knownCell: () => true,
