@@ -6,7 +6,7 @@ const { Vec3 } = require('vec3')
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
 const fs = require('node:fs')
-const { isDoor, panelAcross, doorCrossing, PLATE_WAIT_TICKS } = require('../lib/doors')
+const { isDoor, panelAcross, doorCrossing, partnerLeaf, PLATE_WAIT_TICKS } = require('../lib/doors')
 const { legLedger } = require('../lib/leg-ledger')
 const { entityInCell } = require('../lib/shelter')
 const { loadBotFunctions, reflexIn, botConstant } = require('./helpers')
@@ -24,7 +24,8 @@ const blocksX = (shapes) => shapes.some((s) => s[2] < 0.78 && s[5] > 0.22)
 // A look takes turnTicks ticks and a click toggles the door.
 // A plate puts that plate under the body. With lag, the server presses it and opens the door from the start,
 // and the client sees both at the end of tick lag. A click reaches the server and comes back at once.
-async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x', turnTicks = 1, refuse = false, plate, pressed = false, lag } = {}) {
+// With known, the walk plans through knownMoves over that knownCell.
+async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x', turnTicks = 1, refuse = false, plate, pressed = false, lag, known } = {}) {
   const at = (along, y, across = 0) => (axis === 'x' ? new Vec3(along, y, across) : new Vec3(across, y, along))
   const door = [at(2, 64), at(2, 65)]
   const plateAt = at(1, 64)
@@ -109,10 +110,17 @@ async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x'
     }
   })
 
-  const moves = new Movements(bot)
+  let moves = new Movements(bot)
   bot.registry.blocksArray.forEach((b) => { if (b.name.endsWith('_door') && !b.name.includes('iron')) moves.openable.add(b.id) })
   moves.canOpenDoors = true
   moves.canDig = false
+  if (known) {
+    const env = { bot, knownCell: known, shapeNear: () => null, ck: (x, y, z) => `${x},${y},${z}`, PLAN_KNOWN: new Map() }
+    moves = loadBotFunctions(['knownMoves'], env).knownMoves(moves)
+  }
+  // The walk shifts each node's toPlace as it acts on it.
+  const updates = []
+  bot.on('path_update', (r) => updates.push({ status: r.status, path: r.path.map((n) => ({ ...n, toPlace: n.toPlace.map((t) => ({ ...t })) })) }))
   bot.pathfinder.tickTimeout = bot.pathfinder.thinkTimeout
   bot.pathfinder.setMovements(moves)
   bot.pathfinder.setGoal(new goals.GoalBlock(goal.x, goal.y, goal.z))
@@ -143,6 +151,7 @@ async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x'
     bot,
     tick,
     reachDoor,
+    updates,
     writes,
     doorOpen,
     serverOpen: () => server.door,
@@ -327,6 +336,50 @@ test('the walk clicks a door on reaching it exactly when panelAcross puts its pa
   }
 })
 
+const doorNode = (r) => r.path.flatMap((n) => n.toPlace || []).find((t) => t.useOne)
+
+test('a walk through a door whose far side the bot knows plans a click on the door and clicks it once', async () => {
+  const w = await body({ known: () => true })
+  for (let i = 0; i < 20; i++) await w.tick()
+  const plan = w.updates.find(doorNode)
+  assert.deepStrictEqual(plan && { ...doorNode(plan) }, { x: 2, y: 64, z: 0, dx: 0, dy: 0, dz: 0, useOne: true })
+  assert.deepStrictEqual(w.writes, [false])
+  assert.strictEqual(w.doorOpen(), true)
+})
+
+test('a walk through a door whose floor the bot cannot see plans a click on the door and clicks it once', async () => {
+  const w = await body({ known: (p) => !(p.x === 2 && p.y === 63 && p.z === 0) })
+  const plan = w.bot.pathfinder.getPathTo(w.bot.pathfinder.movements, new goals.GoalBlock(4, 64, 0))
+  assert.deepStrictEqual({ status: plan.status, door: doorNode(plan) }, { status: 'success', door: { x: 2, y: 64, z: 0, dx: 0, dy: 0, dz: 0, useOne: true } })
+  for (let i = 0; i < 20; i++) await w.tick()
+  assert.deepStrictEqual(w.writes, [false])
+})
+
+test('planKnown reads the cell under the lower half of a door the bot knows as solid, and under any other block as unknown', () => {
+  const blocks = { '0,65,0': 'oak_door lower', '1,65,0': 'oak_door lower', '2,65,0': 'oak_trapdoor', '3,65,0': 'oak_fence_gate', '4,65,0': 'oak_door upper' }
+  const bot = {
+    blockAt: (p) => {
+      const [name, half] = (blocks[`${p.x},${p.y},${p.z}`] || 'air').split(' ')
+      return { name, getProperties: () => (half ? { half } : {}) }
+    }
+  }
+  const unseen = new Set(['1,65,0'])
+  const known = (p) => p.y >= 65 && !unseen.has(`${p.x},${p.y},${p.z}`)
+  const { planKnown } = loadBotFunctions(['planKnown'], { bot, knownCell: known, shapeNear: () => null })
+  const at = (x, y) => planKnown(new Vec3(x, y, 0))
+  assert.deepStrictEqual([at(0, 64), at(1, 64), at(2, 64), at(3, 64), at(4, 64)], ['solid', null, null, null, null])
+})
+
+test('the path log names the door of the first click a plan holds', () => {
+  const bot = new EventEmitter()
+  const lines = []
+  loadBotFunctions(['wirePathLog'], { bot, lastPathStatus: null, console: { log: (line) => lines.push(line) } }).wirePathLog()
+  const node = (x, toPlace = []) => ({ x, y: 64, z: 0, toPlace })
+  bot.emit('path_update', { status: 'success', path: [node(1), node(2, [{ x: 2, y: 64, z: 0, useOne: true }]), node(5, [{ x: 5, y: 64, z: 0, useOne: true }])] })
+  bot.emit('path_update', { status: 'noPath', path: [node(1, [{ x: 1, y: 63, z: 0 }])] })
+  assert.deepStrictEqual(lines, ['[path] update success, 3 nodes, door 2,64,0', '[path] update noPath, 1 nodes'])
+})
+
 test('the doorway drill waits on a plate as long as the pathfinder does', () => {
   const src = fs.readFileSync(require.resolve('mineflayer-pathfinder'), 'utf8')
   assert.strictEqual(Number(/^const PLATE_WAIT_TICKS = (\d+)$/m.exec(src)?.[1]), PLATE_WAIT_TICKS)
@@ -382,7 +435,7 @@ function drill ({ turnTicks = 1, plate, lag, onLook } = {}) {
   const env = {
     bot,
     shared: { mcData: { blocksByName: { oak_door: { id: 1, name: 'oak_door' } } } },
-    cellKnown: () => true,
+    planKnown: () => true,
     seenNow: () => true,
     routeEnd: () => null,
     walkOnce: async () => 'done',
@@ -392,6 +445,7 @@ function drill ({ turnTicks = 1, plate, lag, onLook } = {}) {
     isDoor,
     panelAcross,
     doorCrossing,
+    partnerLeaf,
     PLATE_WAIT_TICKS,
     console: { log () {} }
   }

@@ -13,6 +13,7 @@ const { createDescribe } = require('../lib/bot/describe')
 const { expireConfirmed } = require('../lib/shelter')
 const { STANCES } = require('../lib/bot/stances')
 const { SPRINT_FLOOR, sprintAllowed } = require('../lib/sprint')
+const { isDoor, panelAcross, doorCrossing, partnerLeaf, PLATE_WAIT_TICKS } = require('../lib/doors')
 const registry = require('prismarine-registry')('1.21.11')
 const Item = require('prismarine-item')(registry)
 const { loadBotFunctions, botConstant, botObject, startApp, fakeClock, combatReflexIn, claimRescue } = require('./helpers')
@@ -406,11 +407,11 @@ test('walkAttempt ends on the pathfinder event that settles the walk', async () 
   }
 })
 
-test('walkAttempt asks due on every 10th physics tick and ends hungry on the first yes', async () => {
+test('walkAttempt asks due on every 10th physics tick and ends with the first reason it gives', async () => {
   let ticks = 0
   const asked = []
   const bot = fakeWalker((b) => { for (let i = 0; i < 30; i++) { ticks++; b.emit('physicsTick') } })
-  const due = () => { asked.push(ticks); return asked.length === 2 }
+  const due = () => { asked.push(ticks); return asked.length === 2 ? 'hungry' : null }
   assert.strictEqual(await walkAttempt(bot, new goals.GoalBlock(5, 64, 5), { stallMs: 4500, thinkTimeout: 10000, due }), 'hungry')
   assert.deepStrictEqual(asked, [10, 20])
 })
@@ -441,7 +442,8 @@ const FAST = {
   clearTimeout: (h) => clearTimeout(h)
 }
 
-// A fake bot over flat stone up to y 63, with bot.js's walking functions loaded into env.
+// A fake bot over flat stone up to y 63, with bot.js's walking functions loaded into env. An over entry set to undefined
+// loads bot.js's own function.
 function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
   const env = {}
   const bot = fakeWalker((b, g) => answer(b, g, env))
@@ -484,6 +486,7 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     seenNow: over.cellKnown || (() => true),
     hasLegalMove: () => true,
     airPrecheck: () => ({ verdict: 'connected' }),
+    ironDoorAhead: () => null,
     doorwayCommit: async () => false,
     stopPath () { bot.pathfinder.setGoal(null) },
     // A plan straight onto the goal cell.
@@ -494,6 +497,7 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     zoneCrossed,
     ...over
   })
+  for (const [k, v] of Object.entries(over)) if (v === undefined) delete env[k]
   return { env, bot, ctx: loadBotFunctions(['walkRoute', 'stagedGoto', 'collectDrops', 'planKnown', 'planBlock'], env) }
 }
 
@@ -566,6 +570,14 @@ test('the /goto walk replies the reason it did not start', async () => {
     { arrived: false, kind: 'waypoint', target: { waypoint: 'home' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: null, reason: 'unknown', hint: null })
   assert.deepStrictEqual(await goto({ block: 'chset' }, { over: { resolveBlockIds: () => [] } }),
     { arrived: false, kind: 'block', target: { block: 'chset' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: null, reason: 'unknown', hint: null })
+})
+
+test('a walled /goto reply names the iron door ahead after the dig advice, and keeps the dig advice alone without one', async () => {
+  const walled = { airPrecheck: () => ({ verdict: 'walled' }), WALK_HINTS: { walled: 'reachable only by digging' } }
+  const plain = await goto({ x: 5, z: 5 }, { over: { ...walled, ironDoorAhead: () => null } })
+  assert.deepStrictEqual([plain.reason, plain.hint], ['walled', 'reachable only by digging'])
+  const iron = await goto({ x: 5, z: 5 }, { over: { ...walled, ironDoorAhead: () => ({ x: 3, y: 64, z: 0 }) } })
+  assert.deepStrictEqual([iron.reason, iron.hint], ['walled', 'reachable only by digging. the iron_door at 3,64,0 opens only by redstone: power it or pick another way'])
 })
 
 // A player entity the server tracks, which bot.players does not list.
@@ -1616,4 +1628,176 @@ test('a rescue that takes the hand mid-bite keeps it, and the goto ends stopped 
   assert.deepStrictEqual([r.arrived, r.reason, done], [false, 'stopped', ['bite']])
   assert.strictEqual(bot.heldItem, shovel)
   assert.deepStrictEqual(env.legs.takenSince(route.mark), { reflex: 'hurt', why: 'freeze after an unexplained hit' })
+})
+
+const OAK = { name: 'oak_door', x: 1, y: 64, z: -2, open: false }
+// The body swings between 0.5,64,0.5 and 1.5,64,-0.5, the second a block nearer the goal cell 1,64,-8.
+const swingOf = (n) => (n % 2 ? new Vec3(1.5, 64, -0.5) : new Vec3(0.5, 64, 0.5))
+
+// A goto from 0.5,64,0.5 on a fake clock that every 3.5 s runs during(n, rig), moves the body to at(n) and resets for reason,
+// or arrives once at(n) is null. doorBeside answers door, the drill drill() (calls in drills), or with drillEnv the real drill.
+async function loopGoto ({ q = { x: 1, z: -8 }, at = swingOf, reason = 'stuck', door = OAK, drill = () => null, drillEnv = null, during = () => {}, setup = () => {}, opts = {} } = {}) {
+  const clock = fakeClock()
+  const drills = []
+  const items = [stack('bread', 8)]
+  const combat = { name: 'combat', fairFill: () => ({}), _seenAt: new Map(), fightBusy: () => false }
+  const h = walkBot({
+    answer: update('success', [{ x: 1, y: 64, z: 0 }]),
+    setup: (bot) => {
+      Object.assign(bot, { food: 20, foodSaturation: 0, heldItem: null })
+      bot.entity.onGround = true
+      bot.pathfinder.isMoving = () => false
+      bot.inventory = { items: () => items }
+      bot.equip = async (item) => { bot.heldItem = item }
+      bot.consume = async () => fedBy(5)(bot, items, clock)
+      setup(bot)
+    },
+    over: {
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      walkAttempt: (b, g, o) => walkAttempt(b, g, { ...o, clock }),
+      routeDeadline: (o) => routeDeadline({ ...o, clock }),
+      Date: { now: clock.now },
+      doorBeside: () => door,
+      SPRINT_FLOOR,
+      sprintAllowed,
+      RISKY_FOODS: botConstant('RISKY_FOODS'),
+      FOOD_UPDATE_MS: botConstant('FOOD_UPDATE_MS'),
+      shared: { mcData: { foods: registry.foods } },
+      jobs: { list: () => [] },
+      guardState: { hand: null },
+      digLock: botConstant('digLock'),
+      reflexes: [combat],
+      gotoRoute: null,
+      livePath: [],
+      liveEntities: () => [],
+      mobClass: (e) => e.cls,
+      AGGRO_CONFIRMED: new Map(),
+      entityEngageable: () => true,
+      walksToBody: () => true,
+      doorwayCommit: drillEnv ? undefined : async () => { drills.push(clock.now()); return drill() },
+      ...drillEnv
+    }
+  })
+  let ticks = 0
+  let resets = 0
+  clock.setInterval(() => {
+    const { bot } = h
+    const goal = bot.pathfinder.goal
+    if (!goal) return
+    bot.emit('physicsTick')
+    if (++ticks % 70) return
+    during(++resets, h)
+    const next = at(resets)
+    if (!next) return arrive(bot, goal)
+    bot.entity.position = next
+    bot.emit('path_reset', reason)
+  }, 50)
+  const route = h.ctx.walkRoute()
+  const walking = h.ctx.stagedGoto(q, route, opts)
+  let end = false
+  walking.then(() => { end = true }, () => { end = true })
+  while (!end && clock.now() < 300000) {
+    await new Promise(setImmediate)
+    clock.advance(10)
+  }
+  assert.ok(end, 'no reply within 300 s')
+  const r = await walking
+  return { r: JSON.parse(JSON.stringify({ ...r, ...route.end() })), drills, resets, at: clock.now(), listeners: h.bot.listenerCount('path_reset') }
+}
+
+const LOOP_HINT = /^stuck at the oak_door at 1,64,-2: walked back and forth beside it for (\d+) s without getting nearer(.*)\. Open or close it with activate and walk again, or pick another way$/
+
+test('a goto the pathfinder swings back and forth beside a door drills it once, then ends at the door well inside its budget', async () => {
+  const { r, drills, at, listeners } = await loopGoto({ drill: () => ({ door: OAK, through: true }) })
+  assert.strictEqual(r.reason, 'door')
+  const [, secs, why] = LOOP_HINT.exec(r.hint) || []
+  assert.deepStrictEqual([why, drills.length, listeners], ['', 1, 0], r.hint)
+  assert.ok(at < 60000 && Number(secs) > 0 && Number(secs) * 1000 <= at, `${secs} s, ended at ${at} ms`)
+})
+
+test('a loop whose drill cannot cross the door ends at once, naming the door and why', async () => {
+  const stuck = { door: OAK, through: false, why: 'did not let me through from the south after 2 tries, its partner at 2,64,-2 too' }
+  const { r, drills } = await loopGoto({ drill: () => stuck })
+  assert.deepStrictEqual([r.reason, LOOP_HINT.exec(r.hint)?.[2], drills.length], ['door', `, and it ${stuck.why}`, 1])
+})
+
+test('a goto whose stuck resets bring it a block nearer each time, or that sees no door, never loops', async () => {
+  const nearer = await loopGoto({ at: (n) => (n <= 6 ? new Vec3(0.5, 64, 0.5 - 1.2 * n) : null) })
+  assert.deepStrictEqual([nearer.r.arrived, nearer.drills.length], [true, 0], 'nearer')
+  const doorless = await loopGoto({ door: null, at: (n) => (n <= 8 ? swingOf(n) : null) })
+  assert.deepStrictEqual([doorless.r.arrived, doorless.drills.length], [true, 0], 'no door')
+})
+
+test('a loop that spans a meal on the way still ends at the door', async () => {
+  const during = (n, { bot }) => { if (n === 2) bot.food = SPRINT_FLOOR }
+  const { r, drills } = await loopGoto({ during, opts: { eat: true }, drill: () => ({ door: OAK, through: false, why: 'stayed shut' }) })
+  assert.deepStrictEqual([r.reason, r.meals && r.meals.length, drills.length], ['door', 1, 1])
+})
+
+test('a pilot stop mid-loop ends the goto stopped, without the drill', async () => {
+  const during = (n, { env }) => { if (n === 2) env.legs.take(null) }
+  const { r, drills } = await loopGoto({ during, drill: () => ({ door: OAK, through: true }) })
+  assert.deepStrictEqual([r.reason, drills.length], ['stopped', 0])
+})
+
+test('a loop during a hop toward a target out of sight ends at the door like one on the last leg', async () => {
+  const unloaded = (bot) => {
+    const flat = bot.blockAt
+    bot.blockAt = (p) => (p.x > 40 ? null : flat(p))
+  }
+  const { r, drills } = await loopGoto({ q: { x: 100, z: 0 }, setup: unloaded, drill: () => ({ door: OAK, through: true }) })
+  assert.deepStrictEqual([r.reason, LOOP_HINT.test(r.hint), drills.length], ['door', true, 1], r.hint)
+})
+
+test('path resets for a block update beside a door never trip the loop check', async () => {
+  const { r, drills } = await loopGoto({ reason: 'block_updated', at: (n) => (n <= 8 ? swingOf(n) : null), drill: () => ({ door: OAK, through: true }) })
+  assert.deepStrictEqual([r.arrived, drills.length], [true, 0])
+})
+
+test('the doorway drill a loop trips walks to its near cell, crosses and the goto arrives', async () => {
+  // The oak door OAK names, closed, facing south in open ground.
+  const door = { open: false }
+  const clicks = []
+  const nudges = []
+  let body = null
+  const half = (p) => ({ name: 'oak_door', boundingBox: 'block', shapes: [], position: p, getProperties: () => ({ facing: 'south', half: p.y === 64 ? 'lower' : 'upper', hinge: 'left', open: door.open }) })
+  const setup = (bot) => {
+    body = bot
+    const flat = bot.blockAt
+    bot.blockAt = (p) => (p.x === 1 && p.z === -2 && (p.y === 64 || p.y === 65) ? half(new Vec3(p.x, p.y, p.z)) : flat(p))
+    bot.findBlocks = () => [new Vec3(1, 64, -2), new Vec3(1, 65, -2)]
+    bot.lookAt = async () => {}
+    bot.waitForTicks = async () => {}
+    bot.activateBlock = async (b) => { clicks.push(b.position.toString()); door.open = !door.open }
+  }
+  const drillEnv = {
+    shared: { mcData: { foods: registry.foods, blocksByName: { oak_door: { id: 1, name: 'oak_door' } } } },
+    isDoor,
+    panelAcross,
+    doorCrossing,
+    partnerLeaf,
+    PLATE_WAIT_TICKS,
+    PENDING_DOORS: [],
+    console: { log () {} },
+    nudgeInto: async (cell) => {
+      nudges.push(cell.toString())
+      body.entity.position = cell.offset(0.5, 0, 0.5)
+      return true
+    }
+  }
+  // The trip comes at the 4th reset, the drill's walk arrives at the 5th and the goto at the 6th.
+  const { r } = await loopGoto({ at: (n) => (n <= 4 ? swingOf(n) : null), setup, drillEnv })
+  assert.deepStrictEqual([r.arrived, clicks, nudges], [true, ['(1, 64, -2)'], ['(1, 64, -2)', '(1, 64, -3)']], r.hint)
+})
+
+const OAK_ON = { name: 'oak_door', x: 1, y: 64, z: -12, open: false }
+
+test('a loop at a second door after progress past the first runs the drill again and names the second door', async () => {
+  // A trip at the first door, then the body swings beside the second, 10 blocks on.
+  const at = (n) => (n <= 4 ? swingOf(n) : n % 2 ? new Vec3(0.5, 64, -9.5) : new Vec3(1.5, 64, -10.5))
+  const during = (n, { env }) => { if (n === 5) env.doorBeside = () => OAK_ON }
+  const { r, drills } = await loopGoto({ q: { x: 1, z: -20 }, at, during, drill: () => ({ door: OAK, through: true }) })
+  assert.deepStrictEqual([r.reason, drills.length], ['door', 2], r.hint)
+  assert.match(r.hint, /^stuck at the oak_door at 1,64,-12: /)
 })

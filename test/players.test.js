@@ -9,7 +9,7 @@ const { crumbCentre, nametagGoal, routeDeadline } = require('../lib/walk')
 const { PRESENCE_GAP_MS, PRESENCE_FORGET_MS, PRESENCE_MAX, playerNamed, playersAround, presenceUpdate, presenceText } = require('../lib/players')
 const { QUIET_MS, LONG_QUIET_MS, legLedger } = require('../lib/leg-ledger')
 const { countVerbs } = require('../lib/verbs')
-const { isDoor, panelAcross, doorCrossing } = require('../lib/doors')
+const { isDoor, panelAcross, doorCrossing, partnerLeaf } = require('../lib/doors')
 const { expireConfirmed } = require('../lib/shelter')
 const { createReflexes, bindReflexes } = require('../lib/bot/reflexes')
 const { loadBotFunctions, combatReflexIn, botConstant } = require('./helpers')
@@ -319,9 +319,11 @@ function followHarness ({ position = new Vec3(10.5, 64, 0.5), gate = { seen: tru
     swimUpUntil: 0,
     shared: { mcData: { blocksByName: { oak_door: { id: 5, name: 'oak_door' } } } },
     cellKnown: () => true,
+    planKnown: () => true,
     isDoor,
     panelAcross,
     doorCrossing,
+    partnerLeaf,
     follow: { followState: null },
     FOLLOW_STILL_MS: botConstant('FOLLOW_STILL_MS'),
     FOLLOW_STILL_SPAN: botConstant('FOLLOW_STILL_SPAN'),

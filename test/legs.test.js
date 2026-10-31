@@ -6,7 +6,7 @@ const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const { QUIET_MS, LONG_QUIET_MS, legLedger, takenText, laneBlocks } = require('../lib/leg-ledger')
 const { routeDeadline } = require('../lib/walk')
-const { isDoor, doorCrossing } = require('../lib/doors')
+const { isDoor, doorCrossing, panelAcross } = require('../lib/doors')
 const { entityInCell } = require('../lib/shelter')
 const Block = require('prismarine-block')('1.21.11')
 const { SPRINT_FLOOR } = require('../lib/sprint')
@@ -296,10 +296,13 @@ test('a melee fight ends the running job but leaves a walk its legs, and a chase
 })
 
 const LADDER_ID = 65
+const IRON_DOOR_ID = 66
 
 // wayHint and insideBlock for a body at pos over stone up to y 63 plus cells ('x,y,z' -> [name, properties]). lit says
-// which cells the bot sees lit, and ladders the ladder cells it sees, or with ladder true the one at -2,64,1.
+// which cells the bot sees lit, and ladders the ladder cells it sees, or with ladder true the one at -2,64,1. findVisible
+// finds the iron doors in lit cells.
 function senses ({ pos = new Vec3(0.5, 64, 0.5), cells = {}, lit = () => true, ladder = false, ladders = ladder ? [new Vec3(-2, 64, 1)] : [] } = {}) {
+  const irons = Object.keys(cells).filter((k) => cells[k][0] === 'iron_door').map((k) => new Vec3(...k.split(',').map(Number))).filter(lit)
   const bot = {
     entity: { position: pos, width: 0.6, height: 1.8 },
     blockAt (p) {
@@ -315,14 +318,15 @@ function senses ({ pos = new Vec3(0.5, 64, 0.5), cells = {}, lit = () => true, l
     Vec3,
     isDoor,
     doorCrossing,
+    panelAcross,
     entityInCell,
     cellKnown: lit,
     knownCell: lit,
     seenNow: (p) => ctx.bodyTouches(p) || lit(p),
-    resolveBlockIds: (name) => (name === 'ladder' ? [LADDER_ID] : []),
+    resolveBlockIds: (name) => ({ ladder: [LADDER_ID], iron_door: [IRON_DOOR_ID] })[name] || [],
     // Nearest first, as findBlocks hands them out.
-    findVisible: (ids, maxDist, count) => (ids.includes(LADDER_ID) && maxDist === 16 ? ladders : [])
-      .map((p) => ({ pos: p, dist: pos.distanceTo(p) })).sort((a, b) => a.dist - b.dist).slice(0, count)
+    findVisible: (ids, maxDist, count) => [...(ids.includes(LADDER_ID) && maxDist === 16 ? ladders : []), ...(ids.includes(IRON_DOOR_ID) ? irons : [])]
+      .map((p) => ({ pos: p, dist: pos.distanceTo(p) })).filter((v) => v.dist <= maxDist).sort((a, b) => a.dist - b.dist).slice(0, count)
   })
   return { bot, wayHint: ctx.wayHint, insideBlock: ctx.insideBlock, lit, touches: ctx.bodyTouches }
 }
@@ -399,6 +403,34 @@ test('a ladder hint names no ladder below the feet', () => {
   const up = { cell: new Vec3(10, 70, 0) }
   assert.strictEqual(senses({ ladders: shaft }).wayHint(up), null)
   assert.strictEqual(senses({ ladders: [...shaft, new Vec3(-3, 64, 2)] }).wayHint(up), 'ladder at -3,64,2: walk to it and climb it', 'control: one at the feet')
+})
+
+const ironDoor = (x, open = false, facing = 'west') => ({
+  [`${x},64,0`]: ['iron_door', { open, half: 'lower', facing, hinge: 'left' }],
+  [`${x},65,0`]: ['iron_door', { open, half: 'upper', facing, hinge: 'left' }]
+})
+
+test('a walk that found no way names a closed iron door in sight between the feet and the goal, which only redstone opens', () => {
+  assert.strictEqual(senses({ cells: ironDoor(3) }).wayHint(EAST), 'the iron_door at 3,64,0 opens only by redstone: power it or pick another way')
+  assert.strictEqual(senses({ cells: ironDoor(-3) }).wayHint(EAST), null, 'behind the feet')
+  assert.strictEqual(senses({ cells: ironDoor(3, true) }).wayHint(EAST), null, 'open')
+  const dark = senses({ cells: ironDoor(3), lit: (p) => p.x !== 3 }).wayHint(EAST)
+  assert.doesNotMatch(dark || '', /iron_door/, 'in the dark')
+})
+
+test('an iron door hint names the lower half, never the upper half alone in sight', () => {
+  const upperOnly = senses({ cells: ironDoor(3), lit: (p) => p.y !== 64 }).wayHint(EAST)
+  assert.doesNotMatch(upperOnly || '', /iron_door/)
+})
+
+test('an iron door hint names a closed door only when its panel lies across the way toward the goal', () => {
+  const named = 'the iron_door at 3,64,0 opens only by redstone: power it or pick another way'
+  assert.strictEqual(senses({ cells: ironDoor(3, false, 'west') }).wayHint(EAST), named, 'a panel across the way')
+  assert.strictEqual(senses({ cells: ironDoor(3, false, 'north') }).wayHint(EAST), null, 'a panel along the way')
+  const south = { cell: new Vec3(0, 64, 10) }
+  const at = (z, facing) => Object.fromEntries(Object.entries(ironDoor(0, false, facing)).map(([k, v]) => [k.replace(/^0,(\d+),0$/, `0,$1,${z}`), v]))
+  assert.strictEqual(senses({ cells: at(3, 'north') }).wayHint(south), 'the iron_door at 0,64,3 opens only by redstone: power it or pick another way', 'a goal to the south, panel across')
+  assert.strictEqual(senses({ cells: at(3, 'west') }).wayHint(south), null, 'a goal to the south, panel along')
 })
 
 test('the way hints come door first, then the ladder, then the dark', () => {

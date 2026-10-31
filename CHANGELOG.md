@@ -4,6 +4,21 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: the bot walks through double doors and ends a walk that loops at one
+
+A goto went back and forth beside a closed oak double door for 91 s without a click, until the pilot
+stopped it. A walk now counts the pathfinder's stuck resets beside a door it sees, and three that
+bring it no nearer the target run the doorway drill. A second trip, or a drill that cannot cross,
+ends the walk with reason `door` and a hint naming the door, the seconds spent and the partner leaf.
+The drill finds a door's partner leaf from the hinge of its upper half, takes an open leaf without a
+click, else clicks the nearer leaf with the partner as the fallback, never clicks an iron leaf, and
+leaves a tried leaf open until the drill ends. Goto planning reads the block under the lower half of
+a door the bot knows as solid, since a door stands only on a solid top, so a door under a lintel no
+longer leaves every walk through it without a path. A walk that finds no way past a closed iron door
+in sight between the bot and the target, its panel across the way, now names that door and says it
+opens only by redstone, in place of the generic no-path advice and after the dig advice of `walled`.
+The path log names the first door a plan clicks.
+
 ## 2026-10-31: goto makes out shapes in the dark, and lava shows by its glow
 
 In a lake at night every goto failed with `no-path` or `unseen-way` while the bot sank to oxygen 8,

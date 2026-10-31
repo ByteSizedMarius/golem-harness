@@ -3,7 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
-const { isDoor, doorStep, panelAcross, doorCrossing } = require('../lib/doors')
+const { isDoor, doorStep, panelAcross, doorCrossing, partnerLeaf, PLATE_WAIT_TICKS } = require('../lib/doors')
 const { LEGACY_DOOR_TOGGLE_MS } = require('../lib/bot/legacy-1710')
 const { loadBotFunctions, fakeClock } = require('./helpers')
 
@@ -11,7 +11,7 @@ const AIR = { name: 'air', boundingBox: 'empty', shapes: [], light: 15, skyLight
 const STONE = { name: 'stone', boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 1]] }
 const ck = (x, y, z) => x + ',' + y + ',' + z
 
-const door = (name, half, open = false) => ({ name, boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 0.1875]], getProperties: () => ({ half, open }) })
+const door = (name, half, open = false) => ({ name, boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 0.1875]], getProperties: () => ({ facing: 'north', half, open }) })
 
 // Flat stone up to y 63, plus the blocks in extra ('x,y,z' -> block), each with its position.
 function world (extra = {}) {
@@ -249,13 +249,14 @@ test('the doorway drill picks no door the bot cannot see now, a remembered one i
     env.bot.blockAt = world({ '2,64,6': door('oak_door', 'lower'), '2,65,6': door('oak_door', 'upper') })
     let walks = 0
     Object.assign(env, {
-      cellKnown: () => true,
+      planKnown: () => true,
       seenNow: () => seen,
       routeEnd: () => null,
       walkOnce: async () => { walks++; return 'changed' },
       goals: require('mineflayer-pathfinder').goals,
       panelAcross,
       doorCrossing,
+      partnerLeaf,
       console: { log () {} }
     })
     const { doorwayCommit } = loadBotFunctions(['doorwayCommit'], env)
@@ -328,7 +329,7 @@ function farmDoor (feet, state = { facing: 'west', hinge: 'left', open: true }) 
   const env = {
     bot,
     shared: { mcData: { blocksByName: { oak_door: { id: 1, name: 'oak_door' } } } },
-    cellKnown: () => true,
+    planKnown: () => true,
     seenNow: () => true,
     routeEnd: () => null,
     walkOnce: async (g) => { walks.push([g.x, g.y, g.z]); bot.entity.position = new Vec3(g.x + 0.5, g.y, g.z + 0.5); return 'done' },
@@ -338,10 +339,19 @@ function farmDoor (feet, state = { facing: 'west', hinge: 'left', open: true }) 
     isDoor,
     panelAcross,
     doorCrossing,
+    partnerLeaf,
     console: { log: (line) => lines.push(line) }
   }
   return { env, lines, walks, nudges, activated, ...loadBotFunctions(['doorwayCommit'], env) }
 }
+
+test('the drill reads the cells beside a door by planKnown, so a dark side it makes out by shape counts as open', async () => {
+  // The door faces south in the wall, across a way that runs along x.
+  const { env, walks, doorwayCommit } = farmDoor(new Vec3(-305.5, 63, 81.5), { facing: 'south', hinge: 'left', open: false })
+  env.planKnown = (p) => (p.x === -308 ? true : 'air')
+  await doorwayCommit({})
+  assert.deepStrictEqual(walks[0], [-307, 63, 81])
+})
 
 test('the drill crosses the live farm door along x from the side the bot stands on, never into the wall', async () => {
   for (const [feet, near, far] of [
@@ -369,4 +379,170 @@ test('a closed door is opened from the near side before the body walks in', asyn
   env.nudgeInto = async (cell) => { nudges.push([cell.x, activated.length]); return true }
   assert.deepStrictEqual(JSON.parse(JSON.stringify(await doorwayCommit({}))), { door: { name: 'oak_door', x: -308, y: 63, z: 81 }, through: true })
   assert.deepStrictEqual(nudges, [[-308, 1], [-309, 1]])
+})
+
+const Block = require('prismarine-block')(require('prismarine-registry')('1.21.11'))
+const STEP = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] }
+
+test('a door\'s partner leaf sits on the side away from where its open panel swings, the other side next', () => {
+  for (const facing of Object.keys(STEP)) {
+    for (const hinge of ['left', 'right']) {
+      const [[dx, dz], other] = partnerLeaf({ facing, hinge })
+      assert.deepStrictEqual([other[0] + dx, other[1] + dz], [0, 0], `${facing} ${hinge}: the other side`)
+      const [panel] = Block.fromProperties('oak_door', { facing, half: 'lower', hinge, open: 'true', powered: 'false' }, 0).shapes
+      // The open panel hugs the cell edge on the hinge side.
+      const [lo, hi] = dx ? [panel[0], panel[3]] : [panel[2], panel[5]]
+      const toward = dx || dz
+      assert.ok(toward > 0 ? hi < 0.5 : lo > 0.5, `${facing} ${hinge}: panel ${panel} faces away from the partner at ${dx},${dz}`)
+    }
+  }
+})
+
+test('a door\'s partner leaf follows the upper half\'s hinge over the lower half\'s', () => {
+  assert.deepStrictEqual(partnerLeaf({ facing: 'west', hinge: 'right' }, 'left'), partnerLeaf({ facing: 'west', hinge: 'left' }))
+  assert.notDeepStrictEqual(partnerLeaf({ facing: 'west', hinge: 'left' }), partnerLeaf({ facing: 'west', hinge: 'right' }), 'control')
+})
+
+test('a fence gate\'s partner is looked for on both sides along the fence', () => {
+  assert.deepStrictEqual(partnerLeaf({ facing: 'north', open: false }), [[1, 0], [-1, 0]])
+  assert.deepStrictEqual(partnerLeaf({ facing: 'east', open: false }), [[0, 1], [0, -1]])
+})
+
+const LEAF_A = '(-308, 63, 81)'
+const LEAF_B = '(-308, 63, 80)'
+const DOOR_A = { name: 'oak_door', x: -308, y: 63, z: 81 }
+const DOOR_B = { name: 'oak_door', x: -308, y: 63, z: 80 }
+
+// The farm door a at -308,63,81 (hinge left) and its partner b at -308,63,80 (hinge right), facing west, as { name, open,
+// blocked, seen }. plate puts an oak plate on a's near cell, and onTick runs on each tick the drill waits.
+function farmPair (feet, { a = {}, b = {}, plate = false, onTick = () => {} } = {}) {
+  const leaves = {
+    81: { name: 'oak_door', hinge: 'left', open: false, blocked: false, seen: true, ...a },
+    80: { name: 'oak_door', hinge: 'right', open: false, blocked: false, seen: true, ...b }
+  }
+  const half = (leaf, half) => ({ name: leaf.name, boundingBox: 'block', getProperties: () => ({ facing: 'west', half, hinge: leaf.hinge, open: leaf.open }) })
+  const extra = {}
+  for (const z of [80, 81]) {
+    extra[ck(-308, 63, z)] = half(leaves[z], 'lower')
+    extra[ck(-308, 64, z)] = half(leaves[z], 'upper')
+  }
+  for (const z of [77, 78, 79, 82, 83, 84]) for (const y of [63, 64]) extra[ck(-308, y, z)] = COBBLE
+  if (plate) extra[ck(-307, 63, 81)] = { name: 'oak_pressure_plate', boundingBox: 'empty', getProperties: () => ({ powered: false }) }
+  const leafAt = (p) => (p.x === -308 && p.y <= 64 ? leaves[p.z] : undefined)
+  const across = (leaf) => panelAcross(leaf.name, { facing: 'west', hinge: leaf.hinge, open: leaf.open }, 'x')
+  const walks = []
+  const nudges = []
+  const activated = []
+  const PENDING_DOORS = []
+  const bot = {
+    entity: { position: feet },
+    blockAt: (p) => ({ ...(extra[ck(p.x, p.y, p.z)] || (p.y <= 62 ? STONE : AIR)), position: new Vec3(p.x, p.y, p.z) }),
+    findBlocks: () => [80, 81].flatMap((z) => [new Vec3(-308, 63, z), new Vec3(-308, 64, z)]),
+    // The manners wrap's bookkeeping: an opened door is remembered, a closed one forgotten.
+    activateBlock: async (block) => {
+      const key = block.position.toString()
+      const leaf = leafAt(block.position)
+      activated.push(key)
+      if (leaf.name !== 'iron_door') leaf.open = !leaf.open
+      const i = PENDING_DOORS.findIndex((d) => d.key === key)
+      if (leaf.open && i < 0) PENDING_DOORS.push({ key, pos: block.position.clone(), t: 0, warned: false })
+      if (!leaf.open && i >= 0) PENDING_DOORS.splice(i, 1)
+    },
+    waitForTicks: async (n) => { for (let i = 0; i < n; i++) onTick(leaves) },
+    lookAt: async () => {},
+    pathfinder: { goal: null }
+  }
+  const moveTo = (c) => { bot.entity.position = new Vec3(c.x + 0.5, c.y, c.z + 0.5) }
+  const env = {
+    bot,
+    shared: { mcData: { blocksByName: { oak_door: { id: 1, name: 'oak_door' }, iron_door: { id: 2, name: 'iron_door' } } } },
+    planKnown: () => true,
+    seenNow: (p) => leafAt(p)?.seen !== false,
+    routeEnd: () => null,
+    walkOnce: async (g) => { walks.push([g.x, g.y, g.z]); moveTo(g); return 'done' },
+    nudgeInto: async (cell) => {
+      nudges.push(cell.toString())
+      const leaf = leafAt(cell)
+      if (leaf && (leaf.blocked || across(leaf))) return false
+      moveTo(cell)
+      return true
+    },
+    stopPath () {},
+    goals: require('mineflayer-pathfinder').goals,
+    isDoor,
+    panelAcross,
+    doorCrossing,
+    partnerLeaf,
+    PLATE_WAIT_TICKS,
+    PENDING_DOORS,
+    console: { log () {} }
+  }
+  const run = async () => JSON.parse(JSON.stringify(await loadBotFunctions(['doorwayCommit'], env).doorwayCommit({})))
+  return { env, run, walks, nudges, activated, leaves, PENDING_DOORS }
+}
+
+// East of the wall on leaf a's near cell.
+const EAST_OF_A = new Vec3(-306.5, 63, 81.5)
+
+test('a closed double door gets one click, on the nearer leaf, and the body walks through it', async () => {
+  const p = farmPair(EAST_OF_A)
+  assert.deepStrictEqual(await p.run(), { door: DOOR_A, through: true })
+  assert.deepStrictEqual([p.activated, p.nudges], [[LEAF_A], [LEAF_A, '(-309, 63, 81)']])
+})
+
+test('a double door with one leaf open is walked through that leaf without a click, even with the closed leaf nearer', async () => {
+  const p = farmPair(EAST_OF_A, { b: { open: true } })
+  assert.deepStrictEqual(await p.run(), { door: DOOR_B, through: true })
+  assert.deepStrictEqual([p.activated, p.walks, p.nudges], [[], [[-307, 63, 80]], [LEAF_B, '(-309, 63, 80)']])
+})
+
+test('a leaf that does not let the body through falls back to its partner, and both failing names both', async () => {
+  const fallback = farmPair(EAST_OF_A, { a: { blocked: true } })
+  assert.deepStrictEqual(await fallback.run(), { door: DOOR_B, through: true })
+  assert.strictEqual(fallback.activated.filter((k) => k === LEAF_B).length, 1, 'one click on the partner')
+  const neither = farmPair(EAST_OF_A, { a: { blocked: true }, b: { blocked: true } })
+  assert.deepStrictEqual(await neither.run(), { door: DOOR_A, through: false, why: 'did not let me through from the east after 2 tries, its partner at -308,63,80 too' })
+})
+
+test('a plate that opens the other leaf during its wait sends the body through that leaf without a click', async () => {
+  let ticks = 0
+  const onTick = (leaves) => { if (++ticks === 3) leaves[80].open = true }
+  const p = farmPair(EAST_OF_A, { plate: true, onTick })
+  assert.deepStrictEqual(await p.run(), { door: DOOR_B, through: true })
+  assert.deepStrictEqual([p.activated, p.walks], [[], [[-307, 63, 80]]])
+  assert.ok(ticks >= 3, 'control: the drill waited on the plate')
+})
+
+test('the drill never clicks an iron leaf: an iron pair opens only by redstone, and a mixed pair is crossed by its wooden leaf', async () => {
+  const iron = farmPair(EAST_OF_A, { a: { name: 'iron_door' }, b: { name: 'iron_door' } })
+  assert.deepStrictEqual(await iron.run(), { door: { ...DOOR_A, name: 'iron_door' }, through: false, why: 'opens only by redstone' })
+  assert.deepStrictEqual([iron.activated, iron.walks], [[], []])
+  const mixed = farmPair(EAST_OF_A, { a: { name: 'iron_door' } })
+  assert.deepStrictEqual(await mixed.run(), { door: DOOR_B, through: true })
+  assert.deepStrictEqual(mixed.activated, [LEAF_B])
+  const open = farmPair(EAST_OF_A, { a: { name: 'iron_door', open: true }, b: { name: 'iron_door' } })
+  assert.deepStrictEqual(await open.run(), { door: { ...DOOR_A, name: 'iron_door' }, through: true })
+  assert.deepStrictEqual(open.activated, [], 'an open iron leaf is walked through')
+})
+
+test('a partner leaf the bot makes out only by its shape is neither tried nor named', async () => {
+  const p = farmPair(EAST_OF_A, { a: { blocked: true }, b: { seen: false } })
+  assert.deepStrictEqual(await p.run(), { door: DOOR_A, through: false, why: 'did not let me through from the east after 2 tries' })
+  assert.ok(!p.nudges.includes(LEAF_B) && !p.activated.includes(LEAF_B), 'the partner untouched')
+})
+
+test('a leaf tried but not crossed stays open until its partner is crossed, then closes', async () => {
+  // Out of the doorway west of the wall, 3 blocks from leaf a.
+  const away = new Vec3(-310.5, 63, 80.5)
+  const steps = []
+  const p = farmPair(EAST_OF_A, { a: { blocked: true } })
+  const nudge = p.env.nudgeInto
+  p.env.nudgeInto = async (cell) => {
+    const a = p.PENDING_DOORS.find((d) => d.key === LEAF_A)
+    if (a && cell.z === 80) steps.push(doorStep(a, away, 10000))
+    return nudge(cell)
+  }
+  assert.deepStrictEqual(await p.run(), { door: DOOR_B, through: true })
+  assert.deepStrictEqual(steps, ['wait', 'wait'], 'held while the body crosses the partner')
+  assert.strictEqual(doorStep(p.PENDING_DOORS.find((d) => d.key === LEAF_A), away, 10000), 'close')
 })

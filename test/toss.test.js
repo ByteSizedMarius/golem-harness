@@ -53,7 +53,7 @@ async function tossingBody (t, stacks, cells = {}, at = START) {
 
 // knownMoves over the cells known(p) holds, with no cell made out by its shape alone.
 function knowing (body, known) {
-  const { knownMoves } = loadBotFunctions(['knownMoves'], { ck, knownCell: known, shapeNear: () => null, PLAN_KNOWN: new Map() })
+  const { knownMoves } = loadBotFunctions(['knownMoves'], { bot: body.bot, ck, knownCell: known, shapeNear: () => null, PLAN_KNOWN: new Map() })
   body.moves = knownMoves(body.moves)
 }
 
