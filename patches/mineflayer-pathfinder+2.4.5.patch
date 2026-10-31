@@ -288,7 +288,7 @@ index b38bd30..10ed8a9 100644
    goals: require('./lib/goals')
  }
 diff --git a/node_modules/mineflayer-pathfinder/lib/movements.js b/node_modules/mineflayer-pathfinder/lib/movements.js
-index a7e3505..3a53536 100644
+index a7e3505..690866b 100644
 --- a/node_modules/mineflayer-pathfinder/lib/movements.js
 +++ b/node_modules/mineflayer-pathfinder/lib/movements.js
 @@ -1,6 +1,8 @@
@@ -312,7 +312,7 @@ index a7e3505..3a53536 100644
      return cost
    }
  
-+  // LOCAL PATCH (Golem 10-31): the height a jump from node starts at, the feet for a body afloat over water.
++  // LOCAL PATCH (Golem 10-31): a body afloat over water jumps from its feet, not from the block under it.
 +  jumpBase (node) {
 +    const block0 = this.getBlock(node, 0, -1, 0)
 +    return block0.liquid && this.getBlock(node, 0, 0, 0).liquid ? node.y : block0.height

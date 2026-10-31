@@ -26,7 +26,7 @@ const blocksX = (shapes) => shapes.some((s) => s[2] < 0.78 && s[5] > 0.22)
 // A plate puts that plate under the body. With lag, the server presses it and opens the door from the start,
 // and the client sees both at the end of tick lag. A click reaches the server and comes back at once.
 // With known, the walk plans through knownMoves over that knownCell.
-// A partner ({ hinge, open }) stands a second leaf with the same facing at across 1, its clicks kept apart.
+// A partner ({ hinge, open }) stands a second leaf with the same facing at across 1.
 async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x', turnTicks = 1, refuse = false, plate, pressed = false, lag, known, partner } = {}) {
   const at = (along, y, across = 0) => (axis === 'x' ? new Vec3(along, y, across) : new Vec3(across, y, along))
   const door = [at(2, 64), at(2, 65)]
