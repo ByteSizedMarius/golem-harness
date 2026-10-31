@@ -25,7 +25,7 @@ function landsAfter (d) {
   }
 }
 
-// Runs route for a body at (0, 64, 0) in stone, each pick breaking after its uses digs, and returns the result with the cells dug, the mine event texts and the feet cell it ends in.
+// Runs route for a body with its feet at at, by default (0, 64, 0), in stone, each pick breaking after its uses digs, and returns the result with the cells dug, the mine event texts and the feet cell it ends in.
 // The server's update of the held slot follows each dig after lag ms.
 // With legacy the server answers each dig after 2 ms, and resends a block dug without a pick that has uses left after 30 ms.
 // canStepOutTo is the bot's own over a world the body knows and sees in full.
@@ -36,7 +36,7 @@ function landsAfter (d) {
 // With flight, gravel and sand over an open cell start falling 2 ticks after the cell opens, as a falling_block that lands
 // flight(cells it falls) ticks later, under counts the steps into a cell something falls into, and the tread fill sets a
 // gravel block falling from the cell fillDrop names. The blocks landOnStep names land as the next step starts.
-async function watchedDig (route, query, { open = () => false, blocks = {}, picks = [{ name: 'iron_pickaxe' }], seen = () => true, lag = 0, legacy = false, cancelOn = null, busyOn = null, slow = false, flight = null, fillDrop = null, landOnStep = {}, hung = [] } = {}) {
+async function watchedDig (route, query, { open = () => false, blocks = {}, picks = [{ name: 'iron_pickaxe' }], seen = () => true, lag = 0, legacy = false, cancelOn = null, busyOn = null, slow = false, flight = null, fillDrop = null, landOnStep = {}, hung = [], at = new Vec3(0.5, 64, 0.5) } = {}) {
   const key = (p) => `${p.x},${p.y},${p.z}`
   const cell = (k) => new Vec3(...k.split(',').map(Number))
   const opened = new Set(['0,64,0', '0,65,0'])
@@ -98,7 +98,7 @@ async function watchedDig (route, query, { open = () => false, blocks = {}, pick
   const inventory = Object.assign(new EventEmitter(), { emptySlotCount: () => 30, items: () => items })
   Object.defineProperty(inventory, 'slots', { get: () => { const s = new Array(46).fill(null); for (const it of items) s[it.slot] = it; return s } })
   const bot = Object.assign(new EventEmitter(), {
-    entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 },
+    entity: { position: at.clone(), yaw: 0 },
     heldItem: null,
     inventory,
     async equip (item) { bot.heldItem = item },
@@ -147,6 +147,7 @@ async function watchedDig (route, query, { open = () => false, blocks = {}, pick
   await awaitRoute(route, query, {
     bot,
     require,
+    Vec3,
     NEIGHBOURS,
     PICK_TIER: botConstant('PICK_TIER'),
     LEGACY_1710: legacy,
@@ -407,11 +408,40 @@ test('dig_stair names the buried self-rescue whole when it takes the dig lock mi
   assert.strictEqual(r.stopped, 'busy: the buried self-rescue is running, nothing dug')
 })
 
+const STONE_BELOW_64 = (p) => (p.y < 64 ? { name: 'stone', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' })
+
 test('dig_stair during the buried self-rescue answers busy naming it and starts no job', async () => {
-  const env = { bot: { entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 } }, require, bunker: { building: false }, digLock: botConstant('digLock') }
+  const env = { bot: { entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 }, blockAt: STONE_BELOW_64 }, require, bunker: { building: false }, digLock: botConstant('digLock') }
   assert.deepStrictEqual((await routeJobs('/dig_stair', UP_EAST, env)).started, ['dig_stair up e x2'], 'control: no rescue')
   claimRescue(env.digLock)
   const r = await routeJobs('/dig_stair', UP_EAST, env)
   assert.deepStrictEqual([r.error && r.error.reason, r.started], ['busy', []])
   assert.match(r.error.message, /^busy: the buried self-rescue is running\b/)
+})
+
+test('dig_stair with nothing under the feet refuses naming why and starts no job', async () => {
+  const blockAt = (p) => (p.y === 63 ? { name: 'air', boundingBox: 'empty' } : STONE_BELOW_64(p))
+  const r = await routeJobs('/dig_stair', UP_EAST, { bot: { entity: { position: new Vec3(0.5, 64, 0.5), yaw: 0 }, blockAt }, require, bunker: { building: false }, digLock: botConstant('digLock') })
+  assert.deepStrictEqual([r.error && r.error.message, r.started], ['no footing: nothing to stand on under 0,64,0', []])
+})
+
+test('dig_stair from a body wedged into the dirt of a field steps from the top of the dirt and digs no farmland', async () => {
+  const field = { blocks: { '0,63,0': 'dirt', '1,63,0': 'farmland', '-1,63,0': 'farmland' }, open: (p) => p.y >= 64, at: new Vec3(0.5, 63.9375, 0.5) }
+  const up = await watchedDig('/dig_stair', { ...UP_EAST, steps: '1' }, field)
+  assert.deepStrictEqual([up.at, up.fills, up.dug], ['1,65,0', ['1,64,0'], []])
+  const down = await watchedDig('/dig_stair', { ...UP_EAST, up: '-1', steps: '1' }, field)
+  assert.deepStrictEqual([down.dug, down.stopped], [[], 'farmland at 1,63,0 is a field, stopping short'])
+})
+
+test('dig_stair stops short of a step into farmland or a crop, or under a crop, and digs none of it', async () => {
+  const DOWN_EAST = { ...UP_EAST, up: '-1', steps: '1' }
+  const cases = [
+    [DOWN_EAST, { blocks: { '1,63,0': 'farmland' }, open: (p) => p.y >= 64 }, 'farmland at 1,63,0 is a field, stopping short'],
+    [DOWN_EAST, { blocks: { '1,63,0': 'farmland', '1,64,0': 'wheat' }, open: (p) => p.y >= 64 && !(p.x === 1 && p.y === 64 && p.z === 0) }, 'wheat at 1,64,0 is a field, stopping short'],
+    [{ ...UP_EAST, steps: '1' }, { blocks: { '0,66,0': 'soul_sand', '0,67,0': 'nether_wart' }, open: (p) => p.y >= 67 && !(p.x === 0 && p.y === 67 && p.z === 0) }, 'the nether_wart at 0,67,0 grows on 0,66,0, stopping short']
+  ]
+  for (const [query, world, stopped] of cases) {
+    const r = await watchedDig('/dig_stair', query, world)
+    assert.deepStrictEqual([r.dug, r.stopped], [[], stopped])
+  }
 })

@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-10-31: a body wedged into a block is lifted onto its top
+
+On farmland trampled to dirt the server held the bot's feet 1/16 inside the block and corrected
+every move back, so it could neither walk nor jump, and `dig_stair` dug the field. The bot now
+stands on the top of a full block its feet are at most 0.15 into, raises an unstuck event when idle
+and stuck, and `dig_stair` starts from that top, refuses with no footing and stops short of
+farmland and crops.
+
 ## 2026-10-31: the bot swims up out of deep water and keeps its head above it
 
 A body on the bed of water 2 deep could plan no way out, and its drown reflex let go of jump 4 s

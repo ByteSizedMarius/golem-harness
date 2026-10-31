@@ -14,7 +14,8 @@ const FULL = [[0, 0, 0, 1, 1, 1]]
 const SHAPES = {
   air: [],
   cobblestone_wall: [[0.25, 0, 0.25, 0.75, 1.5, 0.75]],
-  chest: [[0.0625, 0, 0.0625, 0.9375, 0.875, 0.9375]]
+  chest: [[0.0625, 0, 0.0625, 0.9375, 0.875, 0.9375]],
+  top_slab: [[0, 0.5, 0, 1, 1, 1]]
 }
 
 // A stone floor below y 64. The walk moves 0.2 a tick at the goal and stalls while the body overlaps a block.
@@ -44,7 +45,7 @@ function world ({ blocks = {}, at = new Vec3(0.5, 64, 0.5), goal, pockets = [], 
   }
 
   const bot = new EventEmitter()
-  bot.entity = { position: at.clone(), yaw: 0, width: 0.6, height: 1.8 }
+  bot.entity = { position: at.clone(), yaw: 0, width: 0.6, height: 1.8, onGround: true }
   bot.blockAt = blockAt
   const controls = {}
   bot.setControlState = (c, v) => { controls[c] = v }
@@ -96,9 +97,13 @@ function world ({ blocks = {}, at = new Vec3(0.5, 64, 0.5), goal, pockets = [], 
   }
 
   const events = []
+  const clock = { t: 1000000 }
   const env = {
     bot,
     Vec3,
+    Date: { now: () => clock.t },
+    seenNow: () => true,
+    smotherBlock: () => null,
     legs: legLedger(),
     console: { log () {} },
     emitEvent: (kind, msg) => { events.push(msg) },
@@ -118,7 +123,24 @@ function world ({ blocks = {}, at = new Vec3(0.5, 64, 0.5), goal, pockets = [], 
   const reflex = reflexIn('unstuck', env)
   reflex._crumbs = crumbs
   bot.pathfinder.setGoal(goal)
-  return { bot, reflex, events, digs, nameAt: (x, y, z) => nameAt(new Vec3(x, y, z)), items }
+  return { bot, reflex, events, digs, nameAt: (x, y, z) => nameAt(new Vec3(x, y, z)), items, clock, env }
+}
+
+// Runs the reflex loop's check every 300 ms for ms, acting on each hit, with step(t) before each check.
+async function idleFor (w, ms, step = () => {}) {
+  for (let t = 0; t <= ms; t += 300) {
+    step(t)
+    if (w.reflex.check(w.bot)) await w.reflex.act(w.bot)
+    w.clock.t += 300
+  }
+}
+// The server corrections the heartbeat counts, n of them 100 ms apart.
+function corrections (w, n) {
+  if (!w.bot.listenerCount('forcedMove')) loadBotFunctions(['wireUnstuckHeartbeat'], { bot: w.bot, unstuckReflex: w.reflex, Date: w.env.Date }).wireUnstuckHeartbeat()
+  for (let i = 0; i < n; i++) {
+    w.clock.t += 100
+    w.bot.emit('forcedMove')
+  }
 }
 
 const EAST = new goals.GoalNear(6, 64, 0, 1)
@@ -193,4 +215,41 @@ test('unstuck never breaks a container or a door, even with the block in its poc
     assert.strictEqual(w.events.length, 1, c.why)
     assert.ok(w.events[0].endsWith(`break refused (${c.why})`), w.events[0])
   }
+})
+
+test('an idle body wedged into the floor under a slab it cannot lift into says it is stuck after 2 s, once', async () => {
+  const w = world({ blocks: { '0,65,0': 'top_slab' }, at: new Vec3(0.5, 63.9375, 0.5) })
+  await idleFor(w, 1800)
+  assert.deepStrictEqual(w.events, [], 'under 2 s')
+  await idleFor(w, 3000)
+  assert.deepStrictEqual(w.events, ['unstuck: stuck inside the stone at 0,63,0'])
+})
+
+test('an idle body the server moves back more than 20 times in 5 s says it is stuck', async () => {
+  const w = world({})
+  corrections(w, 20)
+  await idleFor(w, 3000)
+  assert.deepStrictEqual(w.events, [], 'control: 20 corrections, then standing on the floor')
+  corrections(w, 21)
+  await idleFor(w, 0)
+  assert.deepStrictEqual(w.events, ['unstuck: stuck at 0,64,0: the server moved the body back 21 times in 5 s'])
+})
+
+test('an idle body held off the ground at one height for 2 s says it is stuck, a falling one does not', async () => {
+  const held = world({ at: new Vec3(0.5, 64.5, 0.5) })
+  held.bot.entity.onGround = false
+  await idleFor(held, 2400)
+  assert.deepStrictEqual(held.events, ['unstuck: stuck at 0,64,0 off the ground for 2 s'])
+  const falling = world({ at: new Vec3(0.5, 80, 0.5) })
+  falling.bot.entity.onGround = false
+  await idleFor(falling, 2400, () => { falling.bot.entity.position.y -= 1 })
+  assert.deepStrictEqual(falling.events, [])
+})
+
+test('a walk the server corrects more than 20 times in 5 s raises no idle stuck event', async () => {
+  const w = world({ goal: EAST })
+  corrections(w, 21)
+  await idleFor(w, 3000, () => w.bot.waitForTicks(6))
+  assert.deepStrictEqual(w.events, [])
+  assert.ok(w.bot.entity.position.x > 4, `control: the walk went on, at x ${w.bot.entity.position.x}`)
 })
