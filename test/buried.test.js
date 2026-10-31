@@ -143,6 +143,7 @@ function body (head, feet = AIR, { cells = {}, pos, legacy = false, known = () =
         digLock: env.digLock,
         cellKnown: known,
         knownCell: known,
+        leafInTheWay: () => null,
         LEGACY_1710: false,
         round: (v) => ({ x: v.x, y: v.y, z: v.z }),
         stopPath () {},

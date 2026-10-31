@@ -129,6 +129,7 @@ async function doorBody (t, legacy, contents) {
     stackPause: async () => {},
     cellKnown: () => true,
     seenNow: () => true,
+    leafInTheWay: () => null,
     STATIONS: new Map(),
     ck: (x, y, z) => x + ',' + y + ',' + z,
     require,

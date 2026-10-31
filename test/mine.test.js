@@ -15,6 +15,7 @@ const { guardWork } = require('../lib/walk')
 const { createJobs } = require('../lib/jobs')
 const { deathLedger } = require('../lib/deaths')
 const { entityInCell } = require('../lib/shelter')
+const { GRAVESTONE } = require('../lib/server-overrides')
 const { HUNG, awaitRoute, botConstant, claimRescue, fakeClock, loadBotFunctions, routeHandler, runRoute, timed, waitFor } = require('./helpers')
 
 // The collect plugin switches on the class names.
@@ -121,6 +122,7 @@ function collector (t, { blocks, reach, plan = () => ({ status: 'success', path:
     console: { log: () => {} },
     resolveBlockIds: () => [1],
     nearestVisible: () => blocks['1,64,0'],
+    leafInTheWay: () => null,
     holdCollectTool: async () => {}
   }
   // collectSafely hands abandonCollect on uncalled, so the route loader would not find it.
@@ -806,7 +808,7 @@ test('a gather with silk whose silk touch pick is gone after the walk stops at t
 })
 
 // 1.21.11 blocks from cells beside the body at 0.5,64,0.5 on rig, all lit and known but the hidden ones, walks as in potatoRig.
-function woodRig (t, cells, { hidden = [], rig = collector } = {}) {
+function woodRig (t, cells, { hidden = [], rig = collector, plan } = {}) {
   const props = (name) => name.endsWith('_log') ? { axis: 'y' } : name.endsWith('_leaves') ? { distance: '1', persistent: 'false', waterlogged: 'false' } : {}
   const blocks = {}
   for (const [k, name] of Object.entries(cells)) blocks[k] = realBlock(name, ...k.split(',').map(Number), props(name))
@@ -819,7 +821,7 @@ function woodRig (t, cells, { hidden = [], rig = collector } = {}) {
     if (end) c.bot.entity.position = end
     return !!end
   }
-  const c = rig(t, { blocks, reach })
+  const c = rig(t, { blocks, reach, ...(plan && { plan }) })
   c.bot.entity = { width: 0.6, height: 1.8, position: new Vec3(0.5, 64, 0.5) }
   const at = (p) => {
     const b = c.blocks[`${p.x},${p.y},${p.z}`]
@@ -898,7 +900,7 @@ test('mine takes logs only within radius of where it started, though the body wa
   const c = woodRig(t, { '6,64,0': 'oak_log', '6,65,0': 'oak_leaves', '10,64,0': 'oak_log', '10,65,0': 'oak_leaves' })
   const reply = awaitRoute('/mine', { name: 'oak_log', count: '2', radius: '8' }, c.env)
   await pickUpLog(c)
-  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 2, gathered: 1, reason: null })
+  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 2, gathered: 1, reason: 'no oak_log in sight within 8 of the start' })
   assert.ok(c.bot.entity.position.floored().distanceTo(new Vec3(10, 64, 0)) <= 8, 'control: the second log lies within radius of the body')
   assert.strictEqual(c.bot.blockAt(new Vec3(10, 64, 0)).name, 'oak_log')
 })
@@ -958,4 +960,122 @@ test('a wood gather keeps built logs out of its collect walk and of the forestry
   }
   assert.deepStrictEqual(await run({}), { weights: [[100, 0, 0]], cage: [[100, 0, 0]], after: 0 })
   assert.deepStrictEqual(await run({ natural: '0' }), { weights: [], cage: [], after: 0 })
+})
+
+// woodRig over the real sight functions at noon, listing each leaf dug in leafDigs with the log digs before it.
+function leafyRig (t, cells, opts) {
+  const c = woodRig(t, cells, { ...opts, plan: () => ({ status: 'noPath', path: [new Vec3(0, 64, 0)] }) })
+  for (const stub of ['sightFace', 'eyeDist', 'lightReach', 'seesLit', 'leafInTheWay']) delete c.env[stub]
+  const blockAt = c.bot.blockAt
+  c.bot.blockAt = (p) => {
+    const b = blockAt(p)
+    if (b.name === 'air' || b.name.endsWith('_leaves')) b.skyLight = 15
+    return b
+  }
+  Object.assign(c.bot, { game: { dimension: 'overworld', minY: -64, height: 384 }, time: { timeOfDay: 6000 }, registry, digTime: (b) => b.digTime(null, false, false, false) })
+  c.leafDigs = []
+  const dig = c.bot.dig
+  c.bot.dig = async (b) => {
+    if (!b.name.endsWith('_leaves')) return dig(b)
+    const k = `${b.position.x},${b.position.y},${b.position.z}`
+    c.leafDigs.push([k, c.seen.digs])
+    delete c.blocks[k]
+  }
+  Object.assign(c.env, {
+    ESTIMATED_LIGHT: new Map(),
+    GRAVESTONE,
+    LEGACY_1710: false,
+    DIG_TOOL: botConstant('DIG_TOOL'),
+    reflexes: [],
+    guardState: { hand: null },
+    setTimeout: c.clock.setTimeout,
+    clearTimeout: c.clock.clearTimeout
+  })
+  return c
+}
+
+// An oak 2.5 blocks east of the body, its logs at x 3 from y 64 to 66, leaves on the four sides of the upper two and on top.
+const LEAFY_OAK = {
+  '3,64,0': 'oak_log', '3,65,0': 'oak_log', '3,66,0': 'oak_log', '3,67,0': 'oak_leaves',
+  ...Object.fromEntries([65, 66].flatMap((y) => [[2, 0], [4, 0], [3, 1], [3, -1]].map(([x, z]) => [`${x},${y},${z}`, 'oak_leaves'])))
+}
+
+test('mine takes the logs of a tree seen through its leaves, digging only the leaves in the way, at most 2 a log', async (t) => {
+  for (const natural of ['1', '0']) {
+    const c = leafyRig(t, LEAFY_OAK)
+    const reply = awaitRoute('/mine', { name: 'oak_log', count: '3', natural }, c.env)
+    for (const k of [1, 2, 3]) await pickUpLog(c, k)
+    assert.deepStrictEqual(await within(reply), { mined: 3, requested: 3, gathered: 3, reason: null }, `natural ${natural}`)
+    assert.deepStrictEqual(c.leafDigs, [['2,65,0', 1]], `natural ${natural}`)
+  }
+})
+
+test('a gather takes the logs of a tree seen through its leaves', async (t) => {
+  const c = leafyRig(t, LEAFY_OAK, { rig: jobRig })
+  const { job } = runRoute('/gather', { resource: 'oak_log', amount: '3' }, c.env)
+  for (const k of [1, 2, 3]) await pickUpLog(c, k)
+  assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(c.env.jobs.get(job).result)), { gathered: 3, dug: 3, requested: 3, inventoryMatching: 3 })
+  assert.deepStrictEqual(c.leafDigs, [['2,65,0', 0]], 'only the leaf over the bottom log, which hides it from within 2 blocks')
+})
+
+test('a gather digs the leaf that blocks collectblock\'s look at a log it sees in plain sight from within 2 blocks', async (t) => {
+  // From 2,64,1 the look reaches only the log's west face, past the leaf at 2,65,0, while the eye sees its south face.
+  const c = leafyRig(t, { '3,65,0': 'oak_log', '3,66,0': 'oak_leaves', '2,65,0': 'oak_leaves', '3,65,-1': 'oak_leaves' }, { rig: jobRig })
+  c.bot.entity.position = new Vec3(2.5, 64, 1.5)
+  const { job } = runRoute('/gather', { resource: 'oak_log', amount: '1' }, c.env)
+  await pickUpLog(c)
+  assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
+  assert.strictEqual(c.env.jobs.get(job).result.gathered, 1)
+  assert.deepStrictEqual(c.leafDigs, [['2,65,0', 0]])
+})
+
+test('mine digs a leaf that blocks collectblock\'s look from the body\'s cell once the eye sees the log past the leaves', async (t) => {
+  // From the eye at z 0.05 the log at 3,65,1 shows past 2,65,0, and the look from the cell's centre also meets 1,65,1.
+  const c = leafyRig(t, { '3,65,1': 'oak_log', '3,65,0': 'oak_leaves', '2,65,0': 'oak_leaves', '1,65,1': 'oak_leaves' })
+  c.bot.entity.position = new Vec3(0.5, 64, 0.05)
+  const reply = awaitRoute('/mine', { name: 'oak_log' }, c.env)
+  await pickUpLog(c)
+  assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 1, reason: null })
+  assert.deepStrictEqual(c.leafDigs, [['2,65,0', 0], ['1,65,1', 0]])
+})
+
+// A log in dirt at 4,66,0 behind three leaves on the line from the eye, and a clear oak at x -5.
+const BURIED_LOG = {
+  '4,66,0': 'oak_log', '4,67,0': 'oak_leaves', '4,65,0': 'dirt', '5,66,0': 'dirt', '4,66,1': 'dirt', '4,66,-1': 'dirt',
+  '2,65,0': 'oak_leaves', '2,66,0': 'oak_leaves', '3,66,0': 'oak_leaves',
+  '-5,64,0': 'oak_log', '-5,65,0': 'oak_leaves'
+}
+
+test('mine passes a log it cannot clear within 2 leaves, digging 2 for it once, takes the next and says why it stopped', async (t) => {
+  const c = leafyRig(t, BURIED_LOG)
+  const reply = awaitRoute('/mine', { name: 'oak_log', count: '2' }, c.env)
+  await pickUpLog(c)
+  assert.deepStrictEqual(await within(reply), {
+    mined: 1, requested: 2, gathered: 1, reason: 'no oak_log in sight within 64 of the start, and 1 behind leaves I could not clear: more than 2 leaves in the way of oak_log at 4,66,0'
+  })
+  assert.deepStrictEqual(c.leafDigs, [['2,65,0', 0], ['2,66,0', 0]])
+  assert.deepStrictEqual(['4,66,0', '-5,64,0'].map((k) => c.bot.blockAt(new Vec3(...k.split(',').map(Number))).name), ['oak_log', 'air'])
+})
+
+// A log under dirt at 3,64,0 that 2,64,1 sees only past two leaves, and a clear oak at x -5.
+const LEAF_WALLED_LOG = {
+  '3,64,0': 'oak_log', '3,65,0': 'dirt', '2,64,0': 'dirt', '3,65,1': 'oak_leaves', '3,64,1': 'oak_leaves', '2,65,0': 'oak_leaves',
+  '-5,64,0': 'oak_log', '-5,65,0': 'oak_leaves'
+}
+
+test('a gather passes a log it cannot clear within 2 leaves, digging 2 for it once, and takes the next', async (t) => {
+  const c = leafyRig(t, LEAF_WALLED_LOG, { rig: jobRig })
+  c.bot.entity.position = new Vec3(2.5, 64, 1.5)
+  const { job } = runRoute('/gather', { resource: 'oak_log', amount: '1' }, c.env)
+  await pickUpLog(c)
+  assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
+  assert.strictEqual(c.env.jobs.get(job).result.gathered, 1)
+  assert.deepStrictEqual(c.leafDigs, [['3,65,1', 0], ['3,64,1', 0]])
+  assert.deepStrictEqual(['3,64,0', '-5,64,0'].map((k) => c.bot.blockAt(new Vec3(...k.split(',').map(Number))).name), ['oak_log', 'air'])
+})
+
+test('mine with no block of the name in sight says so', async (t) => {
+  const c = woodRig(t, { '20,64,0': 'oak_log', '20,65,0': 'oak_leaves' })
+  assert.deepStrictEqual(await within(awaitRoute('/mine', { name: 'oak_log', radius: '8' }, c.env)), { mined: 0, requested: 1, gathered: 0, reason: 'no oak_log in sight within 8 of the start' })
 })

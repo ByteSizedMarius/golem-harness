@@ -92,6 +92,7 @@ function digatInEquip (bunker, digLock) {
     cellKnown: () => true,
     knownCell: () => true,
     seenNow: () => true,
+    leafInTheWay: () => null,
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     refuseWhileFighting () {},
     stopPath () {},

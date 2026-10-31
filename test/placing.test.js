@@ -682,6 +682,7 @@ function placeitemRig (name, { extra = {}, placedAs = null, hidden = [], unseen 
       LEGACY_1710: legacy,
       cellKnown: (p) => !hidden.includes(key(p)),
       seenNow: (p) => !hidden.includes(key(p)) && !unseen.includes(key(p)),
+      leafInTheWay: () => null,
       clearSoftCover: async () => {},
       stampOwnEdit () {},
       send: (res, body) => { res.sent = body },
@@ -995,6 +996,32 @@ test('placeitem at or against a dark wall cell within 4 blocks refuses alike wha
     assert.doesNotMatch(String(stone), /stone|diamond|ore|undefined/)
     assert.strictEqual(await refusal(darkWallRig('diamond_ore'), x, y, z), stone)
   }
+})
+
+// Open ground under the noon sky, the body at x 0 and leaves in the cells keyed in leaves.
+function leafRig (leaves) {
+  const blockAt = (pos) => {
+    const p = pos.floored()
+    return leaves.includes(key(p)) ? { ...heldBlock('stone', p), name: 'oak_leaves' } : heldBlock(p.y <= 63 ? 'stone' : 'air', p)
+  }
+  const rig = heldRig(body(0.5, 64, 0.5), blockAt, [])
+  Object.assign(rig.env, { HANGS: botConstant('HANGS'), BEHIND: botConstant('BEHIND') })
+  return rig
+}
+
+test('placeitem and sign refuse a cell seen only through leaves, naming the first leaf, and placeitem places there with the leaves gone', async () => {
+  const at = { x: '3', y: '64', z: '0' }
+  for (const [route, item] of [['/placeitem', 'cobblestone'], ['/sign', 'oak_sign']]) {
+    const leafy = leafRig(['2,64,0', '2,65,0'])
+    leafy.env.bot.inventory = { items: () => [{ name: item, count: 1 }] }
+    const { handle, res } = routeHandler(route, leafy.env)
+    await handle({ query: { ...at, name: item, text: 'hi' } }, res)
+    assert.strictEqual(res.error?.message, 'oak_leaves at 2,65,0 is in the way', route)
+    assert.deepStrictEqual(leafy.placed, [], route)
+  }
+  const bare = leafRig([])
+  await awaitRoute('/placeitem', { ...at, name: 'cobblestone' }, bare.env)
+  assert.deepStrictEqual(bare.placed, ['3,63,0 face 0,1,0'])
 })
 
 test('placeitem and sign answer a remembered support out of sight the same whatever holds it now', async () => {

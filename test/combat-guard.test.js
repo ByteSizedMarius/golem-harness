@@ -842,6 +842,7 @@ test('a fight that starts between the pre-action check and the placement click g
     bodyTouches: () => false,
     occupant: () => null,
     seenNow: () => true,
+    leafInTheWay: () => null,
     isSoftCover: () => false,
     isInteractive: () => false,
     reachToPlace: async () => {},

@@ -102,6 +102,7 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
     stackPause: async () => {},
     cellKnown: (p) => !p.equals(HIDDEN),
     seenNow: (p) => !p.equals(HIDDEN),
+    leafInTheWay: () => null,
     STATIONS: new Map(),
     ck: (x, y, z) => x + ',' + y + ',' + z,
     require,
@@ -207,6 +208,22 @@ test('chest refuses when every chest in range is unseen, without naming or openi
   assert.match(error, /no chest seen within 12/)
   assert.doesNotMatch(error, /0,64,-3|diamond/)
   assert.deepStrictEqual(opened, [])
+})
+
+test('chest, withdraw and deposit refuse a chest seen only through a leaf from where the walk ends, naming the leaf, without opening it', async () => {
+  for (const route of ['/chest', '/withdraw', '/deposit']) {
+    const { env, opened } = chestEnv([NEAR], { '5,64,0': chestWindow([stack('cobblestone', 10)]) }, [stack('cobblestone', 5)])
+    let walked = false
+    const asked = []
+    env.bot.pathfinder.goto = async () => { walked = true }
+    env.leafInTheWay = (p) => {
+      asked.push(`${p.x},${p.y},${p.z}`)
+      return walked ? { name: 'oak_leaves', position: new Vec3(4, 64, 0) } : null
+    }
+    assert.match(await refusal(route, { name: 'cobblestone', x: '5', y: '64', z: '0' }, env), /oak_leaves at 4,64,0 is in the way/, route)
+    assert.deepStrictEqual([...new Set(asked)], ['5,64,0'], route)
+    assert.deepStrictEqual(opened, [], route)
+  }
 })
 
 test('withdraw takes the named item from the nearest seen chest or the one at x,y,z', async () => {

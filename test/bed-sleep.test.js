@@ -429,6 +429,7 @@ test('grave names a gravestone out of reach after the walk instead of waiting fo
     guardState: { hand: null },
     lightReach: () => Infinity,
     seesLit: () => true,
+    leafInTheWay: () => null,
     goals,
     Vec3,
     GRAVESTONE,

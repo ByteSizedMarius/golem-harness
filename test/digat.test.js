@@ -127,6 +127,7 @@ async function digRun (blockName, hotbar, held, legacy, { during = [], after = [
     stopPath () {},
     cellKnown: () => true,
     seenNow: () => true,
+    leafInTheWay: () => null,
     require,
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     PICK_TIER: botConstant('PICK_TIER'),

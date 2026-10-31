@@ -12,7 +12,7 @@ const { flatText } = require('../lib/flat-text')
 const { balanced, botConstant, wiredSource, groundMemory, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn, claimRescue } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
-const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4, wheat: 11, chest: 12 }
+const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4, wheat: 11, chest: 12, oak_log: 13 }
 const NOON = 6000
 const MIDNIGHT = 18000
 
@@ -153,8 +153,8 @@ test('ore facing the bot from behind a wall stays hidden in every reply', async 
   }
 })
 
-// Light data by block type: 5 torch, 6 end_rod, 7 fire, 8 lava, 9 water, 11 wheat, 12 chest.
-const REGISTRY = { blocks: { 0: { emitLight: 0, filterLight: 0 }, 1: { emitLight: 0, filterLight: 15 }, 2: { emitLight: 0, filterLight: 15 }, 3: { emitLight: 0, filterLight: 15 }, 4: { emitLight: 0, filterLight: 15 }, 5: { emitLight: 14, filterLight: 0 }, 6: { emitLight: 14, filterLight: 0 }, 7: { emitLight: 15, filterLight: 0 }, 8: { emitLight: 15, filterLight: 1 }, 9: { emitLight: 0, filterLight: 1 }, 11: { emitLight: 0, filterLight: 0 }, 12: { emitLight: 0, filterLight: 0 } } }
+// Light data by block type: 5 torch, 6 end_rod, 7 fire, 8 lava, 9 water, 11 wheat, 12 chest, 13 oak_log.
+const REGISTRY = { blocks: { 0: { emitLight: 0, filterLight: 0 }, 1: { emitLight: 0, filterLight: 15 }, 2: { emitLight: 0, filterLight: 15 }, 3: { emitLight: 0, filterLight: 15 }, 4: { emitLight: 0, filterLight: 15 }, 5: { emitLight: 14, filterLight: 0 }, 6: { emitLight: 14, filterLight: 0 }, 7: { emitLight: 15, filterLight: 0 }, 8: { emitLight: 15, filterLight: 1 }, 9: { emitLight: 0, filterLight: 1 }, 11: { emitLight: 0, filterLight: 0 }, 12: { emitLight: 0, filterLight: 0 }, 13: { emitLight: 0, filterLight: 15 } } }
 const block = (name, type, boundingBox) => (p) => ({ name, type, stateId: type, boundingBox, position: new Vec3(...p), getProperties: () => ({}) })
 const stoneAt = block('stone', 3, 'block')
 const airAt = block('air', 0, 'empty')
@@ -1125,19 +1125,26 @@ function withHands (env, walkTo = null) {
 
 const UNSEEN = /not in my sight, blocked or unlit/
 
+async function digat (env, at) {
+  const acts = []
+  withHands(env)
+  const base = env.bot.blockAt
+  env.bot.blockAt = (p) => ({ ...base(p), digTime: () => 750 })
+  env.bot.pathfinder.goto = async () => { acts.push('walk') }
+  Object.assign(env.bot, { equip: async () => { acts.push('equip') }, dig: async () => { acts.push('dig') }, digTime: () => 750 })
+  Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, digLock: botConstant('digLock'), stopPath () {}, setTimeout, clearTimeout, PICK_TIER: botConstant('PICK_TIER'), DIG_TOOL: botConstant('DIG_TOOL') })
+  const { handle, res } = routeHandler('/digat', env)
+  await handle({ query: at }, res)
+  return { body: res.body, error: res.error, acts }
+}
+
+async function activate (env, at) {
+  const { handle, res } = routeHandler('/activate', env)
+  await handle({ query: at }, res)
+  return { body: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error }
+}
+
 test('digat digs a block in lit sight, never one seen before and dark now, around a corner or in the dark', async () => {
-  const digat = async (env, at) => {
-    const acts = []
-    withHands(env)
-    const base = env.bot.blockAt
-    env.bot.blockAt = (p) => ({ ...base(p), digTime: () => 750 })
-    env.bot.pathfinder.goto = async () => { acts.push('walk') }
-    Object.assign(env.bot, { equip: async () => { acts.push('equip') }, dig: async () => { acts.push('dig') }, digTime: () => 750 })
-    Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, digLock: botConstant('digLock'), stopPath () {}, setTimeout, clearTimeout, PICK_TIER: botConstant('PICK_TIER'), DIG_TOOL: botConstant('DIG_TOOL') })
-    const { handle, res } = routeHandler('/digat', env)
-    await handle({ query: at }, res)
-    return { body: res.body, error: res.error, acts }
-  }
   const coal = { x: '-1', y: '65', z: '0' }
   const lit = await digat(cave(LIT), coal)
   assert.strictEqual(lit.body.dug, 'coal_ore', 'control: in sight')
@@ -1154,11 +1161,6 @@ test('digat digs a block in lit sight, never one seen before and dark now, aroun
 })
 
 test('activate presses a block in lit sight and gives its state only while it stays in sight', async () => {
-  const activate = async (env, at) => {
-    const { handle, res } = routeHandler('/activate', env)
-    await handle({ query: at }, res)
-    return { body: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error }
-  }
   const coal = { x: '-1', y: '65', z: '0' }
   assert.deepStrictEqual((await activate(withHands(cave(LIT)), coal)).body, { activated: 'coal_ore', at: { x: -1, y: 65, z: 0 }, properties: { lit: false } }, 'control: in sight')
   assert.match((await activate(withHands(cave(DARK, FAR_END)), coal)).error.message, UNSEEN)
@@ -1382,12 +1384,12 @@ test('overhead cover counts and tops the rock only once the sky shows, and gives
 })
 
 test('overhead cover tells canopy from rock by the solids in sight, and remembered cover with none in sight is neither', () => {
-  // The column seen to the sky, holding first `up` over the head and behind two cells above it, in light.
+  // The column seen to the sky in light, with first in the three cells from `up` over the head and behind in the cell above.
   const column = (first, behind, { up = 2, light = LIT } = {}) => {
-    const lo = 65 + up, hi = lo + 2
-    const env = world({ open: (x, y, z) => y >= 64 && !(x === 0 && z === 0 && (y === lo || y === hi)), light: () => light })
+    const lo = 65 + up, hi = lo + 3
+    const env = world({ open: (x, y, z) => y >= 64 && !(x === 0 && z === 0 && y >= lo && y <= hi), light: () => light })
     const base = env.bot.blockAt
-    env.bot.blockAt = (p) => (p.x === 0 && p.z === 0 && (p.y === lo || p.y === hi) ? { ...base(p), name: p.y === lo ? first : behind } : base(p))
+    env.bot.blockAt = (p) => (p.x === 0 && p.z === 0 && p.y >= lo && p.y <= hi ? { ...base(p), name: p.y === hi ? behind : first } : base(p))
     for (let y = 66; y <= 320; y++) env.SEEN.add(ck(0, y, 0))
     return env
   }
@@ -1540,6 +1542,69 @@ test('a lit floor indoors shows through a closed fence gate or a fence, never th
   assert.strictEqual(through(post('oak_fence_gate')), true, 'closed fence gate')
   assert.strictEqual(through(post('oak_fence')), true, 'fence')
   assert.strictEqual(through(post('cobblestone_wall')), false)
+})
+
+const LEAF = { name: 'oak_leaves', boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 1]], transparent: true, type: 9, light: 0, skyLight: 15 }
+const TRUNK = new Vec3(4, 65, 0)
+// Noon open ground with an oak log at eye height at 4,65,0, a log above, below beneath, leaves on its sides and at x,65,0 per x in west.
+function treeLog (below, west = []) {
+  const log = { name: 'oak_log', type: IDS.oak_log, boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 1]], light: 0 }
+  const leaves = Object.fromEntries(['3,65,0', '5,65,0', '4,65,1', '4,65,-1', ...west.map((x) => `${x},65,0`)].map((k) => [k, LEAF]))
+  return withCells(world({ open: (x, y) => y >= 64, ores: { '4,65,0': 'oak_log' }, light: () => 0, skyLight: () => 15 }), {
+    ...leaves,
+    '4,66,0': log,
+    ...(below === 'oak_log' && { '4,64,0': log })
+  })
+}
+const logSeen = (env) => {
+  const { seesLit, nearestVisible } = loadBotFunctions(['seesLit', 'nearestVisible'], env)
+  const nearest = nearestVisible([IDS.oak_log], 16)
+  return { seesLit: seesLit(TRUNK, 64), nearest: nearest && [nearest.position.x, nearest.position.y, nearest.position.z] }
+}
+
+test('a log in a tree shows through the leaves around it in the sun', () => {
+  for (const below of ['oak_log', 'air']) assert.deepStrictEqual(logSeen(treeLog(below)), { seesLit: true, nearest: [4, 65, 0] }, `${below} below`)
+})
+
+test('a log in a tree shows behind two leaves on every line from the eye, never behind three', () => {
+  assert.deepStrictEqual(logSeen(treeLog('oak_log', [2])), { seesLit: true, nearest: [4, 65, 0] }, 'two leaves')
+  assert.deepStrictEqual(logSeen(treeLog('oak_log', [1, 2])), { seesLit: false, nearest: null }, 'three leaves')
+})
+
+test('a melee or torch line stops at a leaf', () => {
+  const env = treeLog('oak_log')
+  const { lineCell } = loadBotFunctions(['lineCell'], env)
+  const eye = env.bot.entity.position.offset(0, 1.62, 0)
+  assert.ok(lineCell(eye, new Vec3(3, 65.5, 0.5), new Vec3(3, 65, 0), true), 'control: up to the leaf')
+  assert.strictEqual(lineCell(eye, new Vec3(4, 65.5, 0.5), TRUNK, true), null)
+})
+
+const TRUNK_QUERY = { x: '4', y: '65', z: '0' }
+// The tree without the leaf between the body and the log.
+const bareTrunk = () => withCells(treeLog('oak_log'), { '3,65,0': AIR })
+
+test('digat refuses a log seen only through a leaf, naming the leaf, and digs it with the leaf gone', async () => {
+  const leafy = await digat(treeLog('oak_log'), TRUNK_QUERY)
+  assert.strictEqual(leafy.error?.message, 'oak_leaves at 3,65,0 is in the way')
+  assert.deepStrictEqual(leafy.acts, [], 'no equip or dig')
+  const bare = await digat(bareTrunk(), TRUNK_QUERY)
+  assert.strictEqual(bare.body?.dug, 'oak_log', bare.error?.message)
+  assert.deepStrictEqual(bare.acts, ['dig'])
+})
+
+test('activate refuses a log seen only through a leaf without clicking, and clicks it with the leaf gone', async () => {
+  const run = async (env) => {
+    const clicks = []
+    withHands(env)
+    env.bot.activateBlock = async (b) => { clicks.push(b.name) }
+    return { ...(await activate(env, TRUNK_QUERY)), clicks }
+  }
+  const leafy = await run(treeLog('oak_log'))
+  assert.strictEqual(leafy.error?.message, 'oak_leaves at 3,65,0 is in the way')
+  assert.deepStrictEqual(leafy.clicks, [])
+  const bare = await run(bareTrunk())
+  assert.strictEqual(bare.body?.activated, 'oak_log', bare.error?.message)
+  assert.deepStrictEqual(bare.clicks, ['oak_log'])
 })
 
 test('an unloaded cell between the body and a block hides the block', () => {

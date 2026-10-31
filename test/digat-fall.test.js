@@ -78,6 +78,7 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = 
     cellKnown: known,
     knownCell: known,
     seenNow: (p) => bodyTouches(p) || known(p),
+    leafInTheWay: () => null,
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     refuseWhileFighting () {},
     stopPath () {},

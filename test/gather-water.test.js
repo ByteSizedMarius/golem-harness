@@ -86,6 +86,7 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
     resolveBlockIds: (name) => registry.blocksByName[name] ? [registry.blocksByName[name].id] : Object.values(registry.blocksByName).filter((b) => `_${b.name}_`.includes(`_${name}_`)).map((b) => b.id),
     emitEvent () {},
     seesLit: () => true,
+    leafInTheWay: () => null,
     cellKnown: () => true,
     seenNow: (p) => !hidden.includes(`${p.x},${p.y},${p.z}`),
     GATHER_MAX_DROP: 2,
@@ -244,6 +245,21 @@ test('gather leaves bank dirt under grass whose only open face looks onto the wa
   const r = await gather(SHORE, [new Vec3(0, 63, 0)], { blocks: { '0,64,0': 'grass_block' } })
   assert.deepStrictEqual(r.digs, [])
   assert.strictEqual(r.result.ok, false)
+})
+
+test('gather skips a target with no leaf beside it at once when its look walk fails, with no walk near it', async () => {
+  const w = lakeWorld(SHORE, [new Vec3(0, 63, 0)], { hidden: [], blocks: { '0,64,0': 'grass_block' } })
+  const walks = []
+  const goto = w.env.bot.pathfinder.goto
+  w.env.bot.pathfinder.goto = (goal) => { walks.push(goal); return goto(goal) }
+  let job = null
+  const progress = []
+  w.env.jobs = { start: (name, fn) => { job = fn({ name, cancelled: false, progress: (m) => progress.push(m) }); return { id: 1 } } }
+  const { handle, res } = routeHandler('/gather', w.env)
+  handle({ query: { resource: 'dirt', amount: '1' } }, res)
+  assert.strictEqual((await job).gathered, 0)
+  assert.strictEqual(walks.length, 1)
+  assert.ok(progress.some((m) => m.startsWith('skip unreachable @ 0,63,0: ')), progress.join('\n'))
 })
 
 test('gather walks past a cell beside dirt under grass that cannot see it to one that sees its open face', async () => {

@@ -236,6 +236,7 @@ function stationEnv (name) {
     shared: { ready: true, mcData: { blocksByName: { [GRAVESTONE]: { id: 7, name: GRAVESTONE } } } },
     seesLit: () => true,
     seenNow: () => true,
+    leafInTheWay: () => null,
     STATIONS: new Map(),
     ck: (x, y, z) => x + ',' + y + ',' + z,
     resolveBlockIds: () => [7],

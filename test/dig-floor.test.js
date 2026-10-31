@@ -75,6 +75,7 @@ function floorWorld (pos, walls = [], holes = [], { gravel = [], short = 0.35 } 
     stopPath () {},
     cellKnown: () => true,
     seenNow: () => true,
+    leafInTheWay: () => null,
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     canStepOutTo: loadBotFunctions(['canStepOutTo'], { bot, knownCell: () => true, seenNow: () => true }).canStepOutTo,
     centerOnCell: async (c) => { log.centred.push(`${c.x},${c.y},${c.z}`); bot.entity.position = new Vec3(c.x + 0.5, c.y, c.z + 0.5); return true },

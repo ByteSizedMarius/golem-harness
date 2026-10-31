@@ -75,6 +75,7 @@ function graveEnv (window, { hidden = false, graves = true } = {}) {
     shared: { mcData: { blocksByName: graves ? { [GRAVESTONE]: { id: GRAVE_ID, name: GRAVESTONE } } : {} }, ready: true },
     lightReach: () => Infinity,
     seesLit: (p) => !(hidden && p.x === AT.x && p.y === AT.y && p.z === AT.z),
+    leafInTheWay: () => null,
     goals,
     Vec3,
     GRAVESTONE,

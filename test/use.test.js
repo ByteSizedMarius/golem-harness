@@ -34,7 +34,7 @@ function useCell (state, held, click) {
       })
     }
   })
-  return { bot, Vec3, seesLit: () => true, cellKnown: () => true, goals: {}, round: (v) => v, setTimeout, clearTimeout, ok: (res, body) => { res.body = { ok: true, ...body } } }
+  return { bot, Vec3, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, goals: {}, round: (v) => v, setTimeout, clearTimeout, ok: (res, body) => { res.body = { ok: true, ...body } } }
 }
 
 // The clicks /use makes on a seen cell holding name, with held in hand.
@@ -51,7 +51,7 @@ async function clicksOn (name, held) {
     activateItem: () => { clicks.push('item') },
     deactivateItem: () => {}
   })
-  await awaitRoute('/use', AT, { bot, Vec3, seesLit: () => true, cellKnown: () => true, goals: {}, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {} })
+  await awaitRoute('/use', AT, { bot, Vec3, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, goals: {}, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {} })
   return clicks
 }
 
@@ -69,7 +69,7 @@ test('use states what the cell holds now only while the walk into reach left it 
         lookAt: async () => {},
         activateBlock: async () => { tilled = tills }
       })
-      const env = { bot, Vec3, seesLit: () => !walked || inSight, cellKnown: () => true, goals: { GoalNear: class {} }, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {} }
+      const env = { bot, Vec3, seesLit: () => !walked || inSight, leafInTheWay: () => null, cellKnown: () => true, goals: { GoalNear: class {} }, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {} }
       const reply = await awaitRoute('/use', { x: '9', y: '63', z: '0' }, env)
       const label = `in sight ${inSight}, tills ${tills}`
       assert.ok(walked, label)
@@ -116,7 +116,7 @@ function farmland (plant, grow, seen = () => true) {
       })
     }
   })
-  const env = { bot, Vec3, seesLit: seen, cellKnown: () => true, goals: {}, round: (v) => v, setTimeout, clearTimeout, ok: (res, body) => { res.body = { ok: true, ...body } } }
+  const env = { bot, Vec3, seesLit: seen, leafInTheWay: () => null, cellKnown: () => true, goals: {}, round: (v) => v, setTimeout, clearTimeout, ok: (res, body) => { res.body = { ok: true, ...body } } }
   return { env, clicked }
 }
 
@@ -195,6 +195,7 @@ async function bucketUse (cell, hand, { turned = null, turnMs = 0, after = null,
     bot,
     Vec3,
     seesLit: () => true,
+    leafInTheWay: () => null,
     cellKnown: () => true,
     goals: {},
     round: (v) => v,
@@ -284,7 +285,7 @@ function rescueBody (digLock) {
     activateItem: () => { done.push('use item') },
     deactivateItem: () => {}
   })
-  const env = { bot, Vec3, require, seesLit: () => true, cellKnown: () => true, goals: { GoalNear: class {} }, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {}, digLock }
+  const env = { bot, Vec3, require, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, goals: { GoalNear: class {} }, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {}, digLock }
   return { bot, env, done }
 }
 
