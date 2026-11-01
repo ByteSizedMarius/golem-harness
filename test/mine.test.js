@@ -942,6 +942,144 @@ test('a gather is cancelled for another reflex taking the legs while the unstuck
 
 const air = (x, y, z) => Object.assign(new Block('air', new Vec3(x, y, z), 0), { boundingBox: 'empty' })
 
+// The cells of the blocks c's route hands to collectSafely, in order.
+function collectCells (c) {
+  const { collectSafely } = loadBotFunctions(['collectSafely'], c.env)
+  const cells = []
+  c.env.collectSafely = (b, ...a) => {
+    cells.push(`${b.position.x},${b.position.y},${b.position.z}`)
+    return collectSafely(b, ...a)
+  }
+  return cells
+}
+
+test('mine takes the next block when the block changes during its own walk to it, and runs no collect on it', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 2 })
+  // Open sky over the first ore sends mine on its own walk before the collect.
+  Object.assign(c.blocks, { '1,65,0': air(1, 65, 0), '1,66,0': air(1, 66, 0) })
+  // Another player digs the first ore as the walk to it starts.
+  const onGoal = (g) => {
+    if (!(g instanceof goals.GoalLookAtBlock)) return
+    c.bot.removeListener('goal_updated', onGoal)
+    c.blocks['1,64,0'] = air(1, 64, 0)
+  }
+  c.bot.on('goal_updated', onGoal)
+  const collects = collectCells(c)
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '1' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 1, requested: 1, gathered: 1, reason: null })
+  assert.deepStrictEqual(collects, ['2,64,0'])
+  assert.strictEqual(c.seen.digs, 1)
+})
+
+test('mine takes the next block when the block changes during collectblock\'s walk to it, and counts that collect as no fruitless one', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 2 })
+  // Another player digs the first ore as collectblock's walk to it starts.
+  const onGoal = (g) => {
+    if (!(g instanceof goals.GoalLookAtBlock)) return
+    c.bot.removeListener('goal_updated', onGoal)
+    c.blocks['1,64,0'] = air(1, 64, 0)
+  }
+  c.bot.on('goal_updated', onGoal)
+  const collects = collectCells(c)
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '1' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 1, requested: 1, gathered: 1, reason: null })
+  assert.deepStrictEqual(collects, ['1,64,0', '2,64,0'])
+  assert.strictEqual(c.seen.digs, 1)
+})
+
+test('a gather whose block changes during its walk runs no collect on it, takes the next and takes the block again once it is back', async (t) => {
+  // Two ores out of reach of the body's start, the one at 4,64,0 nearer.
+  const near = new Block('iron_ore', new Vec3(4, 64, 0))
+  let gone = false
+  const c = unreachedRig(t, {
+    ores: 0,
+    rig: jobRig,
+    // The walk toward 4,64,0 ends where the body stands while another player digs that ore. Every other walk to a block arrives beside it.
+    reach: (g) => {
+      if (!(g instanceof goals.GoalNear)) return true
+      if (g.x === 4 && !gone) {
+        gone = true
+        c.blocks['4,64,0'] = air(4, 64, 0)
+        return true
+      }
+      c.bot.entity.position = new Vec3(g.x, 64, g.z + 1)
+      return true
+    }
+  })
+  Object.assign(c.blocks, { '4,64,0': near, '-5,64,0': new Block('iron_ore', new Vec3(-5, 64, 0)) })
+  c.bot.entity = { width: 0.6, height: 1.8, position: new Vec3(0, 64, 0) }
+  const standing = () => Object.values(c.blocks).filter((b) => b.type)
+  c.bot.findBlocks = () => standing().map((b) => b.position)
+  c.bot.world = { raycast: (from) => ({ position: standing().sort((a, b) => from.distanceTo(a.position) - from.distanceTo(b.position))[0]?.position }) }
+  c.bot.pathfinder.startCell = (p) => p.floored()
+  // The ore comes back with the dig of the other one.
+  c.bot.once('diggingCompleted', () => { c.blocks['4,64,0'] = near })
+  const collects = collectCells(c)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 2, dug: 2, requested: 2, inventoryMatching: 2 })
+  assert.deepStrictEqual(collects, ['-5,64,0', '4,64,0'])
+})
+
+test('mine counts its collect as fruitless when the server answers the collect\'s dig after the ledger stopped waiting, and digs no other block', async (t) => {
+  // The answer comes 2000 ms after the dig, past its 1500 ms confirm window.
+  const c = unreachedRig(t, { out: 0, ores: 2, answerTicks: 40 })
+  tickTime(c)
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '1' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 0, requested: 1, gathered: 1, reason: null })
+  assert.strictEqual(c.seen.digs, 1)
+  assert.strictEqual(c.blocks['2,64,0'].name, 'iron_ore')
+})
+
+// A gather rig over ores at x on the row level with the feet at 0,64,0. The walk toward the ore at 4,64,0 digs it as the forestry movements do and ends where the body stands, and every other walk to a block arrives beside it.
+function walkDigRig (t, xs) {
+  const c = unreachedRig(t, {
+    ores: 0,
+    rig: jobRig,
+    reach: (g) => {
+      if (g instanceof goals.GoalNear && g.x !== 4) c.bot.entity.position = new Vec3(g.x, 64, g.z + 1)
+      return true
+    }
+  })
+  for (const x of xs) c.blocks[`${x},64,0`] = new Block('iron_ore', new Vec3(x, 64, 0))
+  c.bot.on('goal_updated', (g) => {
+    if (g instanceof goals.GoalNear && g.x === 4 && c.blocks['4,64,0'].type) pathfinderDig(c, c.blocks['4,64,0'])
+  })
+  c.bot.entity = { width: 0.6, height: 1.8, position: new Vec3(0, 64, 0) }
+  const standing = () => Object.values(c.blocks).filter((b) => b.type)
+  c.bot.findBlocks = () => standing().map((b) => b.position)
+  c.bot.world = { raycast: (from) => ({ position: standing().sort((a, b) => from.distanceTo(a.position) - from.distanceTo(b.position))[0]?.position }) }
+  c.bot.pathfinder.startCell = (p) => p.floored()
+  return c
+}
+
+test('a gather whose walk digs the block picks up its drop and counts that pass as progress', async (t) => {
+  const c = walkDigRig(t, [4])
+  // The first two searches find cells that changed since, two passes with nothing gathered. A third would end the gather as tapped out.
+  const findBlocks = c.bot.findBlocks
+  let searches = 0
+  c.bot.findBlocks = (o) => ++searches <= 2 ? [new Vec3(searches + 1, 64, 0)] : findBlocks(o)
+  const collects = collectCells(c)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 1, dug: 1, requested: 2, inventoryMatching: 1, reason: 'no reachable iron_ore left (gathered 1/2)' })
+  assert.deepStrictEqual(c.seen.chases, [c.seen.drops[0]])
+  assert.deepStrictEqual(collects, [])
+  assert.strictEqual(searches, 4)
+})
+
+test('a gather searches again from where the walk to the drops of a block its walk dug left the body', async (t) => {
+  // The walk-dug ore at 4,64,0 lies nearest the start, and the drop walk ends at 8,64,0, nearer the ore at 9,64,0 than the one at -5,64,0.
+  const c = walkDigRig(t, [4, -5, 9])
+  const stagedGoto = c.env.stagedGoto
+  c.env.stagedGoto = async (goal, route) => {
+    c.bot.entity.position = new Vec3(8, 64, 0)
+    return stagedGoto(goal, route)
+  }
+  const collects = collectCells(c)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 2, dug: 2, requested: 2, inventoryMatching: 2 })
+  assert.deepStrictEqual(collects, ['9,64,0'])
+})
+
 test('mine stops its walk to the block when the walk finds no path', async (t) => {
   const c = collector(t, {
     blocks: { ...ORE, '1,65,0': air(1, 65, 0), '1,66,0': air(1, 66, 0) },
