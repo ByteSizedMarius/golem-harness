@@ -66,6 +66,7 @@ function craftEnv (bot, serverRecipes) {
     LEGACY_1710: false,
     overrideRecipes,
     craftable,
+    craftBlocker: () => null,
     resolveItem: (name) => mcData.itemsByName[name] || null,
     resolveBlockIds: () => [mcData.blocksByName.crafting_table.id],
     cellKnown: () => true,

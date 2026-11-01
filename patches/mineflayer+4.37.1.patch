@@ -1,3 +1,82 @@
+diff --git a/node_modules/mineflayer/index.d.ts b/node_modules/mineflayer/index.d.ts
+index e75e90c..014d207 100644
+--- a/node_modules/mineflayer/index.d.ts
++++ b/node_modules/mineflayer/index.d.ts
+@@ -357,7 +357,8 @@ export interface Bot extends TypedEmitter<BotEvents> {
+   craft: (
+     recipe: Recipe,
+     count?: number,
+-    craftingTable?: Block
++    craftingTable?: Block,
++    options?: { intact?: boolean }
+   ) => Promise<void>
+ 
+   writeBook: (
+diff --git a/node_modules/mineflayer/lib/plugins/craft.js b/node_modules/mineflayer/lib/plugins/craft.js
+index a5fe563..ec5c35d 100644
+--- a/node_modules/mineflayer/lib/plugins/craft.js
++++ b/node_modules/mineflayer/lib/plugins/craft.js
+@@ -8,7 +8,8 @@ function inject (bot) {
+   const Recipe = require('prismarine-recipe')(bot.registry).Recipe
+   let windowCraftingTable
+ 
+-  async function craft (recipe, count, craftingTable) {
++  // options.intact takes only undamaged ingredients.
++  async function craft (recipe, count, craftingTable, options = {}) {
+     assert.ok(recipe)
+     count = parseInt(count ?? 1, 10)
+     if (recipe.requiresTable && !craftingTable) {
+@@ -17,7 +18,7 @@ function inject (bot) {
+ 
+     try {
+       for (let i = 0; i < count; i++) {
+-        await craftOnce(recipe, craftingTable)
++        await craftOnce(recipe, craftingTable, options)
+       }
+ 
+       if (windowCraftingTable) {
+@@ -33,7 +34,7 @@ function inject (bot) {
+     }
+   }
+ 
+-  async function craftOnce (recipe, craftingTable) {
++  async function craftOnce (recipe, craftingTable, options) {
+     if (craftingTable) {
+       if (!windowCraftingTable) {
+         bot.activateBlock(craftingTable)
+@@ -93,7 +94,7 @@ function inject (bot) {
+           (ingredient.metadata != null &&
+             window.selectedItem.metadata !== ingredient.metadata)) {
+           // we are not holding the item we need. click it.
+-          const sourceItem = window.findInventoryItem(ingredient.id, ingredient.metadata)
++          const sourceItem = findSource(ingredient)
+           if (!sourceItem) throw new Error('missing ingredient')
+           if (originalSourceSlot == null) originalSourceSlot = sourceItem.slot
+           await bot.clickWindow(sourceItem.slot, 0, 0)
+@@ -109,7 +110,7 @@ function inject (bot) {
+           (ingredient.metadata != null &&
+             window.selectedItem.metadata !== ingredient.metadata)) {
+           // we are not holding the item we need. click it.
+-          const sourceItem = window.findInventoryItem(ingredient.id, ingredient.metadata)
++          const sourceItem = findSource(ingredient)
+           if (!sourceItem) throw new Error('missing ingredient')
+           if (originalSourceSlot == null) originalSourceSlot = sourceItem.slot
+           await bot.clickWindow(sourceItem.slot, 0, 0)
+@@ -164,6 +165,14 @@ function inject (bot) {
+         }
+       }
+ 
++      // The lowest pocket stack of ingredient.
++      function findSource (ingredient) {
++        if (!options.intact) return window.findInventoryItem(ingredient.id, ingredient.metadata)
++        return window.items().find((item) => item.type === ingredient.id &&
++          (ingredient.metadata == null || item.metadata === ingredient.metadata) &&
++          !(item.durabilityUsed > 0)) || null
++      }
++
+       function slot (x, y) {
+         return 1 + x + w * y
+       }
 diff --git a/node_modules/mineflayer/lib/plugins/entities.js b/node_modules/mineflayer/lib/plugins/entities.js
 index 507a618..73d608f 100644
 --- a/node_modules/mineflayer/lib/plugins/entities.js

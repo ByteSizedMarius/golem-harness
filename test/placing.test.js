@@ -233,7 +233,8 @@ function crafter ({ tableAt = null, needsTable = true, seen = true, unreachable 
       cellKnown: (p) => seen || !tableAt || !p.equals(tableAt),
       seenNow: (p) => seen || !tableAt || !p.equals(tableAt),
       STATIONS: new Map(),
-      LEGACY_1710: false
+      LEGACY_1710: false,
+      craftBlocker: () => null
     }
   })
   return { log, ctx: loadBotFunctions(['craftItem'], env) }

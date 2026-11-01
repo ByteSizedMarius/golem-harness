@@ -19,6 +19,7 @@ const { createApp } = require('./lib/app')
 const { createContext } = require('./lib/context')
 const { createStreams, bindStreams, wireChatCapture, wireServerMessages } = require('./lib/bot/streams')
 const { createItems, bindItems, wireLegacyDigTime, wireRespawnHeldSlot } = require('./lib/bot/items')
+const { createCraftCheck, bindCraftCheck } = require('./lib/bot/craft-check')
 const { createSight, bindSight, wireLightChanges, wireLightReload, wireLightPackets, wireSightMemoDrops, wireGroundTopForget, wireSkyInSightRefresh } = require('./lib/bot/sight')
 const { createDescribe, bindDescribe, wireIndoorsReset } = require('./lib/bot/describe')
 const { createLane, bindLane } = require('./lib/bot/lane')
@@ -124,6 +125,8 @@ createStreams(ctx)
 createDescribe(ctx)
 
 createItems(ctx)
+
+createCraftCheck(ctx)
 
 createReflexes(ctx)
 const { reflexes } = ctx
@@ -261,6 +264,7 @@ function installRoutes () {
 function bindAll () {
   bindStreams(ctx)
   bindItems(ctx)
+  bindCraftCheck(ctx)
   bindSight(ctx)
   bindDescribe(ctx)
   bindLane(ctx)

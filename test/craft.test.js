@@ -9,7 +9,13 @@ const mcData = require('minecraft-data')('1.21.11')
 const { Vec3 } = require('vec3')
 const { readServerOverrides, overrideRecipes, craftable } = require('../lib/server-overrides')
 const { LEGACY_CRAFT_SYNC_MS, LEGACY_GRID_SYNC_MS } = require('../lib/bot/legacy-1710')
+const { craftBlocker, bindCraftCheck } = require('../lib/bot/craft-check')
 const { routeHandler } = require('./helpers')
+const registry = require('prismarine-registry')('1.21.11')
+const Item = require('prismarine-item')(registry)
+const windows = require('prismarine-windows')(registry)
+const { Recipe } = require('prismarine-recipe')(registry)
+const injectCraft = require('mineflayer/lib/plugins/craft')
 
 const TABLE_AT = new Vec3(10, 64, 0)
 const FAR = 'the crafting table at 10,64,0 is out of reach, crafted in the 2x2 grid'
@@ -17,31 +23,53 @@ const FAR = 'the crafting table at 10,64,0 is out of reach, crafted in the 2x2 g
 const RECIPES = {
   ladder: { count: 3, requiresTable: true, cost: { stick: 7 } },
   stick: { count: 4, requiresTable: false, cost: { oak_planks: 2 } },
-  oak_button: { count: 1, requiresTable: false, cost: { oak_planks: 1 } }
+  oak_button: { count: 1, requiresTable: false, cost: { oak_planks: 1 } },
+  dispenser: { count: 1, requiresTable: true, cost: { cobblestone: 7, bow: 1, redstone: 1 } },
+  bucket: { count: 1, requiresTable: true, cost: { iron_ingot: 3 } }
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve))
 
 // A /craft run with a seen table at 10,64,0 unless table is false, which the default walk stops 2.5 short of.
 // overrides is a parsed server overrides file, which supplies both the aliases and the recipes.
-function craftRig ({ items, legacy = true, table = true, walk, during = () => {}, aliases = {}, overrides = null }) {
+function craftRig ({ items, legacy = true, table = true, walk, during = () => {}, aliases = {}, overrides = null, damaged = {}, full = false }) {
   const held = new Map(Object.entries(items))
   const timers = []
   const log = []
+  const options = []
   const entity = { position: new Vec3(0.5, 64, 0.5) }
+  const ref = (name, count) => ({ id: mcData.itemsByName[name].id, metadata: null, count })
   const recipeFor = (name, t) => {
     const r = RECIPES[name]
     if (!r || (r.requiresTable && !t)) return []
-    if (!Object.entries(r.cost).every(([n, k]) => (held.get(n) || 0) >= k)) return []
-    return [{ name, result: { id: mcData.itemsByName[name].id, count: r.count }, requiresTable: r.requiresTable }]
+    const cost = Object.entries(r.cost)
+    if (!cost.every(([n, k]) => (held.get(n) || 0) >= k)) return []
+    return [{
+      name,
+      result: ref(name, r.count),
+      requiresTable: r.requiresTable,
+      ingredients: cost.flatMap(([n, k]) => Array.from({ length: k }, () => ref(n, 1))),
+      delta: [...cost.map(([n, k]) => ref(n, -k)), ref(name, r.count)]
+    }]
   }
-  const rig = { held, timers, log }
+  const stack = (name, count) => {
+    const { id, stackSize, maxDurability } = mcData.itemsByName[name]
+    return { type: id, name, count, stackSize, maxDurability, durabilityUsed: maxDurability ? (damaged[name] || 0) : null }
+  }
+  const rig = { held, timers, log, options }
   const bot = {
     entity,
     _client: new EventEmitter(),
     inventory: {
       count: (id) => held.get(mcData.items[id].name) || 0,
-      items: () => [...held].filter(([, n]) => n > 0).map(([name, count]) => ({ name, count }))
+      items: () => [...held].filter(([, n]) => n > 0).map(([name, count]) => ({ name, count })),
+      inventoryStart: 9,
+      inventoryEnd: 45,
+      get slots () {
+        const stacks = [...held].filter(([, n]) => n > 0).map(([name, count]) => stack(name, count))
+        while (full && stacks.length < 36) stacks.push(stack('dirt', 64))
+        return [...Array(9).fill(null), ...stacks, ...Array(37 - stacks.length).fill(null)]
+      }
     },
     recipesFor: (id, meta, min, t) => recipeFor(mcData.items[id].name, t),
     findBlocks: ({ maxDistance }) => (table && TABLE_AT.distanceTo(entity.position) <= maxDistance ? [TABLE_AT] : []),
@@ -53,18 +81,12 @@ function craftRig ({ items, legacy = true, table = true, walk, during = () => {}
         entity.position = new Vec3(g.x - 2.5, g.y, g.z + 0.5)
       }
     },
-    async craft (recipe, n, t) {
-      const made = mcData.items[recipe.result.id].name
-      log.push(`craft ${made} ${t ? 'table' : 'grid'}`)
+    async craft (recipe, n, t, opts) {
+      log.push(`craft ${mcData.items[recipe.result.id].name} ${t ? 'table' : 'grid'}`)
+      options.push({ ...opts })
       await flush()
       during(rig)
-      if (recipe.delta) {
-        for (const d of recipe.delta) held.set(mcData.items[d.id].name, (held.get(mcData.items[d.id].name) || 0) + d.count)
-        return
-      }
-      const r = RECIPES[made]
-      for (const [name, k] of Object.entries(r.cost)) held.set(name, held.get(name) - k)
-      held.set(made, (held.get(made) || 0) + r.count)
+      for (const d of recipe.delta) held.set(mcData.items[d.id].name, (held.get(mcData.items[d.id].name) || 0) + d.count)
     },
     async waitForTicks (n) { log.push(`tick ${n}`) }
   }
@@ -254,4 +276,123 @@ test('1.7.10 several notes join in one', async () => {
   await rig.armed()
   rig.fire()
   assert.strictEqual((await rig.done).note, `birch_button is oak_button on this server; ${FAR}; out of materials/recipe after 1`)
+})
+
+bindCraftCheck({ shared: { mcData } })
+
+const recipeFor = (name) => Recipe.find(mcData.itemsByName[name].id)[0]
+
+// Pockets holding fill, slot to [name, count, damage].
+function pockets (fill, full = false) {
+  const slots = new Array(46).fill(null)
+  const stack = (slot, name, count, damage = 0) => {
+    const { id, stackSize, maxDurability } = mcData.itemsByName[name]
+    return { type: id, name, count, slot, stackSize, maxDurability, durabilityUsed: maxDurability ? damage : null }
+  }
+  if (full) for (let i = 9; i < 45; i++) slots[i] = stack(i, 'dirt', 64)
+  for (const [slot, [name, count, damage]] of Object.entries(fill)) slots[slot] = stack(Number(slot), name, count, damage)
+  return { slots, inventoryStart: 9, inventoryEnd: 45 }
+}
+
+const DISPENSER_PARTS = { 9: ['cobblestone', 7], 10: ['redstone', 1] }
+const NO_POCKET = 'no free pocket slot for the bucket, free one and craft again'
+
+test('1.7.10 refuses a dispenser when every bow carried is damaged, a modern server takes the damaged bow', () => {
+  const inv = pockets({ ...DISPENSER_PARTS, 11: ['bow', 1, 50] })
+  assert.strictEqual(craftBlocker(inv, recipeFor('dispenser'), true),
+    'every bow carried is damaged, and this server crafts dispenser only from an undamaged one')
+  assert.strictEqual(craftBlocker(inv, recipeFor('dispenser'), false), null)
+})
+
+test('1.7.10 crafts a dispenser from an undamaged bow carried above a damaged one', () => {
+  const inv = pockets({ ...DISPENSER_PARTS, 11: ['bow', 1, 50], 30: ['bow', 1] })
+  assert.strictEqual(craftBlocker(inv, recipeFor('dispenser'), true), null)
+})
+
+test('full pockets of full stacks refuse a bucket the craft would drop', () => {
+  const inv = pockets({ 9: ['iron_ingot', 64] }, true)
+  for (const legacy of [true, false]) assert.strictEqual(craftBlocker(inv, recipeFor('bucket'), legacy), NO_POCKET, `legacy ${legacy}`)
+})
+
+test('full pockets take a bucket into the slot the lowest iron stack empties', () => {
+  const inv = pockets({ 9: ['iron_ingot', 2], 20: ['iron_ingot', 30] }, true)
+  assert.strictEqual(craftBlocker(inv, recipeFor('bucket'), true), null)
+})
+
+test('full pockets take a bucket when the leftover iron joins a part-full stack whole, and refuse when part of it is left', () => {
+  assert.strictEqual(craftBlocker(pockets({ 9: ['iron_ingot', 10], 20: ['iron_ingot', 50] }, true), recipeFor('bucket'), true), null)
+  assert.strictEqual(craftBlocker(pockets({ 9: ['iron_ingot', 10], 20: ['iron_ingot', 60] }, true), recipeFor('bucket'), true), NO_POCKET)
+})
+
+test('full pockets take a bucket into a bucket stack with room', () => {
+  const inv = pockets({ 9: ['iron_ingot', 64], 30: ['bucket', 5] }, true)
+  assert.strictEqual(craftBlocker(inv, recipeFor('bucket'), true), null)
+})
+
+test('full pockets take 4 sticks when all of them join a stick stack, and refuse when 2 are left', () => {
+  const sticks = Recipe.find(mcData.itemsByName.stick.id).find((r) => r.inShape.flat()[0].id === mcData.itemsByName.oak_planks.id)
+  const inv = (count) => pockets({ 9: ['oak_planks', 64], 10: ['stick', count] }, true)
+  assert.strictEqual(craftBlocker(inv(60), sticks, true), null)
+  assert.strictEqual(craftBlocker(inv(62), sticks, true), 'no free pocket slot for the stick, free one and craft again')
+})
+
+// The slots bot.craft picks a bow up from while crafting a dispenser.
+async function bowPickups (options) {
+  const table = windows.createWindow(1, 'minecraft:crafting', 'Crafting')
+  // A 1.21.11 server sends the damage as an item component.
+  const put = (slot, name, count, damage = 0) => {
+    const components = damage ? [{ type: 'damage', data: damage }] : []
+    table.updateSlot(slot, Item.fromNotch({ itemId: registry.itemsByName[name].id, itemCount: count, components }))
+  }
+  put(10, 'cobblestone', 7)
+  put(11, 'redstone', 1)
+  put(12, 'bow', 1, 100)
+  put(30, 'bow', 1)
+  const picked = []
+  const bot = Object.assign(new EventEmitter(), {
+    registry,
+    activateBlock: () => setImmediate(() => bot.emit('windowOpen', table)),
+    async clickWindow (slot, mouseButton, mode) {
+      const item = table.slots[slot]
+      if (item && item.name === 'bow') picked.push(slot)
+      table.acceptClick({ slot, mouseButton, mode, item })
+    },
+    async putSelectedItemRange () { table.selectedItem = null },
+    async putAway () {},
+    closeWindow () {}
+  })
+  injectCraft(bot)
+  await bot.craft(recipeFor('dispenser'), 1, { position: TABLE_AT }, options)
+  return picked
+}
+
+test('craft with intact picks up the undamaged bow above a damaged one, without it the lowest bow', async () => {
+  assert.deepStrictEqual(await bowPickups({ intact: true }), [30])
+  assert.deepStrictEqual(await bowPickups(), [12])
+})
+
+test('1.7.10 refuses a dispenser whose only bow is damaged before the walk to the table, and crafts one from an undamaged bow with undamaged ingredients only', async () => {
+  const parts = { cobblestone: 7, redstone: 1, bow: 1 }
+  const worn = craftRig({ items: parts, damaged: { bow: 50 } }).run({ item: 'dispenser', count: '1' })
+  assert.deepStrictEqual(await worn.done, { error: 'every bow carried is damaged, and this server crafts dispenser only from an undamaged one' })
+  assert.deepStrictEqual(worn.log, [])
+  const whole = craftRig({ items: parts }).run({ item: 'dispenser', count: '1' })
+  await whole.armed()
+  whole.packet('window_items', { windowId: 0 })
+  assert.deepStrictEqual(await whole.done, { crafted: 'dispenser', requested: 1, made: 1, usedTable: true, nowHave: 1 })
+  assert.deepStrictEqual(whole.options, [{ intact: true }])
+})
+
+test('1.21.11 crafts a dispenser from a damaged bow', async () => {
+  const rig = craftRig({ items: { cobblestone: 7, redstone: 1, bow: 1 }, damaged: { bow: 50 }, legacy: false }).run({ item: 'dispenser', count: '1' })
+  assert.deepStrictEqual(await rig.done, { crafted: 'dispenser', requested: 1, made: 1, usedTable: true, nowHave: 1 })
+  assert.deepStrictEqual(rig.options, [{ intact: false }])
+})
+
+test('a craft whose result would find no free pocket slot is refused before the walk to the table', async () => {
+  for (const legacy of [true, false]) {
+    const rig = craftRig({ items: { iron_ingot: 64 }, legacy, full: true }).run({ item: 'bucket', count: '1' })
+    assert.deepStrictEqual(await rig.done, { error: NO_POCKET }, `legacy ${legacy}`)
+    assert.deepStrictEqual(rig.log, [], `legacy ${legacy}`)
+  }
 })
