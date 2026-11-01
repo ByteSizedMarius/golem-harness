@@ -1,0 +1,15 @@
+diff --git a/node_modules/prismarine-block/index.js b/node_modules/prismarine-block/index.js
+index e91fb33..17167f3 100644
+--- a/node_modules/prismarine-block/index.js
++++ b/node_modules/prismarine-block/index.js
+@@ -306,7 +306,9 @@ function provider (registry, { Biome, version }) {
+     digTime (heldItemType, creative, inWater, notOnGround, enchantments = [], effects = {}) {
+       if (creative) return 0
+ 
+-      const materialToolMultipliers = registry.materials[this.material]
++      // An incorrect_for_* tag lists only the wooden tools, the pickaxe speeds live in mineable/pickaxe.
++      const material = this.material?.startsWith('incorrect_for_') ? 'mineable/pickaxe' : this.material
++      const materialToolMultipliers = registry.materials[material]
+       const isBestTool = heldItemType && materialToolMultipliers && materialToolMultipliers[heldItemType]
+ 
+       // Compute breaking speed multiplier
