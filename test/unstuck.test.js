@@ -253,3 +253,33 @@ test('a walk the server corrects more than 20 times in 5 s raises no idle stuck 
   assert.deepStrictEqual(w.events, [])
   assert.ok(w.bot.entity.position.x > 4, `control: the walk went on, at x ${w.bot.entity.position.x}`)
 })
+
+test('a walk held still by back-to-back digs for 12 s takes no ladder', async () => {
+  const w = world({ goal: EAST })
+  const head = { name: 'obsidian', position: new Vec3(1, 65, 0) }
+  const feet = { name: 'obsidian', position: new Vec3(1, 64, 0) }
+  await idleFor(w, 12000, (t) => { w.bot.targetDigBlock = t < 6000 ? head : t === 6000 ? null : feet })
+  assert.deepStrictEqual(w.events, [])
+})
+
+test('a walk that digs the same cell over and over for 12 s takes the ladder', async () => {
+  const w = world({ goal: EAST })
+  const tries = []
+  await idleFor(w, 12000, (t) => {
+    const n = Math.floor(t / 1800)
+    tries[n] = tries[n] || { name: 'obsidian', position: new Vec3(1, 64, 0) }
+    w.bot.targetDigBlock = t % 1800 === 1500 ? null : tries[n]
+  })
+  assert.deepStrictEqual(w.events, ['unstuck: replanned the walk from 0,64,0'])
+})
+
+test('a walk held still 10 s past its last dig takes the ladder', async () => {
+  const w = world({ goal: EAST })
+  w.bot.targetDigBlock = { name: 'obsidian', position: new Vec3(1, 64, 0) }
+  await idleFor(w, 6000)
+  w.bot.targetDigBlock = null
+  await idleFor(w, 9000)
+  assert.deepStrictEqual(w.events, [], 'under 10 s since the dig')
+  await idleFor(w, 2100)
+  assert.deepStrictEqual(w.events, ['unstuck: replanned the walk from 0,64,0'])
+})
