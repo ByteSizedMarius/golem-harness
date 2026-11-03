@@ -4,6 +4,21 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-02: a walk toward a swelling creeper is refused
+
+A pilot walk carried the bot toward a creeper that was already swelling and lowered its guard on
+the way. A walk whose path comes nearer a creeper seen swelling within 7 blocks, or a fuse heard in
+the last 1.5 s (4 s for TNT), is now refused with the fuse's direction, and the guard stays up. A
+walk away from it goes ahead. Gather, tidy and the build verbs treat the refusal as temporary: the
+block, drop or cell waits for a later pass or a rerun, and the reply names the fuse.
+
+## 2026-11-02: fewer stalls while the bot sprints away
+
+While the bot ran, the combat reflex rebuilt the air flood that decides what it can see every
+600 ms, in one go. It now builds the next flood ahead of time, 4 ms at a time, from 2 blocks ahead
+along the run. In a 15-block flee from a creeper on the testbed the bot stalled for more than
+50 ms 2 to 4 times, against 5 to 7 before.
+
 ## 2026-11-02: follow walks on down a staircase
 
 Following a player down a lit staircase, the bot stood at the top of a flight for up to 30 s

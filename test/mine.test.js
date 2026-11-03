@@ -166,7 +166,8 @@ function collector (t, { blocks, reach, plan = () => ({ status: 'success', path:
     nearestVisible: () => blocks['1,64,0'],
     leafInTheWay: () => null,
     holdCollectTool: async () => {},
-    reflexes: [{ name: 'unstuck', active: false }]
+    reflexes: [{ name: 'unstuck', active: false }],
+    litFuse: () => null
   }
   // collectSafely hands abandonCollect on uncalled, so the route loader would not find it.
   const { watchGoto } = loadBotFunctions(['abandonCollect', 'watchGoto'], env)
@@ -568,6 +569,17 @@ test('mine lists a drop of its dig that lies beyond the radius from the start', 
   const reply = await within(awaitRoute('/mine', { name: 'iron_ore', radius: '1' }, c.env))
   assert.deepStrictEqual(reply, { mined: 1, requested: 1, gathered: 0, reason: null, unreached: [{ item: 'raw_iron', count: 1, pos: { x: 1.85, y: 64.15, z: 0.85 } }] })
   assert.deepStrictEqual(c.seen.chases, [])
+})
+
+test('mine ends on the fuse with its count and lists the drop whose walk a lit fuse refused', async (t) => {
+  const c = unreachedRig(t, { out: 0, ores: 1, drop: OFF_CENTRE })
+  c.env.stagedGoto = async ({ drop }) => {
+    c.seen.chases.push(drop)
+    throw Object.assign(new Error('refused: a creeper swells E ~4 and this walk closes on it, the guard stays up. Walk away from it, or walk again once the fuse is out.'), { reason: 'fuse' })
+  }
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 1, requested: 1, gathered: 0, reason: 'fuse', unreached: [{ item: 'raw_iron', count: 1, pos: { x: 1.85, y: 64.15, z: 0.85 } }] })
+  assert.deepStrictEqual(c.seen.chases, [c.seen.drops[0], c.seen.drops[0]])
 })
 
 test('mine lists a drop whose collect packet came and that still lies 6 ticks later', async (t) => {
@@ -1126,6 +1138,30 @@ test('tidy stops at a stalled reclaim, keeps the rest queued and says why', asyn
   c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
   assert.deepStrictEqual(await within(reply), { reclaimed: 0, alreadyGone: 0, failed: 1, remaining: 2, reason: 'stalled' })
   assert.deepStrictEqual(c.env.navPlaced.map((p) => p.x).sort(), [1, 2])
+})
+
+test('tidy keeps a scaffold block whose walk a lit fuse refused queued and reclaims the next one of its kind', async (t) => {
+  const scaffold = (x) => new Block('cobblestone', new Vec3(x, 64, 0))
+  // The walks to the blocks arrive, the walks to their drops find no path.
+  const c = collector(t, {
+    blocks: { '1,64,0': scaffold(1), '2,64,0': scaffold(2) },
+    reach: (g) => !(g instanceof goals.GoalFollow),
+    plan: () => ({ status: 'noPath', path: [new Vec3(1, 64, 0)] })
+  })
+  c.env.navPlaced.push({ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 })
+  let refusals = 0
+  Object.assign(c.env, {
+    seenNow: () => true,
+    litFuse: () => (refusals ? null : { at: new Vec3(3.5, 64, 0.5), e: null }),
+    planPath: async () => ({ status: 'success', path: [new Vec3(1, 64, 0)] }),
+    closesOnFuse: () => true,
+    fuseRefusal () {
+      refusals++
+      return Object.assign(new Error('refused: a fuse hissed'), { reason: 'fuse' })
+    }
+  })
+  assert.deepStrictEqual(await within(awaitRoute('/tidy', {}, c.env)), { reclaimed: 1, alreadyGone: 0, failed: 1, remaining: 1, reason: 'fuse' })
+  assert.deepStrictEqual(c.env.navPlaced, [{ x: 1, y: 64, z: 0 }])
 })
 
 const RESCUE_BUSY = /^busy: the buried self-rescue is running\b/
@@ -1937,6 +1973,29 @@ test('a job stop during the walk to a drop of a gather ends its walks to drops',
   assert.strictEqual(c.env.jobs.get(job).status, 'cancelled')
   assert.deepStrictEqual(c.seen.chases, [c.seen.drops[0]])
   assert.strictEqual(c.seen.drops.length, 2, 'control: two drops lay')
+})
+
+test('a wood gather leaves a drop whose walk a lit fuse refused for a later walk, and names the fuse when nothing else is left', async (t) => {
+  const FUSE = 'refused: a creeper swells E ~4 and this walk closes on it, the guard stays up. Walk away from it, or walk again once the fuse is out.'
+  // refuses(n) tells whether the nth walk to a drop is refused for the fuse.
+  const run = async (refuses) => {
+    const c = logJob(t, TWO_OAKS, { forestry: true })
+    breakOnWalk(c, '5,64,2')
+    const stagedGoto = c.env.stagedGoto
+    let n = 0
+    c.env.stagedGoto = async (q, route) => {
+      if (!refuses(n++)) return stagedGoto(q, route)
+      c.seen.chases.push(q.drop)
+      throw Object.assign(new Error(FUSE), { reason: 'fuse' })
+    }
+    const { job } = runRoute('/gather', { resource: 'oak_log', amount: '2' }, c.env)
+    return { c, result: await jobResult(c, job) }
+  }
+  const later = await run((n) => n === 0)
+  assert.deepStrictEqual(later.result, { gathered: 2, dug: 2, requested: 2, inventoryMatching: 2 })
+  assert.deepStrictEqual(later.c.seen.chases, [later.c.seen.drops[0], later.c.seen.drops[0]])
+  const held = await run(() => true)
+  assert.deepStrictEqual([held.result.gathered, held.result.reason, held.result.unreached.length], [1, `${FUSE} (gathered 1/2)`, 1])
 })
 
 // woodRig over the real sight functions at noon, listing each leaf dug in leafDigs with the log digs before it.

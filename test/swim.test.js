@@ -106,6 +106,7 @@ function gotoEnv (bot) {
     entityPerceptible: () => true,
     nametagVisible: () => false,
     reflexes: [{ name: 'combat', fairFill: () => ({}) }],
+    litFuse: () => null,
     nearestVisible: () => null,
     resolveBlockIds: () => [1],
     cellKnown: () => true,

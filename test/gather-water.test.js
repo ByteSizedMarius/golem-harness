@@ -36,7 +36,8 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
     inventory: { items: () => [pocket, ...carried] },
     waitForTicks: async () => {},
     blockAt,
-    findBlocks: ({ matching }) => [...cells.keys()].map((k) => new Vec3(...k.split(',').map(Number))).filter((p) => matching.includes(blockAt(p).type)),
+    findBlocks: ({ matching }) => [...cells.keys()].map((k) => new Vec3(...k.split(',').map(Number)))
+      .filter((p) => typeof matching === 'function' ? matching(blockAt(p)) : matching.includes(blockAt(p).type)),
     world: {
       // The ray passes through water.
       raycast (from, dir, range) {
@@ -267,6 +268,28 @@ test('gather skips a target with no leaf beside it at once when its look walk fa
   assert.strictEqual((await job).gathered, 0)
   assert.strictEqual(walks.length, 1)
   assert.ok(progress.some((m) => m.startsWith('skip unreachable @ 0,63,0: ')), progress.join('\n'))
+})
+
+test('gather passes over dirt whose walk a lit fuse refused, digs it on a later pass, and names the fuse when nothing else is left', async () => {
+  const FUSE = 'refused: a fuse hissed W ~5 and this walk closes on it, the guard stays up. Walk away from it, or walk again once the fuse is out.'
+  // refuses(n) tells whether the nth goto is refused for the fuse.
+  const run = async (dirt, amount, refuses) => {
+    const w = lakeWorld(SHORE, dirt, { hidden: [], blocks: {} })
+    const goto = w.env.bot.pathfinder.goto
+    let n = 0
+    w.env.bot.pathfinder.goto = (goal) => refuses(n++) ? Promise.reject(Object.assign(new Error(FUSE), { reason: 'fuse' })) : goto(goal)
+    let job = null
+    const progress = []
+    w.env.jobs = { start: (name, fn) => { job = fn({ name, cancelled: false, progress: (m) => progress.push(m) }); return { id: 1 } } }
+    const { handle, res } = routeHandler('/gather', w.env)
+    handle({ query: { resource: 'dirt', amount: String(amount) } }, res)
+    return { result: await job, digs: w.log.digs.map((d) => d.at), progress }
+  }
+  const later = await run([new Vec3(-6, 63, 3), new Vec3(-10, 63, 0)], 2, (n) => n === 0)
+  assert.deepStrictEqual([later.result.gathered, later.digs], [2, ['-10,63,0', '-6,63,3']], later.progress.join('\n'))
+  assert.ok(later.progress.includes(`skip for now @ -6,63,3: ${FUSE}`), later.progress.join('\n'))
+  const alone = await run([new Vec3(-6, 63, 0)], 1, () => true)
+  assert.deepStrictEqual([alone.result.gathered, alone.result.reason], [0, `${FUSE} (gathered 0/1)`])
 })
 
 test('gather walks past a cell beside dirt under grass that cannot see it to one that sees its open face', async () => {

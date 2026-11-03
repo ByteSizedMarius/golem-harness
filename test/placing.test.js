@@ -549,6 +549,24 @@ test('build digs no doorway cell once the pilot took over during its walk there'
   assert.strictEqual(reply.stopped, 'stopped by the pilot')
 })
 
+test('a build cell whose walk a lit fuse refused stays pending, and the reply names the fuse', async () => {
+  const FUSE = 'refused: a creeper swells E ~4 and this walk closes on it, the guard stays up. Walk away from it, or walk again once the fuse is out.'
+  const refused = async () => { throw Object.assign(new Error(FUSE), { reason: 'fuse' }) }
+  // A row at x 1 from z -4 to 1 with its doorway at z -1. Only the first cell lies out of reach.
+  const walls = wallsRig()
+  walls.bot.pathfinder.goto = refused
+  assert.deepStrictEqual(await awaitRoute('/walls', { x: '1', z: '-4', w: '1', d: '6', h: '1', base: '64' }, walls.env), {
+    placed: 4, skipped: 0, failed: 0, pending: 1, fuse: FUSE, size: '1x6', height: 1, door: 'west'
+  })
+  const outline = wallsRig({ env: unseenNow('2,63,0') })
+  outline.bot.pathfinder.goto = refused
+  const r = await awaitRoute('/outline', { x: '2', z: '0', w: '1', d: '1', y: '64' }, outline.env)
+  assert.deepStrictEqual([r.failed, r.pending, r.fuse], [0, 1, FUSE], 'outline on ground out of sight')
+  const { reply, log } = await buildCabin(() => { throw Object.assign(new Error(FUSE), { reason: 'fuse' }) })
+  assert.ok(log.includes('walk in door'), 'control: the door phase walked')
+  assert.deepStrictEqual([[...reply.failures.filter((f) => /^1,6[45],0:/.test(f))], reply.pending, reply.fuse], [[], 2, FUSE], 'the doorway of build')
+})
+
 test('build answers not ready before it reads the body position', async () => {
   const { handle, res } = routeHandler('/build', buildVerbEnv({ entity: null }, { shared: { ready: false } }))
   await handle({ query: { x: '1', z: '-1' } }, res)

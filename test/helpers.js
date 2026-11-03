@@ -934,6 +934,7 @@ function combatReflexIn (env) {
   const literal = at < 0 ? '' : balanced(src, src.lastIndexOf('{', at))
   assert.ok(literal, 'the combat reflex not found in bot.js')
   env.OPENABLE ??= botConstant('OPENABLE')
+  env.FILL_RADIUS ??= botConstant('FILL_RADIUS')
   env.seenNow ??= () => true
   env.seesShape ??= () => true
   env.soleClaim ??= loadBotFunctions(['soleClaim'], { digLock: env.digLock || botConstant('digLock') }).soleClaim

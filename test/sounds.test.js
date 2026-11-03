@@ -4,6 +4,7 @@ const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { classifySound } = require('../lib/sounds')
 const { LEGACY_STRIKE_MS, LEGACY_STRIKE_RANGE } = require('../lib/bot/legacy-1710')
+const { FUSE_NEAR } = require('../lib/plan')
 const { loadBotFunctions, functionSource } = require('./helpers')
 const mcData = require('minecraft-data')('1.21.11')
 
@@ -91,6 +92,8 @@ function ears (extra = {}) {
     classifySound,
     LEGACY_1710: true,
     HEARD: [],
+    FUSES: [],
+    FUSE_NEAR,
     dangerHeard: {},
     lastThunder: 0,
     lastThunderPos: null,

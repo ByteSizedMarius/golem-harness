@@ -265,6 +265,7 @@ test('a goto at the food floor during the pour of the fire reflex walks on witho
     ...b.env,
     reflexes: [{ name: 'combat', fightBusy: () => false, fairFill: () => ({}), _seenAt: new Map() }],
     nearHostiles: () => [],
+    litFuse: () => null,
     bunker: { building: false },
     SPRINT_FLOOR,
     stopPath () {},

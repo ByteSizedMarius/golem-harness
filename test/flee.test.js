@@ -10,6 +10,7 @@ const { isDoor, CLEAR } = require('../lib/doors')
 const { MIN_FOOD, SPRINT_FLOOR } = require('../lib/sprint')
 const { expireConfirmed } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
+const { FUSE_REACH, closesOnFuse } = require('../lib/plan')
 const vm = require('node:vm')
 const { EventEmitter } = require('node:events')
 const { loadBotFunctions, combatReflexIn, botConstant, botSource, balanced, reflexIn, fakeClock, laneAt, claimRescue } = require('./helpers')
@@ -173,6 +174,7 @@ function fleeIn (w, threat, ally = null, over = {}) {
   const taken = legs.takenSince(mark)
   return {
     bot,
+    env,
     combat,
     held,
     goal: g && { x: Math.floor(g.x), y: Math.floor(g.y), z: Math.floor(g.z) },
@@ -1388,4 +1390,19 @@ test('open surface beyond the lit disc gives the flee candidates, and a drop the
   assertSafe(w, r.goal)
   assert.ok(Math.hypot(r.goal.x, r.goal.z) >= 8 && r.goal.x >= -11, `goal ${JSON.stringify(r.goal)}`)
   assert.match(r.logs.find((l) => l.startsWith('[flee]')), / [1-9]\d* candidates, .*\(\d*[1-9]\d* a drop, /)
+})
+
+test('the flee from a swelling creeper whose fuse the body heard takes the legs to the goal it takes with no fuse heard', () => {
+  const metadata = []
+  metadata[MC_DATA.entitiesByName.creeper.metadataKeys.indexOf('swell_dir')] = 1
+  const swelling = () => ({ ...creeper(3.5, 64, 0.5), metadata })
+  const column = (x, y, z) => x === 0 && z === 1 && y >= 64 && y <= 66
+  const corner = plateau({ solid: (x, y, z) => plateau().solid(x, y, z) || column(x, y, z) })
+  const quiet = fleeIn(corner, swelling())
+  const fuse = { FUSES: [{ t: Date.now(), at: new Vec3(3.5, 64, 0.5) }], FUSE_MS: botConstant('FUSE_MS'), FUSE_REACH, closesOnFuse, staleEntities: new Set() }
+  const heard = fleeIn(corner, swelling(), null, fuse)
+  heard.bot.entities = {}
+  assert.ok(loadBotFunctions(['litFuse'], heard.env).litFuse(), 'control: the fuse is lit for a pilot walk')
+  assert.deepStrictEqual([quiet.goal, quiet.takenBy], [{ x: -1, y: 64, z: 1 }, 'the combat reflex took the legs to break its sight: creeper E ~3, same level'], 'control: the flee with no fuse heard')
+  assert.deepStrictEqual([heard.goal, heard.takenBy], [quiet.goal, quiet.takenBy])
 })
