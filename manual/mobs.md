@@ -50,4 +50,5 @@ How 1.7.10 mobs notice, move and attack. Distances are in blocks, feet to feet.
 
 - In a 1-wide doorway or corridor, mobs reach you one at a time.
 - On a `pillar` or a ledge 2 above the ground around it, the combat reflex and `hold` strike zombies below instead of fleeing. Spiders and skeletons still reach you there.
-- The flee from a swelling creeper you see heads for a cell within 4 steps that hides you from it, at least 3 from it. Without one it runs 8 to 16 blocks.
+- The flee from a swelling creeper you see heads for a cell within 4 steps that walls hide from it, at least 3 from it. Without one it runs 8 to 16 blocks.
+- A creeper not yet swelling that can walk to you, with no room to run 8 to 16, gets the cover move through wooden doors. A shut door counts as cover, and the walk shuts it behind you.

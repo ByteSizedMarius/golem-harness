@@ -6,7 +6,7 @@ const { goals } = require('mineflayer-pathfinder')
 const MC_DATA = require('minecraft-data')('1.21.11')
 const Block = require('prismarine-block')(require('prismarine-registry')('1.21.11'))
 const { fleeHeading, planFlee, creeperCover, routeWithin, walkersTo, walkFlood, groundCell } = require('../lib/flee')
-const { isDoor } = require('../lib/doors')
+const { isDoor, CLEAR } = require('../lib/doors')
 const { MIN_FOOD, SPRINT_FLOOR } = require('../lib/sprint')
 const { expireConfirmed } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
@@ -94,8 +94,11 @@ const inArea = (x, z) => Math.abs(x) <= 40 && Math.abs(z) <= 40
 // Ground at y 63 over the area, bedrock under y 40. lava, water and unknown pick cells out.
 const plateau = (over = {}) => ({ solid: (x, y, z) => y < 40 || (inArea(x, z) && y < 64), lava: () => false, water: () => false, unknown: () => false, ...over })
 
+// w.block(p), where present, gives the block of p or null for the stone, water, lava and air of w.
 function blockAt (w) {
   return (p) => {
+    const own = w.block && w.block(p)
+    if (own) return own
     const lava = w.lava(p.x, p.y, p.z)
     const solid = !lava && w.solid(p.x, p.y, p.z)
     const water = !lava && !solid && w.water(p.x, p.y, p.z)
@@ -147,7 +150,7 @@ function fleeIn (w, threat, ally = null, over = {}) {
     reflexes: [{ name: 'flee_to_player', on: true, ally: () => ally }],
     nearHostiles: () => [],
     airFlood: () => ({}),
-    knownCell: () => true,
+    knownCell: (p) => !w.unknown(p.x, p.y, p.z),
     mobClass: () => 'creeper',
     laneBlocks: () => false,
     laneNarrate () {},
@@ -158,9 +161,10 @@ function fleeIn (w, threat, ally = null, over = {}) {
     emitEvent: (kind, msg) => events.push({ kind, msg }),
     LEGACY_1710: false,
     MIN_FOOD,
+    PENDING_DOORS: [],
     ...over
   }
-  loadBotFunctions(['fleeWorld', 'fleeLog', 'threatWhy', 'creeperSwelling', 'walksToBody', 'rangedInSight'], env)
+  loadBotFunctions(['fleeWorld', 'fleeLog', 'threatWhy', 'creeperSwelling', 'walksToBody', 'rangedInSight', 'creeperRoute'], env)
   const combat = combatReflexIn(env)
   // The body last perceived threat where it stands.
   combat._seenAt.set(threat.id, threat.position.clone())
@@ -243,6 +247,41 @@ test('a flee never ends under water, and wades across water one deep', () => {
   assert.ok(across.goal && across.goal.x <= -8, `the flee stops short of the ford: ${JSON.stringify(across.goal)}`)
 })
 
+const sceneWorld = (w) => ({
+  kind: (x, y, z) => (w.unknown(x, y, z) ? 'unknown' : w.lava(x, y, z) ? 'hazard' : w.solid(x, y, z) ? 'solid' : w.water(x, y, z) ? 'water' : 'open'),
+  hazard: (x, y, z) => !w.unknown(x, y, z) && w.lava(x, y, z),
+  cover: (x, y, z) => !w.unknown(x, y, z) && w.solid(x, y, z)
+})
+// Known ground x -13 to 15, z -2 to 2, a drop of 24 round it, unknown west of it, water at (5, 64, 0) over an unknown cell.
+const strip = plateau({
+  solid: (x, y, z) => y < 40 || (x >= -15 && x <= 15 && Math.abs(z) <= 2 && y < 64),
+  water: (x, y, z) => x === 5 && y === 64 && z === 0,
+  unknown: (x, y, z) => x <= -14 || (x === 5 && y === 63 && z === 0)
+})
+
+test('a flee plan counts its flood and its edge cells by what lies beside them', () => {
+  const plan = planFlee({ world: sceneWorld(strip), here: new Vec3(0.5, 64, 0.5), threat: new Vec3(20.5, 64, 0.5) })
+  // The strip but the water cell.
+  assert.strictEqual(plan.flood, 144)
+  // The two long rims and the east end drop away, the west end meets unknown cells, four cells touch the water.
+  assert.deepStrictEqual({ ...plan.edges }, { deep: 61, water: 4, unknown: 3 })
+  assert.strictEqual(plan.rejected.edge, 68)
+  assert.strictEqual(plan.safe, 144 - 1 - 68)
+})
+
+test('a flee plan counts the safe cells each filter cuts, in order, and names its heading', () => {
+  const here = new Vec3(0.5, 64, 0.5)
+  const east = new Vec3(20.5, 64, 0.5)
+  const plan = planFlee({ world: sceneWorld(strip), here, threat: east })
+  assert.deepStrictEqual({ ...plan.heading }, { x: -1, z: 0 })
+  // 36 safe cells lie 8 to 16 out, 15 of them west of the body.
+  assert.deepStrictEqual({ ...plan.cut }, { range: 75 - 36, side: 21, mob: 0 })
+  assert.strictEqual(plan.candidates, 15)
+  const boxed = planFlee({ world: sceneWorld(strip), here, threat: east, mobs: [new Vec3(-20.5, 64, 0.5)] })
+  assert.deepStrictEqual({ ...boxed.cut }, { range: 39, side: 21, mob: 15 })
+  assert.strictEqual(boxed.goal, null)
+})
+
 test('with no safe cell in reach the body holds its ground', () => {
   // A ridge one block wide from the body to the creeper, 24 above the ground.
   const w = plateau({ solid: (x, y, z) => y < 40 || (x >= 0 && x <= 3 && z === 0 && y < 64) })
@@ -253,6 +292,20 @@ test('with no safe cell in reach the body holds its ground', () => {
   const stand = 'the combat reflex took the legs to stand still, no safe cell to flee to: creeper E ~3, same level'
   assert.strictEqual(r.takenBy, stand)
   assert.deepStrictEqual(r.combatEvents, [stand])
+})
+
+test('the flee line names the flood, the edge cells by kind, the cut per filter and the heading', () => {
+  const ridge = plateau({ solid: (x, y, z) => y < 40 || (x >= 0 && x <= 3 && z === 0 && y < 64) })
+  const held = fleeIn(ridge, creeper(3.5, 64, 0.5))
+  assert.deepStrictEqual(held.logs.filter((l) => l.startsWith('[flee]')), [
+    '[flee] from creeper at (3,64,0): no safe cell, holding, flood 1 cells, 0 safe, ' +
+    'cut 0 too near or too far, 0 not along the heading (-1.00,0.00), 0 no farther from every mob, ' +
+    'rejected 0 beside a drop, water or an unknown cell (0 a drop, 0 water, 0 unknown), 0 within 2 of lava or fire, 1 too near a mob'
+  ])
+  const fled = fleeIn(strip, creeper(-4.5, 64, 0.5))
+  assert.ok(fled.goal, 'control: the flee found a goal')
+  const line = fled.logs.find((l) => l.startsWith('[flee]'))
+  assert.match(line, / candidates, flood \d+ cells, \d+ safe, cut \d+ too near or too far, \d+ not along the heading \(1\.00,0\.00\), \d+ no farther from every mob, rejected \d+ beside a drop, water or an unknown cell \(\d+ a drop, 4 water, \d+ unknown\),/)
 })
 
 test('a flee that takes the legs turns the head toward its walk, a hold turns nothing', () => {
@@ -1237,4 +1290,102 @@ test('cover from a skeleton lies through an open door', () => {
   combat.takeCover(bot, skeleton, 'skeleton E ~6')
   const g = bot.pathfinder.goal
   assert.deepStrictEqual(g && { x: g.x, y: g.y, z: g.z }, { x: -2, y: 64, z: 0 })
+})
+
+// A plank house with an oak door at (0, 64, 2 + dz), shut unless open, and with yard a walled yard in front of it.
+function doorYard ({ open = false, dz = 0, yard: walled = true, stone = () => false, extra = () => null } = {}) {
+  const house = (x, y, z) => Math.abs(x) <= 3 && z >= 2 && z <= 8 && y >= 64 && y <= 67 && (y === 67 || Math.abs(x) === 3 || z === 2 || z === 8)
+  const yard = (x, y, z) => walled && y >= 64 && y <= 66 && ((z === -6 && Math.abs(x) <= 6) || (Math.abs(x) === 6 && z >= -6 && z <= 2) || (z === 2 && Math.abs(x) >= 4))
+  const door = (x, y, z) => x === 0 && z === 2 && (y === 64 || y === 65)
+  return plateau({
+    solid: (x, y, z) => plateau().solid(x, y, z) || stone(x, y, z) || ((house(x, y, z - dz) || yard(x, y, z - dz)) && !door(x, y, z - dz)),
+    block: (p) => extra(p) || (door(p.x, p.y, p.z - dz) ? oakDoor(p, open) : null)
+  })
+}
+const oakDoor = (p, open) => Object.assign(Block.fromProperties('oak_door', { half: p.y === 64 ? 'lower' : 'upper', open, facing: 'north', hinge: 'left' }, 0), { position: p })
+const swellingCreeper = (x, y, z) => {
+  const metadata = []
+  metadata[MC_DATA.entitiesByName.creeper.metadataKeys.indexOf('swell_dir')] = 1
+  return { ...creeper(x, y, z), metadata }
+}
+
+test('a creeper with no flee goal in a closed yard is escaped through the shut house door, to a hidden cell 1.6 or more from it', () => {
+  const r = fleeIn(doorYard(), creeper(0.5, 64, -4.5))
+  assert.deepStrictEqual(r.goal, { x: 0, y: 64, z: 4 }, JSON.stringify(r.logs))
+  assert.ok(Math.hypot(r.goal.x - 0, r.goal.z - 2) >= CLEAR, 'the goal lies within CLEAR of the door')
+  assert.strictEqual(r.takenBy, 'the combat reflex took the legs to break its sight: creeper N ~5, same level')
+  assert.match(r.logs.find((l) => l.startsWith('[flee]')), /^\[flee\] from creeper at \(0,64,-5\): no safe cell, goal \(0,64,4\) out of its sight behind seen blocks, 4 steps, 9\.0 from it, flood \d+ cells,/)
+})
+
+test('a wooden door standing open lets the walk through but hides nothing', () => {
+  const r = fleeIn(doorYard({ open: true }), creeper(0.5, 64, -4.5))
+  // The creeper sees down the middle of the house through the doorway, the front wall hides the cells beside it.
+  assert.ok(r.goal && Math.abs(r.goal.x) === 1 && r.goal.z === 3, `goal ${JSON.stringify(r.goal)}, ${JSON.stringify(r.logs)}`)
+})
+
+test('a creeper outside the shut door of the house the body stands in is held against, not fled', () => {
+  const r = fleeIn(doorYard({ dz: -4 }), creeper(0.5, 64, -3.5))
+  assert.deepStrictEqual([r.held, r.goal], ['held', null])
+  assert.deepStrictEqual(r.logs, ['[flee] from creeper at (0,64,-4): no walk to the body, holding'])
+})
+
+test('a swelling creeper in a closed yard is held against, the shut house door is no cover under its fuse', () => {
+  let covers = 0
+  const r = fleeIn(doorYard(), swellingCreeper(0.5, 64, -4.5), null, { creeperCover: (args) => { covers++; return creeperCover(args) } })
+  assert.deepStrictEqual([r.held, r.goal], ['held', null], JSON.stringify(r.logs))
+  assert.strictEqual(covers, 1, 'cover moves looked for')
+})
+
+test('a door the body opened and has yet to shut keeps the cover move 1.6 or more from it', () => {
+  // The open house door at (0, 64, 1) is the cell south of the body.
+  const w = doorYard({ open: true, dz: -1 })
+  const door = new Vec3(0, 64, 1)
+  const others = fleeIn(w, creeper(0.5, 64, -4.5))
+  assert.ok(others.goal && Math.hypot(others.goal.x, others.goal.z - 1) < CLEAR, `control: a door someone else left open, goal ${JSON.stringify(others.goal)}`)
+  const own = fleeIn(w, creeper(0.5, 64, -4.5), null, { PENDING_DOORS: [{ key: door.toString(), pos: door, t: 0, warned: false }] })
+  assert.ok(own.goal && Math.hypot(own.goal.x, own.goal.z - 1) >= CLEAR, `goal ${JSON.stringify(own.goal)}, ${JSON.stringify(own.logs)}`)
+})
+
+test('the body in its house holds against a creeper at a door it cannot make out, and never runs out past it', () => {
+  const w = doorYard({ dz: -4, yard: false })
+  const door = (p) => p.x === 0 && p.z === -2
+  const r = fleeIn(w, creeper(-4.5, 64, -4.5), null, { seenNow: (p) => !door(p), seesShape: (p) => !door(p) })
+  assert.deepStrictEqual([r.held, r.goal], ['held', null], JSON.stringify(r.logs))
+  assert.match(r.logs.find((l) => l.startsWith('[flee]')), /: no safe cell, holding, /)
+})
+
+test('a creeper with no walk to the body gets no cover move, also once it hit the body or beside another hostile', () => {
+  // The creeper outside the yard wall to the north, a zombie outside it to the east.
+  const outside = creeper(0.5, 64, -8.5)
+  const zombie = { id: 4, name: 'zombie', position: new Vec3(8.5, 64, 0.5) }
+  const hit = fleeIn(doorYard(), outside, null, { AGGRO_CONFIRMED: new Map([[9, { t: Date.now() }]]) })
+  assert.deepStrictEqual([hit.held, hit.goal], ['held', null], `hit: ${JSON.stringify(hit.logs)}`)
+  const beside = fleeIn(doorYard(), outside, null, { nearHostiles: () => [{ e: zombie, at: zombie.position }] })
+  assert.deepStrictEqual([beside.held, beside.goal], ['held', null], `beside: ${JSON.stringify(beside.logs)}`)
+})
+
+test('an oak door the body never made out neither hides it nor keeps the cover move off the cells beside it', () => {
+  const wall = (x, y, z) => z === -1 && x >= 1 && x <= 3 && y >= 64 && y <= 66
+  const plain = fleeIn(doorYard({ stone: wall }), creeper(0.5, 64, -4.5))
+  assert.deepStrictEqual(plain.goal, { x: 1, y: 64, z: 0 }, `control: ${JSON.stringify(plain.logs)}`)
+  // A shut oak door diagonal to that cell, unknown.
+  const door = (p) => p.x === 2 && p.z === 1 && (p.y === 64 || p.y === 65)
+  const w = doorYard({ stone: wall, extra: (p) => (door(p) ? oakDoor(p, false) : null) })
+  const unseen = { ...w, unknown: (x, y, z) => door({ x, y, z }) }
+  const r = fleeIn(unseen, creeper(0.5, 64, -4.5), null, { seenNow: (p) => !door(p), seesShape: (p) => !door(p) })
+  assert.deepStrictEqual(r.goal, plain.goal, JSON.stringify(r.logs))
+})
+
+test('open surface beyond the lit disc gives the flee candidates, and a drop there stays an edge', () => {
+  const w = plateau({ solid: (x, y, z) => y < 40 || (inArea(x, z) && x >= -12 && y < 64) })
+  // The sky lights the ground top, the air over it and the drop beyond x -12.
+  const lit = (p) => Math.hypot(p.x, p.z) <= 6
+  const surface = (p) => p.y >= 63 || p.x < -12
+  const flee = (knownCell) => fleeIn(w, creeper(5.5, 64, 0.5), null, { cellKnown: lit, knownCell })
+  const dark = flee(lit)
+  assert.deepStrictEqual([dark.held, dark.goal], ['held', null], 'control: lit sight alone')
+  const r = flee((p) => surface(p) || lit(p))
+  assertSafe(w, r.goal)
+  assert.ok(Math.hypot(r.goal.x, r.goal.z) >= 8 && r.goal.x >= -11, `goal ${JSON.stringify(r.goal)}`)
+  assert.match(r.logs.find((l) => l.startsWith('[flee]')), / [1-9]\d* candidates, .*\(\d*[1-9]\d* a drop, /)
 })

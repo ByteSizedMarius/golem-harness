@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-02: a creeper flee takes cover behind the house door
+
+A creeper caught the bot just outside its lit house at night. The flee found no safe cell and held
+still, because it read the door as a wall and the dark yard as unknown. With no room to run, the
+bot now takes cover behind a wooden door it shuts on its way in, before the creeper swells. Under a
+lit fuse only walls count as cover. Open ground under the sky counts as known for the flee, so a
+night flee also crosses surface it never saw lit.
+
 ## 2026-11-02: the bot sprints only where it looks
 
 Fleeing a creeper right after a fight, the bot kept its head on the mob and sprinted the other way,
