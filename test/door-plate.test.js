@@ -110,6 +110,7 @@ async function body ({ facing = 'east', hinge = 'left', open = false, axis = 'x'
     setControlState (control, state) {
       if (control === 'forward' && state) walked = true
     },
+    sprintFacing: () => true,
     clearControlStates () {},
     async activateBlock (block) {
       await bot.lookAt(block.position.offset(0.5, 0.5, 0.5))

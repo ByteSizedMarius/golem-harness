@@ -65,6 +65,7 @@ function standoffFight (extra, mob, over = {}) {
     lookAt: async () => {},
     waitForTicks: async () => {},
     setControlState () {},
+    faceWalk () {},
     attack () { swings++ },
     activateItem () { raises++ },
     deactivateItem () { lowers++ },

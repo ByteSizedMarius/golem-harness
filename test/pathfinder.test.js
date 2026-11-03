@@ -117,6 +117,7 @@ async function firstTick (cells) {
     jumpQueued: false,
     controlState: controls,
     setControlState (k, v) { controls[k] = v },
+    sprintFacing: () => true,
     look: async () => {},
     inventory: { items: () => [], slots: [] }
   })

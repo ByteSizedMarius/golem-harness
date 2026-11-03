@@ -92,10 +92,27 @@ index 507a618..73d608f 100644
  
    bot._client.on('entity_destroy', (packet) => {
 diff --git a/node_modules/mineflayer/lib/plugins/physics.js b/node_modules/mineflayer/lib/plugins/physics.js
-index cecae69..1a746ee 100644
+index cecae69..0675e25 100644
 --- a/node_modules/mineflayer/lib/plugins/physics.js
 +++ b/node_modules/mineflayer/lib/plugins/physics.js
-@@ -73,6 +73,8 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+@@ -13,6 +13,7 @@ const PI = Math.PI
+ const PI_2 = Math.PI * 2
+ const PHYSICS_INTERVAL_MS = 50
+ const PHYSICS_TIMESTEP = PHYSICS_INTERVAL_MS / 1000 // 0.05
++const MAX_SPRINT_OFF = PI / 4 + 1e-3
+ 
+ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+   const PHYSICS_CATCHUP_TICKS = maxCatchupTicks ?? 4
+@@ -35,6 +36,8 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+   }
+   let lastSentYaw = null
+   let lastSentPitch = null
++  // The sprint state the server was last sent, null when unknown.
++  let sprinting = null
+   let doPhysicsTimer = null
+   let lastPhysicsFrameTime = null
+   let shouldUsePhysics = false
+@@ -73,19 +76,61 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
        catchupTicks++
        if (catchupTicks >= PHYSICS_CATCHUP_TICKS) break
      }
@@ -104,19 +121,109 @@ index cecae69..1a746ee 100644
    }
  
    function tickPhysics (now) {
-@@ -160,8 +162,9 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
-     if (!Number.isFinite(bot.entity.position.x)) return
- 
-     // Increment the yaw in baby steps so that notchian clients (not the server) can keep up.
--    const dYaw = deltaYaw(bot.entity.yaw, lastSentYaw)
--    const dPitch = bot.entity.pitch - (lastSentPitch || 0)
+     if (!bot.entity?.position || !Number.isFinite(bot.entity.position.x)) return // entity not ready
+     if (bot.blockAt(bot.entity.position) == null) return // check if chunk is unloaded
+-    if (bot.physicsEnabled && shouldUsePhysics) {
+-      physics.simulatePlayer(new PlayerState(bot, controlState), world).apply(bot)
++    if (!shouldUsePhysics) return
++    const look = turnSentLook()
++    const sprint = bot.sprintEffective()
++    sendSprint(sprint)
++    if (bot.physicsEnabled) {
++      physics.simulatePlayer(new PlayerState(bot, { ...controlState, sprint }), world).apply(bot)
+       bot.emit('physicsTick')
+       bot.emit('physicTick') // Deprecated, only exists to support old plugins. May be removed in the future
+     }
+-    if (shouldUsePhysics) {
+-      updatePosition(now)
+-    }
++    updatePosition(now, look)
++  }
++
++  // Turns the sent look one tick toward the presented look, at its turnSpeed in rad/s when set.
++  function turnSentLook () {
++    // Increment the yaw in baby steps so that notchian clients (not the server) can keep up.
 +    const shown = bot.presentedLook ? bot.presentedLook() : bot.entity
 +    const dYaw = deltaYaw(shown.yaw, lastSentYaw)
 +    const dPitch = shown.pitch - (lastSentPitch || 0)
++
++    // Vanilla doesn't clamp yaw, so we don't want to do it either
++    const maxDeltaYaw = PHYSICS_TIMESTEP * (shown.turnSpeed ?? physics.yawSpeed)
++    const maxDeltaPitch = PHYSICS_TIMESTEP * (shown.turnSpeed ?? physics.pitchSpeed)
++    lastSentYaw += math.clamp(-maxDeltaYaw, dYaw, maxDeltaYaw)
++    lastSentPitch += math.clamp(-maxDeltaPitch, dPitch, maxDeltaPitch)
++    return { yaw: lastSentYaw, pitch: lastSentPitch }
++  }
++
++  // True while the sent look is at most 45 degrees off the walking yaw.
++  bot.sprintFacing = () => Math.abs(deltaYaw(lastSentYaw, bot.entity.yaw)) <= MAX_SPRINT_OFF
++  bot.sprintEffective = () => controlState.sprint && controlState.forward && bot.sprintFacing()
++
++  function sendSprint (on) {
++    if (on === sprinting) return
++    sprinting = on
++    bot._client.write('entity_action', {
++      entityId: bot.entity.id,
++      actionId: bot.supportFeature('entityActionUsesStringMapper')
++        ? (on ? 'start_sprinting' : 'stop_sprinting')
++        : (on ? 3 : 4),
++      jumpBoost: 0
++    })
++  }
++
++  // A sprint hit clears the server's sprint.
++  const attack = bot.attack
++  bot.attack = (...args) => {
++    if (sprinting) sprinting = null
++    return attack(...args)
+   }
  
-     // Vanilla doesn't clamp yaw, so we don't want to do it either
-     const maxDeltaYaw = PHYSICS_TIMESTEP * physics.yawSpeed
-@@ -362,6 +365,15 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+   // remove this when 'physicTick' is removed
+@@ -153,24 +198,15 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+     return false
+   }
+ 
+-  function updatePosition (now) {
++  // A forced look during the tick reaches the move packets from the next tick on.
++  function updatePosition (now, look) {
+     // Only send updates for 20 ticks after death
+     if (isEntityRemoved()) return
+     // Don't send position with invalid coordinates (NaN after death)
+     if (!Number.isFinite(bot.entity.position.x)) return
+ 
+-    // Increment the yaw in baby steps so that notchian clients (not the server) can keep up.
+-    const dYaw = deltaYaw(bot.entity.yaw, lastSentYaw)
+-    const dPitch = bot.entity.pitch - (lastSentPitch || 0)
+-
+-    // Vanilla doesn't clamp yaw, so we don't want to do it either
+-    const maxDeltaYaw = PHYSICS_TIMESTEP * physics.yawSpeed
+-    const maxDeltaPitch = PHYSICS_TIMESTEP * physics.pitchSpeed
+-    lastSentYaw += math.clamp(-maxDeltaYaw, dYaw, maxDeltaYaw)
+-    lastSentPitch += math.clamp(-maxDeltaPitch, dPitch, maxDeltaPitch)
+-
+-    const yaw = Math.fround(conv.toNotchianYaw(lastSentYaw))
+-    const pitch = Math.fround(conv.toNotchianPitch(lastSentPitch))
++    const yaw = Math.fround(conv.toNotchianYaw(look.yaw))
++    const pitch = Math.fround(conv.toNotchianPitch(look.pitch))
+     const position = bot.entity.position
+     const onGround = bot.entity.onGround
+ 
+@@ -249,14 +285,6 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+     controlState[control] = state
+     if (control === 'jump' && state) {
+       bot.jumpQueued = true
+-    } else if (control === 'sprint') {
+-      bot._client.write('entity_action', {
+-        entityId: bot.entity.id,
+-        actionId: bot.supportFeature('entityActionUsesStringMapper')
+-          ? (state ? 'start_sprinting' : 'stop_sprinting')
+-          : (state ? 3 : 4),
+-        jumpBoost: 0
+-      })
+     } else if (control === 'sneak') {
+       if (bot.supportFeature('newPlayerInputPacket')) {
+         // In 1.21.6+, sneak is handled via player_input packet
+@@ -362,6 +390,15 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
      await bot.look(yaw, pitch, force)
    }
  
@@ -132,3 +239,18 @@ index cecae69..1a746ee 100644
    // 1.21.3+
    bot._client.on('player_rotation', (packet) => {
      bot.entity.yaw = conv.fromNotchianYaw(packet.yaw)
+@@ -479,9 +516,13 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+     shouldUsePhysics = false
+     respawnTimer = Date.now()
+   })
+-  bot.on('respawn', () => { shouldUsePhysics = false })
++  bot.on('respawn', () => {
++    shouldUsePhysics = false
++    sprinting = null
++  })
+   bot.on('login', () => {
+     shouldUsePhysics = false
++    sprinting = null
+     if (doPhysicsTimer === null) {
+       lastPhysicsFrameTime = performance.now()
+       doPhysicsTimer = setInterval(doPhysics, PHYSICS_INTERVAL_MS)

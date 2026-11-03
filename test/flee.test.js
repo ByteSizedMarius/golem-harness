@@ -117,7 +117,9 @@ function fleeIn (w, threat, ally = null, over = {}) {
     blockAt: blockAt(w),
     pathfinder: { goal: null, setGoal (g) { this.goal = g } },
     controlState: {},
-    setControlState (c, s) { this.controlState[c] = s }
+    setControlState (c, s) { this.controlState[c] = s },
+    turns: 0,
+    faceWalk () { this.turns++ }
   }
   const env = {
     bot,
@@ -251,6 +253,16 @@ test('with no safe cell in reach the body holds its ground', () => {
   const stand = 'the combat reflex took the legs to stand still, no safe cell to flee to: creeper E ~3, same level'
   assert.strictEqual(r.takenBy, stand)
   assert.deepStrictEqual(r.combatEvents, [stand])
+})
+
+test('a flee that takes the legs turns the head toward its walk, a hold turns nothing', () => {
+  const fled = fleeIn(plateau(), creeper(5.5, 64, 0.5))
+  assert.ok(fled.goal, 'control: the flee found a goal')
+  assert.strictEqual(fled.bot.turns, 1)
+  const ridge = plateau({ solid: (x, y, z) => y < 40 || (x >= 0 && x <= 3 && z === 0 && y < 64) })
+  const held = fleeIn(ridge, creeper(3.5, 64, 0.5))
+  assert.strictEqual(held.held, 'held', 'control: no safe cell')
+  assert.strictEqual(held.bot.turns, 0)
 })
 
 test('a creeper flee names the creeper, its bearing, distance and level in takenBy and in one combat event', () => {

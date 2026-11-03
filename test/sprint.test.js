@@ -104,7 +104,7 @@ test('the corner node stays while the body is short of it, so the hop never cuts
 })
 
 // sprintTick of bot.js over a fake bot walking east along path.
-function sprintBot (path, { sprint = true, moving = true, pos = new Vec3(0.5, 64, 0.5), onGround = true, cells = {} } = {}) {
+function sprintBot (path, { sprint = true, effective = sprint, moving = true, pos = new Vec3(0.5, 64, 0.5), onGround = true, cells = {} } = {}) {
   const controls = {}
   const logs = []
   const clock = { t: 1000000 }
@@ -115,6 +115,7 @@ function sprintBot (path, { sprint = true, moving = true, pos = new Vec3(0.5, 64
     pathfinder: { isMoving: () => moving, goal: {} },
     getControlState: (k) => (k === 'sprint' ? sprint : !!controls[k]),
     setControlState: (k, v) => { controls[k] = v },
+    sprintEffective: () => effective,
     blockAt: world(cells)
   })
   const env = {
@@ -127,7 +128,8 @@ function sprintBot (path, { sprint = true, moving = true, pos = new Vec3(0.5, 64
 }
 
 test('sprintTick holds jump only while the pathfinder sprints along the path', () => {
-  for (const [label, opts, jump] of [['sprinting', {}, true], ['walking', { sprint: false }, undefined], ['no path', { moving: false }, undefined]]) {
+  for (const [label, opts, jump] of [['sprinting', {}, true], ['walking', { sprint: false }, undefined], ['no path', { moving: false }, undefined],
+    ['a sprint request the look holds off', { effective: false }, undefined]]) {
     const { ctx, controls } = sprintBot(east(6), opts)
     ctx.sprintTick()
     assert.strictEqual(controls.jump, jump, label)

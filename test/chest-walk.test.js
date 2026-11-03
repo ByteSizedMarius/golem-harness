@@ -48,7 +48,9 @@ async function tickedBody (t, pos, yaw, cells, unplanned = {}) {
       if (k === 'sprint') body.sprints.push([body.tick, v])
     },
     getControlState: (k) => controls[k],
+    sprintFacing: () => true,
     clearControlStates () { for (const k in controls) bot.setControlState(k, false) },
+    faceWalk () {},
     look,
     lookAt: (p, force) => {
       const d = p.minus(bot.entity.position.offset(0, 1.62, 0))

@@ -1306,7 +1306,7 @@ test('the bunker reflex flees after a failed build, naming what ended it, but no
 
 test('the flee after a failed build runs although a flee was under way when the build began', async () => {
   const mob = { id: 9, name: 'zombie', cls: 'hostile', position: new Vec3(3.5, 64, 0.5) }
-  const bot = { health: 5, entity: { position: HERE }, pathfinder: { goal: null, setGoal (g) { this.goal = g } }, setControlState () {} }
+  const bot = { health: 5, entity: { position: HERE }, pathfinder: { goal: null, setGoal (g) { this.goal = g } }, setControlState () {}, faceWalk () {} }
   // The combat reflex with a planner that always finds a goal, so only its flee latch can hold a flee back.
   const combat = combatReflexIn({
     bot,

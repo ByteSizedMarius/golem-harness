@@ -1,5 +1,5 @@
 diff --git a/node_modules/mineflayer-pathfinder/index.js b/node_modules/mineflayer-pathfinder/index.js
-index b38bd30..10ed8a9 100644
+index b38bd30..299babb 100644
 --- a/node_modules/mineflayer-pathfinder/index.js
 +++ b/node_modules/mineflayer-pathfinder/index.js
 @@ -11,6 +11,50 @@ const Vec3 = require('vec3').Vec3
@@ -252,7 +252,7 @@ index b38bd30..10ed8a9 100644
          })
          return
        }
-@@ -608,13 +757,23 @@ function inject (bot) {
+@@ -608,13 +757,24 @@ function inject (bot) {
      bot.setControlState('forward', true)
      bot.setControlState('jump', false)
  
@@ -271,15 +271,16 @@ index b38bd30..10ed8a9 100644
        bot.setControlState('jump', true)
        bot.setControlState('sprint', false)
 -    } else if (stateMovements.allowSprinting && physics.canStraightLine(path, true)) {
-+    } else if (stateMovements.allowSprinting && !bot.pathfinder.sprintBlocked && physics.canStraightLine(path, true)) {
++    // LOCAL PATCH (Golem 11-03): a sent look over 45 degrees off the walking yaw holds the sprint off.
++    } else if (stateMovements.allowSprinting && !bot.pathfinder.sprintBlocked && bot.sprintFacing() && physics.canStraightLine(path, true)) {
        bot.setControlState('jump', false)
        bot.setControlState('sprint', true)
 -    } else if (stateMovements.allowSprinting && physics.canSprintJump(path)) {
-+    } else if (stateMovements.allowSprinting && !bot.pathfinder.sprintBlocked && physics.canSprintJump(path)) {
++    } else if (stateMovements.allowSprinting && !bot.pathfinder.sprintBlocked && bot.sprintFacing() && physics.canSprintJump(path)) {
        bot.setControlState('jump', true)
        bot.setControlState('sprint', true)
      } else if (physics.canStraightLine(path)) {
-@@ -638,6 +797,7 @@ function inject (bot) {
+@@ -638,6 +798,7 @@ function inject (bot) {
  
  module.exports = {
    pathfinder: inject,

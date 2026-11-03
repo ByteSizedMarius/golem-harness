@@ -167,6 +167,7 @@ async function framer (pos, cells, more = {}) {
     jumpQueued: false,
     controlState: controls,
     setControlState (k, v) { controls[k] = v },
+    sprintFacing: () => true,
     clearControlStates () { for (const k in controls) controls[k] = false },
     look: async (yaw, pitch) => { Object.assign(bot.entity, { yaw, pitch }) },
     inventory: { items: () => [], slots: [] }

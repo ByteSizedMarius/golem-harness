@@ -349,6 +349,34 @@ test('a bow drawn while the pathfinder keeps turning the head holds the aim on t
   assert.ok(offAim(looks.at(-1)) < 0.1, `released off the aim: ${report}`)
 })
 
+test('a flee late in a bow draw or a bite leaves the look to the use, and the gaze eases back after it', async (t) => {
+  for (const [label, start, end] of [
+    ['bow draw', (bot) => bot.activateItem(), (bot) => bot.deactivateItem()],
+    ['eating', (bot) => {
+      bot.game = { gameMode: 'creative' }
+      bot.consume()
+      // Any entity status clears usingHeldItem, here a mob dying nearby.
+      bot._client.emit('entity_status', { entityId: 99, entityStatus: 3 })
+    }, (bot) => bot._client.emit('entity_status', { entityId: bot.entity.id, entityStatus: 9 })]
+  ]) {
+    await t.test(label, async (t) => {
+      const w = await walker(t, STAIRS)
+      await w.walk(20)
+      w.pause(true)
+      start(w.bot)
+      await w.ticks(HOLD_MS / 1000 / TICK_S + 2)
+      w.bot.faceWalk()
+      await w.ticks(1)
+      assert.ok(w.off() < 0.1, `the wire left the real look during the use, ${w.off().toFixed(1)} degrees off`)
+      end(w.bot)
+      w.pause(false)
+      const { maxYaw } = motion(await w.walk(20))
+      assert.ok(maxYaw <= w.clamp + 1e-3, `steps back ${maxYaw.toFixed(1)}`)
+      assert.ok(w.off() > 20, `control: back on the path gaze, ${w.off().toFixed(1)} degrees off the walking yaw`)
+    })
+  }
+})
+
 test('a server position correction in path mode keeps the gaze, and outside it keeps the real look', async (t) => {
   const w = await walker(t, STAIRS)
   await w.walk(20)

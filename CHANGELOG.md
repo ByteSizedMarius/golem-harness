@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-02: the bot sprints only where it looks
+
+Fleeing a creeper right after a fight, the bot kept its head on the mob and sprinted the other way,
+which no player can do. Sprint now reaches the server only while forward is held and the look the
+server sees is within 45° of the walk. A flee turns the head to its run at fight speed, and the
+pathfinder waits at a gap's edge until the look lets the sprint jump through.
+
 ## 2026-10-31: a body wedged into a block is lifted onto its top
 
 On farmland trampled to dirt the server held the bot's feet 1/16 inside the block and corrected
