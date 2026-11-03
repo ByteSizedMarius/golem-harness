@@ -186,6 +186,23 @@ test('an overrides file with a malformed items map is refused at start', (t) => 
   }
 })
 
+test('an enchanting entry reaches the bot as declared, and none reads as null', (t) => {
+  const enchanting = { lapisCost: [1, 2, 3], levelCost: [1, 2, 5] }
+  assert.deepStrictEqual(readServerOverrides(overridesFile(t, { ...OVERRIDES, enchanting })).enchanting, enchanting)
+  assert.strictEqual(readServerOverrides(overridesFile(t)).enchanting, null)
+})
+
+test('an overrides file with a malformed enchanting entry is refused at start', (t) => {
+  for (const enchanting of [
+    null, [], { lapisCost: [1, 2, 3] }, { levelCost: [1, 2, 3] }, { lapisCost: [1, 2], levelCost: [1, 2, 3] },
+    { lapisCost: [1, 2, 3], levelCost: [1, 2, 3, 4] }, { lapisCost: [1, -2, 3], levelCost: [1, 2, 3] },
+    { lapisCost: [1, 2, 3], levelCost: [1, 2.5, 3] }, { lapisCost: [1, 2, '3'], levelCost: [1, 2, 3] },
+    { lapisCost: [0, 2, 3], levelCost: [1, 2, 3] }, { lapisCost: [1, 2, 3], levelCost: [1, 0, 3] }
+  ]) {
+    assert.throws(() => readServerOverrides(overridesFile(t, { ...OVERRIDES, enchanting })), /GOLEM_SERVER_OVERRIDES .*enchanting/, JSON.stringify(enchanting))
+  }
+})
+
 test('a renamed block reaches every block of its kind under the shown name', (t) => {
   const registry = require('prismarine-registry')('1.21.11')
   const Block = require('prismarine-block')(registry)
