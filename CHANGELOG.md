@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-02: follow walks on down a staircase
+
+Following a player down a lit staircase, the bot stood at the top of a flight for up to 30 s
+while the player waited below. The step's lip hid the stair under it, the search found no way, and
+the pathfinder planned again only once the player moved. Follow now searches again from where the
+body stops. At the top of a flight it first walks to 0.2 short of its cell's edge toward the lip
+and looks down. On the test staircases the stall fell from about 30 s to under 3 s.
+
 ## 2026-11-02: a creeper flee takes cover behind the house door
 
 A creeper caught the bot just outside its lit house at night. The flee found no safe cell and held

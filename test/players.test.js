@@ -12,7 +12,8 @@ const { countVerbs } = require('../lib/verbs')
 const { isDoor, panelAcross, doorCrossing, partnerLeaf } = require('../lib/doors')
 const { expireConfirmed } = require('../lib/shelter')
 const { createReflexes, bindReflexes } = require('../lib/bot/reflexes')
-const { loadBotFunctions, combatReflexIn, botConstant } = require('./helpers')
+const { Physics, PlayerState } = require('prismarine-physics')
+const { loadBotFunctions, combatReflexIn, botConstant, botSource, walkingBody } = require('./helpers')
 
 const ME = new Vec3(0.5, 64, 0.5)
 const player = (id, username, position) => ({ id, type: 'player', name: 'player', username, position })
@@ -272,6 +273,8 @@ test('a player who hit the body is scored only inside the threatdebug window, an
 
 // ---- follow ----
 
+const followConstants = () => Object.fromEntries([...botSource().matchAll(/^const (FOLLOW_\w+) = /gm)].map(([, name]) => [name, botConstant(name)]))
+
 // A follow supervisor over a fake bot. The player is at position and perceived as gate says. With door, the
 // real doorway drill runs against an open oak door one cell east of the body, else a stub counts the drills.
 // Pilot routes register on app. With holdPause, the drill's 700 ms pause waits until the test calls pauses.shift().
@@ -325,8 +328,7 @@ function followHarness ({ position = new Vec3(10.5, 64, 0.5), gate = { seen: tru
     doorCrossing,
     partnerLeaf,
     follow: { followState: null },
-    FOLLOW_STILL_MS: botConstant('FOLLOW_STILL_MS'),
-    FOLLOW_STILL_SPAN: botConstant('FOLLOW_STILL_SPAN'),
+    ...followConstants(),
     console: { log () {} },
     setTimeout: (fn, ms) => (ms === 700 && holdPause ? pauses.push(fn) : setImmediate(fn)),
     playerEntity: (name) => (name === 'Steve' ? steve : null),
@@ -350,6 +352,15 @@ function followHarness ({ position = new Vec3(10.5, 64, 0.5), gate = { seen: tru
     setMoving: (m) => { moving = m },
     tick: () => ctx.followTick(st),
     arm: () => ctx.armFollow(st, ctx.followTarget(st)),
+    // Fails a search with status and, for noPath, every retry follow makes from the same cell.
+    searchFails: async (status) => {
+      bot.emit('path_update', { status, path: [] })
+      for (let i = 0; status === 'noPath' && i < env.FOLLOW_EMPTY_TRIES; i++) {
+        st.searchT -= env.FOLLOW_RETRY_MS
+        await ctx.followTick(st)
+        bot.emit('path_update', { status, path: [] })
+      }
+    },
     // What /stop and /unfollow do to a follow.
     stop: () => { env.legs.take(null); ctx.stopFollow(); env.stopPath(); bot.clearControlStates(); log.push(['stop']) },
     unfollow: () => { ctx.stopFollow(); bot.pathfinder.goal = null; bot.clearControlStates(); log.push(['stop']) },
@@ -391,8 +402,8 @@ test('a follow whose search found no way says what blocks it, once per 30 s, whi
     h.env.wayHint = (r) => { asked.push(r.cell && [r.cell.x, r.cell.y, r.cell.z]); return ladder }
     await h.tick()
     assert.deepStrictEqual(h.events, [], `${status}: control, no search failed yet`)
-    h.bot.emit('path_update', { status, path: [] })
-    await h.tick()
+    await h.searchFails(status)
+    assert.deepStrictEqual(h.events, [], `${status}: control, the last search from this cell`)
     await h.tick()
     assert.deepStrictEqual(h.events, [{ kind: 'follow', msg: `no way found to Steve: ${ladder}` }], status)
     assert.deepStrictEqual(asked, [[10, 64, 0]], `${status}: the way toward the player in sight`)
@@ -401,7 +412,7 @@ test('a follow whose search found no way says what blocks it, once per 30 s, whi
     assert.strictEqual(h.events.length, 2, `${status}: again after 30 s`)
   }
   const plain = followHarness()
-  plain.bot.emit('path_update', { status: 'noPath', path: [] })
+  await plain.searchFails('noPath')
   await plain.tick()
   assert.deepStrictEqual(plain.events.map((e) => e.msg), ['no way found to Steve: no known way there'], 'nothing to name')
   const near = followHarness({ position: new Vec3(2.5, 64, 0.5) })
@@ -412,6 +423,36 @@ test('a follow whose search found no way says what blocks it, once per 30 s, whi
   found.bot.emit('path_update', { status: 'success', path: [] })
   await found.tick()
   assert.deepStrictEqual(found.events, [], 'a search that found a way')
+})
+
+test('a follow whose search timed out says so at once and does not search again', async () => {
+  const h = followHarness()
+  const searches = () => h.log.filter(([k]) => k === 'goal').length
+  const armed = searches()
+  h.bot.emit('path_update', { status: 'timeout', path: [] })
+  await h.tick()
+  assert.deepStrictEqual(h.events.map((e) => e.msg), ['no way found to Steve: no known way there'])
+  h.bot.entity.position = new Vec3(3.5, 64, 0.5)
+  await h.tick()
+  h.st.cellT -= 5000
+  h.st.searchT -= 5000
+  await h.tick()
+  assert.strictEqual(searches(), armed, 'from the same cell or a new one')
+})
+
+test('follow searches again from a cell no search started from only 500 ms after the body arrived there', async () => {
+  const h = followHarness()
+  const searches = () => h.log.filter(([k]) => k === 'goal').length
+  await h.tick()
+  h.bot.emit('path_update', { status: 'noPath', path: [] })
+  h.st.searchT -= 5000
+  h.bot.entity.position = new Vec3(3.5, 64, 0.5)
+  const armed = searches()
+  await h.tick()
+  assert.strictEqual(searches(), armed, 'the body just arrived, the last search long past')
+  h.st.cellT -= h.env.FOLLOW_SEARCH_GAP_MS
+  await h.tick()
+  assert.strictEqual(searches(), armed + 1)
 })
 
 test('a follow holds one path listener, a re-arm forgets the last search, and unfollow removes the listener', () => {
@@ -697,4 +738,200 @@ test('a stop or unfollow during the drill\'s pause or its nudge leaves no goal a
     assert.deepStrictEqual(setAfterStop(nudged.log), [], `${end} during the nudge`)
     assert.deepStrictEqual([nudged.bot.pathfinder.goal, nudged.controls.forward || false], [null, false])
   }
+})
+
+// ---- follow under the real pathfinder ----
+
+// Steve stands still at steveZ below a one-wide flight east of the body's room, followed under the real pathfinder.
+// The room, its east wall and doorway, and the flight's air above its first two steps are known. The steps and the stone lining the
+// flight are not. With lipSees, every cell becomes known once the eye is within 0.5 of the lip, the edge at x 4 from z 0 to 1.
+async function lipFollow (t, { lipSees = true, steveZ = 0.5 } = {}) {
+  const air = ['air', {}]
+  const cells = {}
+  for (let x = -3; x <= 8; x++) {
+    for (let z = -3; z <= 3; z++) {
+      const wall = x === -3 || z === -3 || z === 3 || (x === 4 && z !== 0) || (x > 4 && Math.abs(z) === 1)
+      if (wall) for (let y = 64; y <= 66; y++) cells[`${x},${y},${z}`] = ['stone', {}]
+    }
+  }
+  for (let x = 4; x <= 8; x++) for (let y = 67 - x; y <= 63; y++) cells[`${x},${y},0`] = air
+  for (let x = 9; x <= 14; x++) for (let z = -2; z <= 2; z++) for (let y = 58; y <= 63; y++) cells[`${x},${y},${z}`] = air
+  const { bot } = await walkingBody(t, ME.clone(), cells)
+  const ck = (x, y, z) => x + ',' + y + ',' + z
+  const PLAN_KNOWN = new Map()
+  const lipEye = ({ x, z }) => Math.hypot(4 - x, Math.max(0, -z, z - 1))
+  const flightAir = (p) => p.z === 0 && p.y <= 66 && ((p.x === 4 && p.y >= 63) || (p.x === 5 && p.y >= 62))
+  const planKnown = (p) => p.x <= 3 || (p.x === 4 && p.y >= 64 && p.y <= 66) || flightAir(p) || (lipSees && lipEye(bot.entity.position) <= 0.5)
+  loadBotFunctions(['knownMoves'], { bot, Vec3, ck, PLAN_KNOWN, planKnown }).knownMoves(bot.pathfinder.movements)
+  const controls = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false }
+  const world = { getBlock: (p) => bot.blockAt(p) }
+  Object.assign(bot.entity, { yaw: 0, pitch: 0, effects: {}, attributes: {}, isCollidedHorizontally: false })
+  Object.assign(bot, {
+    physics: Physics(bot.registry, world),
+    jumpTicks: 0,
+    jumpQueued: false,
+    food: 20,
+    controlState: controls,
+    setControlState (k, v) { controls[k] = v },
+    getControlState: (k) => controls[k],
+    clearControlStates () { for (const k in controls) controls[k] = false },
+    sprintFacing: () => true,
+    look: async (yaw, pitch) => { Object.assign(bot.entity, { yaw, pitch }) },
+    inventory: { items: () => [], slots: [] }
+  })
+  let now = Date.now()
+  const steve = player(7, 'Steve', new Vec3(12.5, 58, steveZ))
+  const events = []
+  const searches = []
+  bot.on('path_update', (r) => {
+    const c = bot.entity.position.floored()
+    if (r.status !== 'partial') searches.push({ status: r.status, from: [c.x, c.y, c.z], t: now })
+  })
+  const combat = { name: 'combat', active: false, _fleeUntil: 0, _coverUntil: 0, fairFill: () => ({}) }
+  const env = {
+    bot,
+    goals,
+    crumbCentre,
+    nametagGoal,
+    ck,
+    planKnown,
+    PlayerState,
+    Date: { now: () => now },
+    reflexes: [combat],
+    bunkerHolds: () => false,
+    pilotLane: { until: 0 },
+    jobs: { running: () => false },
+    verbs: { running: () => 0 },
+    legs: { quietUntil: () => 0 },
+    follow: { followState: null },
+    ...followConstants(),
+    console: { log () {} },
+    playerEntity: (name) => (name === 'Steve' ? steve : null),
+    playerSighting: () => ({ tier: 'seen' }),
+    emitEvent: (kind, msg) => events.push({ kind, msg, t: now }),
+    stopPath: () => bot.pathfinder.setGoal(null),
+    walkRoute: () => assert.fail('the wedge drill ran'),
+    doorwayCommit: async () => assert.fail('the wedge drill ran'),
+    wayHint: () => null,
+    WALK_HINTS: { 'no-path': 'no known way there' }
+  }
+  const ctx = loadBotFunctions(['followTick', 'armFollow', 'followTarget', 'stopFollow'], env)
+  const st = { name: 'Steve', range: 2, goal: null, lastPos: ME.clone(), lastT: now, drilling: false, lostT: 0, told: false, warnT: 0 }
+  ctx.armFollow(st, ctx.followTarget(st))
+  env.follow.followState = st
+  t.after(() => { ctx.stopFollow(); bot.pathfinder.setGoal(null) })
+  const near = () => steve.position.distanceTo(bot.entity.position) <= st.range + 1.5
+  // When the body last entered each cell.
+  const arrived = new Map()
+  // The body's position after each physics tick.
+  const trace = []
+  return {
+    bot,
+    controls,
+    combat,
+    planKnown,
+    events,
+    searches,
+    arrived,
+    trace,
+    near,
+    stop: () => ctx.stopFollow(),
+    // Runs 50 ms physics ticks until ms have passed or done, with the follow check (400 ms) on every 8th tick.
+    async run (ms, done = near) {
+      let cell
+      for (let tick = 1; tick * 50 <= ms && !done(); tick++) {
+        bot.physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot)
+        now += 50
+        trace.push(bot.entity.position.clone())
+        const c = bot.entity.position.floored()
+        if (ck(c.x, c.y, c.z) !== cell) arrived.set(cell = ck(c.x, c.y, c.z), now)
+        PLAN_KNOWN.clear()
+        bot.emit('physicsTick')
+        if (tick % 8 === 0) await ctx.followTick(st)
+      }
+    }
+  }
+}
+
+test('a follow whose search ends at a lip searches again from there and reaches a player standing still below it', async (t) => {
+  const f = await lipFollow(t)
+  await f.run(30000)
+  assert.ok(f.near(), `the body stood at ${f.bot.entity.position} after searches ${JSON.stringify(f.searches)} and events ${JSON.stringify(f.events)}`)
+  assert.deepStrictEqual(f.searches.map((s) => [s.status, s.from]), [['noPath', [0, 64, 0]], ['noPath', [3, 64, 0]], ['success', [3, 64, 0]]])
+  assert.deepStrictEqual(f.events, [])
+})
+
+test('a follow\'s edge step brings the eye within 0.5 of the lip and keeps the body in its cell, 0.2 short of the edge, over known ground', async (t) => {
+  const f = await lipFollow(t, { lipSees: false })
+  await f.run(25000)
+  const east = Math.max(...f.trace.map((p) => p.x))
+  assert.ok(east >= 3.72 && east <= 3.8, `the body got as far east as x ${east}`)
+  const off = f.trace.find((p) => p.y !== 64 || Math.floor(p.z) !== 0 || !f.planKnown(p.floored().offset(0, -1, 0)))
+  assert.strictEqual(off, undefined, 'a position off the floor, out of the row or over unknown ground')
+})
+
+test('a reflex holding the legs keeps follow from its edge step, and one taking them mid-step ends it', async (t) => {
+  const f = await lipFollow(t)
+  await f.run(10000, () => f.searches.length === 2)
+  assert.deepStrictEqual(f.searches.map((s) => [s.status, s.from]), [['noPath', [0, 64, 0]], ['noPath', [3, 64, 0]]])
+  const parked = f.bot.entity.position.x
+  f.combat.active = true
+  await f.run(5000)
+  assert.deepStrictEqual([f.bot.entity.position.x, f.searches.length], [parked, 2], 'held')
+  f.combat.active = false
+  await f.run(5000, () => f.controls.forward)
+  assert.ok(f.controls.forward, 'the step starts once the legs are free')
+  f.combat.active = true
+  await f.run(50)
+  assert.strictEqual(f.controls.forward, false, 'taken mid-step')
+  await f.run(2000)
+  const x = f.bot.entity.position.x
+  assert.ok(x > parked && x < 3.8, `the cut step stopped at x ${x}`)
+})
+
+test('a reflex that sets the controls as it takes the legs mid-step keeps them', async (t) => {
+  const f = await lipFollow(t)
+  await f.run(10000, () => f.searches.length === 2)
+  await f.run(5000, () => f.controls.forward)
+  f.combat.active = true
+  f.controls.sprint = true
+  await f.run(50)
+  assert.deepStrictEqual([f.controls.forward, f.controls.sprint], [true, true])
+})
+
+test('unfollow mid-step lets go of the controls', async (t) => {
+  const f = await lipFollow(t)
+  await f.run(10000, () => f.searches.length === 2)
+  await f.run(5000, () => f.controls.forward)
+  f.stop()
+  assert.deepStrictEqual([f.controls.forward, f.controls.sneak], [false, false])
+})
+
+test('an edge step from a body parked near the line still walks it to the line', async (t) => {
+  const f = await lipFollow(t, { lipSees: false })
+  await f.run(10000, () => f.searches.length === 2)
+  f.bot.entity.position.x = 3.62
+  await f.run(3000)
+  const east = Math.max(...f.trace.map((p) => p.x))
+  assert.ok(east >= 3.72 && east <= 3.8, `the body got as far east as x ${east}`)
+})
+
+test('a follow whose goal lies across the body\'s row from the hidden flight steps toward the flight, not the player, and reaches them', async (t) => {
+  const f = await lipFollow(t, { steveZ: 1.5 })
+  await f.run(30000)
+  assert.ok(f.near(), `the body stood at ${f.bot.entity.position} after searches ${JSON.stringify(f.searches)}`)
+  assert.deepStrictEqual(f.searches.map((s) => [s.status, s.from]), [['noPath', [0, 64, 0]], ['noPath', [3, 64, 1]], ['success', [3, 64, 1]]])
+  assert.ok(f.trace.some((p) => p.x >= 3.69 && p.z < 1.3 && p.z >= 1), 'the step went to the corner nearest the flight, against the wall east of it')
+})
+
+test('a follow with no known way searches again from where it stopped, then twice more, then says so once and stops searching', async (t) => {
+  const f = await lipFollow(t, { lipSees: false })
+  await f.run(25000)
+  assert.deepStrictEqual(f.searches.map((s) => [s.status, s.from]), [['noPath', [0, 64, 0]], ...Array(3).fill(['noPath', [3, 64, 0]])])
+  const settled = f.searches[1].t - f.arrived.get('3,64,0')
+  assert.ok(settled >= 500, `the search from the new cell came ${settled} ms after the body arrived there`)
+  const gaps = f.searches.slice(2).map((s, i) => s.t - f.searches[i + 1].t)
+  assert.ok(gaps.every((g) => g >= 2000), `searches from the same cell ${gaps} ms apart`)
+  assert.deepStrictEqual(f.events.map((e) => e.msg), ['no way found to Steve: no known way there'])
+  assert.ok(f.events[0].t > f.searches[3].t, 'said after the last search')
 })
