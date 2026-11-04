@@ -4,6 +4,12 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-04: a note, todo or book write survives a reader
+
+On Windows a memory note, todo or book write failed when another process was reading the file at
+that moment, such as a tool listing the notes during a run. The write now tries again for up to
+half a second while the file is held open, and fails only if the reader keeps it longer.
+
 ## 2026-11-02: a walk toward a swelling creeper is refused
 
 A pilot walk carried the bot toward a creeper that was already swelling and lowered its guard on

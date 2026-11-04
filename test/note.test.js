@@ -321,6 +321,25 @@ test('a store write reaches the disk in a synced tmp file before the rename', (t
   assert.strictEqual(read(f.memory), '{\n  "next": 1,\n  "notes": []\n}\n')
 })
 
+test('a store write retries a rename refused while another process holds the file', (t) => {
+  const f = files(t)
+  fs.writeFileSync(f.memory, stored([{ text: 'the mill is shared' }]))
+  const rename = fs.renameSync
+  let refused = 0
+  t.mock.method(fs, 'renameSync', function (...args) {
+    if (refused < 2) {
+      refused++
+      throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+    }
+    return rename.apply(this, args)
+  })
+  memories.writeJson(f.memory, { next: 1, notes: [] })
+  t.mock.restoreAll()
+  assert.strictEqual(refused, 2)
+  assert.strictEqual(read(f.memory), '{\n  "next": 1,\n  "notes": []\n}\n')
+  assert.deepStrictEqual(fs.readdirSync(f.dir), ['memory.json'])
+})
+
 test('dropping the newest note never hands its id out again', (t) => {
   const f = files(t)
   const at = new Date(START)

@@ -184,6 +184,25 @@ test('a fresh server reads the list an earlier one wrote and keeps counting ids'
   assert.deepStrictEqual(openLines(textOf(await call(server(file), 'todo', { action: 'list' }))), ['#2 [0m] smelt the iron'])
 })
 
+test('an add whose rename is refused once while another process holds the file still lands in the list', async (t) => {
+  const { root, file } = todoFile(t)
+  const rename = fs.renameSync
+  let refused = false
+  t.mock.method(fs, 'renameSync', function (...args) {
+    if (!refused) {
+      refused = true
+      throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+    }
+    return rename.apply(this, args)
+  })
+  const r = await call(server(file), 'todo', { action: 'add', text: 'bake bread' })
+  t.mock.restoreAll()
+  assert.ok(refused)
+  assert.match(textOf(r), /^Added #1\./)
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).items.map((x) => x.text), ['bake bread'])
+  assert.deepStrictEqual(fs.readdirSync(root), ['todo.json'])
+})
+
 // CWE-770
 test('add refuses an item past the cap and leaves the file unchanged', async (t) => {
   const { file } = todoFile(t)
