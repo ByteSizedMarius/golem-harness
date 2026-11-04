@@ -5,7 +5,7 @@ const assert = require('node:assert')
 const { Vec3 } = require('vec3')
 const { entityInCell } = require('../lib/shelter')
 const { GRAVESTONE } = require('../lib/server-overrides')
-const { botConstant, digJob, groundMemory, loadBotFunctions, routeHandler } = require('./helpers')
+const { botConstant, digJob, groundMemory, blockWorld, loadBotFunctions, routeHandler } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 
@@ -52,7 +52,7 @@ function pocket (cells, { sky = true } = {}) {
     GRAVESTONE,
     ...groundMemory()
   }
-  return { env, acts }
+  return { env: blockWorld(env), acts }
 }
 
 // What digat at x,y,z answers over env, and the walks, equips and digs it made.

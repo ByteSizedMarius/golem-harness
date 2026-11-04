@@ -9,7 +9,7 @@ const { Physics } = require('prismarine-physics')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const { panelAcross } = require('../lib/doors')
 const { CREEPER_ZONE_SLACK, inCreeperZone, zoneCrossed, summarizePlan } = require('../lib/plan')
-const { botConstant, groundMemory, loadBotFunctions, walkingBody } = require('./helpers')
+const { botConstant, groundMemory, blockWorld, loadBotFunctions, walkingBody } = require('./helpers')
 
 const WALL_ARM = ['cobblestone_wall', { up: 'false', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
 const WALL_POST = ['cobblestone_wall', { up: 'true', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
@@ -223,7 +223,7 @@ async function knowing (pos, { open, sky = () => false, seen }) {
     return block
   }
   const env = { bot: b.bot, Vec3, cellKnown: seen, heldLight: (p, block) => block, ck: (x, y, z) => `${x},${y},${z}`, PLAN_KNOWN: new Map(), ...groundMemory() }
-  loadBotFunctions(['knownMoves'], env).knownMoves(b.moves)
+  loadBotFunctions(['knownMoves'], blockWorld(env)).knownMoves(b.moves)
   return b
 }
 const cellsOf = (path) => path.map((n) => [Math.floor(n.x), Math.floor(n.y), Math.floor(n.z)])
@@ -343,7 +343,7 @@ async function lit (pos, cells, ground, sky) {
     panelAcross,
     ...groundMemory()
   }
-  const fns = loadBotFunctions(['knownMoves', 'lightChanged', 'airPrecheck', 'planKnown', 'planBlock'], env)
+  const fns = loadBotFunctions(['knownMoves', 'lightChanged', 'airPrecheck', 'planKnown', 'planBlock'], blockWorld(env))
   fns.knownMoves(b.moves)
   // Lays block at key as a blockUpdate does: the light estimate first, then the cached ground top above it goes.
   const place = (key, block) => {

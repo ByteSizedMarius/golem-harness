@@ -12,6 +12,7 @@ const WATER = { name: 'water', boundingBox: 'empty' }
 const ck = (x, y, z) => x + ',' + y + ',' + z
 
 const room = (p) => p.x >= -3 && p.x <= 8 && p.y >= 64 && p.y <= 66 && p.z >= -3 && p.z <= 3
+const field = (p) => p.x >= -3 && p.x <= 32 && p.y >= 64 && p.y <= 66 && p.z >= -3 && p.z <= 20
 
 function body (open, wet = () => false) {
   return Object.assign(new EventEmitter(), {
@@ -55,11 +56,12 @@ test('a flood paused after every cell ends with the cells and answer of one floo
   }
 })
 
-// floods() counts the airFlood runs fairFill makes synchronously.
-function reflexRig () {
-  const bot = body(room)
+// floods() counts fairFill's synchronous airFlood runs, launches() its floodNext calls.
+function reflexRig (open = room, wet) {
+  const bot = body(open, wet)
   let t = 1e6
   let floods = 0
+  let launches = 0
   const env = {
     bot,
     Vec3,
@@ -76,21 +78,37 @@ function reflexRig () {
   const airFlood = env.airFlood
   env.airFlood = (o) => { floods++; return airFlood(o) }
   const combat = combatReflexIn(env)
+  const floodNext = combat.floodNext
+  combat.floodNext = function (...args) { launches++; return floodNext.apply(this, args) }
   env.reflexes.push(combat)
   env.wireFloodDrops()
   // A flood run through from seed, as fairFill floods it.
   const fresh = (seed) => airFlood({ seed, radius: 20, cap: 15000, known: () => true, knownOnly: true })
-  return { bot, combat, fresh, floods: () => floods }
+  return { bot, combat, fresh, floods: () => floods, launches: () => launches, at: (ms) => { t = ms } }
+}
+
+// Calls fairFill at each position 300 ms apart, as the reflex does, and lets each successor take over before the next.
+async function reflexWalk (r, positions) {
+  for (const [i, p] of positions.entries()) {
+    r.at(2e6 + 300 * i)
+    r.bot.entity.position = p
+    r.combat.fairFill(r.bot)
+    await turns(() => !r.combat._nextFill, 5000)
+    assert.strictEqual(r.combat._nextFill, null, `control: the successor launched at ${p} took over`)
+    assert.strictEqual(r.floods(), 1, `a synchronous flood at ${p}`)
+  }
 }
 
 async function turns (done, n = 1000) {
   for (let i = 0; i < n && !done(); i++) await new Promise(setImmediate)
 }
 
-test('the fill\'s successor floods between reflex ticks once the body moved 1.5 blocks and takes over with a fresh flood\'s cells', async () => {
+test('the fill\'s successor floods between reflex ticks once the body\'s cell 300 ms on lies 2 blocks from the fill\'s seed and takes over with a fresh flood\'s cells', async () => {
   const r = reflexRig()
+  r.at(2e6)
   const first = r.combat.fairFill(r.bot)
   assert.strictEqual(r.floods(), 1, 'control: the first fill')
+  r.at(2e6 + 300)
   r.bot.entity.position = new Vec3(2.1, 64, 0.5)
   assert.strictEqual(r.combat.fairFill(r.bot), first, 'the fill within 3 blocks of its seed')
   const seed = r.combat._nextFill && r.combat._nextFill.seed
@@ -98,22 +116,58 @@ test('the fill\'s successor floods between reflex ticks once the body moved 1.5 
   assert.notStrictEqual(r.combat._fill, first, 'the successor never took over')
   assert.strictEqual(r.floods(), 1, 'a synchronous flood ran')
   assert.deepStrictEqual(plain(r.combat._fill), plain(r.fresh(seed)))
+  r.at(2e6 + 310)
   assert.strictEqual(r.combat.fairFill(r.bot), r.combat._fill, 'the successor is reused')
   assert.strictEqual(r.combat._nextFill, null, 'a successor started while the body comes up to the fill\'s seed ahead of it')
 })
 
-test('the fill\'s successor seeds 2 blocks past the body along its move, or at the body when that cell lies outside the fill', () => {
-  const seedAfter = (from, to) => {
-    const r = reflexRig()
-    r.bot.entity.position = new Vec3(from + 0.5, 64, 0.5)
+test('the fill\'s successor seeds at the body\'s cell 300 ms on at its pace, at most 2 blocks ahead, or at the body when that cell lies outside the fill or in water', () => {
+  const seedAfter = (x, x2, wet) => {
+    const r = reflexRig(room, wet)
+    r.at(2e6)
+    r.bot.entity.position = new Vec3(x, 64, 0.5)
     r.combat.fairFill(r.bot)
-    r.bot.entity.position = new Vec3(to + 0.5, 64, 0.5)
+    r.at(2e6 + 300)
+    r.bot.entity.position = new Vec3(x2, 64, 0.5)
     r.combat.fairFill(r.bot)
     return r.combat._nextFill.seed.toString()
   }
-  assert.strictEqual(seedAfter(0, 2), '(4, 64, 0)')
-  assert.strictEqual(seedAfter(2, 0), '(-2, 64, 0)')
-  assert.strictEqual(seedAfter(6, 8), '(8, 64, 0)', 'the room ends at x 8')
+  assert.strictEqual(seedAfter(0.5, 2.2), '(3, 64, 0)')
+  assert.strictEqual(seedAfter(2.5, 0.8), '(-1, 64, 0)')
+  assert.strictEqual(seedAfter(0.5, 2.9), '(4, 64, 0)', '2 blocks ahead of 2.9, not 2.4')
+  assert.strictEqual(seedAfter(6.5, 8.2), '(8, 64, 0)', 'the room ends at x 8')
+  assert.strictEqual(seedAfter(0.5, 1.9, (p) => p.x >= 2), '(1, 64, 0)', 'a shore with water from x 2')
+})
+
+// Positions 300 ms apart from (0.5, 64, 0.5) on heading deg (0 is +x, 90 is +z), speed blocks apart.
+const sprint = (deg, speed, calls) => Array.from({ length: calls }, (_, i) => new Vec3(
+  0.5 + speed * i * Math.cos(deg * Math.PI / 180), 64, 0.5 + speed * i * Math.sin(deg * Math.PI / 180)))
+
+for (const [what, deg, speed] of [
+  ['1.7 blocks per reflex tick along x', 0, 1.7],
+  ['1.7 blocks per reflex tick on a 40° heading', 40, 1.7],
+  ['2.3 blocks per reflex tick along x', 0, 2.3]
+]) {
+  test(`a body sprinting ${what} never outruns the fill's successors`, async () => {
+    const r = reflexRig(field)
+    await reflexWalk(r, sprint(deg, speed, 13))
+    assert.ok(r.launches() >= 4, `control: successors took over along the walk, ${r.launches()}`)
+  })
+}
+
+test('a body hovering on a cell edge launches a successor only as the fill turns 1.5 s old', async () => {
+  const r = reflexRig()
+  await reflexWalk(r, Array.from({ length: 11 }, (_, i) => new Vec3(i % 2 ? 1.1 : 0.9, 64, 0.5)))
+  assert.ok(r.launches() <= 2, `3 s of hovering launched ${r.launches()}`)
+})
+
+test('a crit jump, a one-cell knockback and back, and a y bob run no synchronous flood', async () => {
+  const at = (x, y) => new Vec3(x, y, 0.5)
+  for (const positions of [
+    [at(0.5, 64), at(0.5, 65.2), at(0.5, 64)],
+    [at(0.5, 64), at(1.5, 64), at(0.5, 64)],
+    [at(0.5, 64), at(0.5, 63.99), at(0.5, 64), at(0.5, 63.99), at(0.5, 64)]
+  ]) await reflexWalk(reflexRig(), positions)
 })
 
 test('a reflex tick 3 blocks from the fill\'s seed finishes the successor in flight and runs no flood of its own', async () => {
@@ -135,9 +189,11 @@ test('a block change in or beside the successor\'s flood drops it, one away from
   // The fill floods 20 around x 1 and its successor 20 around x 5.
   const successor = () => {
     const r = reflexRig()
+    r.at(2e6)
     r.bot.entity.position = new Vec3(1.5, 64, 0.5)
     r.combat.fairFill(r.bot)
-    r.bot.entity.position = new Vec3(3.1, 64, 0.5)
+    r.at(2e6 + 300)
+    r.bot.entity.position = new Vec3(3.5, 64, 0.5)
     r.combat.fairFill(r.bot)
     assert.ok(r.combat._nextFill, 'control: a successor in flight')
     return r

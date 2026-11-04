@@ -10,7 +10,7 @@ const { overrideRecipes, GRAVESTONE } = require('../lib/server-overrides')
 const { deathLedger } = require('../lib/deaths')
 const { summarizePlan, DROP_MAX } = require('../lib/plan')
 const { goals } = require('mineflayer-pathfinder')
-const { loadBotFunctions, fakeClock, botConstant, awaitRoute, hookedRoute, routeHandler, buildVerbEnv, groundMemory, claimRescue, routeJobs } = require('./helpers')
+const { loadBotFunctions, fakeClock, botConstant, awaitRoute, hookedRoute, routeHandler, buildVerbEnv, groundMemory, blockWorld, claimRescue, routeJobs } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty' }
 const STONE = { name: 'stone', boundingBox: 'block' }
@@ -987,7 +987,7 @@ function heldRig (entity, blockAt, seen) {
       clearTimeout
     }
   })
-  return { env, placed }
+  return { env: blockWorld(env), placed }
 }
 
 test('placeitem goes against a floor in open sky that the client holds no sky light for, never one in a dark room', async () => {

@@ -728,9 +728,40 @@ function botObject (name, env) {
   return vm.runInContext(`(${literal})`, vm.createContext(env))
 }
 
-// An empty ground-top memory and its limits as bot.js keeps them.
+// An empty ground-top memory whose loadBlock reads blockWorld's state ids as blocks.
 function groundMemory () {
-  return { GROUND_TOP: new Map(), GROUND_SPAN: botConstant('GROUND_SPAN'), SURFACE_DEPTH: botConstant('SURFACE_DEPTH') }
+  return {
+    GROUND_TOP: new Map(),
+    GROUND_SPAN: botConstant('GROUND_SPAN'),
+    SURFACE_DEPTH: botConstant('SURFACE_DEPTH'),
+    STATE_CLEAR: new WeakMap(),
+    loadBlock: () => ({
+      fromStateId (b) {
+        assert.notStrictEqual(typeof b, 'number', `state id ${b} from a real world, which needs a real loadBlock`)
+        return b
+      }
+    })
+  }
+}
+
+// Fakes env.bot.world from env.bot.blockAt, with each cell's block standing in for its state id.
+function blockWorld (env) {
+  env.bot.world = {
+    getColumnAt (p) {
+      const { bot } = env
+      if (!bot.blockAt(new Vec3(p.x, bot.game.minY + bot.game.height - 1, p.z))) return null
+      const x0 = Math.floor(p.x / 16) * 16
+      const z0 = Math.floor(p.z / 16) * 16
+      return {
+        getBlockStateId (q) {
+          const b = env.bot.blockAt(new Vec3(x0 + q.x, q.y, z0 + q.z))
+          assert.ok(b, `blockAt answers at the ceiling of ${x0 + q.x},${z0 + q.z} but not at y ${q.y}`)
+          return b
+        }
+      }
+    }
+  }
+  return env
 }
 
 // A body at pos on the real pathfinder with the walk's legs, over a stone floor plus cells ('x,y,z' -> [name, properties]).
@@ -933,6 +964,7 @@ function combatReflexIn (env) {
   const at = reflexAt('combat')
   const literal = at < 0 ? '' : balanced(src, src.lastIndexOf('{', at))
   assert.ok(literal, 'the combat reflex not found in bot.js')
+  env.Vec3 ??= Vec3
   env.OPENABLE ??= botConstant('OPENABLE')
   env.FILL_RADIUS ??= botConstant('FILL_RADIUS')
   env.seenNow ??= () => true
@@ -1349,7 +1381,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, walkingBody, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
+  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, blockWorld, walkingBody, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, laneAt,
   buildVerbEnv, digInProblemWith, facings, digJob, claimRescue, routeJobs

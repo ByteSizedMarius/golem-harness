@@ -9,7 +9,7 @@ const { ambientChange, sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const { flatText } = require('../lib/flat-text')
-const { balanced, botConstant, wiredSource, groundMemory, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn, claimRescue } = require('./helpers')
+const { balanced, botConstant, wiredSource, groundMemory, blockWorld, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn, claimRescue } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4, wheat: 11, chest: 12, oak_log: 13 }
@@ -32,7 +32,7 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     .sort((a, b) => a.distanceTo(position) - b.distanceTo(position))
     .slice(0, count)
   const blocks = [{ id: 1, name: 'coal_ore' }, { id: 2, name: 'iron_ore' }, { id: 4, name: 'diamond_ore' }, { id: 11, name: 'wheat', states: [{ name: 'age', num_values: 8 }] }]
-  return {
+  return blockWorld({
     shared: { ready: true, mcData: { blocksArray: blocks, blocksByName: Object.fromEntries(blocks.map((b) => [b.name, b])), blocks: Object.fromEntries(blocks.map((b) => [b.id, b])) } },
     bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay, age: 100000, doDaylightCycle: true }, game: { minY: -64, height: 384 }, inventory: { slots: [] }, registry: REGISTRY },
     ck,
@@ -46,7 +46,7 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     LEGACY_1710: false,
     GRAVESTONE,
     ...groundMemory()
-  }
+  })
 }
 
 // An empty station memory as bot.js keeps it.
@@ -392,6 +392,33 @@ test('a fence, gate or wall on open ground lets the sky through to the floor ben
   }
   assert.deepStrictEqual(beneath('stone'), [0, false], 'control: a block light does not cross')
   for (const name of ['oak_fence', 'oak_fence_gate', 'cobblestone_wall']) assert.deepStrictEqual(beneath(name), [15, true], name)
+})
+
+test('the ground top read from a column\'s state ids is the one a block by block scan finds, and none in an unloaded column', () => {
+  const registry = require('prismarine-registry')('1.21.11')
+  const Block = require('prismarine-block')(registry)
+  const Chunk = require('prismarine-chunk')(registry)
+  const World = require('prismarine-world')(registry)
+  const world = new World(null, null, 0).sync
+  world.setColumn(0, 0, new Chunk({ minY: -64, worldHeight: 384 }))
+  const lay = (x, y, name) => world.setBlockStateId(new Vec3(x, y, 0), Block.fromProperties(name, {}, 0).stateId)
+  const NAMES = ['air', 'glass', 'oak_leaves', 'oak_fence', 'water', 'stone']
+  for (const [y, name] of [[90, 'glass'], [85, 'oak_fence'], [80, 'oak_leaves'], [75, 'water'], [70, 'stone']]) lay(0, y, name)
+  NAMES.forEach((name, i) => { lay(i + 1, 70, name); lay(i + 1, 60, 'stone') })
+  const env = {
+    bot: { world, registry, game: { minY: -64, height: 384 }, blockAt () { throw new Error('groundTop read a block object') } },
+    ...groundMemory(),
+    loadBlock: require('prismarine-block')
+  }
+  const { groundTop, lightClear } = loadBotFunctions(['groundTop', 'lightClear'], env)
+  const blockScan = (x) => {
+    for (let y = 319; y >= -64; y--) if (!lightClear(world.getBlock(new Vec3(x, y, 0)))) return y
+    return -65
+  }
+  const columns = [0, ...NAMES.map((name, i) => i + 1)]
+  assert.deepStrictEqual(columns.map(blockScan), [80, 60, 60, 70, 60, 70, 70], 'control: glass and fences let light through')
+  assert.deepStrictEqual(columns.map((x) => groundTop(x, 0)), columns.map(blockScan))
+  assert.strictEqual(groundTop(100, 100), null)
 })
 
 // Open sky over ground at y 63, cut by a ravine at x 3..12 with its floor block at y floor, the body at x = at.

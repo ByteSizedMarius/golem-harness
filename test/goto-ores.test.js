@@ -8,7 +8,7 @@ const { sameVein } = require('../lib/wake')
 const { routeDeadline } = require('../lib/walk')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const { GRAVESTONE } = require('../lib/server-overrides')
-const { botConstant, groundMemory, awaitRoute } = require('./helpers')
+const { botConstant, groundMemory, blockWorld, awaitRoute } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4 }
@@ -87,7 +87,7 @@ async function walkEast (scene) {
     GRAVESTONE,
     ...groundMemory()
   }
-  const reply = await awaitRoute('/goto', { x: String(len), z: '0' }, env)
+  const reply = await awaitRoute('/goto', { x: String(len), z: '0' }, blockWorld(env))
   if (!scene.reply) assert.strictEqual(reply.arrived, true, 'control: the walk arrived')
   return reply
 }
