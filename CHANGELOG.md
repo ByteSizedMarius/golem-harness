@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-05: a bed someone sleeps in is refused by name
+
+On a 1.7.10 server a click on a bed another player sleeps in came back `ok`, because that server
+sends the clicker no answer, and the bed's `occupied` state on the client stays stale. A click on
+a bed where a player lies asleep in sight is now refused with that player's name, before the walk
+and again after it. Bed replies through a 1.7.10 server no longer show `occupied`.
+
 ## 2026-11-04: a note, todo or book write survives a reader
 
 On Windows a memory note, todo or book write failed when another process was reading the file at

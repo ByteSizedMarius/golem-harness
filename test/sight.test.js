@@ -1145,7 +1145,8 @@ function withHands (env, walkTo = null) {
     waitForTicks: async () => {},
     activateBlock: async () => {},
     activateItem () {},
-    deactivateItem () {}
+    deactivateItem () {},
+    isABed: (b) => b.name.endsWith('_bed')
   })
   return Object.assign(env, { require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals: { GoalNear: class {} } })
 }
@@ -1193,6 +1194,87 @@ test('activate presses a block in lit sight and gives its state only while it st
   assert.match((await activate(withHands(cave(DARK, FAR_END)), coal)).error.message, UNSEEN)
   const away = await activate(withHands(cave(LIT, FAR_END), new Vec3(6.5, 64, 0.5)), coal)
   assert.deepStrictEqual(away.body, { activated: 'coal_ore', at: { x: -1, y: 65, z: 0 } }, 'the walk went round the corner')
+})
+
+const PLAYER_KEYS = require('minecraft-data')('1.21.11').entitiesByName.player.metadataKeys
+
+function player (username, position, asleep) {
+  const metadata = []
+  metadata[PLAYER_KEYS.indexOf('sleeping_pos')] = asleep ? position.floored() : null
+  return { id: username, type: 'player', name: 'player', username, position, metadata }
+}
+
+// A bed facing south has its head at z 1, inside the corridor's wall.
+function bedRoom (foot, facing, players = [], { legacy = false, walkTo = null } = {}) {
+  const [dx, dz] = { east: [1, 0], south: [0, 1] }[facing]
+  const bed = (part) => ({ name: 'red_bed', boundingBox: 'block', shapes: [[0, 0, 0, 1, 0.5625, 1]], light: 0, getProperties: () => ({ facing, occupied: false, part }) })
+  const room = world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 9 && (y === 64 || y === 65), light: () => LIT })
+  const env = withCells(withHands(room, walkTo), { [ck(...foot)]: bed('foot'), [ck(foot[0] + dx, foot[1], foot[2] + dz)]: bed('head') })
+  env.bot.entities = Object.fromEntries(players.map((p) => [p.id, p]))
+  env.shared.mcData.entitiesByName = { player: { metadataKeys: PLAYER_KEYS } }
+  return Object.assign(env, { LEGACY_1710: legacy, staleEntities: new Set(), HANGS: botConstant('HANGS') })
+}
+
+async function activateBed (env, at) {
+  const acts = []
+  const walk = env.bot.pathfinder.goto
+  env.bot.pathfinder.goto = async (g) => { acts.push('walk'); await walk(g) }
+  env.bot.lookAt = async () => { acts.push('look') }
+  env.bot.activateBlock = async (b) => { acts.push(`click ${b.name}`) }
+  return { ...(await activate(env, at)), acts }
+}
+
+const BED_FOOT = { x: '2', y: '64', z: '0' }
+const BED_HEAD = { x: '3', y: '64', z: '0' }
+// Asleep in the head cell 3,64,0 of the bed facing east from 2,64,0.
+const SLEEPER = () => player('Steve', new Vec3(3.875, 64.9375, 0.5), true)
+
+test('activate refuses a bed a seen player sleeps in, naming the sleeper, without a walk, look or click', async () => {
+  const free = await activateBed(bedRoom([2, 64, 0], 'east'), BED_FOOT)
+  assert.strictEqual(free.body?.activated, 'red_bed', `control: a free bed, ${free.error?.message}`)
+  assert.deepStrictEqual(free.acts, ['look', 'click red_bed'])
+  for (const at of [BED_FOOT, BED_HEAD]) {
+    const taken = await activateBed(bedRoom([2, 64, 0], 'east', [SLEEPER()]), at)
+    assert.strictEqual(taken.error?.message, 'Steve is sleeping in the red_bed at 3,64,0', at.x)
+    assert.strictEqual(taken.body, undefined, at.x)
+    assert.deepStrictEqual(taken.acts, [], at.x)
+  }
+})
+
+test('activate clicks a bed whose sleeper lies hidden in a wall, or whose head cell holds an awake player', async () => {
+  const hidden = bedRoom([3, 64, 0], 'south', [player('Steve', new Vec3(3.5, 64.9375, 1.875), true)])
+  const { seesLit } = loadBotFunctions(['seesLit'], { ...hidden })
+  assert.deepStrictEqual([seesLit(new Vec3(3, 64, 0), 20), seesLit(new Vec3(3, 64, 1), 20)], [true, false], 'control: the foot seen, the head unseen')
+  const walled = await activateBed(hidden, { x: '3', y: '64', z: '0' })
+  assert.strictEqual(walled.body?.activated, 'red_bed', walled.error?.message)
+  assert.deepStrictEqual(walled.acts, ['look', 'click red_bed'])
+  const awake = await activateBed(bedRoom([2, 64, 0], 'east', [player('Steve', new Vec3(3.5, 64.5625, 0.5), false)]), BED_FOOT)
+  assert.strictEqual(awake.body?.activated, 'red_bed', awake.error?.message)
+  assert.deepStrictEqual(awake.acts, ['look', 'click red_bed'])
+})
+
+test('activate refuses a bed a player lies down in during the walk into reach, without a look or click', async () => {
+  const env = bedRoom([6, 64, 0], 'east', [], { walkTo: new Vec3(4.5, 64, 0.5) })
+  const walk = env.bot.pathfinder.goto
+  env.bot.pathfinder.goto = async (g) => {
+    await walk(g)
+    env.bot.entities.Steve = player('Steve', new Vec3(7.875, 64.9375, 0.5), true)
+  }
+  const r = await activateBed(env, { x: '6', y: '64', z: '0' })
+  assert.strictEqual(r.error?.message, 'Steve is sleeping in the red_bed at 7,64,0')
+  assert.deepStrictEqual(r.acts, ['walk'])
+})
+
+test('activate and blockat show a bed without occupied on 1.7.10 and with it on 1.21', async () => {
+  const blockat = (env) => {
+    const { handle, res } = routeHandler('/blockat', env)
+    handle({ query: BED_FOOT }, res)
+    return res.body?.properties
+  }
+  for (const [legacy, properties] of [[false, { facing: 'east', occupied: false, part: 'foot' }], [true, { facing: 'east', part: 'foot' }]]) {
+    assert.deepStrictEqual((await activateBed(bedRoom([2, 64, 0], 'east', [], { legacy }), BED_FOOT)).body?.properties, properties, `activate, legacy ${legacy}`)
+    assert.deepStrictEqual(blockat(bedRoom([2, 64, 0], 'east', [], { legacy })), properties, `blockat, legacy ${legacy}`)
+  }
 })
 
 test('blockat answers the cells the body fills and touches in the dark, never a cell two away or diagonal', () => {

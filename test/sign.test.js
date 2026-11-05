@@ -13,7 +13,7 @@ const side = (messages) => ({ type: 'compound', value: { messages } })
 function blockatSign (front, back = list('string', ['', '', '', ''])) {
   const sign = Block.fromStateId(registry.blocksByName.oak_sign.defaultState, 0)
   sign.entity = { type: 'compound', value: { front_text: side(front), back_text: side(back) } }
-  const env = { require, bot: { blockAt: () => sign }, bodyTouches: () => true }
+  const env = { require, bot: { blockAt: () => sign }, bodyTouches: () => true, LEGACY_1710: false }
   return runRoute('/blockat', { x: '1', y: '64', z: '0' }, env).text
 }
 

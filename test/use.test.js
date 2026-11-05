@@ -283,9 +283,10 @@ function rescueBody (digLock) {
     equip: async (it) => { done.push(`equip ${it.name}`); bot.heldItem = it },
     activateBlock: async () => { done.push('click') },
     activateItem: () => { done.push('use item') },
-    deactivateItem: () => {}
+    deactivateItem: () => {},
+    isABed: () => false
   })
-  const env = { bot, Vec3, require, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, goals: { GoalNear: class {} }, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {}, digLock }
+  const env = { bot, Vec3, require, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, goals: { GoalNear: class {} }, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {}, digLock, LEGACY_1710: false }
   return { bot, env, done }
 }
 
