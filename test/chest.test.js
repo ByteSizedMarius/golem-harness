@@ -6,6 +6,10 @@ const { Vec3 } = require('vec3')
 const { awaitRoute, routeHandler, botConstant, loadBotFunctions, claimRescue } = require('./helpers')
 const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 const { TOOLS } = require('../mcp/tools')
+const mcData = require('minecraft-data')('1.21.11')
+const registry = require('prismarine-registry')('1.21.11')
+const loadItem = require('prismarine-item')
+const Item = loadItem(registry)
 
 const CHEST_ID = 54
 const IDS = { stone: 1, cobblestone: 4, sticky_piston: 29, iron_pickaxe: 257, diamond: 264, iron_ingot: 265, iron_sword: 267, stick: 280, wheat_seeds: 295, wheat: 296, ender_pearl: 368, cobbled_deepslate: 1101 }
@@ -21,6 +25,18 @@ const stack = (name, count, stackSize = 64) => ({ name, type: IDS[name], count, 
 // A chest facing north pairs its left half with the cell east of it and its right half with the cell west.
 const LEFT = { type: 'left', facing: 'north' }
 const RIGHT = { type: 'right', facing: 'north' }
+
+const FRAME_ITEM = mcData.entitiesByName.item_frame.metadataKeys.indexOf('item')
+// objectData and the step from the wall to the frame's own cell.
+const FACES = { north: [2, 0, 0, -1], south: [3, 0, 0, 1], west: [4, -1, 0, 0], east: [5, 1, 0, 0] }
+let frameIds = 100
+// An item frame on face of the wall cell holding item, null for an empty one. seen says whether the body perceives it.
+function frameOn (wall, face, item, seen = true) {
+  const [objectData, dx, dy, dz] = FACES[face]
+  const metadata = []
+  metadata[FRAME_ITEM] = Item.toNotch(item ? new Item(registry.itemsByName[item].id, 1) : null)
+  return { id: frameIds++, name: 'item_frame', objectData, position: wall.offset(dx, dy, dz), metadata, seen }
+}
 
 const pocketItems = (pockets, from) => pockets.flatMap((s, i) => (s.count ? [{ ...s, slot: from + i }] : []))
 
@@ -77,6 +93,8 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
     w.close = () => { close(); inventory = pocketItems(live, 9) }
   }
   const fight = { busy: false }
+  const entities = []
+  const FILL = { cells: new Set() }
   const timers = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) }
   const chest = (p) => ({ name: 'chest', type: CHEST_ID, position: p, getProperties: () => states[at(p)] || { type: 'single', facing: 'north' } })
   const env = {
@@ -93,10 +111,17 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
         env.bot.currentWindow = windows[at(b.position)]
         return env.bot.currentWindow
       },
-      inventory: { items: () => inventory }
+      inventory: { items: () => inventory },
+      registry
     },
     guardState: { hand: null },
-    reflexes: [{ name: 'combat', fightBusy: () => fight.busy, _threat: null }],
+    reflexes: [{ name: 'combat', fightBusy: () => fight.busy, _threat: null, fairFill: (b) => { assert.strictEqual(b, env.bot, 'fairFill got another bot'); return FILL } }],
+    liveEntities: () => entities,
+    entityPerceptible: (en, fill) => { assert.strictEqual(fill, FILL, 'entityPerceptible got another fill'); return en.seen },
+    shared: { mcData },
+    loadItem,
+    // The loader does not follow a call behind a spread.
+    framesOn: loadBotFunctions(['framesOn'], {}).framesOn,
     bunkerHolds: () => false,
     ...timers,
     stackPause: async () => {},
@@ -112,7 +137,7 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
     CHEST_RADIUS: botConstant('CHEST_RADIUS')
   }
   loadBotFunctions(['wireHandLease'], { bot: env.bot, guardState: env.guardState, ...timers }).wireHandLease()
-  return { env, opened, fight }
+  return { env, opened, fight, entities }
 }
 
 async function refused (route, query, env) {
@@ -208,6 +233,64 @@ test('chest refuses when every chest in range is unseen, without naming or openi
   assert.match(error, /no chest seen within 12/)
   assert.doesNotMatch(error, /0,64,-3|diamond/)
   assert.deepStrictEqual(opened, [])
+})
+
+test('chest names the item of each frame in sight on the chest it opened, an empty frame as null', async () => {
+  const { env, entities } = chestEnv([NEAR], { '5,64,0': chestWindow([]) })
+  entities.push(frameOn(NEAR, 'north', 'oak_log'), frameOn(NEAR, 'west', null))
+  assert.deepStrictEqual(await awaitRoute('/chest', { x: '5', y: '64', z: '0' }, env), { at: { x: 5, y: 64, z: 0 }, items: [], frames: ['oak_log', null] })
+})
+
+test('chest at x,y,z names the frames on the other half of a double chest, from either half', async () => {
+  const beside = new Vec3(6, 64, 0)
+  const states = { '5,64,0': LEFT, '6,64,0': RIGHT }
+  const left = chestEnv([NEAR, beside], { '5,64,0': chestWindow([]) }, [], states)
+  left.entities.push(frameOn(beside, 'north', 'oak_planks'))
+  assert.deepStrictEqual(await awaitRoute('/chest', { x: '5', y: '64', z: '0' }, left.env), { at: { x: 5, y: 64, z: 0 }, items: [], frames: ['oak_planks'] })
+  const right = chestEnv([NEAR, beside], { '6,64,0': chestWindow([]) }, [], states)
+  right.entities.push(frameOn(NEAR, 'north', 'oak_log'))
+  assert.deepStrictEqual(await awaitRoute('/chest', { x: '6', y: '64', z: '0' }, right.env), { at: { x: 6, y: 64, z: 0 }, items: [], frames: ['oak_log'] })
+})
+
+test('chest leaves out a frame on the chest the body does not perceive', async () => {
+  const { env, entities } = chestEnv([NEAR], { '5,64,0': chestWindow([]) })
+  entities.push(frameOn(NEAR, 'north', 'oak_log'), frameOn(NEAR, 'east', 'diamond', false))
+  assert.deepStrictEqual(await awaitRoute('/chest', {}, env), {
+    at: { x: 5, y: 64, z: 0 },
+    items: [],
+    frames: ['oak_log'],
+    chests: [{ at: { x: 5, y: 64, z: 0 }, dist: 5, frames: ['oak_log'] }]
+  })
+})
+
+test('each chest of the radius list names the frames in sight on it or its other half, with one sight check per frame', async () => {
+  const beside = new Vec3(6, 64, 0)
+  const { env, entities } = chestEnv([beside, NEAR, FAR], { '5,64,0': chestWindow([]) }, [], { '5,64,0': LEFT, '6,64,0': RIGHT })
+  entities.push(frameOn(beside, 'north', 'cobblestone'), frameOn(FAR, 'south', 'diamond'), frameOn(FAR, 'east', null))
+  const perceptible = env.entityPerceptible
+  let checks = 0
+  env.entityPerceptible = (en, fill) => { checks++; return perceptible(en, fill) }
+  assert.deepStrictEqual(await awaitRoute('/chest', {}, env), {
+    at: { x: 5, y: 64, z: 0 },
+    items: [],
+    frames: ['cobblestone'],
+    chests: [
+      { at: { x: 5, y: 64, z: 0 }, pair: { x: 6, y: 64, z: 0 }, dist: 5, frames: ['cobblestone'] },
+      { at: { x: -7, y: 64, z: 3 }, dist: 7.6, frames: ['diamond', null] }
+    ]
+  })
+  assert.strictEqual(checks, 3)
+})
+
+test('chest gives no frames field when no frame in sight hangs on a chest', async () => {
+  const { env, entities } = chestEnv([NEAR, FAR], { '5,64,0': chestWindow([]) })
+  // The first hangs in the cell north of the chest, on the wall north of that cell.
+  entities.push(frameOn(new Vec3(5, 64, -2), 'south', 'oak_log'), frameOn(FAR, 'north', 'diamond', false), { id: 99, name: 'zombie', position: new Vec3(5, 64, -1), seen: true })
+  assert.deepStrictEqual(await awaitRoute('/chest', {}, env), {
+    at: { x: 5, y: 64, z: 0 },
+    items: [],
+    chests: [{ at: { x: 5, y: 64, z: 0 }, dist: 5 }, { at: { x: -7, y: 64, z: 3 }, dist: 7.6 }]
+  })
 })
 
 test('chest, withdraw and deposit refuse a chest seen only through a leaf from where the walk ends, naming the leaf, without opening it', async () => {
