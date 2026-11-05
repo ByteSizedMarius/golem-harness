@@ -149,8 +149,8 @@ GOLEM_TOKEN=<token> MC_HOST=<host> MC_PORT=<port> node bot.js
 `.env.example` describes the rest: `MC_OWNER` (the default player for `where`),
 `GOLEM_SERVER_OVERRIDES`, `GOLEM_CHAT_MAX`, `GOLEM_BOOKS` (the file of the pilot's copy of the
 books it writes, for the `book` tool), and the MCP server's `GOLEM_PAPERCUTS`,
-`GOLEM_LESSONS`, `GOLEM_MEMORY`, `GOLEM_TODO` and `GOLEM_TOPICS` (the gated manual topics to
-serve).
+`GOLEM_LESSONS`, `GOLEM_MEMORY`, `GOLEM_TODO`, `GOLEM_TOPICS` (the gated manual topics to
+serve) and `GOLEM_REPLIES` (the reply log of calls that carry a tool-use id).
 
 The control API is the only port the bot opens. The bot exits when its connection to the server
 ends.
@@ -188,7 +188,9 @@ The server speaks MCP over stdio and takes a port from 1024 to 65535. `DRIVING.m
 
 An optional second argument names a wake log. The server appends a line for every `wait_events`
 call, delivery and tool call, and after a restart it resumes chat and events where the log left
-off.
+off. With `GOLEM_REPLIES` set, the server also appends the reply of each tool call that carries Claude
+Code's tool-use id as a JSON line under that id, so the reply of a call moved to the background
+can still be read.
 
 The pilot sees 77 tools: 73 that each call one bot route (`goto` calls `/goto`), plus
 

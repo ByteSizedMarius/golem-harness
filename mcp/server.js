@@ -412,7 +412,8 @@ function untilAborted (promise, signal) {
 // The frontier { boot, chat, ev }: every chat line and event of process boot up to those ids reached a wait_events or tick result.
 // onWaitStart runs as a wait_events call starts waiting, onWake and onDeliver get the frontier after each wait_events return and each tick that moved it.
 // onToolCall runs on every tools/call with the name from the tool table, null for a name outside it, and the sorted names of the tool's params the call passed.
-function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = [], start = { boot: null, chat: 0, ev: 0 }, onWaitStart = () => {}, onWake = () => {}, onDeliver = () => {}, onToolCall = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, lessonsFile, todoFile, memoryFile, now = () => new Date() }) {
+// onReply runs on the reply to every tools/call that carries Claude Code's tool-use id, with that id, the reply and the time in epoch ms.
+function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = [], start = { boot: null, chat: 0, ev: 0 }, onWaitStart = () => {}, onWake = () => {}, onDeliver = () => {}, onToolCall = () => {}, onReply = () => {}, requestTimeoutMs = REQUEST_TIMEOUT_MS, papercutsFile, lessonsFile, todoFile, memoryFile, now = () => new Date() }) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new TypeError('port must be an integer 1024-65535')
   if (typeof token !== 'string' || token === '') throw new TypeError('token must be a non-empty string')
   if (typeof fetch !== 'function') throw new TypeError('fetch must be a function')
@@ -425,6 +426,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
   if (typeof onWake !== 'function') throw new TypeError('onWake must be a function')
   if (typeof onDeliver !== 'function') throw new TypeError('onDeliver must be a function')
   if (typeof onToolCall !== 'function') throw new TypeError('onToolCall must be a function')
+  if (typeof onReply !== 'function') throw new TypeError('onReply must be a function')
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > TIMER_MAX_MS) {
     throw new TypeError(`requestTimeoutMs must be an integer 1-${TIMER_MAX_MS}`)
   }
@@ -895,6 +897,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
     if (!Object.hasOwn(msg, 'id')) return null
     const id = msg.id
     if (typeof id !== 'string' && typeof id !== 'number') return rpcError(null, -32600, 'invalid request id')
+    let reply
     try {
       switch (msg.method) {
         case 'initialize': {
@@ -907,13 +910,28 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
         }
         case 'ping': return rpcResult(id, {})
         case 'tools/list': return rpcResult(id, { tools: listed })
-        case 'tools/call': return await callTool(id, msg.params)
+        case 'tools/call':
+          reply = await callTool(id, msg.params)
+          break
         default: return rpcError(id, -32601, 'method not found')
       }
     } catch (e) {
       console.error('[golem-mcp] ' + (e && e.stack ? e.stack : String(e)))
-      return rpcError(id, -32603, 'internal error')
+      reply = rpcError(id, -32603, 'internal error')
     }
+    if (msg.method === 'tools/call') {
+      const p = msg.params
+      const meta = p !== null && typeof p === 'object' ? p._meta : undefined
+      const useId = meta !== null && typeof meta === 'object' ? meta['claudecode/toolUseId'] : undefined
+      if (typeof useId === 'string') {
+        try {
+          onReply(useId, reply, now().getTime())
+        } catch (e) {
+          console.error('[golem-mcp] ' + (e && e.stack ? e.stack : String(e)))
+        }
+      }
+    }
+    return reply
   }
 
   return { handle, close: () => closing.abort() }
@@ -998,7 +1016,18 @@ function main () {
   const todoFile = process.env.GOLEM_TODO || undefined
   const memoryFile = process.env.GOLEM_MEMORY || undefined
   const topics = (process.env.GOLEM_TOPICS || '').split(',').filter(Boolean)
-  serveStdio(createServer({ port, token, fetch: globalThis.fetch, topics, start, onWaitStart, onWake, onDeliver, onToolCall, papercutsFile, lessonsFile, todoFile, memoryFile }))
+  const repliesFile = process.env.GOLEM_REPLIES || undefined
+  const onReply = repliesFile && ((useId, reply, t) => {
+    const line = { id: useId, t }
+    if (reply.error) line.error = reply.error
+    else line.result = reply.result
+    try {
+      fs.appendFileSync(repliesFile, JSON.stringify(line) + '\n')
+    } catch (e) {
+      console.error(`[golem-mcp] cannot write the reply log: ${e.message}`)
+    }
+  })
+  serveStdio(createServer({ port, token, fetch: globalThis.fetch, topics, start, onWaitStart, onWake, onDeliver, onToolCall, onReply, papercutsFile, lessonsFile, todoFile, memoryFile }))
 }
 
 if (require.main === module) main()

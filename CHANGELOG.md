@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-05: tool replies are logged under their tool-use id
+
+A tool call that Claude Code moved to the background left no reply in the transcript, so what the
+tool answered was lost. With `GOLEM_REPLIES` set, the MCP server appends the reply of every tool
+call that carries Claude Code's tool-use id, result or error, as a JSON line under that id before
+it sends the reply.
+
 ## 2026-11-05: a goto without y aims at the floor nearest the bot's height
 
 A goto to x and z without y aimed at the top of the column, the leaf canopy of a jungle tree 20

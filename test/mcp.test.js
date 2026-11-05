@@ -631,6 +631,58 @@ test('onToolCall gets the tool name and the sorted names of its params the call 
   assert.deepStrictEqual(seen, [['chat', ['msg']], ['goto', ['range', 'x', 'z']], ['scene', []], [null, []], ['chat', []]])
 })
 
+// req with Claude Code's tool-use id in its params.
+const withUseId = (req, useId) => ({ ...req, params: { ...req.params, _meta: { 'claudecode/toolUseId': useId } } })
+
+test('onReply gets a tools/call reply with its tool-use id and the time now gives', async () => {
+  const seen = []
+  const at = new Date('2026-11-05T12:00:00Z')
+  const { srv } = mcpServer({ now: () => at, onReply: (useId, reply, t) => seen.push([useId, reply, t]) })
+  const r = await srv.handle(withUseId(callReq('chat', { msg: 'hi' }), 'toolu_01'))
+  assertOk(r)
+  assert.deepStrictEqual(seen, [['toolu_01', r, at.getTime()]])
+})
+
+test('onReply gets the internal error of a tools/call that throws', async (t) => {
+  t.mock.method(console, 'error', () => {})
+  const seen = []
+  const { srv } = mcpServer({ onToolCall: () => { throw new Error('boom') }, onReply: (useId, reply) => seen.push([useId, reply]) })
+  const r = await srv.handle(withUseId(callReq('chat', { msg: 'hi' }), 'toolu_02'))
+  assert.deepStrictEqual(r.error, { code: -32603, message: 'internal error' })
+  assert.deepStrictEqual(seen, [['toolu_02', r]])
+})
+
+test('a throwing onReply still lets handle return the reply', async (t) => {
+  const logged = t.mock.method(console, 'error', () => {})
+  const { srv } = mcpServer({ onReply: () => { throw new Error('disk full') } })
+  const r = await srv.handle(withUseId(callReq('chat', { msg: 'hi' }), 'toolu_06'))
+  assertOk(r)
+  assert.strictEqual(logged.mock.callCount(), 1)
+})
+
+test('odd params still answer invalid params, and onReply runs only for a string tool-use id', async () => {
+  const seen = []
+  const { srv } = mcpServer({ onReply: (useId, reply) => seen.push([useId, reply]) })
+  for (const params of [null, 'chat', 7, [], ['chat'], { _meta: null }, { _meta: 'toolu_x' }, { _meta: { 'claudecode/toolUseId': 3 } }]) {
+    const r = await rpc(srv, 'tools/call', params)
+    assert.deepStrictEqual(r.error, { code: -32602, message: 'invalid params' }, JSON.stringify(params))
+  }
+  assert.deepStrictEqual(seen, [])
+  const r = await rpc(srv, 'tools/call', { _meta: { 'claudecode/toolUseId': 'toolu_03' } })
+  assert.deepStrictEqual(seen, [['toolu_03', r]], 'control: a nameless call with an id is logged')
+})
+
+test('onReply does not run for a tools/call without a tool-use id or for other methods', async () => {
+  const seen = []
+  const { srv } = mcpServer({ onReply: (useId) => seen.push(useId) })
+  assertOk(await call(srv, 'chat', { msg: 'hi' }))
+  assertOk(await srv.handle({ ...callReq('chat', { msg: 'hi' }), params: { name: 'chat', arguments: { msg: 'hi' }, _meta: {} } }))
+  await srv.handle(withUseId({ jsonrpc: '2.0', id: 900, method: 'tools/list' }, 'toolu_04'))
+  assert.deepStrictEqual(seen, [])
+  assertOk(await srv.handle(withUseId(callReq('chat', { msg: 'hi' }), 'toolu_05')))
+  assert.deepStrictEqual(seen, ['toolu_05'], 'control')
+})
+
 test('the wake log names each called tool and its passed params and holds no argument text', { timeout: 30000 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golem-wake-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
@@ -642,6 +694,52 @@ test('the wake log names each called tool and its passed params and holds no arg
   e.child.kill()
   await e.exited
   assert.strictEqual(fs.readFileSync(log, 'utf8'), 'tool call note kind,text\ntool call manual topic\ntool call (unknown)\n')
+})
+
+// Sends reqs to an entry point whose GOLEM_REPLIES is replies, then stops it.
+async function servedReplies (t, replies, reqs) {
+  const e = runEntry(t, [String(PORT)], { ...baseEnv(), GOLEM_TOKEN: MCP_TOKEN, GOLEM_REPLIES: replies })
+  let stderr = ''
+  e.child.stderr.setEncoding('utf8')
+  e.child.stderr.on('data', (d) => { stderr += d })
+  const out = []
+  for (const req of reqs) {
+    e.child.stdin.write(JSON.stringify(req) + '\n')
+    const r = await e.response(req.id, 8000)
+    assert.ok(r, `no reply to ${req.params.name}`)
+    out.push(r)
+  }
+  e.child.kill()
+  await e.exited
+  return { replies: out, stderr }
+}
+
+test('GOLEM_REPLIES gets one line per tools/call reply that carries a tool-use id', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golem-replies-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const file = path.join(dir, 'replies.jsonl')
+  const before = Date.now()
+  const { replies } = await servedReplies(t, file, [
+    withUseId(callReq('manual', { topic: 'chat' }), 'toolu_10'),
+    callReq('manual', { topic: 'chat' }),
+    withUseId(callReq('nope', {}), 'toolu_11')
+  ])
+  const lines = fs.readFileSync(file, 'utf8').split('\n')
+  assert.strictEqual(lines.pop(), '')
+  const logged = lines.map((l) => JSON.parse(l))
+  for (const l of logged) assert.ok(l.t >= before && l.t <= Date.now(), `t ${l.t}`)
+  assert.deepStrictEqual(logged.map(({ t, ...rest }) => rest), [
+    { id: 'toolu_10', result: replies[0].result },
+    { id: 'toolu_11', error: replies[2].error }
+  ])
+})
+
+test('a reply log that cannot be written is reported on stderr and the reply still goes out', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golem-replies-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const { replies, stderr } = await servedReplies(t, path.join(dir, 'missing', 'replies.jsonl'), [withUseId(callReq('manual', { topic: 'chat' }), 'toolu_12')])
+  assertOk(replies[0])
+  assert.match(stderr, /\[golem-mcp\] cannot write the reply log: /)
 })
 
 test('onWaitStart runs as a wait_events call starts, before its first /tick poll, and onWake once it returns', async () => {
