@@ -76,15 +76,21 @@ function enchantingTable (pockets, levels, applies, sent) {
     id: 7,
     closed: false,
     slots: [],
+    inventoryStart: 2,
+    inventoryEnd: 38,
     enchantments: [],
     async putTargetItem (item) { table.slots[0] = item },
     async putLapis (item) {
-      table.slots[1] = item
+      table.slots[1] = { ...item, slot: 1 }
       table.held = table.slots[0] && table.slots[0].count
       table.enchantments = levels.map((level, i) => ({ level, expected: { enchant: level > 0 ? i : -1, level: level > 0 ? 2 : -1 } }))
     },
     targetItem: () => table.slots[0],
-    async takeTargetItem () { table.slots[0] = null },
+    async putAway (slot) {
+      const empty = table.slots.findIndex((s, i) => i >= table.inventoryStart && i < table.inventoryEnd && !s)
+      table.slots[empty] = table.slots[slot]
+      table.slots[slot] = null
+    },
     close () { table.closed = true },
     commit (slot) {
       if (!applies) return
@@ -116,20 +122,30 @@ function clicker (table, clicks) {
   }
 }
 
-async function enchantRun (query, { legacy = false, overrides = null, levels = [2, 5, 9], applies = true, item = { name: 'iron_sword', count: 1 } } = {}) {
+// stuck lists the table slots whose putAway throws. inTable holds the names in the table's item and lapis slots when the reply went out.
+async function enchantRun (query, { legacy = false, overrides = null, levels = [2, 5, 9], applies = true, item = { name: 'iron_sword', count: 1 }, stuck = [] } = {}) {
   const pockets = [item, { name: 'lapis_lazuli', count: 3 }]
   const { env, walks } = stationEnv('enchanting_table', true)
   const sent = sentRegistry()
   const table = enchantingTable(pockets, levels, applies, sent)
+  table.takeTargetItem = () => env.bot.putAway(0)
   const writes = []
   const clicks = []
+  let inTable = null
+  const replied = (send) => (res, body) => {
+    inTable = [table.slots[0], table.slots[1]].map((s) => s && s.name)
+    send(res, body)
+  }
   Object.assign(env.bot, {
     registry: sent,
     clickWindow: clicker(table, clicks),
     inventory: { items: () => pockets },
     experience: { level: 10 },
     openEnchantmentTable: async () => table,
-    putAway: async () => {},
+    putAway: async (slot) => {
+      if (stuck.includes(slot)) throw new Error(`no answer for slot ${slot}`)
+      await table.putAway(slot)
+    },
     _client: {
       on () {},
       removeListener () {},
@@ -146,11 +162,14 @@ async function enchantRun (query, { legacy = false, overrides = null, levels = [
     SERVER_OVERRIDES: overrides,
     ENCHANTING_1_21,
     emitEvent () {},
-    setTimeout: (fn) => setImmediate(fn)
+    setTimeout: (fn) => setImmediate(fn),
+    ok: replied((res, body) => { res.body = body }),
+    err: replied((res, e) => { res.error = e }),
+    send: replied((res, body) => { res.body = body })
   })
   const { handle, res } = routeHandler('/enchant', env)
   await handle({ query }, res)
-  return { reply: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error && res.error.message, writes, table, walks, clicks }
+  return { reply: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error && res.error.message, writes, table, walks, clicks, inTable }
 }
 
 const offersBy = (model, levels = [2, 5, 9]) => levels.map((levelNeeded, slot) => ({
@@ -216,6 +235,29 @@ test('enchant reports an error when the server enchanted nothing', async () => {
   const { error, writes } = await enchantRun({ item: 'iron_sword', slot: '2' }, { applies: false })
   assert.deepStrictEqual(writes, [['enchant_item', { windowId: 7, enchantment: 2 }]])
   assert.strictEqual(error, 'the server enchanted nothing: iron_sword in the table carries no enchantment 1 s after the commit')
+})
+
+test('enchant replies once the item and lapis are back in the pockets', async () => {
+  for (const [query, levels] of [[{ item: 'iron_sword' }], [{ item: 'iron_sword', slot: '1' }], [{ item: 'iron_sword', slot: '1' }, [3, 0, 0]]]) {
+    const { reply, error, inTable } = await enchantRun(query, { levels })
+    assert.ok(reply || error, JSON.stringify(query))
+    assert.deepStrictEqual(inTable, [null, null], JSON.stringify(query))
+    assert.strictEqual(reply && reply.notBack, undefined)
+  }
+})
+
+test('enchant names what a failed put-away left out of the pockets', async () => {
+  const look = await enchantRun({ item: 'iron_sword' }, { stuck: [0] })
+  assert.strictEqual(look.reply.offers.length, 3)
+  assert.deepStrictEqual([look.reply.ok, look.reply.notBack, look.reply.reason], [false, { iron_sword: 1 }, 'iron_sword x1 did not come back from the table to my pockets'])
+  assert.ok(look.table.closed)
+
+  const commit = await enchantRun({ item: 'iron_sword', slot: '1' }, { stuck: [1] })
+  assert.deepStrictEqual(commit.reply.enchants, { silk_touch: 2 })
+  assert.deepStrictEqual([commit.reply.ok, commit.reply.notBack], [false, { lapis_lazuli: 3 }])
+
+  const refused = await enchantRun({ item: 'iron_sword', slot: '1' }, { levels: [3, 0, 0], stuck: [0] })
+  assert.deepStrictEqual(refused.reply, { ok: false, error: 'slot 1 holds no offer', notBack: { iron_sword: 1 } })
 })
 
 test('rename renames the named pocket item at a seen anvil', async () => {

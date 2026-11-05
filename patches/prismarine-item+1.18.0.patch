@@ -1,13 +1,16 @@
 diff --git a/node_modules/prismarine-item/index.js b/node_modules/prismarine-item/index.js
-index 47a27b0..97f77f2 100644
+index 47a27b0..ccbb2c8 100644
 --- a/node_modules/prismarine-item/index.js
 +++ b/node_modules/prismarine-item/index.js
-@@ -259,7 +259,10 @@ function loader (registryOrVersion) {
+@@ -258,8 +258,12 @@ function loader (registryOrVersion) {
+       const typeOfEnchantLevelValue = registry.supportFeature('typeOfValueForEnchantLevel')
        const useStoredEnchantments = registry.supportFeature('booksUseStoredEnchantments') && this.name === 'enchanted_book'
  
-       if (this.componentMap?.has('enchantments')) {
+-      if (this.componentMap?.has('enchantments')) {
 -        return this.componentMap.get('enchantments').data
-+        return this.componentMap.get('enchantments').data.enchantments.map((ench) => ({
++      const component = useStoredEnchantments && this.componentMap?.has('stored_enchantments') ? 'stored_enchantments' : 'enchantments'
++      if (this.componentMap?.has(component)) {
++        return this.componentMap.get(component).data.enchantments.map((ench) => ({
 +          lvl: ench.level,
 +          name: registry.enchantments[ench.id]?.name || null
 +        }))

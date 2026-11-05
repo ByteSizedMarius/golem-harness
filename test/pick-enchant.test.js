@@ -342,3 +342,19 @@ test('inventory names the enchantments of an enchanted item and leaves them out 
   assert.deepStrictEqual(reply.items.map((i) => i.enchants), [{ fortune: 3, unbreaking: 2 }, undefined])
   assert.deepStrictEqual(reply.worn[0].enchants, { protection: 4 })
 })
+
+test('inventory names the stored enchantments of an enchanted book', () => {
+  const book = Item.fromNotch({
+    itemId: registry.itemsByName.enchanted_book.id,
+    itemCount: 1,
+    components: [{ type: 'stored_enchantments', data: { enchantments: [{ id: registry.enchantmentsByName.mending.id, level: 1 }] } }],
+    removeComponents: []
+  })
+  book.slot = 36
+  const slots = new Array(46).fill(null)
+  slots[36] = book
+  const bot = { inventory: { slots, items: () => [book], emptySlotCount: () => 35 } }
+  const { wear } = loadBotFunctions(['wear'], { LEGACY_1710: false })
+  const reply = runRoute('/inventory', {}, { bot, shared: { ready: true }, LEGACY_1710: false, wear })
+  assert.deepStrictEqual(reply.items[0].enchants, { mending: 1 })
+})
