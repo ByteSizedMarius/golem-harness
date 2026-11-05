@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-05: a goto without y aims at the floor nearest the bot's height
+
+A goto to x and z without y aimed at the top of the column, the leaf canopy of a jungle tree 20
+above the ground, and planned toward it until the planning timeout before it ended with no path.
+Without y the goal is now the seen floor nearest the bot's own height, at any distance, and a leaf
+top counts only when the bot has seen the column nearer its own height. A column the bot has seen
+no floor in is walked toward until it has.
+
 ## 2026-11-05: a bed someone sleeps in is refused by name
 
 On a 1.7.10 server a click on a bed another player sleeps in came back `ok`, because that server

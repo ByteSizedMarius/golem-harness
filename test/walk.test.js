@@ -72,16 +72,10 @@ test('standCell returns null for a loaded column of solid rock', () => {
   assert.strictEqual(standCell(world({ '0,0': rock }), 0, 0, 30), null)
 })
 
-test('standCell without y stands on the surface of a hill, not in the cave under it', () => {
-  const blockAt = world({ '0,0': ground(70, air(50, 51)) })
-  assert.deepStrictEqual(cellOf(standCell(blockAt, 0, 0)), { x: 0, y: 71, z: 0 })
-})
-
-test('standCell marks an unloaded column, with and without y', () => {
+test('standCell marks an unloaded column', () => {
   const blockAt = world({ '0,0': ground(63) })
   assert.deepStrictEqual(cellOf(standCell(blockAt, 0, 0, 64)), { x: 0, y: 64, z: 0 }, 'control: the loaded column')
   assert.strictEqual(standCell(blockAt, 16, 0, 64), UNLOADED)
-  assert.strictEqual(standCell(blockAt, 16, 0), UNLOADED)
 })
 
 test('standCell with known answers UNKNOWN for a hidden cavity, and still stands a drop on a seen floor and a ladder foot', () => {
@@ -147,6 +141,7 @@ function sources (over = {}) {
     visibleBlock: () => null,
     cellKnown: () => true,
     seenNow: () => true,
+    feetY: 64,
     ...over
   }
 }
@@ -162,11 +157,59 @@ test('a coordinate walks onto its stand cell with GoalBlock at range 0 and GoalN
   assert.deepStrictEqual([near.goal.x, near.goal.y, near.goal.z, near.goal.rangeSq], [5, 64, 5, 9])
 })
 
-test('the reply echoes the stand cell only when the bot knows it, else the asked coordinate', () => {
-  assert.deepStrictEqual(resolveTarget({ x: 5, z: 5 }, sources()).target, { x: 5, y: 64, z: 5 }, 'control: a known cell')
-  const hidden = resolveTarget({ x: 5, z: 5 }, sources({ cellKnown: () => false }))
-  assert.deepStrictEqual(hidden.target, { x: 5, z: 5 })
-  assert.deepStrictEqual(cellOf(hidden.cell), { x: 5, y: 64, z: 5 })
+test('a coordinate without y in a column the bot has not seen is walked toward, echoing only the asked x and z', () => {
+  assert.deepStrictEqual(resolveTarget({ x: 5, z: 5 }, sources()).target, { x: 5, y: 64, z: 5 }, 'control: a seen column')
+  assert.deepStrictEqual(resolveTarget({ x: 5, z: 5 }, sources({ cellKnown: () => false })),
+    { kind: 'coordinate', target: { x: 5, z: 5 }, toward: { x: 5, y: undefined, z: 5 } })
+})
+
+const LEAVES = block('jungle_leaves', 'block', 1)
+// Ground up to y 66 under a jungle canopy at 85 to 87, seen from feet at 62 with 63 to 84 out of sight.
+const canopy = () => world({ '0,0': ground(66, { 85: LEAVES, 86: LEAVES, 87: LEAVES }) })
+const underCanopy = (p) => p.y < 63 || p.y > 84
+
+test('a coordinate without y is walked toward over a seen canopy when the ground under it is unseen', () => {
+  assert.deepStrictEqual(resolveTarget({ x: 0, z: 0 }, sources({ blockAt: canopy(), feetY: 62, cellKnown: underCanopy })),
+    { kind: 'coordinate', target: { x: 0, z: 0 }, toward: { x: 0, y: undefined, z: 0 } })
+})
+
+test('a coordinate without y walks to the seen ground under a canopy', () => {
+  const r = resolveTarget({ x: 0, z: 0 }, sources({ blockAt: canopy(), feetY: 62, cellKnown: (p) => p.y <= 68 || underCanopy(p) }))
+  assert.deepStrictEqual([cellOf(r.cell), r.target], [{ x: 0, y: 67, z: 0 }, { x: 0, y: 67, z: 0 }])
+})
+
+test('a coordinate without y walks onto a seen leaf platform with every cell below it known', () => {
+  const blockAt = world({ '0,0': (y) => (y <= 40 ? STONE : y === 70 ? LEAVES : AIR) })
+  const r = resolveTarget({ x: 0, z: 0 }, sources({ blockAt, feetY: 64, cellKnown: (p) => p.y <= 72 }))
+  assert.deepStrictEqual(cellOf(r.cell), { x: 0, y: 71, z: 0 })
+})
+
+test('a coordinate with y stands on a seen canopy over unseen ground', () => {
+  const src = sources({ blockAt: canopy(), feetY: 62, cellKnown: underCanopy })
+  assert.deepStrictEqual(cellOf(resolveTarget({ x: 0, y: 88, z: 0 }, src).cell), { x: 0, y: 88, z: 0 })
+  assert.deepStrictEqual(cellOf(resolveTarget({ x: 0, y: 86, z: 0 }, src).cell), { x: 0, y: 88, z: 0 }, 'a y inside the leaves, past an unseen cell')
+})
+
+test('a coordinate without y walks to the floor nearest the feet, the hilltop from its surface and the cave from inside it', () => {
+  const blockAt = world({ '0,0': ground(70, air(50, 51)) })
+  assert.deepStrictEqual(cellOf(resolveTarget({ x: 0, z: 0 }, sources({ blockAt, feetY: 71 })).cell), { x: 0, y: 71, z: 0 })
+  assert.deepStrictEqual(cellOf(resolveTarget({ x: 0, z: 0 }, sources({ blockAt, feetY: 50 })).cell), { x: 0, y: 50, z: 0 })
+})
+
+test('a coordinate without y walks to a seen floor 5 above the feet past unseen rock', () => {
+  const blockAt = world({ '0,0': ground(68) })
+  const cellKnown = (p) => p.y >= 68
+  assert.strictEqual(standCell(blockAt, 0, 0, 64, undefined, cellKnown), UNKNOWN, 'control: the 2-block slack of a y hint')
+  const r = resolveTarget({ x: 0, z: 0 }, sources({ blockAt, feetY: 64, cellKnown }))
+  assert.deepStrictEqual(cellOf(r.cell), { x: 0, y: 69, z: 0 })
+})
+
+test('a coordinate with y keeps the 2-block slack round it, wherever the body stands', () => {
+  const blockAt = world({ '10,10': ground(63) })
+  const src = sources({ blockAt, feetY: 64, cellKnown: (p) => p.y >= 63 })
+  assert.deepStrictEqual(cellOf(resolveTarget({ x: 10, y: 62, z: 10 }, src).cell), { x: 10, y: 64, z: 10 }, 'control: a seen floor within 2 of y')
+  assert.deepStrictEqual(resolveTarget({ x: 10, y: 40, z: 10 }, src),
+    { kind: 'coordinate', target: { x: 10, y: 40, z: 10 }, toward: { x: 10, y: 40, z: 10 } })
 })
 
 test('a waypoint walks to the stand cell nearest its stored feet y, and an unknown name is unknown', () => {
@@ -244,6 +287,8 @@ test('a column without a stand cell is no-floor only when the bot knows every ce
   assert.deepStrictEqual(resolveTarget({ x: 5, z: 5 }, hidden), { kind: 'coordinate', target: { x: 5, z: 5 }, toward: { x: 5, y: undefined, z: 5 } })
   assert.deepStrictEqual(resolveTarget({ x: 300, y: 70, z: -40 }, src),
     { kind: 'coordinate', target: { x: 300, y: 70, z: -40 }, toward: { x: 300, y: 70, z: -40 } }, 'an unloaded column')
+  assert.deepStrictEqual(resolveTarget({ x: 300, z: -40 }, src),
+    { kind: 'coordinate', target: { x: 300, z: -40 }, toward: { x: 300, y: undefined, z: -40 } }, 'an unloaded column without y')
 })
 
 function watched (clock) {
@@ -1128,13 +1173,24 @@ test('a goto refuses a plan that ends far from the y asked or drops more than 3,
   assert.deepStrictEqual([accepted.walks, accepted.r.arrived, planned], [1, true, 0])
 })
 
+test('a goto without y to a seen hilltop over unseen rock walks onto it in one walk, and a preview plans it', async () => {
+  // A hill 5 above the flat at 5,0, its rock under the top out of sight.
+  const setup = (bot) => { bot.blockAt = (p) => (p.y <= (p.x === 5 && p.z === 0 ? 68 : 63) ? STONE : AIR) }
+  const cellKnown = (p) => !(p.x === 5 && p.z === 0 && p.y < 68)
+  const walked = await plannedGoto({ x: 5, z: 0 }, {}, { setup, over: { cellKnown }, answer: arrive })
+  assert.deepStrictEqual([walked.walks, walked.r.arrived, walked.r.target], [1, true, { x: 5, y: 69, z: 0 }])
+  const { r } = await plannedGoto({ x: 5, z: 0 }, { preview: true }, { setup, over: { cellKnown } })
+  assert.deepStrictEqual([r.reason, r.plan], [null, { reaches: true, length: 5, rise: 5, drop: 0, end: { x: 5, y: 69, z: 0 }, unseen: false }])
+})
+
 test('a preview through terrain the bot has not seen reports only the part it knows', async () => {
-  // The plan steps east, then drops 5 into a cave the bot never saw from x 3 on.
+  // The plan steps east, then drops 5 into a cave the bot never saw at x 3 and 4, short of the seen target column.
   const cave = async () => ({ status: 'success', path: [1, 2, 3, 4, 5].map((x) => new Vec3(x + 0.5, x < 3 ? 64 : 59, 0.5)) })
-  const seen = { cellKnown: (p) => p.x < 3, knownCell: (p) => p.x < 3 }
+  const sight = (p) => p.x < 3 || p.x === 5
+  const seen = { cellKnown: sight, knownCell: sight }
   const { r, walks } = await plannedGoto({ x: 5, z: 0 }, { preview: true }, { over: { planPath: cave, ...seen } })
   assert.strictEqual(walks, 0)
-  assert.deepStrictEqual(r.target, { x: 5, z: 0 }, 'the target cell is unseen')
+  assert.deepStrictEqual(r.target, { x: 5, y: 64, z: 0 })
   assert.deepStrictEqual(r.plan, { reaches: null, length: 2, rise: 0, drop: 0, end: { x: 2, y: 64, z: 0 }, unseen: true })
   assert.ok(!JSON.stringify(r).includes('59'), 'the cave floor stays hidden')
   const walked = await plannedGoto({ x: 5, z: 0 }, {}, { over: { planPath: cave, ...seen }, answer: arrive })
@@ -1154,7 +1210,7 @@ test('a goto counts deep water only where the bot sees it now, so a lake out of 
 
 test('a preview of a failed search leaves reaches unknown, since unseen terrain may still hold a way', async () => {
   const failed = async () => ({ status: 'noPath', path: [new Vec3(1.5, 64, 0.5), new Vec3(2.5, 64, 0.5)] })
-  const { r } = await plannedGoto({ x: 5, z: 0 }, { preview: true }, { over: { planPath: failed, cellKnown: (p) => p.x < 3 } })
+  const { r } = await plannedGoto({ x: 5, z: 0 }, { preview: true }, { over: { planPath: failed, cellKnown: (p) => p.x < 3 || p.x === 5 } })
   assert.deepStrictEqual(r.plan, { reaches: null, length: 2, rise: 0, drop: 0, end: { x: 2, y: 64, z: 0 }, unseen: false })
 })
 
