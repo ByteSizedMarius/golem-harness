@@ -316,6 +316,7 @@ function senses ({ pos = new Vec3(0.5, 64, 0.5), cells = {}, lit = () => true, l
   const ctx = loadBotFunctions(['wayHint', 'insideBlock'], {
     bot,
     Vec3,
+    shared: { bed: null },
     isDoor,
     doorCrossing,
     panelAcross,

@@ -458,3 +458,30 @@ test('state names the bed the body sleeps in, and says nothing of beds while awa
   await goToBed(s)
   assert.deepStrictEqual(state().sleeping, { x: 30, y: 150, z: 40 })
 })
+
+test('state names no block the body is inside while in bed, though the sleeper lies partly in the block past the head', async () => {
+  const s = sleeper()
+  const pastHead = HEAD.offset(0, 0, 1)
+  const shapes = { red_bed: [[0, 0, 0, 1, 0.5625, 1]], oak_planks: [[0, 0, 0, 1, 1, 1]], air: [] }
+  s.bot.blockAt = (p) => {
+    const c = p.floored()
+    const name = c.equals(FOOT) || c.equals(HEAD) ? 'red_bed' : c.equals(pastHead) ? 'oak_planks' : 'air'
+    return { name, position: c, shapes: shapes[name] }
+  }
+  Object.assign(s.bot.entity, { yaw: 0, pitch: 0, onGround: true })
+  Object.assign(s.bot, { health: 20, food: 20, oxygenLevel: 20, experience: { level: 0 }, game: { gameMode: 'survival' }, blockAtCursor: () => null })
+  const state = () => runRoute('/state', {}, {
+    bot: s.bot,
+    shared: Object.assign(s.shared, { ready: true }),
+    Vec3,
+    seenNow: () => true,
+    skyClock: () => ({ dimension: 'overworld' }),
+    waterState: () => null,
+    heldInfo: () => null,
+    round: (v) => ({ x: v.x, y: v.y, z: v.z })
+  })
+  await goToBed(s)
+  assert.strictEqual('inside' in state(), false)
+  s.bot.emit('death')
+  assert.deepStrictEqual({ ...state().inside }, { name: 'oak_planks', x: 30, y: 150, z: 42 }, 'control: the same spot awake')
+})

@@ -15,7 +15,8 @@ const SHAPES = {
   air: [],
   cobblestone_wall: [[0.25, 0, 0.25, 0.75, 1.5, 0.75]],
   chest: [[0.0625, 0, 0.0625, 0.9375, 0.875, 0.9375]],
-  top_slab: [[0, 0.5, 0, 1, 1, 1]]
+  top_slab: [[0, 0.5, 0, 1, 1, 1]],
+  red_bed: [[0, 0, 0, 1, 0.5625, 1]]
 }
 
 // A stone floor below y 64. The walk moves 0.2 a tick at the goal and stalls while the body overlaps a block.
@@ -101,6 +102,7 @@ function world ({ blocks = {}, at = new Vec3(0.5, 64, 0.5), goal, pockets = [], 
   const env = {
     bot,
     Vec3,
+    shared: { bed: null },
     Date: { now: () => clock.t },
     seenNow: () => true,
     smotherBlock: () => null,
@@ -223,6 +225,23 @@ test('an idle body wedged into the floor under a slab it cannot lift into says i
   assert.deepStrictEqual(w.events, [], 'under 2 s')
   await idleFor(w, 3000)
   assert.deepStrictEqual(w.events, ['unstuck: stuck inside the stone at 0,63,0'])
+})
+
+test('an idle body in bed that lies partly in the block past the head says nothing, with or without the sleep packet', async () => {
+  const lying = (bed, sleeping) => {
+    const w = world({ blocks: { '0,64,0': 'red_bed', '1,64,0': 'oak_planks' }, at: new Vec3(0.9, 64.5625, 0.5) })
+    w.env.shared.bed = bed
+    w.bot.isSleeping = sleeping
+    return w
+  }
+  const awake = lying(null, false)
+  await idleFor(awake, 2400)
+  assert.deepStrictEqual(awake.events, ['unstuck: stuck inside the oak_planks at 1,64,0'], 'control: awake at the same spot')
+  for (const sleeping of [true, false]) {
+    const w = lying({ x: 0, y: 64, z: 0 }, sleeping)
+    await idleFor(w, 4800)
+    assert.deepStrictEqual(w.events, [], `isSleeping ${sleeping}`)
+  }
 })
 
 test('an idle body the server moves back more than 20 times in 5 s says it is stuck', async () => {

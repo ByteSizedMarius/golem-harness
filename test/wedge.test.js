@@ -8,11 +8,11 @@ const { loadBotFunctions } = require('./helpers')
 
 const WATER = ['water', { level: 0 }]
 
-// A body at feet y on dirt over water between farmland, stone below y 149, plus cells, with bot.js's tick hooks wired.
-function wedged (y, { cells = {}, inWater = false } = {}) {
+// A body at x, feet y on dirt over water between farmland, stone below y 149, plus cells, with bot.js's tick hooks wired.
+function wedged (y, { x = 0.5, cells = {}, inWater = false, bed = null } = {}) {
   const world = { '0,149,0': ['dirt', {}], '0,148,0': WATER, '-1,149,0': ['farmland', { moisture: 7 }], '1,149,0': ['farmland', { moisture: 7 }], ...cells }
   const bot = new EventEmitter()
-  bot.entity = { position: new Vec3(0.5, y, 0.5), velocity: new Vec3(0, -0.0784, 0), onGround: false, isInWater: inWater, isInLava: false }
+  bot.entity = { position: new Vec3(x, y, 0.5), velocity: new Vec3(0, -0.0784, 0), onGround: false, isInWater: inWater, isInLava: false }
   bot.blockAt = (p) => {
     const c = p.floored()
     const [name, props] = world[`${c.x},${c.y},${c.z}`] || [c.y < 149 ? 'stone' : 'air', {}]
@@ -25,7 +25,7 @@ function wedged (y, { cells = {}, inWater = false } = {}) {
   const ctx = loadBotFunctions(['wirePathfinderTicks', 'beforePathfinder'], {
     bot,
     Vec3,
-    shared: { ready: true },
+    shared: { ready: true, bed },
     seenNow: () => true,
     lastLift: null,
     skipPassedNodes () {},
@@ -84,4 +84,16 @@ test('no lift from 0.2 deep, out of farmland or a slab, in water, or with a bloc
     bot.emit('forcedMove')
     assert.deepStrictEqual([...stance(bot), logs], [y, false, -0.0784, []], label)
   }
+})
+
+test('a body in bed stays where the server laid it, partly in the block past the head', () => {
+  const y = 149.9375
+  const cells = { '0,149,0': ['red_bed', { facing: 'east', part: 'head', occupied: true }], '1,149,0': ['stone', {}] }
+  const awake = wedged(y, { x: 0.9, cells })
+  awake.bot.emit('physicsTick')
+  assert.deepStrictEqual(stance(awake.bot), [150, true, 0], 'control: awake at the same spot')
+  const { bot, logs } = wedged(y, { x: 0.9, cells, bed: { x: 0, y: 149, z: 0 } })
+  bot.emit('physicsTick')
+  bot.emit('forcedMove')
+  assert.deepStrictEqual([...stance(bot), logs], [y, false, -0.0784, []])
 })
