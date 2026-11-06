@@ -631,7 +631,7 @@ function patternNames (text) {
 
 // Every `name (` in code with its parenthesised group, and whether a body follows the group.
 function* parenNames (code) {
-  for (const m of code.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+  for (const m of code.matchAll(/(?<=^|\.\.\.|[^.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
     const open = m.index + m[0].length - 1
     const group = balanced(code, open, '(')
     yield { name: m[1], params: group, definition: /^\s*(?:\{|=>)/.test(code.slice(open + group.length)) }

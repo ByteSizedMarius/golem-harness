@@ -120,8 +120,6 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
     entityPerceptible: (en, fill) => { assert.strictEqual(fill, FILL, 'entityPerceptible got another fill'); return en.seen },
     shared: { mcData },
     loadItem,
-    // The loader does not follow a call behind a spread.
-    framesOn: loadBotFunctions(['framesOn'], {}).framesOn,
     bunkerHolds: () => false,
     ...timers,
     stackPause: async () => {},

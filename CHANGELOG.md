@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-06: a body held in a bed is not reported stuck aloft
+
+A bed click the server answered without a sleep packet left the body lying above the floor, and
+after 2 s idle the unstuck reflex reported it stuck off the ground. The bed the server holds the
+body in now counts as carried, like sleep. The mining manual also says how to fell a 2x2 jungle
+trunk from inside.
+
 ## 2026-11-05: tool replies are logged under their tool-use id
 
 A tool call that Claude Code moved to the background left no reply in the transcript, so what the

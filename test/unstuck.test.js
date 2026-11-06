@@ -265,6 +265,22 @@ test('an idle body held off the ground at one height for 2 s says it is stuck, a
   assert.deepStrictEqual(falling.events, [])
 })
 
+test('an idle body the server placed in bed without a sleep packet says nothing about being off the ground', async () => {
+  const onBed = (bed) => {
+    const w = world({ at: new Vec3(0.5, 64.5625, 0.5), blocks: { '0,64,0': 'red_bed' } })
+    w.bot.entity.onGround = false
+    w.bot.isSleeping = false
+    w.env.shared.bed = bed
+    return w
+  }
+  const free = onBed(null)
+  await idleFor(free, 2400)
+  assert.deepStrictEqual(free.events, ['unstuck: stuck at 0,64,0 off the ground for 2 s'], 'control: no bed set')
+  const placed = onBed({ x: 0, y: 64, z: 0 })
+  await idleFor(placed, 2400)
+  assert.deepStrictEqual(placed.events, [])
+})
+
 test('a walk the server corrects more than 20 times in 5 s raises no idle stuck event', async () => {
   const w = world({ goal: EAST })
   corrections(w, 21)

@@ -21,9 +21,7 @@ function body (damage) {
 
 function inventory (legacy, damage) {
   const bot = body(damage)
-  // The loader does not follow a call behind a spread, such as wear in heldInfo.
-  const { wear } = loadBotFunctions(['wear'], { LEGACY_1710: legacy })
-  const env = { bot, shared: { ready: true, mcData: registry }, LEGACY_1710: legacy, wear }
+  const env = { bot, shared: { ready: true, mcData: registry }, LEGACY_1710: legacy }
   const held = loadBotFunctions(['heldInfo'], env).heldInfo()
   return { reply: runRoute('/inventory', {}, env), held: JSON.parse(JSON.stringify(held)) }
 }

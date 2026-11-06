@@ -9,19 +9,20 @@
 ## Branch mining
 
 - Go down with `dig_stair` and save a waypoint at its foot. That cell is the hub.
-- Dig each branch 16 to 24 long with `dig_tunnel`, then walk back to the main tunnel. Every 3rd block leaves 2 blocks of rock between branches.
+- Dig each branch 16 to 24 long with `dig_tunnel`, then walk back to the main tunnel.
 - Stay within a set range of the hub.
 - Leave `dig_tunnel`'s `torch` on. Ore in a tunnel wall shows only in light.
 
 ## Digging
 
-- `find` before `mine`. With nothing in range, `mine` returns `mined: 0` and you learn nothing. `find` shows whether and where it is.
+- `find` before `mine`. With nothing in range, `mine` returns `mined: 0` and you learn nothing.
 - An empty ore result usually means buried or unlit, not absent. Expose it by digging toward it: open a cave, follow a wall of exposed stone. Light a dark cave before you look.
 - `digat` and `mine` step off a block you stand on and dig it from beside. With no cell beside it to stand on (a pillar top, a shaft), they dig it in place and you drop into whatever is below: a cave, lava, a long fall. `gather` refuses targets more than about 2 below your feet.
+- Fell a 2x2 jungle trunk from inside: dig its 4 logs level by level, `pillar` up inside the hollow, then dig the pillar down.
 - `mine` gives up on a block it makes no progress toward for about 5 s, or after a minute, and its `reason` says `stalled` or `budget`. `tidy` stops the same way and keeps the rest queued.
 - `dig_tunnel` and `dig_stair` stop at lava or water in sight and at gravel or sand in sight over their way (`dig_stair` also in it). They plug a hole onto lava with filler, step back from falling gravel and stop at gravel that fell in. With `anyway` they dig through it and dig out what falls in. Before a step they wait up to 2 s for falls to land, else stop `still falling`. A `falling from` stop without `stepped back` means walk out at once.
 - `digat` needs `anyway` to dig where gravel or sand in sight would fall on you.
-- A walk wedged for about 10 s gets the unstuck reflex: it replans, steps back, opens a door or jumps a step, and breaks the block in the way only when you carry one to put back. Failing that, it stops the walk and its event names where you are stuck, against what, and what it tried. Dig out from there.
+- A walk wedged for about 10 s gets the unstuck reflex: it replans, steps back, opens a door or jumps a step, and breaks the block in the way only when you carry one to put back. Failing that, it stops the walk and its event says where. Dig out from there.
 - When something else holds the hand, `digat` puts a carried tool that harvests the block back in it, or refuses the dig.
 - Digs use a fortune pick on ore it multiplies, else a plain one. `silk` is for glass, ice, bookshelves and ore saved for a fortune pick.
 - `digat` answers once the server broke the block. A tool's `durability` counts the digs it has left. A nearly broken tool raises a wear event.
