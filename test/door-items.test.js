@@ -111,7 +111,8 @@ async function doorBody (t, legacy, contents) {
     entity: { position: new Vec3(0.5, 64, 0.5) },
     blockAt: (p) => (p.equals(CHEST_AT) ? chestBlock : { name: 'air', type: 0, position: p }),
     findBlocks: () => [CHEST_AT],
-    pathfinder: { goto: async () => {} },
+    world: { raycast: () => null },
+    pathfinder: { goto: async () => {}, startCell: (p) => p.floored() },
     openContainer: async () => {
       const opened = once(bot, 'windowOpen')
       client.emit('open_window', { windowId: CHEST_WINDOW, inventoryType: 2, windowTitle: 'Chest' })
@@ -136,7 +137,8 @@ async function doorBody (t, legacy, contents) {
     resolveBlockIds: (name) => (name === 'chest' ? [CHEST_ID] : []),
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     goals,
-    CHEST_RADIUS: botConstant('CHEST_RADIUS')
+    CHEST_RADIUS: botConstant('CHEST_RADIUS'),
+    CHEST_REACH: botConstant('CHEST_REACH')
   }
   return { bot, Item, server, env }
 }

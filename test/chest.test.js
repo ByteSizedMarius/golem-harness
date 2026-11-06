@@ -1,10 +1,14 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const { AsyncLocalStorage } = require('node:async_hooks')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
-const { awaitRoute, routeHandler, botConstant, loadBotFunctions, claimRescue } = require('./helpers')
+const WorldSync = require('prismarine-world/src/worldsync')
+const { awaitRoute, routeHandler, botConstant, loadBotFunctions, claimRescue, walkingBody } = require('./helpers')
+const { guardWork } = require('../lib/walk')
 const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
+const { LEGACY_CLICK_REACH } = require('../lib/bot/legacy-1710')
 const { TOOLS } = require('../mcp/tools')
 const mcData = require('minecraft-data')('1.21.11')
 const registry = require('prismarine-registry')('1.21.11')
@@ -96,13 +100,24 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
   const entities = []
   const FILL = { cells: new Set() }
   const timers = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) }
-  const chest = (p) => ({ name: 'chest', type: CHEST_ID, position: p, getProperties: () => states[at(p)] || { type: 'single', facing: 'north' } })
+  const chest = (p) => ({ name: 'chest', type: CHEST_ID, position: p, shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => states[at(p)] || { type: 'single', facing: 'north' } })
   const env = {
     bot: {
       entity: { position: HERE },
-      blockAt: (p) => (cells.has(at(p)) ? chest(p) : { name: 'air', type: 0, position: p }),
+      blockAt: (p) => (cells.has(at(p)) ? chest(p) : { name: 'air', type: 0, position: p, shapes: [] }),
+      world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => env.bot.blockAt(p) }, ray) },
       findBlocks: ({ matching, maxDistance }) => (matching.includes(CHEST_ID) ? chests.filter((p) => HERE.distanceTo(p) <= maxDistance) : []),
-      pathfinder: { goto: async () => {} },
+      pathfinder: {
+        // Walks one cell at a time to the neighbour nearest the goal until it stands on an end cell.
+        goto: async (goal) => {
+          let cell = env.bot.entity.position.floored()
+          for (let i = 0; i < 20 && !goal.isEnd(cell); i++) {
+            cell = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => cell.offset(dx, 0, dz)).reduce((a, b) => (goal.heuristic(b) < goal.heuristic(a) ? b : a))
+          }
+          env.bot.entity.position = cell.offset(0.5, 0, 0.5)
+        },
+        startCell: (p) => p.floored()
+      },
       _client: { write () {} },
       // mineflayer opens a chest with a block_place.
       openContainer: async (b) => {
@@ -132,7 +147,8 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
     resolveBlockIds: (name) => (name === 'chest' ? [CHEST_ID] : []),
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     goals,
-    CHEST_RADIUS: botConstant('CHEST_RADIUS')
+    CHEST_RADIUS: botConstant('CHEST_RADIUS'),
+    CHEST_REACH: botConstant('CHEST_REACH')
   }
   loadBotFunctions(['wireHandLease'], { bot: env.bot, guardState: env.guardState, ...timers }).wireHandLease()
   return { env, opened, fight, entities }
@@ -221,7 +237,7 @@ test('a chest whose other half is unseen lists no pair and never names that cell
     { at: { x: -7, y: 64, z: 3 }, dist: 7.6 }
   ])
   const miss = await refusal('/withdraw', { name: 'diamond', x: '-7', y: '64', z: '3' }, env)
-  assert.match(miss, /other chests seen within 12: 1,64,-3 \(3\.2 away\)$/)
+  assert.match(miss, /other chests seen within 12: 1,64,-3 \(7\.2 away\)$/)
   assert.doesNotMatch(miss, /0,64,-3/)
 })
 
@@ -296,7 +312,10 @@ test('chest, withdraw and deposit refuse a chest seen only through a leaf from w
     const { env, opened } = chestEnv([NEAR], { '5,64,0': chestWindow([stack('cobblestone', 10)]) }, [stack('cobblestone', 5)])
     let walked = false
     const asked = []
-    env.bot.pathfinder.goto = async () => { walked = true }
+    env.bot.pathfinder.goto = async () => {
+      walked = true
+      env.bot.entity.position = new Vec3(3.5, 64, 0.5)
+    }
     env.leafInTheWay = (p) => {
       asked.push(`${p.x},${p.y},${p.z}`)
       return walked ? { name: 'oak_leaves', position: new Vec3(4, 64, 0) } : null
@@ -436,7 +455,7 @@ test('deposit of several names that fails partway closes the window and names wh
   const { env, opened } = chestEnv([NEAR, FAR], windows, [stack('diamond', 5), stack('stone', 70)])
   const error = await refusal('/deposit', { name: 'diamond|stone' }, env)
   assert.match(error, /^deposited diamond 5; then stone: deposited 0 then failed \(chest full\?\): destination full; /)
-  assert.match(error, /other chests seen within 12: -7,64,3 \(7\.6 away\)$/)
+  assert.match(error, /other chests seen within 12: -7,64,3 \(9\.5 away\)$/)
   assert.deepStrictEqual(opened, ['5,64,0'])
   assert.ok(windows['5,64,0'].closed, 'the window stays open')
 })
@@ -520,6 +539,7 @@ test('a buried self-rescue starting during the walk stops withdraw and deposit a
   const { holdHand, endHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState: env.guardState, digLock, setTimeout, clearTimeout })
   let rescue = null
   env.bot.pathfinder.goto = async () => {
+    env.bot.entity.position = new Vec3(3.5, 64, 0.5)
     claimRescue(digLock)
     rescue = holdHand(digLock.holder)
   }
@@ -692,7 +712,7 @@ test('deposit into a full half of a double chest names neither of its cells and 
   const { env, opened } = chestEnv([NEAR, new Vec3(6, 64, 0), FAR, new Vec3(-8, 64, 3)], windows, [stack('diamond', 5)], states)
   const error = await refusal('/deposit', { name: 'diamond', x: '6', y: '64', z: '0' }, env)
   assert.match(error, /^deposited 0 then failed \(chest full\?\): destination full; diamond in chest now 0; /)
-  assert.match(error, /other chests seen within 12: -7,64,3 and -8,64,3 \(7\.6 away\)$/)
+  assert.match(error, /other chests seen within 12: -7,64,3 and -8,64,3 \(10\.5 away\)$/)
   assert.doesNotMatch(error, /5,64,0|6,64,0/)
   assert.deepStrictEqual(opened, ['6,64,0'])
 })
@@ -702,12 +722,12 @@ test('a failing chest, withdraw or deposit names the other seen chests and no un
   unopened.env.bot.openContainer = async () => { throw new Error('Event windowOpen did not fire within timeout of 20000ms') }
   const shut = await refusal('/chest', {}, unopened.env)
   assert.match(shut, /^cannot open the chest at 5,64,0: /)
-  assert.match(shut, /other chests seen within 12: -7,64,3 \(7\.6 away\)$/)
+  assert.match(shut, /other chests seen within 12: -7,64,3 \(9\.5 away\)$/)
   assert.doesNotMatch(shut, /0,64,-3/)
 
   const stocked = { '5,64,0': chestWindow([stack('cobblestone', 10)]), '0,64,-3': chestWindow([stack('diamond', 3)]) }
   const lacking = chestEnv([NEAR, FAR, HIDDEN], stocked)
-  assert.match(await refusal('/withdraw', { name: 'diamond' }, lacking.env), /^no diamond in chest; other chests seen within 12: -7,64,3 \(7\.6 away\)$/)
+  assert.match(await refusal('/withdraw', { name: 'diamond' }, lacking.env), /^no diamond in chest; other chests seen within 12: -7,64,3 \(9\.5 away\)$/)
   assert.deepStrictEqual(lacking.opened, ['5,64,0'])
   assert.ok(stocked['5,64,0'].closed, 'withdraw: the window stays open')
 
@@ -722,7 +742,7 @@ test('a failing chest, withdraw or deposit names the other seen chests and no un
   const error = await refusal('/deposit', { name: 'cobblestone' }, env)
   assert.match(error, /^deposited 14 then failed/)
   assert.match(error, /cobblestone in chest now 64/)
-  assert.match(error, /other chests seen within 12: -7,64,3 \(7\.6 away\)$/)
+  assert.match(error, /other chests seen within 12: -7,64,3 \(9\.5 away\)$/)
   assert.doesNotMatch(error, /0,64,-3/)
   assert.deepStrictEqual(opened, ['5,64,0'])
   assert.ok(windows['5,64,0'].closed, 'deposit: the window stays open')
@@ -741,4 +761,254 @@ test('chest at a negative fractional x,y,z opens the chest in the cell that hold
   const { env, opened } = chestEnv([new Vec3(-4, 64, -1)], { '-4,64,-1': chestWindow([stack('cobblestone', 10)]) })
   const reply = await awaitRoute('/chest', { x: '-3.5', y: '64.2', z: '-0.5' }, env)
   assert.deepStrictEqual([reply.at, opened], [{ x: -4, y: 64, z: -1 }, ['-4,64,-1']])
+})
+
+// A chest on a 2-high stone pillar, the feet at y 63.
+const RAISED = new Vec3(0, 65, 0)
+const SINGLE = ['chest', { facing: 'north', type: 'single', waterlogged: 'false' }]
+function raisedWorld (cells = {}) {
+  return new Proxy({}, {
+    get (_, k) {
+      if (typeof k !== 'string') return undefined
+      if (cells[k]) return cells[k]
+      const [x, y, z] = k.split(',').map(Number)
+      if (x === 0 && z === 0 && y >= 63 && y <= 65) return y === 65 ? SINGLE : ['stone', {}]
+      return [y <= 62 ? 'stone' : 'air', {}]
+    }
+  })
+}
+
+// A 3 by 3 grid of points on each face of a cell, as offsets from its corner, with the face's axis and whether it faces up the axis.
+const FACE_POINTS = []
+for (let k = 0; k < 3; k++) {
+  for (const up of [0, 1]) {
+    for (const u of [0.2, 0.5, 0.8]) {
+      for (const v of [0.2, 0.5, 0.8]) {
+        const q = [0, 0, 0]
+        q[k] = up
+        q[(k + 1) % 3] = u
+        q[(k + 2) % 3] = v
+        FACE_POINTS.push({ k: 'xyz'[k], up, q: new Vec3(...q) })
+      }
+    }
+  }
+}
+
+// chestEnv on the real planner, whose goto leaves the goal set where mineflayer-pathfinder's goto does.
+async function plannedChestEnv (t, feet, world, at, items = [], pockets = []) {
+  const walk = await walkingBody(t, feet, world)
+  // The Timeout case runs out this budget.
+  walk.bot.pathfinder.thinkTimeout = 1000
+  const { env, opened } = chestEnv([at], { [`${at.x},${at.y},${at.z}`]: chestWindow(items) }, pockets)
+  const { bot } = env
+  const { pathfinder } = walk.bot
+  const named = (name, message) => Object.assign(new Error(message), { name })
+  const walks = []
+  const watch = {
+    bot: walk.bot,
+    COLLECT_STALL_MS: botConstant('COLLECT_STALL_MS'),
+    COLLECT_BUDGET_MS: botConstant('COLLECT_BUDGET_MS'),
+    guardWork,
+    watchScope: new AsyncLocalStorage(),
+    reflexes: [{ name: 'unstuck', active: false }],
+    litFuse: () => null
+  }
+  pathfinder.goto = loadBotFunctions(['watchGoto', 'stopPath'], watch).watchGoto(async (goal) => {
+    pathfinder.setGoal(goal)
+    let result
+    for (const step of pathfinder.getPathFromTo(pathfinder.movements, bot.entity.position, goal)) result = step.result
+    const { status, path } = result
+    walks.push(path.length)
+    if (!path.length) {
+      if (goal.isEnd(bot.entity.position.floored())) pathfinder.setGoal(null)
+      return
+    }
+    if (status === 'noPath') throw named('NoPath', 'No path to the goal!')
+    if (status === 'timeout') throw named('Timeout', 'Took to long to decide path to goal!')
+    const end = path[path.length - 1]
+    bot.entity.position = new Vec3(end.x, end.y, end.z)
+    pathfinder.setGoal(null)
+  })
+  const raycast = (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => walk.bot.blockAt(p) }, ray)
+  Object.assign(bot, { entity: walk.bot.entity, blockAt: walk.bot.blockAt, world: { raycast }, pathfinder })
+  // Whether a line from the eye reaches a point of FACE_POINTS on a face of p turned to it, crossing only empty cells besides p.
+  const sees = (eye, p) => FACE_POINTS.some(({ k, up, q }) => {
+    const point = p.plus(q)
+    if ((eye[k] - point[k]) * (up ? 1 : -1) <= 0) return false
+    const steps = Math.ceil(eye.distanceTo(point) / 0.05)
+    for (let i = 1; i < steps; i++) {
+      const c = eye.plus(point.minus(eye).scaled(i / steps)).floored()
+      if (!c.equals(p) && walk.bot.blockAt(c).boundingBox !== 'empty') return false
+    }
+    return true
+  })
+  const open = bot.openContainer
+  bot.openContainer = async (b) => {
+    const feet = bot.entity.position
+    if (!sees(feet.offset(0, 1.62, 0), b.position)) throw new Error(`the chest is out of sight from ${feet}`)
+    if (feet.distanceTo(b.position.offset(0.5, 0.5, 0.5)) >= LEGACY_CLICK_REACH) throw new Error(`the chest is out of reach from ${feet}`)
+    return open(b)
+  }
+  return { env, opened, walks, pathfinder }
+}
+
+// Turns an offset x, z from the chest so the corridor at local +x lies on side.
+const TURNS = { '+x': (x, z) => [x, z], '-x': (x, z) => [-x, -z], '+z': (x, z) => [-z, x], '-z': (x, z) => [z, -x] }
+const UNTURNS = { '+x': TURNS['+x'], '-x': TURNS['-x'], '+z': TURNS['-z'], '-z': TURNS['+z'] }
+const FACING = { '+x': 'east', '-x': 'west', '+z': 'south', '-z': 'north' }
+const SIDES = Object.keys(TURNS)
+// A chest at 0,y,0 in stone beside a 1-wide corridor 2 high on side, from 2 cells before it to 8 past it, the feet at y 63.
+function corridorWorld (side, y) {
+  return new Proxy({}, {
+    get (_, k) {
+      if (typeof k !== 'string') return undefined
+      const [wx, wy, wz] = k.split(',').map(Number)
+      const [x, z] = UNTURNS[side](wx, wz)
+      if (wy <= 62) return ['stone', {}]
+      if (wy >= 66) return ['air', {}]
+      if (x === 0 && z === 0 && wy === y) return ['chest', { facing: FACING[side], type: 'single', waterlogged: 'false' }]
+      return [x === 1 && z >= -2 && z <= 8 && wy <= 64 ? 'air' : 'stone', {}]
+    }
+  })
+}
+// The feet in the corridor of corridorWorld, along cells past the cell beside the chest.
+function corridorFeet (side, along) {
+  const [x, z] = TURNS[side](1, along)
+  return new Vec3(x + 0.5, 63, z + 0.5)
+}
+const cellQuery = (p) => ({ name: 'cobblestone', x: String(p.x), y: String(p.y), z: String(p.z) })
+async function chestWalk (route, query, planned) {
+  const { handle, res } = routeHandler(route, planned.env)
+  await handle({ query }, res)
+  const { x, y, z } = planned.env.bot.entity.position
+  const goal = planned.pathfinder.goal
+  return { walks: planned.walks, opened: planned.opened, goal: goal && goal.constructor.name, feet: [x, y, z], error: res.error && res.error.message }
+}
+const walked = (steps, cell, feet) => ({ walks: [steps], opened: [cell], goal: null, feet: [feet.x, feet.y, feet.z], error: undefined })
+
+test('chest opens a chest in the wall beside a 1-wide corridor from the cell beside it without a step, on each side and at both heights', async (t) => {
+  const got = {}
+  const want = {}
+  for (const side of SIDES) {
+    for (const y of [63, 64]) {
+      const at = new Vec3(0, y, 0)
+      const feet = corridorFeet(side, 0)
+      got[`${side} y ${y}`] = await chestWalk('/chest', cellQuery(at), await plannedChestEnv(t, feet, corridorWorld(side, y), at))
+      want[`${side} y ${y}`] = walked(0, `0,${y},0`, feet)
+    }
+  }
+  assert.deepStrictEqual(got, want)
+})
+
+test('chest walks from 4 and from 8 cells down a corridor to 3 cells down before opening a chest in its wall, at both heights', async (t) => {
+  const cases = [[4, 63, 1, 3], [4, 64, 1, 3], [8, 63, 5, 3], [8, 64, 5, 3]]
+  const got = {}
+  const want = {}
+  for (const side of SIDES) {
+    for (const [from, y, steps, end] of cases) {
+      const at = new Vec3(0, y, 0)
+      const key = `${side} y ${y} from ${from}`
+      got[key] = await chestWalk('/chest', cellQuery(at), await plannedChestEnv(t, corridorFeet(side, from), corridorWorld(side, y), at))
+      want[key] = walked(steps, `0,${y},0`, corridorFeet(side, end))
+    }
+  }
+  assert.deepStrictEqual(got, want)
+})
+
+test('chest walks before opening a chest whose centre is more than 4.2 from the eye but in click reach of the feet', async (t) => {
+  const at = new Vec3(0, 63, 0)
+  const centre = at.offset(0.5, 0.5, 0.5)
+  const feet = corridorFeet('+x', 4)
+  assert.ok(feet.offset(0, 1.62, 0).distanceTo(centre) > 4.2, 'the eye is in human reach')
+  assert.ok(feet.distanceTo(centre) < LEGACY_CLICK_REACH - Math.SQRT1_2, 'the feet are out of click reach')
+  const { walks, opened } = await chestWalk('/chest', cellQuery(at), await plannedChestEnv(t, feet, corridorWorld('+x', 63), at))
+  assert.ok(walks[0] >= 1, `walked ${walks[0]} steps`)
+  assert.deepStrictEqual(opened, ['0,63,0'])
+})
+
+const AT_RAISED = { x: '0', y: '65', z: '0' }
+
+test('chest and deposit open a chest 2 above the floor from a cell beside it without a step, and leave no goal set', async (t) => {
+  for (const feet of [new Vec3(1.5, 63, 1.5), new Vec3(1.5, 63, 0.5)]) {
+    for (const route of ['/chest', '/deposit']) {
+      const planned = await plannedChestEnv(t, feet, raisedWorld(), RAISED, [], [stack('cobblestone', 5)])
+      assert.deepStrictEqual(await chestWalk(route, cellQuery(RAISED), planned), walked(0, '0,65,0', feet), `${route} from ${feet}`)
+    }
+  }
+})
+
+test('withdraw walks from 4 and from 8 cells away to 3 cells away before opening a chest 2 above the floor', async (t) => {
+  for (const [from, steps] of [[4, 1], [8, 5]]) {
+    const planned = await plannedChestEnv(t, new Vec3(from + 0.5, 63, 0.5), raisedWorld(), RAISED, [stack('cobblestone', 10)])
+    assert.deepStrictEqual(await chestWalk('/withdraw', cellQuery(RAISED), planned), walked(steps, '0,65,0', new Vec3(3.5, 63, 0.5)), `from ${from}`)
+  }
+})
+
+test('chest opens a chest already in reach and sight without a step', async (t) => {
+  const feet = new Vec3(-0.5, 63, 0.5)
+  const { env, opened, walks, pathfinder } = await plannedChestEnv(t, feet, raisedWorld(), RAISED)
+  await awaitRoute('/chest', AT_RAISED, env)
+  assert.deepStrictEqual([walks, opened, env.bot.entity.position, pathfinder.goal], [[0], ['0,65,0'], feet, null])
+})
+
+test('chest opens a chest on a pillar 4 above a slab floor from a slab beside it without a step', async (t) => {
+  const at = new Vec3(0, 67, 0)
+  const world = new Proxy({}, {
+    get (_, k) {
+      if (typeof k !== 'string') return undefined
+      const [x, y, z] = k.split(',').map(Number)
+      if (x === 0 && z === 0 && y >= 63 && y <= 67) return y === 67 ? SINGLE : ['stone', {}]
+      if (y === 63) return ['stone_slab', { type: 'bottom', waterlogged: 'false' }]
+      return [y <= 62 ? 'stone' : 'air', {}]
+    }
+  })
+  const feet = new Vec3(2.5, 63.5, 0.5)
+  assert.deepStrictEqual(await chestWalk('/chest', cellQuery(at), await plannedChestEnv(t, feet, world, at)), walked(0, '0,67,0', feet))
+})
+
+test('chest, withdraw and deposit refuse a chest out of sight from where a walk on an empty plan ends, clear its goal and open nothing', async (t) => {
+  // The feet stand in a 1-cell room of stone 3 high, with the chest 1 cell beyond its wall.
+  const at = new Vec3(0, 63, 0)
+  const world = new Proxy({}, {
+    get (_, k) {
+      if (typeof k !== 'string') return undefined
+      const [x, y, z] = k.split(',').map(Number)
+      if (y <= 62) return ['stone', {}]
+      if (y >= 66) return ['air', {}]
+      if (x === 0 && y === 63 && z === 0) return SINGLE
+      return [x === 2 && z === 0 && y <= 64 ? 'air' : 'stone', {}]
+    }
+  })
+  const feet = new Vec3(2.5, 63, 0.5)
+  for (const route of ['/chest', '/withdraw', '/deposit']) {
+    const planned = await plannedChestEnv(t, feet, world, at, [stack('cobblestone', 10)], [stack('cobblestone', 5)])
+    const { error, ...rest } = await chestWalk(route, cellQuery(at), planned)
+    assert.match(String(error), /the chest at 0,63,0 is out of reach or sight from 2,63,0, where the walk ended/, route)
+    assert.deepStrictEqual(rest, { walks: [0], opened: [], goal: null, feet: [2.5, 63, 0.5] }, route)
+  }
+})
+
+test('chest, withdraw and deposit leave no goal set after a walk that ends in NoPath or Timeout under the watch on every goto', async (t) => {
+  // Stone walls 3 high around a 2-cell pen hide the chest from the NoPath feet.
+  const pen = {}
+  for (let x = 1; x <= 4; x++) {
+    for (let z = -1; z <= 1; z++) {
+      if (z === 0 && (x === 2 || x === 3)) continue
+      for (let y = 63; y <= 65; y++) pen[`${x},${y},${z}`] = ['stone', {}]
+    }
+  }
+  const high = new Vec3(0, 72, 0)
+  // Each plan leads to the cell nearest the chest.
+  const cases = [
+    ['NoPath', new Vec3(3.5, 63, 0.5), raisedWorld(pen), RAISED, /No path to the goal!/, 1],
+    ['Timeout', new Vec3(4.5, 63, 0.5), raisedWorld({ '0,72,0': SINGLE }), high, /Took to long to decide path to goal!/, 3]
+  ]
+  for (const [outcome, feet, world, at, failed, steps] of cases) {
+    for (const route of ['/chest', '/withdraw', '/deposit']) {
+      const planned = await plannedChestEnv(t, feet, world, at, [stack('cobblestone', 10)], [stack('cobblestone', 5)])
+      const { error, ...rest } = await chestWalk(route, cellQuery(at), planned)
+      assert.match(String(error), failed, `${outcome} ${route}`)
+      assert.deepStrictEqual(rest, { walks: [steps], opened: [], goal: null, feet: [feet.x, feet.y, feet.z] }, `${outcome} ${route}`)
+    }
+  }
 })

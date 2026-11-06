@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-07: chests stacked three high open on the top row
+
+Storage chests stacked three high could not be opened on the top row. From a step away the walk to
+them planned for 10 s and gave up with "Took to long to decide path to goal!", since no floor cell
+lies within 2 blocks of a chest 2 above the floor. The walk to a chest now ends where the eye is
+within 4.2 blocks of the chest's centre and sees one of its faces, the reach digging and building
+use, and it opens without a step when that already holds.
+
 ## 2026-11-07: the bot sees farther in the dark and at night
 
 The bot's sight in the dark was tighter than a player's: 2 blocks at light 0, 12 on open ground at
