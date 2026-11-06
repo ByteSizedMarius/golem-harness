@@ -4,6 +4,16 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-07: useon takes turns over the animals
+
+Feeding cows with `useon` fed the same cow on every call, though it was already in love and took
+nothing. Breeding food and shears now go to the nearest animal that hasn't had them in the last 5
+minutes, calves and sheared sheep are left out, and `at=x,y,z` names one. A use counts only when
+the server answers it: hearts for breeding food, the wool coming off a sheep, a mooshroom turning
+into a cow, and the item's count going down for anything else. An animal the walk can't reach is
+passed over while the bot stays near where the walk failed, and the walk judges only ground the
+bot has seen.
+
 ## 2026-11-07: chests stacked three high open on the top row
 
 Storage chests stacked three high could not be opened on the top row. From a step away the walk to

@@ -11,6 +11,7 @@ const { isDoor } = require('../lib/doors')
 const { routeWithin, walkersTo, groundCell, walkFlood } = require('../lib/flee')
 const { expireConfirmed, babyFlag } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
+const { watchProgress } = require('../lib/walk')
 const { createLane } = require('../lib/bot/lane')
 const vm = require('node:vm')
 const { SPRINT_FLOOR } = require('../lib/sprint')
@@ -63,20 +64,33 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity, recentre = f
   clock.setInterval(tick, 50)
   clock.setInterval(() => bot.emit('physicsTick'), 50)
   const solid = (p) => p.y < 64 || p.y >= ceiling
+  // The 'x,y,z' cells the body has not seen.
+  const unseen = new Set()
   const bot = Object.assign(new EventEmitter(), {
+    _client: new EventEmitter(),
     entity: { position: new Vec3(0.5, 64, 0.5), onGround: true },
     entities: Object.fromEntries(entities.map((e) => [e.id, e])),
     players: {},
     food: 20,
     heldItem: null,
-    inventory: { items: () => ['iron_sword', 'bow', 'arrow', 'shears'].map((name) => ({ name })) },
+    quickBarSlot: 0,
+    inventory: Object.assign(new EventEmitter(), { hotbarStart: 36, items: () => ['iron_sword', 'bow', 'arrow', 'shears'].map((name) => ({ name })) }),
     pathfinder: {
       goto: async (goal) => {
         did.push('walk')
         const at = goal.aim ? goal.aim.floored() : goal
         bot.entity.position = new Vec3(at.x - 1.5, 64, at.z + 0.5)
       },
-      isMoving: () => false
+      isMoving: () => false,
+      // Reads a cell in unseen as knownMoves reads one the body has not seen.
+      movements: {
+        getBlock: (pos, dx, dy, dz) => {
+          const p = pos.offset(dx, dy, dz)
+          return unseen.has(`${p.x},${p.y},${p.z}`) ? { position: p, type: null, name: 'unknown' } : bot.blockAt(p)
+        }
+      },
+      // A plan with the unseen cells open finds no way either.
+      * getPathFromTo () { yield { result: { status: 'noPath', path: [] } } }
     },
     blockAt: (p) => ({ name: solid(p) ? 'stone' : 'air', boundingBox: solid(p) ? 'block' : 'empty', shapes: solid(p) ? [[0, 0, 0, 1, 1, 1]] : [], position: p }),
     setControlState (c, s) {
@@ -152,7 +166,21 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity, recentre = f
     fight: { lastAttackT: 0 },
     STRIKE_SWING_MS: rules.STRIKE_SWING_MS,
     STRIKE_APPROACH_MS: rules.STRIKE_APPROACH_MS,
+    COLLECT_STALL_MS: botConstant('COLLECT_STALL_MS'),
+    COLLECT_BUDGET_MS: botConstant('COLLECT_BUDGET_MS'),
+    UNSEEN_PLAN_MS: botConstant('UNSEEN_PLAN_MS'),
+    watchProgress: (o) => watchProgress({ ...o, clock }),
     strikeBudgetMs: rules.strikeBudgetMs,
+    USEON_GROUPS: botConstant('USEON_GROUPS'),
+    USEON_RECENT_MS: botConstant('USEON_RECENT_MS'),
+    USEON_KEEP_WITHIN: botConstant('USEON_KEEP_WITHIN'),
+    USEON_AT_WITHIN: botConstant('USEON_AT_WITHIN'),
+    USEON_SLOT_MS: botConstant('USEON_SLOT_MS'),
+    USEON_LATE_MS: botConstant('USEON_LATE_MS'),
+    USEON_BREEDS: botConstant('USEON_BREEDS'),
+    useonMissed: new Map(),
+    usedOn: new Map(),
+    walkFailed: new Map(),
     Date: { now: clock.now },
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
@@ -195,7 +223,7 @@ function verbWorld (entities, { legacy = false, ceiling = Infinity, recentre = f
     }
     bot.on('goal_updated', changed)
   })
-  return { bot, env, clock, did, hits, stop, stops: () => stops, gotoUntilChanged }
+  return { bot, env, clock, did, hits, stop, stops: () => stops, gotoUntilChanged, unseen }
 }
 
 // Advances the fake clock 10 ms a step until route answers, ten minutes at most.
@@ -376,8 +404,18 @@ test('a useon walks to the fence of a pen and shears a sheep inside it', async (
   const pen = (x, y, z) => y === 64 && x >= 4 && x <= 8 && Math.abs(z) <= 3 && (x === 4 || x === 8 || Math.abs(z) === 3) ? ['oak_fence', {}] : null
   const sheep = { id: 9, name: 'sheep', width: 0.9, height: 1.3, seen: true, position: new Vec3(5.5, 64, 0.5) }
   const world = realWorld([sheep], pen, () => new Vec3(3.5, 64, 0.5))
+  const { bot } = world
+  bot.inventory.items = () => [{ name: 'shears', durabilityUsed: 0 }]
+  bot.useOn = async (en) => {
+    world.did.push('use')
+    const wool = mcData.entitiesByName.sheep.metadataKeys.indexOf('wool')
+    en.metadata = (en.metadata || []).slice()
+    en.metadata[wool] |= 0x10
+    bot.emit('entityUpdate', en)
+  }
   const res = await drive('/useon', { name: 'sheep', item: 'shears' }, world)
   assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.strictEqual(res.body.used, 'shears')
   assert.deepStrictEqual(world.did, ['walk', 'use'])
 })
 
@@ -642,7 +680,7 @@ test('a useon does not click once the guard reflex took the hand back after the 
   }
 })
 
-test('a useon gives the hand back once the click is sent, before it waits for the frame update', async () => {
+test('a useon gives the hand back once the click is sent, before it waits for the server\'s answer, on a creature or a frame', async () => {
   const creature = verbWorld([zombie(2.5)])
   const frameW = frameWorld([frame(20, 2.5, null)])
   const seen = {}
@@ -667,7 +705,7 @@ test('a useon gives the hand back once the click is sent, before it waits for th
   const held = (s) => ({ atClick: s.atClick, ...(s.inWait === undefined ? {} : { inWait: s.inWait !== null }), atReply: s.atReply !== null })
   assert.deepStrictEqual(
     { zombie: held(seen.zombie), frame: held(seen.item_frame) },
-    { zombie: { atClick: true, atReply: false }, frame: { atClick: true, inWait: false, atReply: false } }
+    { zombie: { atClick: true, inWait: false, atReply: false }, frame: { atClick: true, inWait: false, atReply: false } }
   )
 })
 
@@ -905,6 +943,8 @@ test('strike and useon on a frame say the walk ran out of time on its way after 
           if (u === 'arrived') return
           if (u === 'reached') {
             world.bot.emit('goal_reached', goal)
+            // mineflayer-pathfinder clears its goal right after goal_reached.
+            world.bot.pathfinder.goal = null
             return resolve()
           }
           const [status, path] = u
@@ -965,6 +1005,66 @@ test('strike and useon on a frame whose walk runs out of time in swing reach act
       else assert.strictEqual(res.error ? res.error.message : `no error, did ${world.did.join(', ')}`, 'the walk to the item_frame at 3,65,0 ran out of time on its way', label)
       assert.deepStrictEqual({ did: world.did, stops: world.stops(), listening: pathListeners(world.bot) }, { did: kept ? ['walk', `equip ${item}`, act] : ['walk'], stops: 1, listening: NO_PATH_LISTENERS }, label)
     }
+  }
+})
+
+test('strike and useon on a frame whose walk ends on a cell out of swing reach plan the walk once more and act', async () => {
+  for (const [route, item, fill, act] of [['/strike', 'iron_sword', 'wheat', 'swing 20'], ['/useon', 'wheat', null, 'use 20']]) {
+    const world = frameWorld([frame(20, 3.5, fill)])
+    const { bot, clock, did } = world
+    // As in mineflayer-pathfinder, a path that ends off its goal leaves the walk standing until setGoal plans it again.
+    bot.pathfinder.goto = (goal) => new Promise((resolve) => {
+      did.push('walk')
+      bot.pathfinder.goal = goal
+      clock.setTimeout(() => bot.emit('path_update', { status: 'success', path: [new Vec3(0, 64, 1), new Vec3(0, 64, 2)] }), 500)
+      clock.setTimeout(() => { bot.entity.position = new Vec3(0.5, 64, 2.5) }, 1000)
+      bot.pathfinder.setGoal = (g, dynamic = false) => {
+        did.push(dynamic ? 'plan dynamic' : 'plan')
+        bot.pathfinder.goal = g
+        bot.emit('goal_updated', g, dynamic)
+        clock.setTimeout(() => {
+          bot.emit('path_update', { status: 'success', path: [new Vec3(1, 64, 1), new Vec3(1, 64, 0)] })
+          bot.entity.position = new Vec3(1.5, 64, 0.5)
+          if (dynamic) return
+          bot.emit('goal_reached', g)
+          bot.pathfinder.goal = null
+          resolve()
+        }, 500)
+      }
+    })
+    bot.attack = (en) => {
+      did.push(`swing ${en.id}`)
+      world.hold(en, null)
+    }
+    bot.useOn = async (en) => {
+      did.push(`use ${en.id}`)
+      world.hold(en, 'wheat')
+    }
+    const res = await drive(route, { name: 'item_frame', item }, world)
+    assert.strictEqual(res.error, undefined, res.error && `${route}: ${res.error.message}`)
+    assert.deepStrictEqual({ did, stops: world.stops(), listening: pathListeners(bot) }, { did: ['walk', 'plan', `equip ${item}`, act], stops: 0, listening: NO_PATH_LISTENERS }, route)
+  }
+})
+
+test('strike and useon on a frame in swing reach past a cell the body has not seen act from where the body stands', async () => {
+  for (const [route, item, fill, act] of [['/strike', 'iron_sword', 'wheat', 'swing 20'], ['/useon', 'wheat', null, 'use 20']]) {
+    const world = frameWorld([frame(20, 2.5, fill)])
+    const { bot, did } = world
+    const blockAt = bot.blockAt
+    const hidden = new Vec3(1, 65, 0)
+    bot.blockAt = (p) => p.floored().equals(hidden) ? { name: 'stone', boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 1]], position: hidden } : blockAt(p)
+    world.unseen.add('1,65,0')
+    bot.attack = (en) => {
+      did.push(`swing ${en.id}`)
+      world.hold(en, null)
+    }
+    bot.useOn = async (en) => {
+      did.push(`use ${en.id}`)
+      world.hold(en, 'wheat')
+    }
+    const res = await drive(route, { name: 'item_frame', item }, world)
+    assert.strictEqual(res.error, undefined, res.error && `${route}: ${res.error.message}`)
+    assert.deepStrictEqual(did, [`equip ${item}`, act], route)
   }
 })
 
@@ -1124,8 +1224,12 @@ test('a stop during the useon walk to a creature ends as stopped', async () => {
 const walkingFails = [['NoPath', 'No path to the goal!'], ['Timeout', 'Took to long to decide path to goal!']]
 
 test('a strike or a useon on a creature whose goto finds no path or times out stops the pathfinder before it answers', async () => {
-  for (const [route, query] of [['/strike', { name: 'zombie' }], ['/useon', { name: 'zombie', item: 'shears' }]]) {
-    for (const [name, message] of walkingFails) {
+  const useonReasons = ['no walk puts the zombie at 6,64,0 in swing reach', 'the pathfinder ran out of think time on the walk to the zombie at 6,64,0']
+  for (const [route, query, answers] of [
+    ['/strike', { name: 'zombie' }, walkingFails.map(([, message]) => message)],
+    ['/useon', { name: 'zombie', item: 'shears' }, useonReasons]
+  ]) {
+    for (const [i, [name, message]] of walkingFails.entries()) {
       const world = verbWorld([zombie(6.5)])
       world.bot.pathfinder.goto = async (goal) => {
         world.did.push('walk')
@@ -1133,7 +1237,8 @@ test('a strike or a useon on a creature whose goto finds no path or times out st
         throw Object.assign(new Error(message), { name })
       }
       const res = await drive(route, query, world)
-      assert.deepStrictEqual({ error: res.error && res.error.message, did: world.did, stops: world.stops() }, { error: message, did: ['walk'], stops: 1 }, `${route} ${name}`)
+      const answer = res.error ? res.error.message : res.body.reason
+      assert.deepStrictEqual({ answer, did: world.did, stops: world.stops() }, { answer: answers[i], did: ['walk'], stops: 1 }, `${route} ${name}`)
     }
   }
 })
@@ -1794,10 +1899,10 @@ test('a strike with at refuses an empty frame in that cell, and a useon with at 
   assert.deepStrictEqual(did, [])
 })
 
-test('strike and useon refuse at on anything but an item frame, and a malformed at, before any walk', async () => {
+test('strike refuses at on anything but an item frame, and strike and useon refuse a malformed at, before any walk', async () => {
   for (const [route, query, world, text] of [
     ['/strike', { name: 'zombie', at: '6,64,0' }, () => verbWorld([zombie(6.5)])],
-    ['/useon', { name: 'zombie', item: 'shears', at: '6,64,0' }, () => verbWorld([zombie(6.5)])],
+    ['/useon', { name: 'zombie', item: 'shears', at: '6,64' }, () => verbWorld([zombie(6.5)]), /^at takes x,y,z$/],
     ['/strike', { name: 'item_frame', item: 'iron_sword', at: '2,65' }, () => frameWorld([frame(20, 2.5, 'wheat')]), /^at takes x,y,z$/],
     ['/useon', { name: 'item_frame', item: 'wheat', at: '2,65' }, () => frameWorld([frame(20, 2.5, null)]), /^at takes x,y,z$/],
     ['/strike', { name: 'item_frame', item: 'iron_sword', at: '4,,0' }, () => frameWorld([frame(20, 2.5, 'wheat')]), /^at takes x,y,z$/],
