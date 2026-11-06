@@ -243,6 +243,128 @@ test('the boot reply lists the current task first', async (t) => {
   assert.deepStrictEqual(openLines(content[content.length - 1].text), ['#2 [current 0m, 0m] replant the farm plot', '#1 [0m] idle the nights'])
 })
 
+// ---- text caps ----
+
+const SMILE = '\u{1F600}'
+const AT = new Date(START).toISOString()
+const items = (file) => JSON.parse(fs.readFileSync(file, 'utf8')).items
+
+// CWE-770
+test('I1: a todo text of 400 units is kept and shown whole, 401 units or a who of 33 is refused and stores nothing', async (t) => {
+  const { file } = todoFile(t)
+  const srv = server(file)
+  assert.deepStrictEqual(openLines(textOf(await call(srv, 'todo', { action: 'add', text: 'bake bread' }))), ['#1 [0m] bake bread'], 'control')
+  const plain = 'a'.repeat(399) + 'Z'
+  const astral = SMILE.repeat(200)
+  assert.deepStrictEqual(openLines(textOf(await call(srv, 'todo', { action: 'add', text: plain }))), ['#1 [0m] bake bread', `#2 [0m] ${plain}`])
+  assert.deepStrictEqual(openLines(textOf(await call(srv, 'todo', { action: 'add', text: astral, who: 'w'.repeat(32) }))),
+    ['#1 [0m] bake bread', `#2 [0m] ${plain}`, `#3 [${'w'.repeat(32)}, 0m] ${astral}`])
+  assert.deepStrictEqual(items(file).map((x) => x.text), ['bake bread', plain, astral])
+  const before = fs.readFileSync(file, 'utf8')
+  assert.strictEqual(assertToolError(await call(srv, 'todo', { action: 'add', text: 'b'.repeat(401) })), 'text must be a string of 1 to 400 characters')
+  assert.strictEqual(assertToolError(await call(srv, 'todo', { action: 'add', text: astral + 'x' })), 'text must be a string of 1 to 400 characters')
+  assert.strictEqual(assertToolError(await call(srv, 'todo', { action: 'add', text: 'fine', who: 'w'.repeat(33) })), 'who must be a string of 1 to 32 characters')
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), before)
+})
+
+// CWE-400, operator-owned bytes
+test('I5: a hand-edited todo file renders flat and cut to the caps everywhere, and an add keeps its texts byte for byte', async (t) => {
+  const { file } = todoFile(t)
+  fs.writeFileSync(file, JSON.stringify({ next: 2, items: [{ id: 1, text: 'bake bread', at: AT }] }))
+  const srv = server(file, undefined, () => ({ ok: true }))
+  assert.deepStrictEqual(openLines(textOf(await call(srv, 'todo', { action: 'list' }))), ['#1 [0m] bake bread'], 'control')
+  // The who's 32nd unit is the first half of a surrogate pair.
+  const who = 'W'.repeat(31) + SMILE.repeat(84) + 'W'
+  const hand = [
+    { id: 1, text: 'L'.repeat(5000), who, at: AT },
+    { id: 2, text: 'ring\u0007bell', at: AT },
+    { id: 3, text: 'zero\u200bwidth', at: AT },
+    { id: 4, text: 'bake bread', at: AT }
+  ]
+  assert.strictEqual(who.length, 200)
+  fs.writeFileSync(file, JSON.stringify({ next: 5, items: hand }))
+  const shown = [`#1 [${'W'.repeat(31)}, 0m] ${'L'.repeat(400)}`, '#2 [0m] ring bell', '#3 [0m] zerowidth', '#4 [0m] bake bread']
+  assert.deepStrictEqual(openLines(textOf(await call(srv, 'todo', { action: 'list' }))), shown, 'todo list')
+  const boot = (await call(srv, 'boot', {})).result.content
+  assert.deepStrictEqual(openLines(boot.slice(1).map((c) => c.text).join('\n')), shown, 'boot')
+  assert.deepStrictEqual(openLines(textOf(await call(srv, 'todo', { action: 'add', text: 'smelt the iron' }))), [...shown, '#5 [0m] smelt the iron'], 'add')
+  assert.deepStrictEqual(items(file).slice(0, 4), hand)
+})
+
+// CWE-770
+test('I6: a todo file of 100 items shows the first 30 and how many more the file holds, and keeps all 100', async (t) => {
+  const { file } = todoFile(t)
+  const many = (n) => JSON.stringify({ next: n + 1, items: Array.from({ length: n }, (_, i) => ({ id: i + 1, text: `item ${i + 1}`, at: AT })) })
+  const lines = Array.from({ length: 30 }, (_, i) => `#${i + 1} [0m] item ${i + 1}`)
+  fs.writeFileSync(file, many(30))
+  const srv = server(file)
+  assert.deepStrictEqual(textOf(await call(srv, 'todo', { action: 'list' })).split('\n').slice(1), lines, 'control: 30 items, no more line')
+  fs.writeFileSync(file, many(100))
+  assert.deepStrictEqual(textOf(await call(srv, 'todo', { action: 'list' })).split('\n').slice(1), [...lines, '70 more in the todo file'])
+  assert.strictEqual(items(file).length, 100)
+})
+
+// CWE-20, operator-owned bytes
+test('I10: a hand-edited todo file with next above 1000000 or two items of one id is refused as unreadable and left byte for byte', async (t) => {
+  const { file } = todoFile(t)
+  const srv = server(file)
+  fs.writeFileSync(file, JSON.stringify({ next: 1000000, items: [{ id: 1, text: 'bake bread', at: AT }, { id: 999999, text: 'smelt the iron', at: AT }] }))
+  assert.deepStrictEqual(openLines(textOf(await call(srv, 'todo', { action: 'list' }))), ['#1 [0m] bake bread', '#999999 [0m] smelt the iron'], 'control: next 1000000')
+  t.mock.method(console, 'error', () => {})
+  const cases = [
+    ['next 1000001', '{"next":1000001,"items":[{"id":1,"text":"bake bread","at":"' + AT + '"}]}'],
+    ['next 2^53', '{"next":9007199254740992,"items":[{"id":1,"text":"bake bread","at":"' + AT + '"}]}'],
+    ['two items of id 1', '{"next":3,"items":[{"id":1,"text":"bake bread","at":"' + AT + '"},{"id":1,"text":"smelt the iron","at":"' + AT + '"}]}']
+  ]
+  const replyOf = (r) => (r.result.isError === true ? errorText(r) : `loaded: ${errorText(r).slice(0, 100)}`)
+  const got = []
+  for (const [label, raw] of cases) {
+    fs.writeFileSync(file, raw)
+    got.push([label,
+      replyOf(await call(srv, 'todo', { action: 'list' })),
+      replyOf(await call(srv, 'todo', { action: 'add', text: 'fence the farm' })),
+      replyOf(await call(srv, 'todo', { action: 'done', id: 1 })),
+      fs.readFileSync(file, 'utf8') === raw ? 'file kept' : 'file changed'])
+  }
+  assert.deepStrictEqual(got, cases.map(([label]) => [label, 'the todo list could not be read', 'the todo list could not be read or written',
+    'the todo list could not be read or written', 'file kept']))
+})
+
+// CWE-20, operator-owned bytes
+test('I10: add against a todo file whose next is 1000000 is refused as used up and leaves the file byte for byte', async (t) => {
+  const { file } = todoFile(t)
+  const srv = server(file)
+  fs.writeFileSync(file, JSON.stringify({ next: 999999, items: [{ id: 1, text: 'bake bread', at: AT }] }))
+  assert.match(textOf(await call(srv, 'todo', { action: 'add', text: 'smelt the iron' })), /^Added #999999\./, 'control')
+  const raw = JSON.stringify({ next: 1000000, items: [{ id: 1, text: 'bake bread', at: AT }, { id: 999998, text: 'smelt the iron', at: AT }] })
+  fs.writeFileSync(file, raw)
+  assert.match(assertToolError(await call(srv, 'todo', { action: 'add', text: 'fence the farm' })), /used up/)
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), raw)
+})
+
+// CWE-532, operator-owned bytes
+test('I11: a todo file that is not valid JSON is reported unreadable and none of its text reaches stderr', async (t) => {
+  const { file } = todoFile(t)
+  const srv = server(file)
+  fs.writeFileSync(file, JSON.stringify({ next: 2, items: [{ id: 1, text: 'bake bread MARKER-7f3a', at: AT }] }))
+  assert.deepStrictEqual(openLines(textOf(await call(srv, 'todo', { action: 'list' }))), ['#1 [0m] bake bread MARKER-7f3a'], 'control')
+  const logged = []
+  t.mock.method(console, 'error', (...args) => { logged.push(args.map(String).join(' ')) })
+  t.mock.method(process.stderr, 'write', (chunk) => {
+    logged.push(String(chunk))
+    return true
+  })
+  console.error('capture check')
+  assert.deepStrictEqual(logged.splice(0), ['capture check'], 'control: stderr is captured')
+  // JSON.parse quotes an input this short whole in its message.
+  fs.writeFileSync(file, '{"next":MARKER-7f3a}')
+  const list = assertToolError(await call(srv, 'todo', { action: 'list' }))
+  const add = assertToolError(await call(srv, 'todo', { action: 'add', text: 'fence the farm' }))
+  t.mock.restoreAll()
+  assert.deepStrictEqual([list, add], ['the todo list could not be read', 'the todo list could not be read or written'])
+  assert.deepStrictEqual(logged.filter((line) => line.includes('MARKER-7f3a')), [])
+})
+
 test('the stdio server keeps the todo list in GOLEM_TODO', { timeout: 20000 }, async (t) => {
   const { file } = todoFile(t)
   const e = runEntry(t, [String(PORT)], { ...baseEnv(), GOLEM_TOKEN: MCP_TOKEN, GOLEM_TODO: file })

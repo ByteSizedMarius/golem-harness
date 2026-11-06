@@ -212,11 +212,21 @@ test('a waypoint name or linkto with a journal line or a prototype key gets 400'
   assert.strictEqual(s.routeHits('/waypoint').length, 1)
 })
 
-test('a waypoint note of 200 units passes, 201 units or a control character gets 400', async (t) => {
+test('a waypoint note of 400 units passes, 401 units or a control character gets 400', async (t) => {
   const s = await startApp(t)
-  assert.strictEqual((await s.get('/waypoint?name=a&note=' + 'n'.repeat(200))).status, 200)
-  assert.strictEqual((await s.get('/waypoint?name=a&note=' + 'n'.repeat(201))).status, 400)
+  assert.strictEqual((await s.get('/waypoint?name=a&note=' + 'n'.repeat(400))).status, 200)
+  assert.strictEqual((await s.get('/waypoint?name=a&note=' + 'n'.repeat(401))).status, 400)
   assert.strictEqual((await s.get('/waypoint?name=a&note=' + enc('a\nb'))).status, 400)
+  assert.strictEqual(s.routeHits('/waypoint').length, 1)
+})
+
+// CWE-20
+test('I2: an astral waypoint note of 200 code points reaches the route whole, one of 201 code points gets 400', async (t) => {
+  const s = await startApp(t)
+  const smile = '\u{1F600}'
+  assert.strictEqual((await s.get('/waypoint?name=a&note=' + enc(smile.repeat(200)))).status, 200)
+  assert.strictEqual(s.routeHits('/waypoint')[0].query.note, smile.repeat(200))
+  assert.strictEqual((await s.get('/waypoint?name=a&note=' + enc(smile.repeat(201)))).status, 400)
   assert.strictEqual(s.routeHits('/waypoint').length, 1)
 })
 

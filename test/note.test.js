@@ -374,19 +374,83 @@ test('boot shows the memory notes alone without todoFile, and memory then todo w
   assert.strictEqual(await bootTail(both), `${UNREADABLE}\n\nTodo list, high priority first, then oldest first:\n#1 [0m] bake bread`)
 })
 
-test('a boot whose memory and todo lists pass the reply cap keeps both lists whole and cuts the reply to what fits', async (t) => {
+// A boot body of exactly units JSON units, chatSeq and summary first.
+function bootBody (units) {
+  const body = { ok: true, chatSeq: 41, summary: 'standing at the spawn, health 20, food 18, day', waypoints: ['spawn'] }
+  while (JSON.stringify(body).length + 263 <= units) body.waypoints.push('w'.repeat(250))
+  body.waypoints.push('w'.repeat(units - JSON.stringify(body).length - 3))
+  assert.strictEqual(JSON.stringify(body).length, units)
+  return body
+}
+
+// CWE-400
+test('I7: a boot whose memory and todo lists pass the reply cap keeps its body and the memory list whole and cuts the todo list at a whole item', async (t) => {
   const f = files(t)
   fs.writeFileSync(f.memory, stored(Array.from({ length: memories.MEMORY_CAP }, () => ({ text: SMILE.repeat(memories.TEXT_CAP), who: SMILE.repeat(memories.WHO_CAP) }))))
-  const todos = (text) => JSON.stringify({ next: 31, items: Array.from({ length: 30 }, (_, i) => ({ id: i + 1, text, at: AT })) })
-  // 200 UTF-16 units is the todo tool's text cap.
-  fs.writeFileSync(f.todo, todos(SMILE.repeat(100)))
-  const srv = server({ memoryFile: f.memory, todoFile: f.todo })
-  assert.ok((await bootTail(srv)).startsWith(LABEL), 'control: the full lists fit beside the reply')
-  fs.writeFileSync(f.todo, todos(SMILE.repeat(250)))
-  const lists = `${textOf(await memory(srv, { action: 'list' }))}\n\n${textOf(await call(srv, 'todo', { action: 'list' }))}`
-  assert.ok(lists.length > 32000)
-  const content = (await call(srv, 'boot', {})).result.content
-  assert.deepStrictEqual(content.map((c, i) => (i === 1 ? c.text.slice(0, 9) : c.text)), ['{}', 'Trimmed: ', lists])
+  const todos = (units) => JSON.stringify({ next: 31, items: Array.from({ length: 30 }, (_, i) => ({ id: i + 1, text: String(i + 1).padEnd(units, 't'), who: 'w'.repeat(32), at: AT })) })
+  // A body just under the 4000-unit floor, beside the unread chat and waiting events notes at their largest.
+  const body = bootBody(3900)
+  const unreadChat = { lines: 9, from: Array.from({ length: 7 }, (_, i) => String(i).padEnd(32, 'n')) }
+  const wakeEvents = { boot: 'b0', recent: Array.from({ length: 8 }, (_, i) => [i + 1, String(i).padEnd(32, 'k'), START]) }
+  const reply = (url) => (url.pathname === '/boot' ? { ...body, unreadChat, wakeEvents } : { ok: true })
+  const srv = createServer({ port: PORT, token: MCP_TOKEN, fetch: fakeBot({ reply }).fetch, memoryFile: f.memory, todoFile: f.todo, now: () => new Date(START) })
+  const boot = async () => {
+    const content = (await call(srv, 'boot', {})).result.content
+    return { body: JSON.parse(content[0].text), rest: content.slice(1).map((c) => c.text).join('\n'), units: content.reduce((n, c) => n + c.text.length, 0) }
+  }
+  const memoryList = textOf(await memory(srv, { action: 'list' }))
+  fs.writeFileSync(f.todo, todos(100))
+  const small = await boot()
+  assert.deepStrictEqual(small.body, body, 'control: the body')
+  assert.ok(small.rest.includes(memoryList), 'control: the memory list')
+  assert.ok(small.rest.includes(textOf(await call(srv, 'todo', { action: 'list' }))), 'control: the whole todo list')
+  assert.doesNotMatch(small.rest, /more, call todo/, 'control')
+  fs.writeFileSync(f.todo, todos(400))
+  const items = textOf(await call(srv, 'todo', { action: 'list' })).split('\n').filter((l) => l.startsWith('#'))
+  assert.strictEqual(items.length, 30)
+  const big = await boot()
+  assert.deepStrictEqual(big.body, body)
+  assert.ok(big.rest.includes(memoryList), 'the memory list is cut')
+  const lines = big.rest.split('\n')
+  const shown = lines.filter((l) => items.includes(l))
+  assert.ok(shown.length >= 1 && shown.length < 30, `${shown.length} todo items shown`)
+  assert.deepStrictEqual(shown, items.slice(0, shown.length))
+  assert.strictEqual(lines.filter((l) => l === `${30 - shown.length} more, call todo`).length, 1, big.rest.slice(-300))
+  assert.ok(big.units <= 32000, `${big.units} units`)
+})
+
+// CWE-20
+test('I8: a memory note over 300 code points gets the memory message whatever its units, a lesson or papercut over 600 units the param message', async (t) => {
+  const f = files(t)
+  const srv = server({ memoryFile: f.memory, lessonsFile: f.lessons, papercutsFile: f.papercuts })
+  assert.strictEqual(textOf(await memory(srv, { text: SMILE.repeat(300) })), 'Noted #1, 1 of 30.', 'control: 300 astral code points')
+  assert.strictEqual(textOf(await memory(srv, { text: ZWSP.repeat(2398) + 'ok' })), 'Noted #2, 2 of 30.', 'control: 2400 raw units')
+  const before = read(f.memory)
+  const over = 'memory note text is over 300 characters'
+  const cases = [['301 astral code points', SMILE.repeat(301)], ['700 units without whitespace', 'z'.repeat(700)], ['2401 raw units', ZWSP.repeat(2399) + 'ok']]
+  for (const [label, text] of cases) {
+    assert.strictEqual(assertToolError(await memory(srv, { text })), over, label)
+    assert.strictEqual(assertToolError(await memory(srv, { action: 'update', id: 1, text })), over, `update, ${label}`)
+  }
+  assert.strictEqual(read(f.memory), before)
+  for (const kind of ['lesson', 'papercut']) {
+    assert.strictEqual(assertToolError(await call(srv, 'note', { kind, text: 'p'.repeat(601) })), 'text must be a string of 1 to 600 characters', kind)
+  }
+  assert.ok(!fs.existsSync(f.lessons) && !fs.existsSync(f.papercuts))
+})
+
+// CWE-20
+test('I8: a memory note with an empty text gets a message naming the 300 cap, never the 600 param bound', async (t) => {
+  const f = files(t)
+  const srv = server({ memoryFile: f.memory })
+  assert.strictEqual(textOf(await memory(srv, { text: 'the mill is shared' })), 'Noted #1, 1 of 30.', 'control')
+  const before = read(f.memory)
+  for (const args of [{ text: '' }, { action: 'update', id: 1, text: '' }]) {
+    const text = assertToolError(await memory(srv, args))
+    assert.match(text, /\b300\b/, JSON.stringify(args))
+    assert.doesNotMatch(text, /600/, JSON.stringify(args))
+  }
+  assert.strictEqual(read(f.memory), before)
 })
 
 test('lesson and papercut notes land in their own log files, stamped with the time, the run dir and the for', async (t) => {

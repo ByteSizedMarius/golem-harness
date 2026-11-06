@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-06: todo items and waypoint notes hold 400 characters
+
+A 243-character todo item was refused at the 200 cap, and long waypoint notes were cut, so the
+pilot shortened its plans until their detail was lost. Both now take 400 characters and come back
+whole where the pilot reads them, with file paths still hidden. A memory note over 300 characters
+gets the memory note's own message, and a second `wait_events` while one runs says about when the
+running one returns.
+
 ## 2026-11-06: a body held in a bed is not reported stuck aloft
 
 A bed click the server answered without a sleep packet left the body lying above the floor, and

@@ -11,8 +11,9 @@ const { ROUTE_BOUNDS } = require('../lib/bounds')
 const {
   HUNG, PORT, MCP_TOKEN, proofOver, timed, delay, rawReply, mcpServer, manualFixture, call, rpc, callReq, isToolError, isRpcError, assertOk,
   textOf, errorText, LOCAL_TOOLS, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
-  baseEnv, assertEntryServes, assertEntryRefuses, fakeBot, runEntry, tickFrom, tickReply, chatLine, botProcess, missing, codeOnly
+  baseEnv, assertEntryServes, assertEntryRefuses, fakeBot, runEntry, tickFrom, tickReply, chatLine, botProcess, missing, codeOnly, routeHandler
 } = require('./helpers')
+const { Vec3 } = require('vec3')
 
 const FORBIDDEN_ROUTES = ['/snapshot', '/record', '/pov', '/threatdebug', '/pathdebug', '/stream', '/batch']
 const FORBIDDEN_NAME = /snapshot|record|pov|stream|threatdebug|pathdebug|batch/i
@@ -420,6 +421,284 @@ test('the /waypoints graph is capped at 4000 units', async () => {
   assert.ok(text.includes('g'.repeat(301)), 'control: the structural field keeps more than 300 units')
   assert.ok(!text.includes('g'.repeat(4001)), 'graph longer than 4000 units')
   assert.ok(!text.includes('n'.repeat(301)), 'a non-structural field of /waypoints longer than 300 units')
+})
+
+// ---- waypoint notes ----
+
+const ZW = '\u200b'
+const WP_AT = { x: 1, y: 64, z: 1, kind: 'place', links: {} }
+const firstBody = async (srv, name, args) => JSON.parse((await call(srv, name, args)).result.content[0].text)
+
+// CWE-20
+test('I2: the waypoint tool sends a note of 400 units or 200 astral code points whole and refuses 401 units without a request', async () => {
+  const { srv, calls } = mcpServer({ reply: () => ({ ok: true }) })
+  assertOk(await call(srv, 'waypoint', { name: 'home', note: 'the mill is shared' }))
+  const kept = ['n'.repeat(399) + 'Z', EMOJI.repeat(200)]
+  for (const note of kept) assertOk(await call(srv, 'waypoint', { name: 'home', note }))
+  assert.deepStrictEqual(calls.map((c) => c.url.searchParams.get('note')), ['the mill is shared', ...kept])
+  for (const note of ['n'.repeat(401), EMOJI.repeat(201)]) {
+    const r = await call(srv, 'waypoint', { name: 'home', note })
+    assert.ok(isToolError(r), `${note.length} units`)
+    assert.strictEqual(errorText(r), 'note must be a string of 1 to 400 characters')
+  }
+  assert.strictEqual(calls.length, 3)
+})
+
+// CWE-200
+test('I3: a waypoint note of 301 to 400 units comes back whole in waypoint and verbose waypoints, its paths hidden and invisibles stripped', async () => {
+  const head = `left C:/Users/alice/keyA here D:${ZW}/Users/bob/keyB th${ZW}ere `
+  const pad = 'n'.repeat(380 - head.length)
+  const note = head + pad
+  let stored
+  const replies = {
+    '/waypoint': () => ({ ok: true, name: 'home', at: { ...WP_AT, note: stored }, from: 'updated' }),
+    '/waypoints': () => ({ ok: true, count: 1, graph: 'home (1,64,1)', waypoints: { home: { ...WP_AT, note: stored } } })
+  }
+  const { srv } = mcpServer({ reply: (url) => replies[url.pathname]() })
+  const notes = async (n) => {
+    stored = n
+    return [(await firstBody(srv, 'waypoint', { name: 'home' })).at.note, (await firstBody(srv, 'waypoints', { verbose: true })).waypoints.home.note]
+  }
+  assert.deepStrictEqual(await notes('the mill is shared'), ['the mill is shared', 'the mill is shared'], 'control')
+  const shown = 'left <path> here <path> there ' + pad
+  assert.deepStrictEqual(await notes(note), [shown, shown])
+  assert.deepStrictEqual(await notes('q'.repeat(1000)), ['q'.repeat(400), 'q'.repeat(400)], 'a longer stored note')
+})
+
+// CWE-200
+test('I3: the waypoints graph strips invisibles before it hides paths', async () => {
+  let graph
+  const { srv } = mcpServer({ reply: () => ({ ok: true, count: 1, graph, names: ['home'] }) })
+  graph = 'home (1,64,1) see C:/Users/alice/keyF'
+  assert.strictEqual((await firstBody(srv, 'waypoints', {})).graph, 'home (1,64,1) see <path>', 'control')
+  graph = `home (1,64,1) see C:${ZW}/Users/alice/keyG`
+  assert.strictEqual((await firstBody(srv, 'waypoints', {})).graph, 'home (1,64,1) see <path>')
+})
+
+// CWE-400
+test('I3: outside waypoint notes a note stays cut at 300 units, and waypoint names keep their path redaction', async () => {
+  const long = 'j'.repeat(380)
+  const cut = 'j'.repeat(300)
+  const replies = {
+    '/jobs': { ok: true, jobs: [{ id: 1, name: 'mine', status: 'running', note: long }] },
+    '/craft': { ok: true, note: long },
+    '/goto': { ok: true, at: { x: 1, y: 64, z: 1, note: long } },
+    '/waypoint': { ok: true, name: 'home', at: { ...WP_AT, note: 'the mill is shared' }, note: long, moved: long },
+    '/waypoints': { ok: true, count: 1, graph: 'home', waypoints: { 'C:/Users/alice/keyC': { ...WP_AT, note: 'the mill is shared' } } }
+  }
+  const { srv } = mcpServer({ reply: (url) => replies[url.pathname] })
+  const wp = await firstBody(srv, 'waypoint', { name: 'home' })
+  assert.strictEqual(wp.at.note, 'the mill is shared', 'control')
+  assert.deepStrictEqual([wp.note, wp.moved], [cut, cut])
+  assert.strictEqual((await firstBody(srv, 'jobs', {})).jobs[0].note, cut)
+  assert.strictEqual((await firstBody(srv, 'craft', { item: 'bread' })).note, cut)
+  assert.strictEqual((await firstBody(srv, 'goto', { waypoint: 'home' })).at.note, cut)
+  const verbose = await firstBody(srv, 'waypoints', { verbose: true })
+  assert.deepStrictEqual(Object.keys(verbose.waypoints), ['<path>'])
+  assert.strictEqual(verbose.waypoints['<path>'].note, 'the mill is shared')
+})
+
+// CWE-400
+test('I4: a waypoints graph over 4000 units ends with the marker to call waypoints verbose, within the 4000', async () => {
+  let graph
+  const { srv } = mcpServer({ reply: () => ({ ok: true, count: 1, graph, names: ['home'] }) })
+  graph = '~'.repeat(4000)
+  assert.strictEqual((await firstBody(srv, 'waypoints', {})).graph, graph, 'control: 4000 units come whole')
+  graph = '~'.repeat(9000)
+  const shown = (await firstBody(srv, 'waypoints', {})).graph
+  assert.ok(shown.length <= 4000, `${shown.length} units`)
+  assert.ok(shown.startsWith('~'.repeat(3000)), shown.slice(0, 100))
+  assert.match(shown.slice(shown.lastIndexOf('~') + 1), /\bwaypoints\b[\s\S]*\bverbose\b|\bverbose\b[\s\S]*\bwaypoints\b/)
+})
+
+// CWE-400
+test('I4: the cut waypoints graph names the waypoint tool with a name beside waypoints with verbose, within the 4000', async () => {
+  let graph
+  const { srv } = mcpServer({ reply: () => ({ ok: true, count: 1, graph, names: ['home'] }) })
+  graph = '~'.repeat(4000)
+  assert.strictEqual((await firstBody(srv, 'waypoints', {})).graph, graph, 'control: 4000 units come whole')
+  graph = '~'.repeat(9000)
+  const shown = (await firstBody(srv, 'waypoints', {})).graph
+  assert.ok(shown.length <= 4000, `${shown.length} units`)
+  const marker = shown.slice(shown.lastIndexOf('~') + 1)
+  for (const word of [/\bwaypoint\b/, /\bname\b/, /\bwaypoints\b/, /\bverbose\b/]) assert.match(marker, word)
+})
+
+// CWE-200
+test('I3: a path split from its drive by an invisible, a C1 control, a line separator or a lone surrogate stays hidden in waypoint and both waypoints forms', async () => {
+  let note
+  const graph = () => `home (1,64,1) - ${note}`
+  const replies = {
+    '/waypoint': () => ({ ok: true, name: 'home', at: { ...WP_AT, note }, from: 'stored' }),
+    '/waypoints': (url) => url.searchParams.get('verbose') === '1'
+      ? { ok: true, count: 1, graph: graph(), waypoints: { home: { ...WP_AT, note } } }
+      : { ok: true, count: 1, graph: graph(), names: ['home'] }
+  }
+  const { srv } = mcpServer({ reply: (url) => replies[url.pathname](url) })
+  const shown = async (n) => {
+    note = n
+    return [
+      textOf(await call(srv, 'waypoint', { name: 'home' })),
+      textOf(await call(srv, 'waypoints', {})),
+      textOf(await call(srv, 'waypoints', { verbose: true }))
+    ]
+  }
+  for (const text of await shown('logs at C:/Users/alice/keyZ')) {
+    assert.ok(text.includes('logs at <path>'), `control: ${text.slice(0, 300)}`)
+    assert.ok(!text.includes('/Users/alice'), `control: ${text.slice(0, 300)}`)
+  }
+  const cases = [
+    ['an invisible after a letter', `logs at x${ZW}C:/Users/alice/keyA`],
+    ['a C1 control', 'logs at C:\u0085/Users/alice/keyB'],
+    ['a line separator', 'logs at C:\u2028/Users/alice/keyD'],
+    ['a lone surrogate', 'logs at C:\ud800/Users/alice/keyE']
+  ]
+  const leaks = []
+  for (const [label, n] of cases) {
+    const [one, map, verbose] = await shown(n)
+    for (const [form, text] of [['waypoint', one], ['waypoints', map], ['waypoints verbose', verbose]]) {
+      if (text.includes('/Users/alice')) leaks.push(`${label}, ${form}`)
+    }
+  }
+  assert.deepStrictEqual(leaks, [])
+})
+
+// waypoint, waypoints and waypoints verbose against a bot that holds one note and repeats it in its graph.
+function noteForms () {
+  let note
+  const graph = () => `home (1,64,1) - ${note}`
+  const replies = {
+    '/waypoint': () => ({ ok: true, name: 'home', at: { ...WP_AT, note }, from: 'stored' }),
+    '/waypoints': (url) => url.searchParams.get('verbose') === '1'
+      ? { ok: true, count: 1, graph: graph(), waypoints: { home: { ...WP_AT, note } } }
+      : { ok: true, count: 1, graph: graph(), names: ['home'] }
+  }
+  const { srv } = mcpServer({ reply: (url) => replies[url.pathname](url) })
+  return {
+    async texts (n) {
+      note = n
+      return [
+        ['waypoint', textOf(await call(srv, 'waypoint', { name: 'home' }))],
+        ['waypoints', textOf(await call(srv, 'waypoints', {}))],
+        ['waypoints verbose', textOf(await call(srv, 'waypoints', { verbose: true }))]
+      ]
+    },
+    async fields (n) {
+      note = n
+      const one = await firstBody(srv, 'waypoint', { name: 'home' })
+      const map = await firstBody(srv, 'waypoints', {})
+      const verbose = await firstBody(srv, 'waypoints', { verbose: true })
+      return [one.at.note, map.graph, verbose.waypoints.home.note, verbose.graph]
+    }
+  }
+}
+
+const leaked = (forms, words) => forms.flatMap(([form, text]) => words.filter((w) => text.includes(w)).map((w) => `${form}: ${w}`))
+
+// CWE-200
+test('I3: a path whose tail is split by a zero width no-break space stays hidden in waypoint and both waypoints forms', async () => {
+  const forms = noteForms()
+  const control = await forms.texts('logs C:/Users/alice/k5')
+  assert.deepStrictEqual(leaked(control, ['alice']), [], 'control')
+  for (const [form, text] of control) assert.ok(text.includes('logs <path>'), `control: ${form}`)
+  assert.deepStrictEqual(leaked(await forms.texts('logs C:/Users\ufeff/alice/k5'), ['alice']), [])
+})
+
+// CWE-200
+test('I3: a path split before its drive by an invisible and after its colon by a C1 control stays hidden in waypoint and both waypoints forms', async () => {
+  const forms = noteForms()
+  const words = ['/Users/alice', 'alice/k4']
+  const control = await forms.texts('see C:/Users/alice/k4')
+  assert.deepStrictEqual(leaked(control, words), [], 'control')
+  for (const [form, text] of control) assert.ok(text.includes('see <path>'), `control: ${form}`)
+  assert.deepStrictEqual(leaked(await forms.texts('see x\u200bC:\u0085/Users/alice/k4'), words), [])
+})
+
+// CWE-200
+test('I3: a path whose tail is split by a line or paragraph separator stays hidden in waypoint and both waypoints forms', async () => {
+  const forms = noteForms()
+  assert.deepStrictEqual(leaked(await forms.texts('logs C:/Users/alice/k5'), ['alice']), [], 'control')
+  const leaks = []
+  for (const [label, n] of [['line separator', 'logs C:/Users\u2028/alice/k5'], ['paragraph separator', 'logs C:/Users\u2029/alice/k5']]) {
+    for (const leak of leaked(await forms.texts(n), ['alice'])) leaks.push(`${label}, ${leak}`)
+  }
+  assert.deepStrictEqual(leaks, [])
+})
+
+// CWE-200
+test('I3: URLs, times and drive-like text in a waypoint note come back as they do without a split path', async () => {
+  const forms = noteForms()
+  assert.deepStrictEqual(await forms.fields('the mill is shared'), ['the mill is shared', 'home (1,64,1) - the mill is shared', 'the mill is shared',
+    'home (1,64,1) - the mill is shared'], 'control')
+  const kept = [
+    ['https://example.com/a/b', 'https://example.com/a/b'],
+    ['see http://x/y', 'see http://x/y'],
+    ['10:30/11:00', '10:30/11:00'],
+    ['3:/4', '3:/4'],
+    ['plan A:/x', 'plan <path>'],
+    ['file:///C:/x/y', 'file:///<path>']
+  ]
+  for (const [note, shown] of kept) {
+    assert.deepStrictEqual(await forms.fields(note), [shown, `home (1,64,1) - ${shown}`, shown, `home (1,64,1) - ${shown}`], note)
+  }
+})
+
+// The bot's own waypoint store and its /waypoint and /waypoints handlers, with a fresh temp dir as the bot's cwd.
+function waypointBot (t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golem-waypoints-'))
+  const cwd = process.cwd()
+  process.chdir(dir)
+  t.after(() => {
+    process.chdir(cwd)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+  const id = require.resolve('../lib/bot/memory')
+  delete require.cache[id]
+  const ctx = {}
+  try {
+    require(id).createMemory(ctx)
+  } finally {
+    delete require.cache[id]
+  }
+  const env = {
+    waypoints: ctx.waypoints,
+    memory: ctx.memory,
+    journal: ctx.journal,
+    bot: { entity: { position: new Vec3(1, 64, 1) } },
+    standsAtWaypoint: () => false,
+    standFault: () => '',
+    standBeside: () => null,
+    cellText: (c) => `${c.x},${c.y},${c.z}`,
+    Vec3
+  }
+  const reply = (url) => {
+    const { handle, res } = routeHandler(url.pathname, env)
+    handle({ query: Object.fromEntries(url.searchParams) }, res)
+    return res.error ? { ok: false, error: res.error.message } : { ok: true, ...res.body }
+  }
+  return { file: path.join(dir, 'waypoints.json'), store: ctx.waypoints, reply }
+}
+
+// CWE-20, CWE-400
+test('I2, I3: a 400-unit note goes through the bot\'s waypoint route and store and comes back whole, a 401-unit one is refused and the store kept', async (t) => {
+  const bot = waypointBot(t)
+  const { srv, calls } = mcpServer({ reply: bot.reply })
+  assert.strictEqual((await firstBody(srv, 'waypoint', { name: 'home', note: 'the mill is shared' })).at.note, 'the mill is shared', 'control')
+  assert.strictEqual(bot.store.get('home').note, 'the mill is shared', 'control: stored')
+  const long = 'the mill is shared '.repeat(21).slice(0, 399) + 'Z'
+  assert.strictEqual(long.length, 400)
+  assert.strictEqual((await firstBody(srv, 'waypoint', { name: 'home', note: long })).at.note, long, 'the reply to the write')
+  assert.strictEqual(JSON.parse(fs.readFileSync(bot.file, 'utf8')).home.note, long, 'the file')
+  assert.strictEqual((await firstBody(srv, 'waypoint', { name: 'home' })).at.note, long, 'waypoint with the name')
+  assert.strictEqual((await firstBody(srv, 'waypoints', { verbose: true })).waypoints.home.note, long, 'waypoints verbose')
+  const before = fs.readFileSync(bot.file, 'utf8')
+  const sent = calls.length
+  const r = await call(srv, 'waypoint', { name: 'home', note: long + 'x' })
+  assert.ok(isToolError(r), JSON.stringify(r).slice(0, 300))
+  assert.strictEqual(errorText(r), 'note must be a string of 1 to 400 characters')
+  assert.strictEqual(calls.length, sent, 'no request for 401 units')
+  assert.strictEqual(fs.readFileSync(bot.file, 'utf8'), before)
+  assert.strictEqual(bot.store.get('home').note, long)
 })
 
 test('a whole tool result is capped at 32000 units', async () => {

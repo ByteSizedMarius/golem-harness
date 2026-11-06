@@ -3,7 +3,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const {
-  PORT, mcpServer, call, isToolError, assertOk, textOf, assertSigned,
+  PORT, mcpServer, call, isToolError, assertOk, textOf, errorText, assertSigned, waitFor, delay, timed, HUNG,
   tickFrom, tickReply, tickOf, chatLine, eventLine, botProcess, missing
 } = require('./helpers')
 
@@ -334,3 +334,73 @@ test('a tick from the frontier moves it to the last items its reply showed whole
   assert.ok(next.includes('after-the-cut'), next.slice(0, 300))
 })
 
+
+// ---- one wait at a time ----
+
+const ABOUT = /\babout (\d+) s\b/
+
+function assertRunningRefusal (r) {
+  assert.ok(isToolError(r), JSON.stringify(r).slice(0, 300))
+  const text = errorText(r)
+  assert.ok(text.startsWith('wait_events is already running'), text)
+  const m = ABOUT.exec(text)
+  assert.ok(m, text)
+  return Number(m[1])
+}
+
+test('I9: a second wait_events while a 90 s wait runs is refused naming about 90 s, and the first returns what came in', { timeout: 20000 }, async () => {
+  const lone = mcpServer({ reply: tickReply([chatLine(1, 'lone-line')]) })
+  assert.ok(textOf(await call(lone.srv, 'wait_events', { timeout: 1 })).includes('lone-line'), 'control')
+  const messages = []
+  let starts = 0
+  const { srv } = mcpServer({ reply: tickReply(messages), onWaitStart: () => { starts++ } })
+  const first = call(srv, 'wait_events', { timeout: 90 })
+  assert.ok(await waitFor(() => starts === 1, 5000), 'the first wait never started')
+  const n = assertRunningRefusal(await call(srv, 'wait_events', { timeout: 5 }))
+  assert.ok(n >= 85 && n <= 90, `about ${n} s`)
+  assert.strictEqual(starts, 1)
+  messages.push(chatLine(1, 'end-the-wait'))
+  assert.ok(textOf(await first).includes('end-the-wait'))
+  assert.strictEqual(starts, 1)
+})
+
+test('I9: a wait overrunning its deadline on a held /tick still refuses a second one, naming 1 s', { timeout: 20000 }, async () => {
+  let release
+  const held = new Promise((resolve) => { release = resolve })
+  let ticks = 0
+  const reply = async (url) => {
+    if (url.pathname === '/tick') {
+      ticks++
+      await held
+    }
+    return tickFrom({ chat: [], events: [] }, url)
+  }
+  let starts = 0
+  const { srv } = mcpServer({ reply, requestTimeoutMs: 15000, onWaitStart: () => { starts++ } })
+  const first = call(srv, 'wait_events', { timeout: 1 })
+  assert.ok(await waitFor(() => ticks === 1, 5000), 'control: the first wait polls')
+  await delay(1500)
+  assert.strictEqual(assertRunningRefusal(await call(srv, 'wait_events', { timeout: 1 })), 1)
+  assert.strictEqual(starts, 1)
+  release()
+  assertOk(await first)
+  assert.strictEqual(starts, 1)
+})
+
+test('I9: an onWaitStart that throws ends that wait with an error, and the next wait_events runs', { timeout: 20000 }, async (t) => {
+  const calm = mcpServer({ reply: tickReply([chatLine(1, 'calm-line')]), onWaitStart: () => {} })
+  assert.ok(textOf(await call(calm.srv, 'wait_events', { timeout: 1 })).includes('calm-line'), 'control')
+  t.mock.method(console, 'error', () => {})
+  let starts = 0
+  const onWaitStart = () => {
+    starts++
+    if (starts === 1) throw new Error('the wake log is not writable')
+  }
+  const { srv } = mcpServer({ reply: tickReply([chatLine(1, 'after-the-throw')]), onWaitStart })
+  const { out: first } = await timed(call(srv, 'wait_events', { timeout: 5 }), 8000)
+  assert.ok(first !== HUNG && isToolError(first), String(JSON.stringify(first)).slice(0, 300))
+  const { out: next } = await timed(call(srv, 'wait_events', { timeout: 1 }), 8000)
+  assert.ok(next !== HUNG && !isToolError(next), `refused: ${String(JSON.stringify(next)).slice(0, 300)}`)
+  assert.ok(textOf(next).includes('after-the-throw'))
+  assert.strictEqual(starts, 2)
+})

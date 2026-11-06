@@ -15,6 +15,12 @@ const PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05
 const STRING_CAP = 300
 const STRUCTURAL_CAP = 4000
 const RESULT_CAP = 32000
+// UTF-16 units of RESULT_CAP that the boot tails leave for the reply body.
+const BODY_FLOOR = 4000
+// Units of memory note text before flatText.
+const MEMORY_RAW_CAP = 2400
+const WAYPOINT_NOTE_CAP = TOOLS.find((t) => t.name === 'waypoint').params.note.maxLen
+const GRAPH_CUT = '\nThe map is cut here. Call waypoints with verbose true for every waypoint and its note, or waypoint with a name for one.'
 const MAX_ITEMS = 50
 // Bytes of a topic with LF line ends.
 const MANUAL_CAP = 6000
@@ -90,8 +96,8 @@ const LOCAL_TOOLS = [
     description: 'Your todo list, kept across restarts and shown at boot: add what was asked (by who), promised or started, at priority high when it is urgent, mark the task you start current, then done or drop it by id.',
     params: {
       action: { type: 'enum', values: ['add', 'done', 'drop', 'priority', 'current', 'list'], required: true },
-      text: { type: 'str', maxLen: 200 },
-      who: { type: 'str', maxLen: NAME_CAP },
+      text: { type: 'str', maxLen: todos.TEXT_CAP },
+      who: { type: 'str', maxLen: todos.WHO_CAP },
       id: { type: 'int', min: 1, max: 999999 },
       priority: { type: 'enum', values: ['high', 'normal', 'low'] }
     }
@@ -196,6 +202,31 @@ function redactBook (body) {
     [redact(k), BOOK_PAGE_LISTS.includes(k) && Array.isArray(v) ? v.map(bookPage) : bookField(k, v)]))
 }
 
+const isRecord = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+const redactFields = (value, field) => (isRecord(value) ? Object.fromEntries(Object.entries(value).map(([k, v]) => [redact(k), field(k, v)])) : redact(value))
+
+// Any of these between a drive and its slash hides the path from PATH_TOKEN.
+const SPLITS = /[\p{Cc}\p{Zl}\p{Zp}\p{Cs}]/gu
+const REMOVED = `(?:${SPLITS.source}|${INVISIBLE.source})`
+// A drive path as PATH_TOKEN reads it, with removed characters anywhere after its letter.
+const SPLIT_DRIVE = new RegExp(String.raw`(?<![A-Za-z0-9])[A-Za-z]${REMOVED}*:${REMOVED}*[\\/](?:[^\s"']|${REMOVED})*`, 'gu')
+// PATH_TOKEN misses a drive that stripping leaves right after a letter or digit.
+const waypointText = (s, cap) => redactString(s.replace(SPLIT_DRIVE, '<path>').replace(INVISIBLE, '').replace(SPLITS, ''), cap)
+const withNote = (w) => redactFields(w, (k, v) => (k === 'note' && typeof v === 'string' ? waypointText(v, WAYPOINT_NOTE_CAP) : redact(v)))
+const redactWaypoint = (body) => redactFields(body, (k, v) => (k === 'at' ? withNote(v) : redact(v)))
+
+function waypointGraph (graph, verbose) {
+  // SPLITS would remove the line breaks between waypoints.
+  const shown = graph.split('\n').map((line) => waypointText(line, Infinity)).join('\n')
+  if (shown.length <= STRUCTURAL_CAP) return shown
+  return verbose ? capString(shown, STRUCTURAL_CAP) : capString(shown, STRUCTURAL_CAP - GRAPH_CUT.length) + GRAPH_CUT
+}
+
+const redactWaypoints = (body, verbose) => redactFields(body, (k, v) =>
+  k === 'graph' && typeof v === 'string' ? waypointGraph(v, verbose)
+    : k === 'waypoints' && isRecord(v) ? redactFields(v, (_, w) => withNote(w))
+      : redact(v))
+
 // Keeps the leading fields and items of value that fit in budget units of JSON. Null for a scalar over budget.
 function fitJson (value, budget) {
   const size = JSON.stringify(value).length
@@ -286,7 +317,8 @@ function describeSpec (spec) {
   }
 }
 
-function checkArgs (tool, args) {
+// lengths names the max of str params whose length the caller checks.
+function checkArgs (tool, args, lengths = {}) {
   if (args === undefined) args = {}
   if (args === null || typeof args !== 'object' || Array.isArray(args)) throw new ArgError('arguments must be an object')
   for (const key of Object.keys(args)) {
@@ -299,7 +331,8 @@ function checkArgs (tool, args) {
       if (spec.required) throw new ArgError(`${name} is required`)
       continue
     }
-    if (!validValue(spec, v)) throw new ArgError(`${name} must be ${describeSpec(spec)}`)
+    const own = Object.hasOwn(lengths, name)
+    if (!validValue(own ? { ...spec, maxLen: Infinity } : spec, v)) throw new ArgError(`${name} must be ${describeSpec(own ? { ...spec, maxLen: lengths[name] } : spec)}`)
     values[name] = v
   }
   return values
@@ -469,7 +502,8 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
   const frontier = { boot: start.boot, chat: start.chat, ev: start.ev }
   // events maps id to { kind, t } for the waking events of process boot, since is the frontier's boot at the map's start.
   const wake = { boot: null, since: frontier.boot, events: new Map() }
-  let waiting = false
+  // The deadline in epoch ms of the running wait_events, null while none runs.
+  let waitDeadline = null
   let lastReturn = -Infinity
   // The last wait_events left items for the next one.
   let leftover = false
@@ -511,7 +545,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
     }
   }
 
-  // last, when not null, becomes the final tail.
+  // last(room) builds the final tail to fit RESULT_CAP minus BODY_FLOOR and the other tails.
   async function callRouted (tool, values, last = null, lease = null) {
     const timeoutMs = tool.timeoutMs ?? requestTimeoutMs
     let reply
@@ -553,9 +587,12 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
         tails.push(primers.get(p.topic))
       }
     }
-    if (last !== null) tails.push(last)
+    if (last !== null) tails.push(last(RESULT_CAP - BODY_FLOOR - tails.reduce((n, t) => n + t.length, 0)))
     const trimmed = trimLists(body, tool.lists)
-    const shown = tool.name === 'book' ? redactBook(trimmed) : redact(trimmed, tool.structural)
+    const shown = tool.name === 'book' ? redactBook(trimmed)
+      : tool.name === 'waypoint' ? redactWaypoint(trimmed)
+        : tool.name === 'waypoints' ? redactWaypoints(trimmed, values.verbose === true)
+          : redact(trimmed, tool.structural)
     const fit = fitResult(shown, tails)
     if (listed !== null) tickDelivered(values, listed, body, shown, fit.value)
     return jsonResult(shown, reply.status !== 200, tails, fit)
@@ -629,14 +666,15 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
   }
 
   async function waitEvents ({ timeout = WAIT_DEFAULT_S }) {
-    if (waiting) return textResult('wait_events is already running, its result arrives when it returns', true)
-    waiting = true
-    onWaitStart()
+    // A wait can pass its deadline by a /tick still in flight.
+    if (waitDeadline !== null) return textResult(`wait_events is already running, its result arrives within about ${Math.max(1, Math.ceil((waitDeadline - Date.now()) / 1000))} s`, true)
+    waitDeadline = Date.now() + timeout * 1000
     try {
-      return await gather(Date.now() + timeout * 1000, leftover ? -Infinity : lastReturn + WAIT_GAP_MS, leftover)
+      onWaitStart()
+      return await gather(waitDeadline, leftover ? -Infinity : lastReturn + WAIT_GAP_MS, leftover)
     } finally {
       lastReturn = Date.now()
-      waiting = false
+      waitDeadline = null
       onWake({ ...frontier })
     }
   }
@@ -754,11 +792,11 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
     return textResult('noted')
   }
 
-  function todoListing () {
+  function todoListing (room) {
     try {
-      return todos.render(todos.load(todoFile).items, now().getTime())
+      return todos.render(todos.load(todoFile).items, now().getTime(), room)
     } catch (e) {
-      console.error(`[golem-mcp] cannot read the todo list: ${e.message}`)
+      console.error(`[golem-mcp] cannot read the todo list: ${todoFault(e)}`)
       return null
     }
   }
@@ -792,7 +830,7 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
       }
     } catch (e) {
       if (!(e instanceof todos.TodoFull)) {
-        console.error(`[golem-mcp] cannot update the todo list: ${e.message}`)
+        console.error(`[golem-mcp] cannot update the todo list: ${todoFault(e)}`)
         return textResult('the todo list could not be read or written', true)
       }
       head = e.message
@@ -803,8 +841,9 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
     return textResult(head === null ? list : `${head}\n${list}`, failed)
   }
 
-  // JSON.parse quotes the text around the fault, which can be note text.
+  // A JSON.parse error message can quote note or todo text.
   const memoryFault = (e) => e instanceof SyntaxError ? 'the memory file is not valid JSON' : e.message
+  const todoFault = (e) => e instanceof SyntaxError ? 'the todo file is not valid JSON' : e.message
 
   function memoryListing () {
     try {
@@ -819,9 +858,11 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
     if (memoryFile === undefined) return textResult('memory notes are off', true)
     try {
       if (action === 'add' || action === 'update') {
+        const over = textResult(`memory note text is over ${memories.TEXT_CAP} characters`, true)
+        if (text.length > MEMORY_RAW_CAP) return over
         const line = flatText(text)
         if (!line) return textResult('memory note text is empty', true)
-        if ([...line].length > memories.TEXT_CAP) return textResult(`memory note text is over ${memories.TEXT_CAP} characters`, true)
+        if ([...line].length > memories.TEXT_CAP) return over
         if (action === 'update') {
           const updated = memories.update(memoryFile, id, line, now())
           if (updated === false) return textResult(`No memory note has id ${id}.`, true)
@@ -867,7 +908,8 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
     if (!tool) return rpcError(id, -32602, 'unknown tool')
     let values
     try {
-      values = checkArgs(tool, params.arguments)
+      // memory() checks the length of a memory note's text, in code points after flatText.
+      values = checkArgs(tool, params.arguments, tool.name === 'note' && args.kind === 'memory' ? { text: memories.TEXT_CAP } : {})
     } catch (e) {
       if (!(e instanceof ArgError)) throw e
       return rpcResult(id, textResult(e.message, true))
@@ -878,10 +920,14 @@ function createServer ({ port, token, fetch, manualDir = MANUAL_DIR, topics = []
     if (tool.name === 'todo') return rpcResult(id, todo(values))
     // A restarted pilot learns its memory notes and open todos from boot.
     if (tool.name === 'boot' && (memoryFile !== undefined || todoFile !== undefined)) {
-      const tails = []
-      if (memoryFile !== undefined) tails.push(memoryListing() ?? 'the memory notes could not be read')
-      if (todoFile !== undefined) tails.push(todoListing() ?? 'the todo list could not be read')
-      return rpcResult(id, await callRouted(tool, values, tails.join('\n\n')))
+      // The memory notes come whole, the todo list in the room they leave.
+      const last = (room) => {
+        const lead = memoryFile === undefined ? '' : memoryListing() ?? 'the memory notes could not be read'
+        if (todoFile === undefined) return lead
+        const sep = lead ? '\n\n' : ''
+        return lead + sep + (todoListing(room - lead.length - sep.length) ?? 'the todo list could not be read')
+      }
+      return rpcResult(id, await callRouted(tool, values, last))
     }
     if (tool.body || (tool.name === 'book' && BOOK_EDITS.includes(values.action))) return rpcResult(id, await bodyCall(tool, values))
     const result = await callRouted(tool, values)
