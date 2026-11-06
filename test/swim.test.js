@@ -173,12 +173,19 @@ test('a far goto whose first hop ends 3 cells into a lake is refused on the hop 
   assert.deepStrictEqual([r.walks, r.r.reason, r.r.plan.swim], [1, 'risky', 18])
 })
 
+const LONG_HOPS = { segLen: 30 }
+
 test('a far goto counts deep water on a hop only where the bot sees it now', async () => {
-  const lake = terrain([5, 10, 60])
-  const lit = await swimGoto(FAR, {}, { blockAt: lake })
+  const lake = terrain([20, 25, 60])
+  const lit = await swimGoto(FAR, LONG_HOPS, { blockAt: lake })
   assert.deepStrictEqual([lit.walks, lit.r.reason, lit.r.plan.swim], [0, 'risky', 6], 'control: the lake in sight')
-  const dark = await swimGoto(FAR, {}, { blockAt: lake, seen: (p) => p.x < 3 })
-  assert.deepStrictEqual([dark.walks, dark.r.reason], [3, 'no-path'])
+  const dark = await swimGoto(FAR, LONG_HOPS, { blockAt: lake, seen: (p) => p.x < 3 })
+  assert.deepStrictEqual([dark.walks, dark.r.reason], [2, 'no-path'])
+})
+
+test('a far goto counts a dark lake within 16 blocks of the hop start as deep water by its shape', async () => {
+  const dark = await swimGoto(FAR, {}, { blockAt: terrain([20, 25, 60]), seen: (p) => p.x < 3 })
+  assert.deepStrictEqual([dark.walks, dark.r.reason, dark.r.plan?.swim], [1, 'risky', 6])
 })
 
 test('a goto that starts afloat stays afloat over water out of sight, so the next hop swims on unrefused', async () => {
@@ -188,11 +195,11 @@ test('a goto that starts afloat stays afloat over water out of sight, so the nex
 })
 
 test('a night swim counts the seen surface of a lake whose lower layer and bed are unseen as deep water', async () => {
-  const known = (p) => !(p.x >= 5 && p.x <= 10 && p.y < 63)
-  const r = await swimGoto(FAR, {}, { blockAt: terrain([5, 10, 60]), known })
+  const known = (p) => !(p.x >= 20 && p.x <= 25 && p.y < 63)
+  const r = await swimGoto(FAR, LONG_HOPS, { blockAt: terrain([20, 25, 60]), known })
   const { reason, plan } = r.r
   assert.deepStrictEqual([r.walks, reason, plan.swim], [0, 'risky', 6])
-  assert.deepStrictEqual([plan.unseen, plan.end], [true, { x: 4, y: 64, z: 0 }], 'the rest of the plan stops where the seen cells end')
+  assert.deepStrictEqual([plan.unseen, plan.end], [true, { x: 19, y: 64, z: 0 }], 'the rest of the plan stops where the seen cells end')
 })
 
 test('a ford with a seen bed counts no swim, and one whose bed is unseen counts as deep water', () => {

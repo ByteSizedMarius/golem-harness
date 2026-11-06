@@ -98,11 +98,17 @@ test('a goto names a vein it walked past in sight, with its size and a cell', as
   assert.strictEqual(reply.oresMore, undefined)
 })
 
-test('a goto leaves out ore behind a wall and ore in the dark', async () => {
+test('a goto leaves out ore behind a wall and dark ore on its way past 4 blocks of the eye, and names dark ore within 4', async () => {
   // An alcove north of x 10, two cells deep, with ore at its end 3 blocks from the corridor.
   const alcove = { open: ['10,64,-1', '10,64,-2', '10,65,-1', '10,65,-2'], ores: { '10,64,-3': 'coal_ore' } }
   assert.deepStrictEqual((await walkEast(alcove)).ores, ['coal_ore 10,64,-3'], 'control: the alcove lit')
-  assert.strictEqual((await walkEast({ ...alcove, light: DARK })).ores, undefined)
+  assert.deepStrictEqual((await walkEast({ ...alcove, light: DARK })).ores, ['coal_ore 10,64,-3'])
+  // Ore at the foot of an open shaft under x 10, 4 below the feet and 4.62 from the eye.
+  const shaft = { open: ['10,61,0', '10,62,0', '10,63,0'], ores: { '10,60,0': 'coal_ore' } }
+  assert.deepStrictEqual((await walkEast(shaft)).ores, ['coal_ore 10,60,0 unreached'], 'control: the shaft lit')
+  const dark = await walkEast({ ...shaft, light: DARK })
+  assert.strictEqual(dark.ores, undefined)
+  assert.doesNotMatch(JSON.stringify(dark), /coal|10,60,0/)
   const walled = await walkEast({ ores: { '5,64,-2': 'coal_ore' } })
   assert.strictEqual(walled.ores, undefined)
   assert.doesNotMatch(JSON.stringify(walled), /coal|5,64,-2/)

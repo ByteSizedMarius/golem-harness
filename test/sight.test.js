@@ -9,6 +9,8 @@ const { ambientChange, sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const { flatText } = require('../lib/flat-text')
+const { STANCES } = require('../lib/bot/stances')
+const { expireConfirmed } = require('../lib/shelter')
 const { balanced, botConstant, wiredSource, groundMemory, blockWorld, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn, claimRescue } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
@@ -52,19 +54,19 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
 // An empty station memory as bot.js keeps it.
 const stationMemory = () => ({ STATIONS: new Map(), STATION_CAP: botConstant('STATION_CAP'), STATION_RE: botConstant('STATION_RE'), stationEdits: 0 })
 
-// A room at x 0..3 with coal in its west wall, joined by a z 1 passage to a lit cave at x 5..8 behind a wall at x 4, with iron in the cave ceiling.
+// A room at x 0..5 with coal in its west wall, joined by a z 1 passage to a lit cave at x 7..10 behind a wall at x 6, with iron in the cave ceiling.
 function cave (roomLight, at = 0) {
   const open = (x, y, z) => (y === 64 || y === 65) &&
-    ((z === 0 && x >= 0 && x <= 3) || (z === 1 && x >= 3 && x <= 8) || (z === 0 && x >= 5 && x <= 8))
-  const ores = { '-1,65,0': 'coal_ore', '7,66,0': 'iron_ore' }
-  return world({ open, ores, light: (x, z) => (z === 0 && x <= 3 ? roomLight : 15), at })
+    ((z === 0 && x >= 0 && x <= 5) || (z === 1 && x >= 5 && x <= 10) || (z === 0 && x >= 7 && x <= 10))
+  const ores = { '-1,65,0': 'coal_ore', '9,66,0': 'iron_ore' }
+  return world({ open, ores, light: (x, z) => (z === 0 && x <= 5 ? roomLight : 15), at })
 }
 
 const LIT = 15
 const DARK = 0
-// The room's far end, 3.5 blocks from the coal.
-const FAR_END = 3
-const hidden = (reply) => assert.doesNotMatch(JSON.stringify(reply), /iron|7,66|"x":7,"y":66/)
+// The room's far end, 5.5 blocks from the coal.
+const FAR_END = 5
+const hidden = (reply) => assert.doesNotMatch(JSON.stringify(reply), /iron|9,66|"x":9,"y":66/)
 
 test('find names ore in lit sight, never ore around a corner or in the dark', () => {
   const find = (env, name) => runRoute('/find', { name }, env)
@@ -94,19 +96,37 @@ const behindWall = (block) => ({ '1,64,-2': AIR, '2,64,-2': block })
 const tunnel = (len, light) => world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x < len, ores: { [`${len},65,0`]: 'coal_ore' }, light: () => light })
 const findsCoal = (env) => runRoute('/find', { name: 'coal' }, env).count === 1
 
+test('a thing shows 4, 4, 6, 8, 16 and 24 blocks out at light 0 to 5, and at any distance from light 6', () => {
+  const { levelRange } = loadBotFunctions(['levelRange'], {})
+  assert.deepStrictEqual([0, 1, 2, 3, 4, 5, 6, 7, 15].map(levelRange), [4, 4, 6, 8, 16, 24, Infinity, Infinity, Infinity])
+})
+
 test('ore shows only as far as the light on it carries', () => {
-  assert.strictEqual(findsCoal(tunnel(2, 0)), true, 'light 0, 2 blocks out')
-  assert.strictEqual(findsCoal(tunnel(3, 0)), false, 'light 0, 3 blocks out')
-  assert.strictEqual(findsCoal(tunnel(4, 1)), true, 'light 1, 4 blocks out')
-  assert.strictEqual(findsCoal(tunnel(5, 1)), false, 'light 1, 5 blocks out')
+  for (const [light, shows] of [[0, 4], [1, 4], [2, 6], [3, 8], [4, 16], [5, 24]]) {
+    assert.strictEqual(findsCoal(tunnel(shows, light)), true, `light ${light}, ${shows} blocks out`)
+    assert.strictEqual(findsCoal(tunnel(shows + 1, light)), false, `light ${light}, ${shows + 1} blocks out`)
+  }
+  assert.strictEqual(findsCoal(tunnel(40, 6)), true, 'light 6, 40 blocks out')
   assert.strictEqual(findsCoal(tunnel(40, 7)), true, 'light 7, 40 blocks out')
 })
 
-test('open sky at midnight shows ore 12 blocks out, not 13', () => {
-  const plain = (out, timeOfDay) => world({ open: (x, y) => y >= 64, ores: { [`${out},64,0`]: 'coal_ore' }, light: () => 0, skyLight: () => 15, timeOfDay })
-  assert.strictEqual(findsCoal(plain(13, NOON)), true, 'control: noon')
-  assert.strictEqual(findsCoal(plain(12, MIDNIGHT)), true)
-  assert.strictEqual(findsCoal(plain(13, MIDNIGHT)), false)
+test('open sky at midnight shows ore as light 6 does, sky light 12 as light 3', () => {
+  const plain = (out, timeOfDay, sky = 15) => world({ open: (x, y) => y >= 64, ores: { [`${out},64,0`]: 'coal_ore' }, light: () => 0, skyLight: () => sky, timeOfDay })
+  assert.strictEqual(findsCoal(plain(40, NOON)), true, 'control: noon')
+  assert.strictEqual(findsCoal(plain(40, MIDNIGHT)), true, 'open sky')
+  assert.strictEqual(findsCoal(plain(8, MIDNIGHT, 12)), true, 'sky light 12, 8 blocks out')
+  assert.strictEqual(findsCoal(plain(9, MIDNIGHT, 12)), false, 'sky light 12, 9 blocks out')
+  assert.strictEqual(findsCoal(plain(4, NOON, 0)), true, 'sky light 0 at noon, 4 blocks out')
+  assert.strictEqual(findsCoal(plain(5, NOON, 0)), false, 'sky light 0 at noon, 5 blocks out')
+})
+
+test('the night sky dims open ground only by its darkening past 2', () => {
+  for (const [timeOfDay, darken, range] of [[NOON, 0, 24], [12100, 1, 24], [12300, 2, 24], [12450, 3, 16], [MIDNIGHT, 11, 4], [23500, 3, 16], [23700, 2, 24], [23900, 1, 24]]) {
+    const env = world({ open: (x, y) => y >= 64, light: () => 0, skyLight: () => 5, timeOfDay })
+    const { skyDarken, lightRange } = loadBotFunctions(['skyDarken', 'lightRange'], env)
+    assert.strictEqual(skyDarken(), darken, `control: the darkening at ${timeOfDay}`)
+    assert.strictEqual(lightRange(new Vec3(3, 64, 0)), range, `at ${timeOfDay}`)
+  }
 })
 
 test('a floor block five out shows by its top face, never under a block laid over it', () => {
@@ -182,14 +202,14 @@ test('a gravestone placed on a 1.7.10 server lights nothing, an end_rod on 1.21.
 })
 
 test('a placed torch lights the cells within its falloff, not past it or through rock', () => {
-  // The coal at 30,65,0 shows from 29.5 blocks out by light 7 on the cell before it.
+  // The coal at 30,65,0 shows from 29.5 blocks out by light 6 on the cell before it.
   const coalAfter = (torch) => {
     const env = wireLight(tunnel(30, DARK))
     env.bot.emit('blockUpdate', stoneAt(torch), torchAt(torch))
     return findsCoal(env)
   }
-  assert.strictEqual(coalAfter([23, 64, 0]), true, '7 steps from the cell before the coal')
-  assert.strictEqual(coalAfter([22, 64, 0]), false, '8 steps')
+  assert.strictEqual(coalAfter([22, 64, 0]), true, '8 steps from the cell before the coal')
+  assert.strictEqual(coalAfter([21, 64, 0]), false, '9 steps')
   assert.strictEqual(coalAfter([29, 65, 2]), false, '2 cells away behind rock')
 })
 
@@ -647,9 +667,54 @@ test('a mob shows only as far as the light on its body carries', () => {
     const { entityPerceptible } = loadBotFunctions(['entityPerceptible'], env)
     return entityPerceptible({ type: 'mob', name: 'zombie', position: new Vec3(x + 0.5, 64, 0.5), metadata: [0] }, fill)
   }
+  assert.strictEqual(seen(4, 0), true, 'light 0, 4 blocks out')
+  assert.strictEqual(seen(5, 0), false, 'light 0, 5 blocks out')
   assert.strictEqual(seen(4, 1), true, 'light 1, 4 blocks out')
   assert.strictEqual(seen(5, 1), false, 'light 1, 5 blocks out')
   assert.strictEqual(seen(15, 7), true, 'light 7, 15 blocks out')
+})
+
+test('a mob on open ground at midnight shows 20 blocks out', () => {
+  const seen = (timeOfDay) => {
+    const env = world({ open: (x, y) => y >= 64, light: () => 0, skyLight: () => 15, timeOfDay })
+    const { entityPerceptible } = loadBotFunctions(['entityPerceptible'], env)
+    return entityPerceptible({ type: 'mob', name: 'zombie', position: new Vec3(20.5, 64, 0.5), metadata: [0] }, { cells: new Set() })
+  }
+  assert.strictEqual(seen(NOON), true, 'control: noon')
+  assert.strictEqual(seen(MIDNIGHT), true)
+})
+
+test('the combat scan tracks an unconfirmed zombie 20 blocks out on open ground at midnight, never one past 24 or 5 out in the dark', () => {
+  const tracked = (x, timeOfDay, sky = 15) => {
+    const env = world({ open: (cx, y) => y >= 64, light: () => 0, skyLight: () => sky, timeOfDay })
+    env.bot.entities = { 9: { id: 9, type: 'hostile', name: 'zombie', position: new Vec3(x + 0.5, 64, 0.5), metadata: [0] } }
+    Object.assign(env, {
+      fight: { stance: 'guard', threatDebugUntil: 0 },
+      STANCES,
+      AGGRO_CONFIRMED: new Map(),
+      expireConfirmed,
+      bunker: { building: false },
+      holdRun: { on: false },
+      console: { log () {} },
+      liveEntities: () => Object.values(env.bot.entities),
+      mobClass: (e) => (e.name === 'zombie' ? 'hostile' : 'other'),
+      airFlood: () => ({ cells: new Set() }),
+      entityEngageable: () => true,
+      inMeleeReach: () => false,
+      perchStrike: () => false,
+      emitEvent () {},
+      ...Object.fromEntries(['CONFIRMED_HORIZON', 'CONFIRMED_MS', 'CONFIRMED_COOL_MS'].map((name) => [name, botConstant(name)]))
+    })
+    loadBotFunctions(['entityPerceptible'], env)
+    const combat = combatReflexIn(env)
+    combat.check(env.bot)
+    return combat._seenAt.has(9) && combat._hist.has(9)
+  }
+  assert.strictEqual(tracked(20, NOON), true, 'control: noon')
+  assert.strictEqual(tracked(20, MIDNIGHT), true)
+  assert.strictEqual(tracked(25, MIDNIGHT), false, 'past the 24-block horizon')
+  assert.strictEqual(tracked(4, NOON, 0), true, 'control: light 0, 4 blocks out')
+  assert.strictEqual(tracked(5, NOON, 0), false, 'light 0, 5 blocks out')
 })
 
 test('a mob standing on soul sand in the noon sun shows 10 blocks out', () => {
@@ -866,19 +931,19 @@ test('section draws the room it sees and leaves the cave around the corner unsee
   const body = runRoute('/section', { dir: 'e' }, env)
   assert.deepStrictEqual(body.ores.map((o) => o.name), ['coal'], 'control: in sight')
   hidden(body)
-  // Columns d -2..len along y 65: the coal at d -1, the room to d 3, the wall at d 4, the cave beyond.
+  // Columns d -2..len along y 65: the coal at d -1, the room to d 5, the wall at d 6, the cave beyond.
   const row = body.grid.split('\n').find((r) => r.startsWith('y 65')).slice(5)
-  assert.strictEqual(row.slice(0, 7), '?*@   #', 'control: the room and its walls')
-  assert.strictEqual(row.slice(7, 11), '????', 'the cave at d 5..8')
-  assert.match(body.summary, /sealed from d4/)
+  assert.strictEqual(row.slice(0, 9), '?*@     #', 'control: the room and its walls')
+  assert.strictEqual(row.slice(9, 13), '????', 'the cave at d 7..10')
+  assert.match(body.summary, /sealed from d6/)
 })
 
-test('section in total darkness names no ore and draws the cells past two blocks as dark shapes', () => {
+test('section in total darkness names no ore and draws the cells past four blocks as dark shapes', () => {
   const body = runRoute('/section', { dir: 'w' }, { ...cave(DARK, FAR_END), sectionColumns, floorPhrase })
   assert.deepStrictEqual(body.ores, [])
-  // Columns d -2..len west along y 65: the wall at d -1, the room at d 1..3, the coal at d 4.
+  // Columns d -2..len west along y 65: the wall at d -1, the room at d 1..5, the coal at d 6.
   const row = body.grid.split('\n').find((r) => r.startsWith('y 65')).slice(5)
-  assert.strictEqual(row.slice(0, 7), '?#@  :%')
+  assert.strictEqual(row.slice(0, 9), '?#@    :%')
 })
 
 test('section draws a cell seen before and out of sight now as unseen, whatever it holds now', () => {
@@ -891,26 +956,44 @@ test('section draws a cell seen before and out of sight now as unseen, whatever 
     return runRoute('/section', { dir: 'w' }, { ...env, sectionColumns, floorPhrase })
   }
   const row = (body) => body.grid.split('\n').find((r) => r.startsWith('y 65')).slice(5)
-  assert.strictEqual(row(section(LIT, false))[5], '#', 'control: the stone in sight')
+  assert.strictEqual(row(section(LIT, false))[7], '#', 'control: the stone in sight')
   assert.deepStrictEqual(section(DARK, true), section(DARK, false))
 })
 
-test('scene names the block ahead only in sight, and reads a dark cell the same whatever it holds', () => {
-  // A tunnel north from the body at x 0, y 64..65, open to z -2 with coal at 0,65,-3, or open to z -4 without.
-  const ahead = (light, coal) => {
+test('scene names the block ahead within four blocks in total darkness as in the light', () => {
+  const ahead = (light) => {
     const env = world({
-      open: (x, y, z) => x === 0 && (y === 64 || y === 65) && z <= 0 && z >= (coal ? -2 : -4),
-      ores: coal ? { '0,65,-3': 'coal_ore' } : {},
+      open: (x, y, z) => x === 0 && (y === 64 || y === 65) && z <= 0 && z >= -2,
+      ores: { '0,65,-3': 'coal_ore' },
       light: () => light
     })
     const scene = JSON.parse(summaries(env)[0])
     return [scene.summary.match(/Ahead: [^.]*\./)[0], scene.ahead]
   }
-  assert.strictEqual(ahead(LIT, true)[0], 'Ahead: coal_ore @3.', 'control: in sight')
-  const dark = ahead(DARK, true)
-  assert.doesNotMatch(JSON.stringify(dark), /coal/)
-  assert.strictEqual(dark[0], 'Ahead: unseen @3.')
-  assert.deepStrictEqual(ahead(DARK, false), dark, 'dark air reads like dark ore')
+  assert.strictEqual(ahead(LIT)[0], 'Ahead: coal_ore @3.', 'control: in sight')
+  assert.deepStrictEqual(ahead(DARK), ahead(LIT))
+})
+
+test('scene names the block ahead only in sight, and reads a cell hidden by water the same whatever it holds', () => {
+  // The body faces north-west, toward -3,65,-3.
+  const ahead = (flooded, coal) => {
+    const env = world({
+      open: (x, y, z) => x >= -4 && x <= 1 && z >= -4 && z <= 1 && (y === 64 || y === 65),
+      ores: coal ? { '-3,65,-3': 'coal_ore' } : {},
+      light: () => LIT
+    })
+    env.bot.entity.yaw = Math.PI / 4
+    const base = env.bot.blockAt
+    // The sight line to -3,65,-3 crosses five water cells.
+    if (flooded) env.bot.blockAt = (p) => { const b = base(p); return b.name === 'air' ? { ...b, name: 'water', boundingBox: 'empty', shapes: [], getProperties: () => ({}) } : b }
+    const scene = JSON.parse(summaries(env)[0])
+    return [scene.summary.match(/Ahead: [^.]*\./)[0], scene.ahead]
+  }
+  assert.strictEqual(ahead(false, true)[0], 'Ahead: coal_ore @4.', 'control: in sight')
+  const past = ahead(true, true)
+  assert.doesNotMatch(JSON.stringify(past), /coal/)
+  assert.strictEqual(past[0], 'Ahead: unseen @4.')
+  assert.deepStrictEqual(ahead(true, false), past, 'water past the flood reads like ore')
 })
 
 // A corridor at z 0, y 64..65 east from x 0 to 9 at light level light, or with bend, a room at
@@ -1019,13 +1102,13 @@ test('a dark wall in sight reads as solid', () => {
   assert.match(section.summary, /sealed from d6\.$/)
   // Columns d -2..len north along y 65: the corridor's far wall, the body, the tunnel to d 5, its end wall at d 6.
   const row = section.grid.split('\n').find((r) => r.startsWith('y 65')).slice(5)
-  assert.strictEqual(row.slice(0, 10), '?#@  :::%?')
+  assert.strictEqual(row.slice(0, 10), '?#@    :%?')
 })
 
 test('an unlit ore and an unlit block stay unnamed in every reply, the tunnel reading the same without them', async () => {
-  // Diamond in the end wall of the dark tunnel at 0,65,-6 and a chest in its side wall at 1,64,-3.
-  const stocked = () => sideTunnel(-5, { '0,65,-6': 'diamond_ore', '1,64,-3': 'chest' })
-  const leak = /diamond|chest|"x":0,"y":65,"z":-6|"x":1,"y":64,"z":-3/
+  // Diamond in the end wall of the dark tunnel at 0,65,-6 and a chest in its side wall at 1,64,-5.
+  const stocked = () => sideTunnel(-5, { '0,65,-6': 'diamond_ore', '1,64,-5': 'chest' })
+  const leak = /diamond|chest|"x":0,"y":65,"z":-6|"x":1,"y":64,"z":-5/
   const replies = (env) => [sectionNorth(env), runRoute('/passages', { radius: '8' }, env), summaries(env)]
   const dark = replies(stocked())
   assert.doesNotMatch(JSON.stringify(dark), leak)
@@ -1035,7 +1118,7 @@ test('an unlit ore and an unlit block stay unnamed in every reply, the tunnel re
   const events = []
   loadBotFunctions(['oreCallout'], { ...stocked(), ORE_IDS: [4], ORE_ANNOUNCED: new Map(), sameVein, emitEvent: (kind, msg) => events.push(msg) }).oreCallout()
   assert.deepStrictEqual(events, [])
-  for (const at of [{ x: '0', y: '65', z: '-6' }, { x: '1', y: '64', z: '-3' }]) {
+  for (const at of [{ x: '0', y: '65', z: '-6' }, { x: '1', y: '64', z: '-5' }]) {
     const { handle, res } = routeHandler('/blockat', { ...stocked(), require })
     await handle({ query: at }, res)
     assert.match(res.error.message, UNSEEN)
@@ -1044,15 +1127,15 @@ test('an unlit ore and an unlit block stay unnamed in every reply, the tunnel re
   }
 })
 
-// A dark room at x 0..3 behind a closed door at x 4 and a dark corridor to x 12, with water at 3,64,0 when water is set.
+// A dark room at x 0..5 behind a closed door at x 6 and a dark corridor to x 14, with water at 5,64,0 when water is set.
 function doorRoom (door, water) {
-  const env = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 12 && x !== 4, light: () => DARK })
+  const env = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 14 && x !== 6, light: () => DARK })
   const base = env.bot.blockAt
   env.bot.blockAt = (pos) => {
     const b = base(pos)
     const { x, y, z } = b.position
-    if (x === 4 && z === 0 && (y === 64 || y === 65)) return { ...b, name: door, getProperties: () => ({ open: false }) }
-    if (water && x === 3 && y === 64 && z === 0) return { ...b, name: 'water', boundingBox: 'empty', shapes: [], getProperties: () => ({}) }
+    if (x === 6 && z === 0 && (y === 64 || y === 65)) return { ...b, name: door, getProperties: () => ({ open: false }) }
+    if (water && x === 5 && y === 64 && z === 0) return { ...b, name: 'water', boundingBox: 'empty', shapes: [], getProperties: () => ({}) }
     return b
   }
   return env
@@ -1161,6 +1244,7 @@ async function digat (env, at) {
   env.bot.pathfinder.goto = async () => { acts.push('walk') }
   Object.assign(env.bot, { equip: async () => { acts.push('equip') }, dig: async () => { acts.push('dig') }, digTime: () => 750 })
   Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, digLock: botConstant('digLock'), stopPath () {}, setTimeout, clearTimeout, PICK_TIER: botConstant('PICK_TIER'), DIG_TOOL: botConstant('DIG_TOOL') })
+  env.goals = { GoalNear: class { isEnd () { return false } } }
   const { handle, res } = routeHandler('/digat', env)
   await handle({ query: at }, res)
   return { body: res.body, error: res.error, acts }
@@ -1179,12 +1263,12 @@ test('digat digs a block in lit sight, never one seen before and dark now, aroun
   assert.deepStrictEqual(lit.acts, ['dig'])
   const remembered = cave(DARK, FAR_END)
   remembered.SEEN.add(ck(-1, 65, 0))
-  for (const [env, at] of [[cave(LIT), { x: '7', y: '66', z: '0' }], [cave(DARK, FAR_END), coal], [remembered, coal]]) {
+  for (const [env, at, acts] of [[cave(LIT), { x: '9', y: '66', z: '0' }, []], [cave(DARK, FAR_END), coal, []], [remembered, coal, ['walk']]]) {
     const r = await digat(env, at)
     assert.match(r.error.message, UNSEEN)
     assert.doesNotMatch(r.error.message, /iron|coal|ore/)
     assert.strictEqual(r.body, undefined)
-    assert.deepStrictEqual(r.acts, [], 'no walk, equip or dig')
+    assert.deepStrictEqual(r.acts, acts, 'no equip or dig, a walk only toward a remembered cell')
   }
 })
 
@@ -1192,7 +1276,7 @@ test('activate presses a block in lit sight and gives its state only while it st
   const coal = { x: '-1', y: '65', z: '0' }
   assert.deepStrictEqual((await activate(withHands(cave(LIT)), coal)).body, { activated: 'coal_ore', at: { x: -1, y: 65, z: 0 }, properties: { lit: false } }, 'control: in sight')
   assert.match((await activate(withHands(cave(DARK, FAR_END)), coal)).error.message, UNSEEN)
-  const away = await activate(withHands(cave(LIT, FAR_END), new Vec3(6.5, 64, 0.5)), coal)
+  const away = await activate(withHands(cave(LIT, FAR_END), new Vec3(8.5, 64, 0.5)), coal)
   assert.deepStrictEqual(away.body, { activated: 'coal_ore', at: { x: -1, y: 65, z: 0 } }, 'the walk went round the corner')
 })
 
@@ -1277,17 +1361,16 @@ test('activate and blockat show a bed without occupied on 1.7.10 and with it on 
   }
 })
 
-test('blockat answers the cells the body fills and touches in the dark, never a cell two away or diagonal', () => {
+test('blockat answers the cells the body fills and touches in the dark, never a cell five away or diagonal', () => {
   const blockat = (env, [x, y, z]) => {
     const { handle, res } = routeHandler('/blockat', env)
     handle({ query: { x: String(x), y: String(y), z: String(z) } }, res)
     return { body: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error }
   }
-  // A passage north through stone that ends at the feet, coal beside the feet, iron in the floor two cells
-  // ahead, diamond diagonal to the feet and open only to a pocket east of it.
+  // Coal beside the feet, iron in the floor five ahead, diamond diagonal and open only to a pocket east of it.
   const passage = (light, cells = {}) => withHands(withCells(world({
-    open: (x, y, z) => (x === 0 && z >= -3 && z <= 0 && (y === 64 || y === 65)) || (x === 2 && y === 64 && z === 1),
-    ores: { '1,64,0': 'coal_ore', '0,63,-2': 'iron_ore', '1,64,1': 'diamond_ore' },
+    open: (x, y, z) => (x === 0 && z >= -6 && z <= 0 && (y === 64 || y === 65)) || (x === 2 && y === 64 && z === 1),
+    ores: { '1,64,0': 'coal_ore', '0,63,-5': 'iron_ore', '1,64,1': 'diamond_ore' },
     light: () => light
   }), cells))
   const DOOR = { name: 'oak_door', boundingBox: 'block', light: 0 }
@@ -1299,8 +1382,8 @@ test('blockat answers the cells the body fills and touches in the dark, never a 
   }
   assert.strictEqual(blockat(doorway(DARK), [0, 64, 0]).body.name, 'oak_door', 'the door the feet stand in')
   assert.strictEqual(blockat(doorway(DARK), [1, 64, 0]).body.name, 'coal_ore', 'the wall beside the feet')
-  assert.strictEqual(blockat(passage(LIT), [0, 63, -2]).body.name, 'iron_ore', 'control: two away in the light')
-  for (const cell of [[0, 63, -2], [1, 64, 1]]) {
+  assert.strictEqual(blockat(passage(LIT), [0, 63, -5]).body.name, 'iron_ore', 'control: five away in the light')
+  for (const cell of [[0, 63, -5], [1, 64, 1]]) {
     const r = blockat(passage(DARK), cell)
     assert.match(r.error.message, UNSEEN, String(cell))
     assert.strictEqual(r.body, undefined, String(cell))
@@ -1308,11 +1391,11 @@ test('blockat answers the cells the body fills and touches in the dark, never a 
   }
 })
 
-// A corridor at z 0 from x 0 to 9 at light level light, with name in its south wall at 3,64,1, 2.6 blocks from the eye.
-const wallCell = (name, light) => withHands(world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 9 && (y === 64 || y === 65), ores: { '3,64,1': name }, light: () => light }))
+// A corridor at z 0 from x 0 to 9 at light level light, with name in its south wall at 6,64,1, 5.6 blocks from the eye.
+const wallCell = (name, light) => withHands(world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 9 && (y === 64 || y === 65), ores: { '6,64,1': name }, light: () => light }))
 
-test('blockat and digat refuse a dark wall cell within 4 blocks alike whatever it holds, and never name it', async () => {
-  const at = { x: '3', y: '64', z: '1' }
+test('blockat and digat refuse a dark wall cell past 4 blocks alike whatever it holds, and never name it', async () => {
+  const at = { x: '6', y: '64', z: '1' }
   const blockat = async (env) => {
     const { handle, res } = routeHandler('/blockat', env)
     await handle({ query: at }, res)
@@ -1359,6 +1442,14 @@ test('making out shapes, a goto precheck and a plan in the dark leave the seen c
   runRoute('/passages', { radius: '8' }, env)
   assert.deepStrictEqual([...env.SEEN].sort(), [...control.SEEN].sort())
   assert.deepStrictEqual(verdicts(env), verdicts(dark()))
+})
+
+test('the eye makes out a shape in the dark 16 blocks out, not 17', () => {
+  const env = world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 30 && (y === 64 || y === 65), light: () => DARK })
+  env.bot.entity.position = new Vec3(1, 64, 0.5)
+  const { shapeNear } = loadBotFunctions(['shapeNear'], env)
+  assert.strictEqual(shapeNear(new Vec3(17, 65, 0)), 'air')
+  assert.strictEqual(shapeNear(new Vec3(18, 65, 0)), null)
 })
 
 // env with the blocks at the 'x,y,z' keys of cells in place of its own.
@@ -1470,9 +1561,9 @@ test('the trek scans ahead along the way the body moves', async () => {
   assert.ok(ahead.z < -0.99, `moving north the scan looks north, got ${ahead}`)
 })
 
-// A one-cell shaft up to y roof - 1, then stone to y 69 and open air from y 70.
-function shaft (light, roof = 66) {
-  return world({ open: (x, y, z) => (x === 0 && z === 0 && y >= 64 && y < roof) || y >= 70, light: () => light })
+// A one-cell shaft up to y roof - 1, then stone to y sky - 1 and open air from y sky.
+function shaft (light, roof = 66, sky = 70) {
+  return world({ open: (x, y, z) => (x === 0 && z === 0 && y >= 64 && y < roof) || y >= sky, light: () => light })
 }
 
 test('overhead cover counts and tops the rock only once the sky shows, and gives no height past unseen rock', () => {
@@ -1487,7 +1578,7 @@ test('overhead cover counts and tops the rock only once the sky shows, and gives
   const [oh, phrase] = cover(shaft(LIT))
   assert.deepStrictEqual(oh, { sky: false, canopy: false, firstUp: 1 })
   assert.doesNotMatch(phrase, /cover|top|~y|69|70/)
-  assert.deepStrictEqual(cover(shaft(DARK, 68)), [{ sky: false, unseen: true }, 'Overhead unseen. '], 'rock 2.4 blocks over the eye')
+  assert.deepStrictEqual(cover(shaft(DARK, 71, 74)), [{ sky: false, unseen: true }, 'Overhead unseen. '], 'rock 5.4 blocks over the eye')
   const open = world({ open: (x, y, z) => x === 0 && z === 0 && y >= 64, light: () => LIT, skyLight: () => 15 })
   assert.deepStrictEqual(cover(open)[0], { sky: true }, 'sky light 15 at the head')
 })
@@ -1540,8 +1631,14 @@ test('the walked trail marks only what the body fills and sees by its light, nev
   assert.ok(lit.has('3,64,0') && lit.has('2,63,0'), 'control: the room and its floor in sight')
   assert.ok(!lit.has('2,64,-2') && !lit.has('1,64,-2'), 'the pocket behind the wall')
   const dark = trail(DARK)
-  assert.ok(dark.has('0,64,0') && dark.has('0,65,0') && dark.has('1,64,0'), 'the body and the cells within two blocks')
-  assert.ok(!dark.has('3,64,0') && !dark.has('2,63,0'), 'past two blocks')
+  assert.ok(dark.has('0,64,0') && dark.has('0,65,0') && dark.has('3,64,0') && dark.has('2,63,0'), 'the body and the room within four blocks')
+  // From the north-west corner of its cell, the eye is 4.5 blocks from the floor corner 3,63,3.
+  const room = world({ open: (x, y, z) => Math.abs(x) <= 4 && Math.abs(z) <= 4 && (y === 64 || y === 65), light: () => DARK })
+  room.bot.entity.position = new Vec3(0.05, 64, 0.05)
+  room.markSeen = (x, y, z) => room.SEEN.add(ck(x, y, z))
+  loadBotFunctions(['markTrail'], room).markTrail(new Vec3(0, 64, 0))
+  assert.ok(room.SEEN.has('3,63,0') && room.SEEN.has('-3,63,-3'), 'control: the floor within four blocks')
+  assert.ok(!room.SEEN.has('3,63,3'), 'past four blocks')
 })
 
 // The gaze reply of a body looking north from 0,64,0 over env, and the cells it marked seen.
@@ -1560,13 +1657,14 @@ const fartherThan = (keys, d) => [...keys].filter((k) => {
 
 const cavern = (light) => world({ open: (x, y, z) => Math.abs(x) <= 6 && Math.abs(z) <= 6 && y >= 64 && y <= 70, light: () => light })
 
-test('gaze names nothing it would see only in total darkness, and says it is too dark', () => {
+test('gaze in total darkness names only the floor within four blocks, and says it is too dark past it', () => {
   const lit = gaze(cavern(LIT))
   assert.match(lit.reply.summary, /stone/, 'control: lit')
   const dark = gaze(cavern(DARK))
-  assert.deepStrictEqual([dark.reply.surfaces, dark.reply.openings], [[], []])
-  assert.deepStrictEqual(fartherThan(dark.seen, 2), [], 'no cell past the two blocks light 0 shows')
-  assert.doesNotMatch(dark.reply.summary, /stone|coal|open space/)
+  assert.deepStrictEqual([dark.reply.surfaces.map((s) => s.name), dark.reply.openings], [['stone'], []])
+  assert.ok(dark.reply.surfaces[0].nearest <= 4, `the floor ${dark.reply.surfaces[0].nearest} out`)
+  assert.deepStrictEqual(fartherThan(dark.seen, 4), [], 'no cell past the four blocks light 0 shows')
+  assert.doesNotMatch(dark.reply.summary, /coal|open space/)
   assert.match(dark.reply.summary, /too dark to see/)
 })
 
@@ -1574,7 +1672,7 @@ test('gaze at the edge of the loaded world in the dark says too dark, not open s
   const edge = (light) => {
     const env = world({ open: () => true, light: () => light })
     const base = env.bot.blockAt
-    env.bot.blockAt = (p) => (p.z < -3 ? null : base(p))
+    env.bot.blockAt = (p) => (p.z < -6 ? null : base(p))
     return gaze(env).reply.summary
   }
   assert.match(edge(LIT), /open space/, 'control: lit')
@@ -1942,12 +2040,15 @@ test('map draws a floor changed out of sight as last seen, and the new block onc
   env.bot.blockAt = (p) => (planked.has(ck(p.x, p.y, p.z)) ? { ...base(p), name: 'oak_planks', type: 9 } : base(p))
   env.bot.registry = { blocks: { 0: { name: 'air', emitLight: 0 }, 3: { name: 'stone', emitLight: 0 }, 9: { name: 'oak_planks', emitLight: 0 } } }
   Object.assign(env, { require, SEEN_CAP: 1000, seenEdits: 0, SURFACE: new Map(), SURFACE_CAP: 1000, surfaceEdits: 0, ...stationMemory(), indoors: () => false })
-  loadBotFunctions(['markTrail'], env).markTrail(new Vec3(0, 64, 0))
-  // The glyph of column x 3, z 0.
-  const glyph = () => runRoute('/map', { radius: '4' }, env).grid.split('\n')[4][7]
+  const { markTrail, markSeen } = loadBotFunctions(['markTrail', 'markSeen'], env)
+  markTrail(new Vec3(0, 64, 0))
+  // The floor at 5,63,0 lies past the trail's box.
+  markSeen(5, 63, 0)
+  // The glyph of column x 5, z 0.
+  const glyph = () => runRoute('/map', { radius: '5' }, env).grid.split('\n')[5][10]
   assert.strictEqual(glyph(), '#', 'control: the stone floor in sight')
   light = DARK
-  planked.add('3,63,0')
+  planked.add('5,63,0')
   assert.strictEqual(glyph(), '#')
   light = LIT
   assert.strictEqual(glyph(), '=')

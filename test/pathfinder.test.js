@@ -228,13 +228,13 @@ async function knowing (pos, { open, sky = () => false, seen }) {
 }
 const cellsOf = (path) => path.map((n) => [Math.floor(n.x), Math.floor(n.y), Math.floor(n.z)])
 
-test('the pathfinder never plans through a cave the bot has not seen past 4 blocks, so an open one plans like a sealed one', async () => {
-  // Two rooms in stone at x 0 to 5 and 9 to 11, joined by a tunnel at x 6 to 8 when it is open.
-  const tunnel = (p) => p.x >= 6 && p.x <= 8 && p.z === 0 && (p.y === 64 || p.y === 65)
-  const room = (p) => p.x >= 0 && p.x <= 11 && p.z === 0 && (p.y === 64 || p.y === 65) && !tunnel(p)
+test('the pathfinder never plans through a cave the bot has not seen past 16 blocks, so an open one plans like a sealed one', async () => {
+  // Two rooms in stone at x 0 to 17 and 21 to 23, joined by a tunnel at x 18 to 20 when it is open.
+  const tunnel = (p) => p.x >= 18 && p.x <= 20 && p.z === 0 && (p.y === 64 || p.y === 65)
+  const room = (p) => p.x >= 0 && p.x <= 23 && p.z === 0 && (p.y === 64 || p.y === 65) && !tunnel(p)
   const planFor = async (open, seen) => {
     const { plan } = await knowing(START, { open: (p) => room(p) || (open && tunnel(p)), seen })
-    const r = plan(new goals.GoalBlock(10, 64, 0))
+    const r = plan(new goals.GoalBlock(22, 64, 0))
     return { status: r.status, cells: cellsOf(r.path) }
   }
   assert.strictEqual((await planFor(true, () => true)).status, 'success', 'control: a tunnel in sight')
@@ -268,12 +268,11 @@ test('the pathfinder plans over open ground the bot has not seen', async () => {
 })
 
 test('the pathfinder never plans along a sky-lit ravine floor 20 under the ground that the bot has not seen', async () => {
-  // Stone up to y 63 under open sky, cut by a ravine at x -2 to 40, z -1 to 1 down to its floor at y floor, the body on
-  // that floor having seen nothing past x 1.
+  // The goal at x 20 lies past the 16 blocks the eye makes out shapes in.
   const statusOf = async (floor) => {
     const open = (p) => p.y > 63 || (p.x >= -2 && p.x <= 40 && p.z >= -1 && p.z <= 1 && p.y > floor)
     const { plan } = await knowing(new Vec3(0.5, floor + 1, 0.5), { open, sky: open, seen: (p) => p.x <= 1 })
-    return plan(new goals.GoalBlock(8, floor + 1, 0)).status
+    return plan(new goals.GoalBlock(20, floor + 1, 0)).status
   }
   assert.strictEqual(await statusOf(53), 'success', 'control: a floor 10 under the ground')
   assert.strictEqual(await statusOf(43), 'noPath')
@@ -427,82 +426,84 @@ test('a goto out of a dark lake at midnight plans to the shore 3 and 4 blocks ou
   }
 })
 
-test('a plan in the dark takes no shore and no pit floor past 4 blocks', async () => {
+test('a plan in the dark takes no shore and no pit floor past 16 blocks', async () => {
+  const long = (c) => (c.x >= -3 && c.x <= 20 && c.y >= 64 && c.y <= 66 && Math.abs(c.z) <= 3 ? AIR : STONE)
   const far = async (seen) => {
-    const r = await midnight(new Vec3(0.5, 63, 0.5), lake(6))
-    if (seen) seeAll(r.env, [5, 61, -3], [8, 66, 3])
-    return r.plan(new goals.GoalBlock(6, 64, 0)).status
+    const r = await midnight(new Vec3(0.5, 63, 0.5), lake(18), long)
+    if (seen) seeAll(r.env, [17, 61, -3], [20, 66, 3])
+    return r.plan(new goals.GoalBlock(18, 64, 0)).status
   }
   assert.strictEqual(await far(true), 'success', 'control: the far shore seen')
   assert.strictEqual(await far(false), 'noPath')
-  // A pit at x 4 to 6 floored at y 61, its floor 5 blocks from the eye.
+  // The pit floor lies 16.2 blocks from the eye and its open top 15.9.
   const pit = {}
-  for (let x = 4; x <= 6; x++) for (let z = -1; z <= 1; z++) for (const y of [62, 63]) pit[`${x},${y},${z}`] = AIR
+  for (let x = 16; x <= 18; x++) for (let z = -1; z <= 1; z++) for (const y of [62, 63]) pit[`${x},${y},${z}`] = AIR
   const down = async (seen) => {
-    const r = await midnight(START, pit)
-    if (seen) seeAll(r.env, [4, 61, -1], [6, 63, 1])
-    return r.plan(new goals.GoalBlock(4, 62, 0)).status
+    const r = await midnight(new Vec3(0.2, 64, 0.5), pit, long)
+    if (seen) seeAll(r.env, [16, 61, -1], [18, 63, 1])
+    return r.plan(new goals.GoalBlock(16, 62, 0)).status
   }
   assert.strictEqual(await down(true), 'success', 'control: the pit floor seen')
   assert.strictEqual(await down(false), 'noPath')
 })
 
-test('the goto precheck makes out a dark corridor 4 blocks out and names its edge there', async () => {
+test('the goto precheck makes out a dark corridor 16 blocks out and names its edge there', async () => {
   const corridor = (c) => (c.z === 0 && c.x >= 0 && c.x <= 30 && (c.y === 64 || c.y === 65) ? AIR : STONE)
   const { fns, env } = await midnight(START, {}, corridor)
   seeAll(env, [19, 63, -1], [21, 65, 1])
   const { verdict, edge } = fns.airPrecheck(new Vec3(20, 64, 0), 0)
-  assert.deepStrictEqual([verdict, edge && edge.toString()], ['unseen', '(4, 64, 0)'])
+  assert.deepStrictEqual([verdict, edge && edge.toString()], ['unseen', '(16, 64, 0)'])
 })
 
 test('a closed door made out in the dark walls the plan, and the goto precheck calls the way past it unseen', async () => {
   const corridor = (c) => (c.z === 0 && c.x >= 0 && c.x <= 30 && (c.y === 64 || c.y === 65) ? AIR : STONE)
   const both = async (doorSeen) => {
-    const { plan, fns, env } = await midnight(START, { '3,64,0': door('lower'), '3,65,0': door('upper') }, corridor)
-    // The door hides the floor under it and the corridor past it.
-    seeAll(env, [3, 63, 0], [3, 63, 0])
-    seeAll(env, [4, 63, -1], [9, 66, 1])
-    if (doorSeen) seeAll(env, [3, 64, 0], [3, 65, 0])
-    return [plan(new goals.GoalBlock(8, 64, 0)).status, fns.airPrecheck(new Vec3(8, 64, 0), 0).verdict]
+    const { plan, fns, env } = await midnight(START, { '6,64,0': door('lower'), '6,65,0': door('upper') }, corridor)
+    // The door stands past the 4 blocks a dark cell shows in.
+    seeAll(env, [6, 63, 0], [6, 63, 0])
+    seeAll(env, [7, 63, -1], [12, 66, 1])
+    if (doorSeen) seeAll(env, [6, 64, 0], [6, 65, 0])
+    return [plan(new goals.GoalBlock(11, 64, 0)).status, fns.airPrecheck(new Vec3(11, 64, 0), 0).verdict]
   }
   assert.deepStrictEqual(await both(true), ['success', 'connected'], 'control: the door seen')
   assert.deepStrictEqual(await both(false), ['noPath', 'unseen'])
 })
 
-test('a goto climbs a ladder made out in the dark within 4 blocks, as one seen', async () => {
-  // A ladder shaft at 3,64..69,0 in stone under a corridor at y 70 and 71 from x 3 to 8, the body at its foot.
-  const shaft = (c) => (c.z === 0 && c.x >= 3 && c.x <= 8 && (c.y === 70 || c.y === 71) ? AIR : STONE)
-  const ladder = Object.fromEntries([64, 65, 66, 67, 68, 69].map((y) => [`3,${y},0`, ['ladder', { facing: 'west', waterlogged: 'false' }]]))
+test('a goto climbs a ladder made out in the dark within 16 blocks, as one seen', async () => {
+  // A ladder shaft at 3,64..73,0 in stone under a corridor at y 74 and 75 from x 3 to 8, the body at its foot.
+  const shaft = (c) => (c.z === 0 && c.x >= 3 && c.x <= 8 && (c.y === 74 || c.y === 75) ? AIR : STONE)
+  const ladder = Object.fromEntries([64, 65, 66, 67, 68, 69, 70, 71, 72, 73].map((y) => [`3,${y},0`, ['ladder', { facing: 'west', waterlogged: 'false' }]]))
   const both = async (ladderSeen) => {
     const { plan, fns, env } = await midnight(new Vec3(3.5, 64, 0.5), ladder, shaft)
-    // The rungs at y 68 and 69 lie 2.4 and 3.4 blocks from the eye, past the 2 blocks a dark cell shows in.
-    seeAll(env, [3, 70, 0], [3, 71, 0])
-    seeAll(env, [4, 69, -1], [8, 72, 1])
-    if (ladderSeen) seeAll(env, [3, 64, 0], [3, 69, 0])
-    return [plan(new goals.GoalBlock(6, 70, 0)).status, fns.airPrecheck(new Vec3(6, 70, 0), 0).verdict]
+    // The rungs from y 70 lie 4.4 blocks and more from the eye, past the 4 blocks a dark cell shows in.
+    seeAll(env, [3, 74, 0], [3, 75, 0])
+    seeAll(env, [4, 73, -1], [8, 76, 1])
+    if (ladderSeen) seeAll(env, [3, 64, 0], [3, 73, 0])
+    return [plan(new goals.GoalBlock(6, 74, 0)).status, fns.airPrecheck(new Vec3(6, 74, 0), 0).verdict]
   }
   assert.deepStrictEqual(await both(true), ['success', 'connected'], 'control: the ladder seen')
   assert.deepStrictEqual(await both(false), ['success', 'connected'])
 })
 
-// The plan to 4,64,0 past block in cells, the floor and x 4 to 5 seen, digging only coal ore with cage.
+// The plan to 7,64,0 past block in cells, the floor and x 7 to 8 seen, digging only coal ore with cage.
 async function planPast (cells, block, { cage = false, seen = [] } = {}) {
   const { plan, moves, fns, env } = await midnight(START, Object.fromEntries(cells.map((k) => [k, block])))
-  seeAll(env, [3, 63, -1], [3, 63, 1])
-  seeAll(env, [4, 63, -1], [5, 65, 1])
+  seeAll(env, [6, 63, -1], [6, 63, 1])
+  seeAll(env, [7, 63, -1], [8, 65, 1])
   for (const k of seen) env.SEEN.add(k)
   if (cage) {
     moves.canDig = true
     moves.blocksCantBreak = new Set(moves.bot.registry.blocksArray.filter((b) => b.name !== 'coal_ore').map((b) => b.id))
   }
-  const r = plan(new goals.GoalBlock(4, 64, 0))
+  const r = plan(new goals.GoalBlock(7, 64, 0))
   const broken = r.path.flatMap((n) => n.toBreak.map((p) => [p.x, p.y, p.z]))
   return { status: r.status, cost: r.cost, cells: cellsOf(r.path), broken, plan: summarizePlan(START, r, fns.planKnown, fns.planBlock) }
 }
 
 test('a body that may dig coal plans no dig through a wall made out in the dark, whatever the wall is', async () => {
+  // The wall at x 6, past the 4 blocks a dark cell shows in.
   const wall = []
-  for (let y = 64; y <= 66; y++) for (let z = -3; z <= 3; z++) wall.push(`3,${y},${z}`)
+  for (let y = 64; y <= 66; y++) for (let z = -3; z <= 3; z++) wall.push(`6,${y},${z}`)
   const seen = await planPast(wall, ['coal_ore', {}], { cage: true, seen: wall })
   assert.deepStrictEqual([seen.status, seen.broken.length > 0], ['success', true], 'control: a dig through the coal in sight')
   const stone = await planPast(wall, STONE, { cage: true })
@@ -511,18 +512,25 @@ test('a body that may dig coal plans no dig through a wall made out in the dark,
 })
 
 test('a plan reads cobweb, kelp and tall grass made out in the dark as unknown cells', async () => {
-  const { moves } = await midnight(START, { '3,64,1': ['cobweb', {}], '3,64,0': ['kelp', { age: 0 }], '3,64,-1': ['tall_grass', { half: 'lower' }] })
+  // At x 6, past the 4 blocks a dark cell shows in.
+  const { moves } = await midnight(START, { '6,64,1': ['cobweb', {}], '6,64,0': ['kelp', { age: 0 }], '6,64,-1': ['tall_grass', { half: 'lower' }] })
   const name = (x, y, z) => moves.getBlock(new Vec3(x, y, z), 0, 0, 0).name
-  assert.deepStrictEqual([name(3, 65, 0), name(3, 63, 0)], ['air', 'solid'], 'control: an open and a solid shape')
-  assert.deepStrictEqual([name(3, 64, 1), name(3, 64, 0), name(3, 64, -1)], ['unknown', 'unknown', 'unknown'])
+  assert.deepStrictEqual([name(6, 65, 0), name(6, 63, 0)], ['air', 'solid'], 'control: an open and a solid shape')
+  assert.deepStrictEqual([name(6, 64, 1), name(6, 64, 0), name(6, 64, -1)], ['unknown', 'unknown', 'unknown'])
 })
 
-test('a plan makes out a block in the dark across three cells of water and not across four', async () => {
+test('a plan sees a block in the dark across three cells of water, makes out one past 4 blocks, and not across four', async () => {
   // A room flooded at x -3 to 2, y 64 to 67 and z -3 to 3, the eye in its water.
   const room = (c) => (c.x >= -3 && c.x <= 2 && c.y >= 64 && c.y <= 67 && Math.abs(c.z) <= 3 ? WATER : STONE)
   const { moves } = await midnight(START, {}, room)
   const name = (x, y, z) => moves.getBlock(new Vec3(x, y, z), 0, 0, 0).name
-  assert.deepStrictEqual([name(3, 65, 0), name(3, 65, 2)], ['solid', 'unknown'])
+  assert.deepStrictEqual([name(3, 65, 0), name(3, 65, 2)], ['stone', 'unknown'])
+  // The east wall at x 5 lies 4.5 blocks from the eye.
+  const wall = async (flooded) => {
+    const { moves } = await midnight(START, {}, (c) => (c.x >= -3 && c.x <= 4 && c.y >= 64 && c.y <= 67 && Math.abs(c.z) <= 3 ? (c.x <= flooded ? WATER : AIR) : STONE))
+    return moves.getBlock(new Vec3(5, 65, 0), 0, 0, 0).name
+  }
+  assert.deepStrictEqual([await wall(2), await wall(4)], ['solid', 'unknown'])
 })
 
 const pillar = (height) => Object.fromEntries(Array.from({ length: height }, (_, i) => [`0,${64 + i},0`, STONE]))

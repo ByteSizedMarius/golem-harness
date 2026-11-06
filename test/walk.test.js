@@ -879,9 +879,9 @@ test('a retry pause never outlasts the route deadline', async () => {
 })
 
 test('the goto precheck calls a goal walled only when every cell its flood read is known, else names the unseen edge', () => {
-  // Two air rooms in stone, joined at x 6 and 7 by a tunnel when open, past the 4 blocks the bot makes out shapes in.
-  const tunnel = (p) => (p.x === 6 || p.x === 7) && p.z === 0 && (p.y === 64 || p.y === 65)
-  const room = (p) => (p.y === 64 || p.y === 65) && p.z === 0 && ((p.x >= 0 && p.x <= 5) || (p.x >= 8 && p.x <= 10))
+  // The tunnel at x 18 and 19 lies past the 16 blocks the bot makes out shapes in.
+  const tunnel = (p) => (p.x === 18 || p.x === 19) && p.z === 0 && (p.y === 64 || p.y === 65)
+  const room = (p) => (p.y === 64 || p.y === 65) && p.z === 0 && ((p.x >= 0 && p.x <= 17) || (p.x >= 20 && p.x <= 22))
   let open = false
   const env = {
     bot: { entity: { position: new Vec3(0.5, 64, 0.5) }, blockAt: (p) => (room(p) || (open && tunnel(p)) ? AIR : STONE) },
@@ -892,13 +892,13 @@ test('the goto precheck calls a goal walled only when every cell its flood read 
   }
   const { airPrecheck } = loadBotFunctions(['airPrecheck'], env)
   const precheck = () => {
-    const { verdict, edge, cells } = airPrecheck(new Vec3(9, 64, 0), 0)
+    const { verdict, edge, cells } = airPrecheck(new Vec3(21, 64, 0), 0)
     return { verdict, edge: edge && edge.toString(), cells }
   }
   assert.strictEqual(precheck().verdict, 'walled', 'control: every cell known')
-  env.cellKnown = (p) => !(p.x === 6 && p.y === 64 && p.z === 0)
+  env.cellKnown = (p) => !(p.x === 18 && p.y === 64 && p.z === 0)
   const pre = precheck()
-  assert.deepStrictEqual([pre.verdict, pre.edge], ['unseen', '(5, 64, 0)'])
+  assert.deepStrictEqual([pre.verdict, pre.edge], ['unseen', '(17, 64, 0)'])
   env.cellKnown = (p) => !tunnel(p)
   const sealed = precheck()
   open = true
@@ -925,9 +925,9 @@ test('a /goto whose known way leaves the precheck radius is walked, not refused 
 })
 
 test('a /goto walks past open ground it has not seen, and the same way under rock replies unseen-way', async () => {
-  // Seen: x -2 to 1 round the body and 9 to 12 round the goal, made out to x 4. A hill stands beside the way at x 2 to 4.
+  // The bot makes out shapes to x 16, short of the seen cells round the goal.
   const hill = (p) => p.x >= 2 && p.x <= 4 && p.z >= 2 && p.z <= 4 && p.y <= 66
-  const cellKnown = (p) => Math.abs(p.z) <= 2 && p.y >= 63 && p.y <= 67 && ((p.x >= -2 && p.x <= 1) || (p.x >= 9 && p.x <= 12))
+  const cellKnown = (p) => Math.abs(p.z) <= 2 && p.y >= 63 && p.y <= 67 && ((p.x >= -2 && p.x <= 1) || (p.x >= 21 && p.x <= 24))
   const replyFor = (underRock) => {
     const solid = (p) => p.y <= 63 || hill(p) || (underRock && p.y >= 66)
     let precheck = null
@@ -935,11 +935,11 @@ test('a /goto walks past open ground it has not seen, and the same way under roc
       bot.blockAt = (p) => ({ ...(solid(p) ? STONE : AIR), skyLight: underRock || solid(p) ? 0 : 15 })
       precheck = loadBotFunctions(['airPrecheck'], { bot, cellKnown, heldLight: (p, b) => b, ck: (x, y, z) => x + ',' + y + ',' + z, Vec3 }).airPrecheck
     }
-    return goto({ x: 10, y: 64, z: 0 }, { setup, answer: arrive, over: { cellKnown, airPrecheck: (...a) => precheck(...a) } })
+    return goto({ x: 22, y: 64, z: 0 }, { setup, answer: arrive, over: { cellKnown, airPrecheck: (...a) => precheck(...a) } })
   }
   assert.strictEqual((await replyFor(false)).arrived, true)
   const buried = await replyFor(true)
-  assert.deepStrictEqual([buried.arrived, buried.reason, buried.edge], [false, 'unseen-way', { x: 4, y: 64, z: 0 }])
+  assert.deepStrictEqual([buried.arrived, buried.reason, buried.edge], [false, 'unseen-way', { x: 16, y: 64, z: 0 }])
 })
 
 test('a /goto into a rock column beside the bot replies no-floor only when it knows the column, else unseen-way with the target as edge', async () => {
@@ -956,7 +956,7 @@ test('a /goto into a known wall cell beside a dark tunnel names the block only i
   const sides = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
   const eye = new Vec3(10.5, 16.62, -16.5)
   const gap = (v, lo) => Math.max(lo - v, 0, v - lo - 1)
-  // Unlit, the bot sees 2 blocks: open cells and blocks with an open face.
+  // The fixture sees 2 blocks: open cells and blocks with an open face.
   const dark = (p) => Math.hypot(gap(eye.x, p.x), gap(eye.y, p.y), gap(eye.z, p.z)) <= 2 &&
     (tunnel(p) || sides.some(([dx, dy, dz]) => tunnel({ x: p.x + dx, y: p.y + dy, z: p.z + dz })))
   const setup = (bot) => {
@@ -1184,27 +1184,27 @@ test('a goto without y to a seen hilltop over unseen rock walks onto it in one w
 })
 
 test('a preview through terrain the bot has not seen reports only the part it knows', async () => {
-  // The plan steps east, then drops 5 into a cave the bot never saw at x 3 and 4, short of the seen target column.
-  const cave = async () => ({ status: 'success', path: [1, 2, 3, 4, 5].map((x) => new Vec3(x + 0.5, x < 3 ? 64 : 59, 0.5)) })
-  const sight = (p) => p.x < 3 || p.x === 5
+  // The plan drops 5 into an unseen cave at x 18 and 19, past shape sight and short of the target.
+  const cave = async () => ({ status: 'success', path: Array.from({ length: 20 }, (_, i) => new Vec3(i + 1.5, i < 17 ? 64 : 59, 0.5)) })
+  const sight = (p) => p.x < 18 || p.x === 20
   const seen = { cellKnown: sight, knownCell: sight }
-  const { r, walks } = await plannedGoto({ x: 5, z: 0 }, { preview: true }, { over: { planPath: cave, ...seen } })
+  const { r, walks } = await plannedGoto({ x: 20, z: 0 }, { preview: true }, { over: { planPath: cave, ...seen } })
   assert.strictEqual(walks, 0)
-  assert.deepStrictEqual(r.target, { x: 5, y: 64, z: 0 })
-  assert.deepStrictEqual(r.plan, { reaches: null, length: 2, rise: 0, drop: 0, end: { x: 2, y: 64, z: 0 }, unseen: true })
+  assert.deepStrictEqual(r.target, { x: 20, y: 64, z: 0 })
+  assert.deepStrictEqual(r.plan, { reaches: null, length: 17, rise: 0, drop: 0, end: { x: 17, y: 64, z: 0 }, unseen: true })
   assert.ok(!JSON.stringify(r).includes('59'), 'the cave floor stays hidden')
-  const walked = await plannedGoto({ x: 5, z: 0 }, {}, { over: { planPath: cave, ...seen }, answer: arrive })
+  const walked = await plannedGoto({ x: 20, z: 0 }, {}, { over: { planPath: cave, ...seen }, answer: arrive })
   assert.deepStrictEqual([walked.walks, walked.r.reason], [1, null], 'the hidden drop raises no refusal')
 })
 
 test('a goto counts deep water only where the bot sees it now, so a lake out of sight raises no swim', async () => {
-  // A lake 3 deep at x 10 to 16 on z 0, its surface at y 63. The plan swims across it.
+  // The lake lies past the 16 blocks the bot makes out shapes in.
   const WATER = block('water', 'empty')
-  const setup = (bot) => { bot.blockAt = (p) => (p.z === 0 && p.x >= 10 && p.x <= 16 && p.y >= 61 && p.y <= 63 ? WATER : p.y <= 63 ? STONE : AIR) }
-  const across = async (g) => ({ status: 'success', path: Array.from({ length: 20 }, (_, i) => new Vec3(i + 1.5, i >= 9 && i <= 15 ? 63 : 64, 0.5)).concat([new Vec3(g.x + 0.5, g.y, g.z + 0.5)]) })
-  const lit = await plannedGoto({ x: 20, z: 0 }, {}, { setup, over: { planPath: across }, answer: arrive })
+  const setup = (bot) => { bot.blockAt = (p) => (p.z === 0 && p.x >= 20 && p.x <= 26 && p.y >= 61 && p.y <= 63 ? WATER : p.y <= 63 ? STONE : AIR) }
+  const across = async (g) => ({ status: 'success', path: Array.from({ length: 30 }, (_, i) => new Vec3(i + 1.5, i >= 19 && i <= 25 ? 63 : 64, 0.5)).concat([new Vec3(g.x + 0.5, g.y, g.z + 0.5)]) })
+  const lit = await plannedGoto({ x: 30, z: 0 }, {}, { setup, over: { planPath: across }, answer: arrive })
   assert.deepStrictEqual([lit.walks, lit.r.reason, lit.r.risk], [0, 'risky', 'it swims 7 blocks of deep water'], 'control: the lake in sight')
-  const dark = await plannedGoto({ x: 20, z: 0 }, {}, { setup, over: { planPath: across, seenNow: (p) => p.x < 3 }, answer: arrive })
+  const dark = await plannedGoto({ x: 30, z: 0 }, {}, { setup, over: { planPath: across, seenNow: (p) => p.x < 3 }, answer: arrive })
   assert.deepStrictEqual([dark.walks, dark.r.reason, dark.r.risk], [1, null, undefined])
 })
 

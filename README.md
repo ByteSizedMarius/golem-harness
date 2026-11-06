@@ -250,8 +250,8 @@ distance and screen position, and misses become open space.
 
 Everywhere, a bare name means seen: in lit sight now or when the bot looked earlier. `?` or silence
 means unseen. A dark cave around the corner stays unknown even though the raw API knows it. Full
-light (level 7 and up) lets sight reach as far as the line of sight does. In the dark it shrinks
-from 24 blocks at level 6 to 2 at level 0. A player's nametag shows through walls within 64 blocks
+light (level 6 and up) lets sight reach as far as the line of sight does. In the dark it shrinks
+from 24 blocks at level 5 to 4 at level 0. A player's nametag shows through walls within 64 blocks
 unless they sneak or are invisible, as in the game.
 
 There is no camera. The model works from text.

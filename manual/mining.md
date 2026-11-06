@@ -11,7 +11,7 @@
 - Go down with `dig_stair` and save a waypoint at its foot. That cell is the hub.
 - Dig each branch 16 to 24 long with `dig_tunnel`, then walk back to the main tunnel.
 - Stay within a set range of the hub.
-- Leave `dig_tunnel`'s `torch` on. Ore in a tunnel wall shows only in light.
+- Leave `dig_tunnel`'s `torch` on. Ore in a dark tunnel wall shows only within 4 blocks.
 
 ## Digging
 

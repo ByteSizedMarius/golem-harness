@@ -936,24 +936,24 @@ const HELD_TYPES = { air: 0, stone: 1, diamond_ore: 2 }
 const heldBlock = (name, p) => ({ name, type: HELD_TYPES[name], boundingBox: name === 'air' ? 'empty' : 'block', position: p, light: 0, skyLight: 0, getProperties: () => ({}) })
 
 // A walled stone platform, roofed when asked, where every cell holds light 0 and sky light 0.
-function heldPlatformRig (roofed) {
+function heldPlatformRig (roofed, z = 1.5) {
   const solid = (x, y, z) => Math.abs(x) <= 4 && Math.abs(z) <= 4 &&
     (y === 63 || (roofed && y === 66) || ((Math.abs(x) === 4 || Math.abs(z) === 4) && (y === 64 || y === 65)))
   const blockAt = (pos) => {
     const p = pos.floored()
     return heldBlock(solid(p.x, p.y, p.z) ? 'stone' : 'air', p)
   }
-  return heldRig(body(0.5, 64, 1.5), blockAt, ['0,64,-2'])
+  return heldRig(body(0.5, 64, z), blockAt, ['0,64,-2'])
 }
 
-// A dark corridor along z 0 with name in its south wall at 3,64,1, 2.6 blocks from the eye, and 3,64,0 seen.
+// A dark corridor along z 0 with name in its south wall at 6,64,1, 5.6 blocks from the eye, and 6,64,0 seen.
 function darkWallRig (name, entity = body(0.5, 64, 0.5)) {
   const blockAt = (pos) => {
     const p = pos.floored()
     const open = p.z === 0 && p.x >= -1 && p.x <= 9 && (p.y === 64 || p.y === 65)
-    return heldBlock(p.x === 3 && p.y === 64 && p.z === 1 ? name : open ? 'air' : 'stone', p)
+    return heldBlock(p.x === 6 && p.y === 64 && p.z === 1 ? name : open ? 'air' : 'stone', p)
   }
-  return heldRig(entity, blockAt, ['3,64,0'])
+  return heldRig(entity, blockAt, ['6,64,0'])
 }
 
 // placingEnv over blockAt with one cobblestone, SEEN starting as seen.
@@ -990,27 +990,55 @@ function heldRig (entity, blockAt, seen) {
   return { env: blockWorld(env), placed }
 }
 
-test('placeitem goes against a floor in open sky that the client holds no sky light for, never one in a dark room', async () => {
+test('placeitem goes against a floor 3 blocks out in open sky that the client holds no sky light for, and in a dark room', async () => {
   const at = { x: '0', y: '64', z: '-2', name: 'cobblestone' }
-  const open = heldPlatformRig(false)
+  for (const roof of [false, true]) {
+    const rig = heldPlatformRig(roof)
+    await awaitRoute('/placeitem', at, rig.env)
+    assert.deepStrictEqual(rig.placed, ['0,63,-2 face 0,1,0'], `roofed ${roof}`)
+  }
+})
+
+test('placeitem walks to and goes against a floor 4.8 blocks out in open sky that the client holds no sky light for, never one in a dark room', async () => {
+  const at = { x: '0', y: '64', z: '-2', name: 'cobblestone' }
+  // The floor at 0,63,-2 lies 4.78 blocks from the eye.
+  const far = (roofed) => {
+    const rig = heldPlatformRig(roofed, 3.5)
+    const walks = []
+    Object.assign(rig.env, {
+      walkRoute: () => ({ end () {} }),
+      planPath: async () => ({ status: 'success', path: [new Vec3(0.5, 64, 2.5), new Vec3(0.5, 64, 1.5)] }),
+      routeEnd: () => null,
+      planKnown: () => true,
+      summarizePlan,
+      PLACE_WALK_MAX: botConstant('PLACE_WALK_MAX'),
+      DROP_MAX
+    })
+    rig.env.bot.pathfinder.goto = async (g) => {
+      walks.push(`${g.x},${g.y},${g.z}`)
+      rig.env.bot.entity.position = new Vec3(0.5, 64, 1.5)
+    }
+    return { ...rig, walks }
+  }
+  const open = far(false)
   await awaitRoute('/placeitem', at, open.env)
-  assert.deepStrictEqual(open.placed, ['0,63,-2 face 0,1,0'])
-  const roofed = heldPlatformRig(true)
+  assert.deepStrictEqual([open.walks, open.placed], [['0,64,-2'], ['0,63,-2 face 0,1,0']])
+  const roofed = far(true)
   const { handle, res } = routeHandler('/placeitem', roofed.env)
   await handle({ query: at }, res)
   assert.strictEqual(res.error && res.error.message, 'nothing solid I can see below or beside the target to place against')
-  assert.deepStrictEqual(roofed.placed, [])
+  assert.deepStrictEqual([roofed.walks, roofed.placed], [[], []])
 })
 
-test('placeitem at or against a dark wall cell within 4 blocks refuses alike whatever it holds, and never names it', async () => {
+test('placeitem at or against a dark wall cell past 4 blocks refuses alike whatever it holds, and never names it', async () => {
   const refusal = async (rig, x, y, z) => {
     const { handle, res } = routeHandler('/placeitem', rig.env)
     await handle({ query: { x: String(x), y: String(y), z: String(z), name: 'cobblestone' } }, res)
     assert.deepStrictEqual(rig.placed, [])
     return res.error && res.error.message
   }
-  assert.match(await refusal(darkWallRig('diamond_ore', body(3.5, 64, 0.5)), 3, 64, 1), /diamond_ore/, 'control: the cell beside the body')
-  for (const [x, y, z] of [[3, 64, 1], [3, 64, 0]]) {
+  assert.match(await refusal(darkWallRig('diamond_ore', body(6.5, 64, 0.5)), 6, 64, 1), /diamond_ore/, 'control: the cell beside the body')
+  for (const [x, y, z] of [[6, 64, 1], [6, 64, 0]]) {
     const stone = await refusal(darkWallRig('stone'), x, y, z)
     assert.doesNotMatch(String(stone), /stone|diamond|ore|undefined/)
     assert.strictEqual(await refusal(darkWallRig('diamond_ore'), x, y, z), stone)

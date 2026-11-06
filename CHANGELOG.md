@@ -4,6 +4,15 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-07: the bot sees farther in the dark and at night
+
+The bot's sight in the dark was tighter than a player's: 2 blocks at light 0, 12 on open ground at
+midnight, and shapes only within 4. Screenshots from a 1.7.10 client at medium brightness showed a
+dark face as bright 32 blocks out as 2 blocks out, and moonlit open ground as bright as a hall at
+block light 6. A thing now shows 4, 4, 6, 8, 16 and 24 blocks out at light 0 to 5 and at any
+distance from light 6, open ground at midnight shows at any distance, and in the dark the bot
+makes out air, water and solid within 16 blocks.
+
 ## 2026-11-06: todo items and waypoint notes hold 400 characters
 
 A 243-character todo item was refused at the 200 cap, and long waypoint notes were cut, so the
