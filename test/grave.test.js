@@ -56,7 +56,6 @@ function graveEnv (window, { hidden = false, graves = true } = {}) {
     bot: {
       entity: { position: new Vec3(0.5, 64, 0.5) },
       blockAt: (p) => (p.equals(AT) ? grave : { name: 'air', type: 0, position: p }),
-      findBlocks: ({ matching }) => (matching.includes(GRAVE_ID) ? [AT] : []),
       pathfinder: { goto: async () => {} },
       _client: { write () {} },
       // mineflayer opens a block with a block_place.
@@ -73,6 +72,7 @@ function graveEnv (window, { hidden = false, graves = true } = {}) {
     ...timers,
     stackPause: async () => {},
     shared: { mcData: { blocksByName: graves ? { [GRAVESTONE]: { id: GRAVE_ID, name: GRAVESTONE } } : {} }, ready: true },
+    nearestCells: (matching, point, maxDist, sight, deadline, visit) => { if (matching.includes(GRAVE_ID)) visit(AT) },
     lightReach: () => Infinity,
     seesLit: (p) => !(hidden && p.x === AT.x && p.y === AT.y && p.z === AT.z),
     leafInTheWay: () => null,

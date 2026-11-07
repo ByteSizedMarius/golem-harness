@@ -4,10 +4,12 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
+const WorldSync = require('prismarine-world/src/worldsync')
 const { awaitRoute, routeHandler, botConstant, claimRescue, fakeClock } = require('./helpers')
 
 const AT = { x: '1', y: '64', z: '0' }
-const AIR = { name: 'air', stateId: 0 }
+const AIR = { name: 'air', stateId: 0, shapes: [] }
+const STONE = { name: 'stone', stateId: 1, shapes: [[0, 0, 0, 1, 1, 1]] }
 const block = (state, position) => ({
   ...state,
   position,
@@ -77,6 +79,35 @@ test('use states what the cell holds now only while the walk into reach left it 
       else if (tills) assert.deepStrictEqual([reply.now, reply.ok], ['farmland', undefined], label)
       else assert.deepStrictEqual([reply.now, reply.ok, typeof reply.reason], ['dirt', false, 'string'], label)
     }
+  }
+})
+
+test('use clears the goal of a walk into reach that ends short of the cell', async () => {
+  for (const end of ['NoPath', 'Timeout', 'an empty plan']) {
+    const pathfinder = {
+      goal: null,
+      setGoal (goal) { pathfinder.goal = goal },
+      stop () {},
+      isMoving: () => false,
+      async goto (goal) {
+        pathfinder.goal = goal
+        if (end !== 'an empty plan') throw Object.assign(new Error(end), { name: end })
+      }
+    }
+    const bot = Object.assign(new EventEmitter(), {
+      entity: { position: new Vec3(0.5, 64, 0.5) },
+      heldItem: { name: 'iron_hoe' },
+      inventory: { items: () => [] },
+      blockAt: (p) => block({ name: 'dirt', stateId: 1 }, p),
+      pathfinder,
+      lookAt: async () => {},
+      activateBlock: async () => {}
+    })
+    const env = { bot, Vec3, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, goals: { GoalNear: class {} }, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {} }
+    const { handle, res } = routeHandler('/use', env)
+    await handle({ query: { x: '9', y: '63', z: '0' } }, res)
+    if (end !== 'an empty plan') assert.strictEqual(res.error && res.error.name, end)
+    assert.strictEqual(pathfinder.goal, null, end)
   }
 })
 
@@ -158,7 +189,20 @@ test('bone meal on a sapling the server left as it was replies ok with its stage
   assert.strictEqual(typeof reply.note, 'string')
 })
 
-// Runs /use on a fake clock with hand in hotbar slot 36 beside cell, the server ticking every 50 ms unless ticks is false.
+// Runs /use on query, advancing clock 10 ms at a time until it replies.
+async function useOnClock (clock, env, query) {
+  const { handle, res } = routeHandler('/use', env)
+  const done = handle({ query }, res)
+  while (res.body === undefined && res.error === undefined && clock.now() < 10000) {
+    await new Promise(setImmediate)
+    clock.advance(10)
+  }
+  const ms = clock.now()
+  await done
+  return { res, ms }
+}
+
+// Runs /use on a fake clock with hand in hotbar slot 36 beside cell over a stone floor, the server ticking every 50 ms unless ticks is false.
 // After the click the hand's slot turns to turned at turnMs, the cell to after at blockMs, and a reflex selects slot 37
 // holding swap at swapMs, each when given. Returns the reply and the ms it took.
 async function bucketUse (cell, hand, { turned = null, turnMs = 0, after = null, blockMs = 0, swap = null, swapMs = 0, ticks = true } = {}) {
@@ -168,12 +212,14 @@ async function bucketUse (cell, hand, { turned = null, turnMs = 0, after = null,
   const inventory = Object.assign(new EventEmitter(), { hotbarStart: 36, slots: [], items: () => [] })
   inventory.slots[36] = hand
   inventory.slots[37] = swap
+  const blockAt = (at) => block(at.equals(p) ? now : at.y < p.y ? STONE : AIR, at)
   const bot = Object.assign(new EventEmitter(), {
     entity: { position: new Vec3(0.5, 64, 0.5) },
     inventory,
     quickBarSlot: 0,
     time: { age: 0 },
-    blockAt: (at) => block(at.equals(p) ? now : AIR, at),
+    blockAt,
+    world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: blockAt }, ray) },
     pathfinder: { goto: async () => {} },
     lookAt: async () => {},
     activateItem () {
@@ -204,22 +250,17 @@ async function bucketUse (cell, hand, { turned = null, turnMs = 0, after = null,
     Date: { now: clock.now },
     BUCKET_WAIT_MS: botConstant('BUCKET_WAIT_MS'),
     BUCKET_WAIT_CAP_MS: botConstant('BUCKET_WAIT_CAP_MS'),
+    POUR_REACH: botConstant('POUR_REACH'),
+    POUR_FACES: botConstant('POUR_FACES'),
     ok: (res, body) => { res.body = { ok: true, ...body } }
   }
-  const { handle, res } = routeHandler('/use', env)
-  const done = handle({ query: AT }, res)
-  while (res.body === undefined && res.error === undefined && clock.now() < 10000) {
-    await new Promise(setImmediate)
-    clock.advance(10)
-  }
-  const ms = clock.now()
-  await done
+  const { res, ms } = await useOnClock(clock, env, AT)
   assert.strictEqual(res.error, undefined, res.error && res.error.message)
   return { reply: res.body, ms }
 }
 
-const WATER = { name: 'water', stateId: 86 }
-const LAVA = { name: 'lava', stateId: 102 }
+const WATER = { name: 'water', stateId: 86, shapes: [] }
+const LAVA = { name: 'lava', stateId: 102, shapes: [] }
 
 test('a bucket use counts as done once the bucket in hand turns, before the cell\'s late update', async () => {
   const late = { turnMs: 900, blockMs: 1500 }
@@ -267,6 +308,123 @@ test('a bucket on grass, a flower or a torch uses the item, other items click th
       assert.deepStrictEqual(await clicksOn(cell, bucket), ['item'], `${bucket} on ${cell}`)
     }
   }
+})
+
+// The step from a block across each prismarine-world face id.
+const FACE_STEP = { 0: [0, -1, 0], 1: [0, 1, 0], 2: [0, 0, -1], 3: [0, 0, 1], 4: [-1, 0, 0], 5: [1, 0, 0] }
+// The survival block reach of a 1.21.11 server.
+const SERVER_REACH = 4.5
+
+// Runs /use with hand on at, and the fake server pours across the face the last look's ray meets first within SERVER_REACH.
+// A cell for which hidden(key, feet) is true is unseen and unknown.
+async function pourAt (at, { hand = 'water_bucket', feet = new Vec3(0.5, 64, 0.5), cells = {}, hidden = () => false, walkTo = feet } = {}) {
+  const clock = fakeClock()
+  const key = (c) => `${c.x},${c.y},${c.z}`
+  const world = { ...cells }
+  const looks = []
+  const walks = []
+  let poured = null
+  const inventory = Object.assign(new EventEmitter(), { hotbarStart: 36, slots: [], items: () => [] })
+  inventory.slots[36] = { name: hand, count: 1 }
+  const blockAt = (c) => block(world[key(c)] || (c.y <= 63 ? STONE : AIR), c)
+  const bot = Object.assign(new EventEmitter(), {
+    entity: { position: feet },
+    inventory,
+    heldItem: inventory.slots[36],
+    quickBarSlot: 0,
+    time: { age: 0 },
+    blockAt,
+    world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: blockAt }, ray) },
+    pathfinder: { goto: async (goal) => { walks.push(goal); bot.entity.position = walkTo } },
+    lookAt: async (point) => { looks.push(point) },
+    activateItem () {
+      if (hand === 'bucket') return
+      const eye = bot.entity.position.offset(0, 1.62, 0)
+      const hit = bot.world.raycast(eye, looks.at(-1).minus(eye).normalize(), SERVER_REACH)
+      if (!hit) return
+      const into = hit.position.offset(...FACE_STEP[hit.face])
+      clock.setTimeout(() => {
+        const old = blockAt(into)
+        world[key(into)] = WATER
+        poured = key(into)
+        bot.emit('blockUpdate', old, blockAt(into))
+        const full = inventory.slots[36]
+        inventory.slots[36] = { name: 'bucket', count: 1 }
+        inventory.emit('updateSlot', 36, full, inventory.slots[36])
+      }, 100)
+    },
+    deactivateItem () {}
+  })
+  clock.setInterval(() => { bot.time.age++; bot.emit('time') }, 50)
+  const seen = (c) => !hidden(key(c), bot.entity.position)
+  const env = {
+    bot,
+    Vec3,
+    seesLit: seen,
+    cellKnown: seen,
+    leafInTheWay: () => null,
+    goals: { GoalNear: class { constructor (x, y, z, range) { Object.assign(this, { x, y, z, range }) } } },
+    round: (v) => v,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    Date: { now: clock.now },
+    BUCKET_WAIT_MS: botConstant('BUCKET_WAIT_MS'),
+    BUCKET_WAIT_CAP_MS: botConstant('BUCKET_WAIT_CAP_MS'),
+    POUR_REACH: botConstant('POUR_REACH'),
+    POUR_FACES: botConstant('POUR_FACES'),
+    ok: (res, body) => { res.body = { ok: true, ...body } }
+  }
+  const { res } = await useOnClock(clock, env, { x: String(at.x), y: String(at.y), z: String(at.z) })
+  return { reply: res.body, refusal: res.error && res.error.message, looks, walks, poured }
+}
+
+test('a pour into an air cell over stone looks at the middle of the stone\'s top face', async () => {
+  const { looks, poured } = await pourAt(new Vec3(1, 64, 0))
+  assert.deepStrictEqual(looks, [new Vec3(1.5, 64, 0.5)])
+  assert.strictEqual(poured, '1,64,0')
+})
+
+test('a pour into a floor cell 4.15 from the eye lands in that cell, not one past it', async () => {
+  const { reply, poured } = await pourAt(new Vec3(4, 64, 0))
+  assert.deepStrictEqual([reply.ok, reply.now, poured], [true, 'water', '4,64,0'])
+})
+
+test('a pour into the cell on top of a 1-high block aims at that block\'s top face', async () => {
+  const { reply, looks, poured } = await pourAt(new Vec3(3, 65, 0), { cells: { '3,64,0': STONE } })
+  assert.deepStrictEqual(looks, [new Vec3(3.5, 65, 0.5)])
+  assert.deepStrictEqual([reply.ok, poured], [true, '3,65,0'])
+})
+
+test('a pour against a side face aims at its middle when the cell has no floor', async () => {
+  const { reply, looks, poured } = await pourAt(new Vec3(1, 65, 0), { cells: { '1,64,0': AIR, '2,65,0': STONE } })
+  assert.deepStrictEqual(looks, [new Vec3(2, 65.5, 0.5)])
+  assert.deepStrictEqual([reply.ok, poured], [true, '1,65,0'])
+})
+
+test('a pour into air with nothing beside it to rest against refuses naming the cell, walks nowhere and pours nothing', async () => {
+  const { refusal, looks, walks, poured } = await pourAt(new Vec3(1, 66, 0))
+  assert.match(refusal || '', /1,66,0/)
+  assert.deepStrictEqual([looks, walks.length, poured], [[], 0, null])
+})
+
+test('a pour whose floor is unseen from here walks, then pours once the walk brings the floor into sight', async () => {
+  const start = new Vec3(0.5, 64, 0.5)
+  const hidden = (k, feet) => k === '1,63,0' && feet.equals(start)
+  const { reply, looks, walks, poured } = await pourAt(new Vec3(1, 64, 0), { feet: start, hidden, walkTo: new Vec3(2.5, 64, 0.5) })
+  assert.strictEqual(walks.length, 1)
+  assert.deepStrictEqual(looks, [new Vec3(1.5, 64, 0.5)])
+  assert.deepStrictEqual([reply.ok, poured], [true, '1,64,0'])
+})
+
+test('a pour whose floor stays unseen after the walk refuses naming the cell and pours nothing', async () => {
+  const { refusal, looks, walks, poured } = await pourAt(new Vec3(1, 64, 0), { hidden: (k) => k === '1,63,0', walkTo: new Vec3(2.5, 64, 0.5) })
+  assert.match(refusal || '', /1,64,0/)
+  assert.deepStrictEqual([looks, walks.length, poured], [[], 1, null])
+})
+
+test('a fill from a water source still looks at the source\'s middle', async () => {
+  const { looks } = await pourAt(new Vec3(1, 64, 0), { hand: 'bucket', cells: { '1,64,0': WATER } })
+  assert.deepStrictEqual(looks, [new Vec3(1.5, 64.5, 0.5)])
 })
 
 // A body holding an iron shovel beside a seen dirt cell at 1,64,0, an iron hoe in its pockets, over digLock. done records walks, looks, equips and clicks.

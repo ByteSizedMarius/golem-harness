@@ -7,7 +7,6 @@ const { Vec3 } = require('vec3')
 const { goals, Movements, startCell } = require('mineflayer-pathfinder')
 const registry = require('prismarine-registry')('1.21.11')
 const Block = require('prismarine-block')(registry)
-const movements = new Movements({ registry })
 const { HUNG, botConstant, loadBotFunctions, routeHandler, waitFor, timed } = require('./helpers')
 const { entityInCell } = require('../lib/shelter')
 
@@ -15,10 +14,12 @@ const noPath = () => Object.assign(new Error('No path to the goal!'), { name: 'N
 
 // A cave of stone under y 64 and air above, with blocks at the given 'x,y,z' cells, each a name or [name, properties].
 // The bot sees and knows every cell but the unseen ones.
-function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = {} } = {}) {
+// Each walk ends in the nearest goal cell within 2 of the body, on its level or one below.
+function cave (pos, blocks, { unseen = [], own = [], hold = false, stuck = false, query = {} } = {}) {
   const cells = new Map(Object.entries(blocks))
   const digs = []
   const releases = []
+  const walks = []
   const blockAt = (p) => {
     const c = p.floored()
     const [name, props] = [].concat(cells.get(`${c.x},${c.y},${c.z}`) || (c.y < 64 ? 'stone' : 'air'))
@@ -26,6 +27,7 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = 
     return Object.assign(b, { position: c })
   }
   const bot = Object.assign(new EventEmitter(), {
+    registry,
     entity: { position: pos, width: 0.6, height: 1.8 },
     heldItem: null,
     inventory: { items: () => [] },
@@ -42,22 +44,35 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = 
       }
     },
     pathfinder: {
-      movements,
       startCell: (p) => startCell(bot, p),
+      goal: null,
+      setGoal (goal) {
+        walks.push(`setGoal ${goal}`)
+        bot.pathfinder.goal = goal
+      },
       async goto (goal) {
+        walks.push('goto')
+        bot.pathfinder.goal = goal
         const here = bot.entity.position
-        if (stuck || goal.isEnd(here.floored())) return
+        if (stuck) return
+        if (goal.isEnd(here.floored())) {
+          bot.pathfinder.goal = null
+          return
+        }
         const open = (c) => blockAt(c).shapes.length === 0
         const ends = []
         for (let x = -2; x <= 2; x++) {
           for (let z = -2; z <= 2; z++) {
-            const c = here.floored().offset(x, 0, z)
-            if (open(c) && open(c.offset(0, 1, 0)) && goal.isEnd(c)) ends.push(c)
+            for (const dy of [0, -1]) {
+              const c = here.floored().offset(x, dy, z)
+              if (open(c) && open(c.offset(0, 1, 0)) && goal.isEnd(c)) ends.push(c)
+            }
           }
         }
         const end = ends.sort((a, b) => a.distanceTo(here) - b.distanceTo(here))[0]
         if (!end) throw noPath()
         bot.entity.position = end.offset(0.5, 0, 0.5)
+        bot.pathfinder.goal = null
       }
     },
     async dig (b) {
@@ -68,6 +83,8 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = 
     }
   })
   const known = (p) => !unseen.includes(`${p.x},${p.y},${p.z}`)
+  const ck = (x, y, z) => `${x},${y},${z}`
+  bot.pathfinder.movements = loadBotFunctions(['knownMoves'], { bot, ck, PLAN_KNOWN: new Map(), planKnown: known }).knownMoves(new Movements(bot))
   const { bodyTouches } = loadBotFunctions(['bodyTouches'], { bot })
   const env = {
     bot,
@@ -83,13 +100,15 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = 
     leafInTheWay: () => null,
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     refuseWhileFighting () {},
-    stopPath () {},
+    stopPath () { bot.pathfinder.setGoal(null) },
     holdHand: () => ({ renew: () => true }),
     endHand () {},
     holdDigTool: async () => {},
     holdHarvester: async () => null,
     neededPickTier: () => 0,
-    PICK_TIER: {}
+    PICK_TIER: {},
+    ck,
+    recentOwnEdits: new Map(own.map((k) => [k, Date.now()]))
   }
   const digat = (at) => {
     const { handle } = routeHandler('/digat', env)
@@ -121,7 +140,7 @@ function cave (pos, blocks, { unseen = [], hold = false, stuck = false, query = 
     await handle({ query: { name, count: String(count) } }, res)
     return { error: res.error, reply: res.body }
   }
-  return { digat, mine, digs, releases, digLock: env.digLock, bot, env }
+  return { digat, mine, digs, releases, walks, digLock: env.digLock, bot, env }
 }
 
 async function digOnce (pos, blocks, at, opts) {
@@ -293,6 +312,252 @@ test('a digat taken over during its tool equip names the taker before the next e
   assert.strictEqual(run.res.error && run.res.error.message, 'the buried self-rescue took over digat stone at 1,65,0, nothing dug')
   assert.deepStrictEqual(equips, ['tool'])
   assert.deepStrictEqual(w.digs, [])
+})
+
+test('digat of a cell seen from beyond reach digs nothing when its walk closer ends where that cell is out of sight', async () => {
+  const p = new Vec3(5, 64, 0)
+  for (const after of ['seen', 'unseen']) {
+    const w = cave(UNDER, { '5,64,0': 'stone' })
+    const seenNow = w.env.seenNow
+    w.env.seenNow = (c) => (after === 'seen' || !c.equals(p) || !w.walks.length) && seenNow(c)
+    const { res, done } = w.digat('5,64,0')
+    await done
+    const out = { error: res.error && res.error.message, digs: w.digs, walks: w.walks }
+    const want = after === 'seen'
+      ? { error: undefined, digs: ['5,64,0 from (2, 64, 0)'], walks: ['goto'] }
+      : { error: 'not in my sight, blocked or unlit: walk closer, clear the view or light it', digs: [], walks: ['goto'] }
+    assert.deepStrictEqual(out, want, after)
+  }
+})
+
+// A trench the bot dug in the floor east of the body at UNDER.
+const TRENCH = ['1,63,0', '2,63,0', '3,63,0']
+const DUG = Object.fromEntries(TRENCH.map((k) => [k, 'air']))
+
+test('digat walks to a cell beside the trench it dug, not into the trench', async () => {
+  const w = cave(UNDER, DUG, { own: TRENCH })
+  const { res, done } = w.digat('4,63,0')
+  await done
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(w.digs, ['4,63,0 from (2, 64, 0)'])
+})
+
+const WALLED = { ...DUG, ...Object.fromEntries([-2, -1, 0, 1, 2].map((z) => [`2,64,${z}`, 'cobblestone'])) }
+
+test('digat walks into the trench it dug when no other cell in reach has a path, clearing the goal between the walks', async () => {
+  for (const first of ['no path', 'an empty plan']) {
+    const w = cave(UNDER, WALLED, { own: TRENCH })
+    const walk = w.bot.pathfinder.goto
+    // The empty plan comes from a search that met the trench cell.
+    if (first === 'an empty plan') {
+      w.bot.pathfinder.goto = async (goal) => {
+        if (w.walks.length) return walk(goal)
+        w.walks.push('goto')
+        w.bot.pathfinder.goal = goal
+        goal.isEnd(new Vec3(1, 63, 0))
+      }
+    }
+    const { res, done } = w.digat('4,63,0')
+    await done
+    assert.strictEqual(res.error, undefined, `${first}: ${res.error && res.error.message}`)
+    assert.deepStrictEqual(w.digs, ['4,63,0 from (1, 63, 0)'], first)
+    assert.deepStrictEqual(w.walks, ['goto', 'setGoal null', 'goto'], first)
+  }
+})
+
+test('digat whose walk met no cell it dug and found no path walks once, clears its goal and digs nothing', async () => {
+  const w = cave(UNDER, DUG)
+  w.bot.pathfinder.goto = async (goal) => {
+    w.walks.push('goto')
+    w.bot.pathfinder.goal = goal
+    throw noPath()
+  }
+  const { res, done } = w.digat('4,63,0')
+  await done
+  assert.match(res.error && res.error.message, /No path/)
+  assert.deepStrictEqual(w.digs, [])
+  assert.deepStrictEqual(w.walks, ['goto', 'setGoal null'])
+  assert.strictEqual(w.bot.pathfinder.goal, null)
+})
+
+test('digat whose walk ends on an empty plan clears its goal', async () => {
+  const w = cave(UNDER, { '6,65,0': 'stone' }, { stuck: true })
+  const { done } = w.digat('6,65,0')
+  await done
+  assert.deepStrictEqual(w.walks, ['goto', 'setGoal null'])
+  assert.strictEqual(w.bot.pathfinder.goal, null)
+})
+
+test('digat clears the goal of its walk into the trench when that walk ends short of it', async () => {
+  for (const end of ['no path', 'an empty plan']) {
+    const w = cave(UNDER, WALLED, { own: TRENCH })
+    const walk = w.bot.pathfinder.goto
+    w.bot.pathfinder.goto = async (goal) => {
+      if (!w.walks.length) return walk(goal)
+      w.walks.push('goto')
+      w.bot.pathfinder.goal = goal
+      if (end === 'no path') throw noPath()
+    }
+    const { done } = w.digat('4,63,0')
+    await done
+    assert.deepStrictEqual(w.walks, ['goto', 'setGoal null', 'goto', 'setGoal null'], end)
+    assert.strictEqual(w.bot.pathfinder.goal, null, end)
+  }
+})
+
+// The stall watch stops the walk before it rejects.
+const WALK_FAILS = {
+  'a timeout': () => Object.assign(new Error('Took to long to decide path to goal!'), { name: 'Timeout' }),
+  'a search that outlasted the think timeout': (w) => {
+    w.bot.pathfinder.setGoal(null)
+    return Object.assign(new Error('stalled at 0,64,0'), { reason: 'stalled', planning: true })
+  }
+}
+
+test('digat whose walk beside the trench ends in a body stall stops there and digs nothing', async () => {
+  const w = cave(UNDER, WALLED, { own: TRENCH })
+  w.bot.pathfinder.goto = async (goal) => {
+    w.walks.push('goto')
+    w.bot.pathfinder.goal = goal
+    goal.isEnd(new Vec3(1, 63, 0))
+    w.bot.pathfinder.setGoal(null)
+    throw Object.assign(new Error('stalled at 0,64,0'), { reason: 'stalled' })
+  }
+  const { res, done } = w.digat('4,63,0')
+  await done
+  assert.strictEqual(res.error && res.error.message, 'stalled at 0,64,0')
+  assert.deepStrictEqual(w.digs, [])
+  assert.deepStrictEqual(w.walks, ['goto', 'setGoal null'])
+})
+
+for (const [first, fail] of Object.entries(WALK_FAILS)) {
+  test(`digat walks into the trench it dug when the walk beside it ends in ${first}`, async () => {
+    const w = cave(UNDER, WALLED, { own: TRENCH })
+    const walk = w.bot.pathfinder.goto
+    // The failed search met the trench cell.
+    w.bot.pathfinder.goto = async (goal) => {
+      if (w.walks.length) return walk(goal)
+      w.walks.push('goto')
+      w.bot.pathfinder.goal = goal
+      goal.isEnd(new Vec3(1, 63, 0))
+      throw fail(w)
+    }
+    const { res, done } = w.digat('4,63,0')
+    await done
+    assert.strictEqual(res.error, undefined, res.error && res.error.message)
+    assert.deepStrictEqual(w.digs, ['4,63,0 from (1, 63, 0)'])
+    assert.deepStrictEqual(w.walks, ['goto', 'setGoal null', 'goto'])
+  })
+}
+
+// A tunnel the bot dug at y 60 to 61, ending at the wall at 6,60,0.
+const TUNNEL = [1, 2, 3, 4, 5].flatMap((x) => [`${x},60,0`, `${x},61,0`])
+
+test('digat walks into the tunnel it dug in a single walk when it can stand nowhere else in reach of the wall', async () => {
+  const w = cave(UNDER, Object.fromEntries(TUNNEL.map((k) => [k, 'air'])), { own: TUNNEL })
+  const end = new Vec3(5, 60, 0)
+  const ends = []
+  w.bot.pathfinder.goto = async (goal) => {
+    w.walks.push('goto')
+    w.bot.pathfinder.goal = goal
+    ends.push(goal.isEnd(end))
+    if (!ends[ends.length - 1]) throw noPath()
+    w.bot.entity.position = end.offset(0.5, 0, 0.5)
+    w.bot.pathfinder.goal = null
+  }
+  const { res, done } = w.digat('6,60,0')
+  await done
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(w.digs, ['6,60,0 from (5, 60, 0)'])
+  assert.deepStrictEqual([w.walks, ends], [['goto'], [true]])
+})
+
+test('digat walking from a cell it dug may end in another it dug, as in a tunnel', async () => {
+  const tunnel = ['0,63,0', ...TRENCH, '4,63,0']
+  const w = cave(new Vec3(0.5, 63, 0.5), Object.fromEntries(tunnel.map((k) => [k, 'air'])), { own: tunnel })
+  const { res, done } = w.digat('5,63,0')
+  await done
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(w.digs, ['5,63,0 from (2, 63, 0)'])
+  assert.deepStrictEqual(w.walks, ['goto'])
+})
+
+// Cells south of the wall at 6,60,0, where 6,60,2 sees the wall's south face over 6,60,1.
+const POCKET = ['6,60,1', '6,61,1', '6,60,2', '6,61,2']
+
+test('digat walks into its tunnel in a single walk when the only other cell in reach of the wall is unseen or in lava', async () => {
+  const cases = {
+    unseen: [Object.fromEntries(POCKET.map((k) => [k, 'air'])), [...POCKET, '6,59,1', '6,59,2']],
+    lava: [{ '6,60,1': 'lava', '6,61,1': 'air', '6,60,2': 'lava', '6,61,2': 'air' }, []]
+  }
+  for (const [pocket, [blocks, unseen]] of Object.entries(cases)) {
+    const w = cave(UNDER, { ...Object.fromEntries(TUNNEL.map((k) => [k, 'air'])), ...blocks }, { own: TUNNEL, unseen })
+    const end = new Vec3(5, 60, 0)
+    const ends = []
+    w.bot.pathfinder.goto = async (goal) => {
+      w.walks.push('goto')
+      w.bot.pathfinder.goal = goal
+      ends.push(goal.isEnd(end))
+      if (!ends[ends.length - 1]) throw noPath()
+      w.bot.entity.position = end.offset(0.5, 0, 0.5)
+      w.bot.pathfinder.goal = null
+    }
+    const { res, done } = w.digat('6,60,0')
+    await done
+    assert.strictEqual(res.error, undefined, `${pocket}: ${res.error && res.error.message}`)
+    assert.deepStrictEqual([w.walks, ends], [['goto'], [true]], pocket)
+  }
+})
+
+// A hill of stone from y 64 to 66 with a tunnel the bot dug along z 0 from x 0 to 5, ending at the face at 6,64,0.
+const HILL = {}
+for (let x = 0; x <= 12; x++) for (let z = -4; z <= 4; z++) for (const y of [64, 65, 66]) HILL[`${x},${y},${z}`] = 'stone'
+const BORE = [0, 1, 2, 3, 4, 5].flatMap((x) => [`${x},64,0`, `${x},65,0`])
+for (const k of BORE) HILL[k] = 'air'
+const FACE_END = new Vec3(5, 64, 0)
+// The roof hides the face from this open cell in reach on the hill top.
+const HILL_TOP = new Vec3(6, 67, 0)
+// Known open cells out of the walk's reach that see the face's south side.
+const HOLLOW = ['6,64,1', '6,65,1', '6,64,2', '6,65,2']
+
+// Each walk ends at the first of FACE_END and HILL_TOP the goal accepts.
+function hill (blocks) {
+  const w = cave(new Vec3(-3.5, 64, 3.5), blocks, { own: BORE })
+  w.bot.pathfinder.goto = async (goal) => {
+    w.walks.push('goto')
+    w.bot.pathfinder.goal = goal
+    const end = [FACE_END, HILL_TOP].find((c) => goal.isEnd(c))
+    if (!end) throw noPath()
+    w.bot.entity.position = end.offset(0.5, 0, 0.5)
+    w.bot.pathfinder.goal = null
+  }
+  const faces = [[0.5, 0, 0.5], [0.5, 1, 0.5], [0, 0.5, 0.5], [1, 0.5, 0.5], [0.5, 0.5, 0], [0.5, 0.5, 1]]
+  w.env.seenNow = (c) => faces.some(([dx, dy, dz]) => {
+    const eye = w.bot.entity.position.offset(0, 1.62, 0)
+    const to = c.offset(dx, dy, dz).minus(eye)
+    const range = to.norm() + 0.1
+    const hit = w.bot.world.raycast(eye, to.normalize(), range)
+    return !!hit && hit.position.equals(c)
+  })
+  return w
+}
+
+test('digat digs a face in its tunnel from the tunnel when an open cell on the hill over it is in reach', async () => {
+  const w = hill(HILL)
+  const { res, done } = w.digat('6,64,0')
+  await done
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(w.digs, ['6,64,0 from (5, 64, 0)'])
+  assert.deepStrictEqual(w.walks, ['goto'])
+})
+
+test('digat whose walk shuns its tunnel never ends on the hill over the face, and walks into the tunnel after', async () => {
+  const w = hill({ ...HILL, ...Object.fromEntries(HOLLOW.map((k) => [k, 'air'])) })
+  const { res, done } = w.digat('6,64,0')
+  await done
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual(w.digs, ['6,64,0 from (5, 64, 0)'])
+  assert.deepStrictEqual(w.walks, ['goto', 'setGoal null', 'goto'])
 })
 
 test('mine walks out from under a gravel-capped ore before the collect digs it', async () => {

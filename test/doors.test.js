@@ -209,13 +209,15 @@ function doorScene (wall = true) {
   }
   if (wall) for (let x = -6; x <= 6; x++) for (let y = 64; y <= 72; y++) extra[ck(x, y, 3)] = STONE
   const blockAt = world(extra)
+  const doors = ['3,64,0', '3,65,0', '0,64,6', '0,65,6'].map((k) => new Vec3(...k.split(',').map(Number)))
   return {
     bot: {
       entity: { position: new Vec3(0.5, 64, 0.5) },
       blockAt,
-      findBlocks: () => ['3,64,0', '3,65,0', '0,64,6', '0,65,6'].map((k) => new Vec3(...k.split(',').map(Number))),
+      findBlocks: () => doors,
       time: { timeOfDay: 6000 }
     },
+    nearestCells: (matching, point, maxDist, sight, deadline, visit) => doors.some((p) => visit(p)),
     shared: { mcData: { blocksByName: { oak_door: { id: 1, name: 'oak_door' }, spruce_door: { id: 2, name: 'spruce_door' }, stone: { id: 3, name: 'stone' } } } },
     isDoor,
     ck,

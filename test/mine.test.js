@@ -17,7 +17,7 @@ const { deathLedger } = require('../lib/deaths')
 const { entityInCell } = require('../lib/shelter')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const { legLedger, takenText } = require('../lib/leg-ledger')
-const { HUNG, awaitRoute, botConstant, claimRescue, fakeClock, loadBotFunctions, routeHandler, runRoute, timed, waitFor } = require('./helpers')
+const { HUNG, awaitRoute, botConstant, claimRescue, fakeClock, groundMemory, loadBotFunctions, routeHandler, runRoute, sectionWorld, timed, waitFor } = require('./helpers')
 
 // The collect plugin switches on the class names.
 class Block {
@@ -42,6 +42,8 @@ function collector (t, { blocks, reach, plan = () => ({ status: 'success', path:
   let x = 0
   bot.entity = { width: 0.6, height: 1.8, get position () { return new Vec3(drifting ? x++ : 0, 64, 0) } }
   bot.blockAt = (p) => blocks[`${p.x},${p.y},${p.z}`] || null
+  // A GoalLookAtBlock never counts as reached.
+  bot.world = { raycast: () => null }
   bot.entities = {}
   bot.on('entityGone', (e) => { delete bot.entities[e.id] })
   const pockets = []
@@ -746,6 +748,31 @@ test('a goto through the watch that the goal change ends leaves its own goal set
   })
   await assert.rejects(walk, { name: 'GoalChanged' })
   assert.strictEqual(c.bot.pathfinder.goal, goal)
+})
+
+test('a goto through the watch that resolves on an empty plan short of its goal clears that goal', async (t) => {
+  for (const status of ['noPath', 'timeout']) {
+    const c = collector(t, { blocks: ORE, reach: () => false, plan: () => ({ status, path: [] }) })
+    await c.bot.pathfinder.goto(new goals.GoalBlock(5, 64, 0))
+    assert.strictEqual(c.bot.pathfinder.goal, null, status)
+  }
+})
+
+test('a goto through the watch that resolves on an empty plan leaves the goal another caller set before it resolved', async (t) => {
+  const c = collector(t, { blocks: ORE, reach: () => false, plan: () => ({ status: 'noPath', path: [] }) })
+  const other = new goals.GoalBlock(9, 64, 0)
+  const walk = c.bot.pathfinder.goto(new goals.GoalBlock(5, 64, 0))
+  c.bot.once('path_update', () => c.bot.pathfinder.setGoal(other))
+  await walk
+  assert.strictEqual(c.bot.pathfinder.goal, other)
+})
+
+test('a goto through the watch that resolves on an empty partial plan, or on an empty plan at its goal, leaves its goal to the pathfinder', async (t) => {
+  for (const [status, goal] of [['partial', new goals.GoalBlock(5, 64, 0)], ['success', new goals.GoalBlock(0, 64, 0)]]) {
+    const c = collector(t, { blocks: ORE, reach: () => false, plan: () => ({ status, path: [] }) })
+    await c.bot.pathfinder.goto(goal)
+    assert.strictEqual(c.bot.pathfinder.goal, goal, status)
+  }
 })
 
 test('mine clears the goal of a collect walk that ended on an empty path', async (t) => {
@@ -1706,7 +1733,9 @@ function woodRig (t, cells, { hidden = [], rig = collector, plan } = {}) {
   Object.assign(c.env, {
     resolveBlockIds: (name) => [registry.blocksByName[name].id],
     cellKnown: (p) => !hidden.includes(`${p.x},${p.y},${p.z}`),
-    sightFace: () => true,
+    // Every block the rig's findBlocks names counts as showing a face.
+    nearestCells: (matching, point, maxDist, sight, deadline, visit) => c.bot.findBlocks({ matching, maxDistance: sight, count: Infinity })
+      .filter((p) => p.distanceTo(point.floored()) <= maxDist).some((p) => visit(p)),
     eyeDist: () => 0,
     lightReach: () => 15,
     seesLit: () => true,
@@ -2001,7 +2030,7 @@ test('a wood gather leaves a drop whose walk a lit fuse refused for a later walk
 // woodRig over the real sight functions at noon, listing each leaf dug in leafDigs with the log digs before it.
 function leafyRig (t, cells, opts) {
   const c = woodRig(t, cells, { ...opts, plan: () => ({ status: 'noPath', path: [new Vec3(0, 64, 0)] }) })
-  for (const stub of ['sightFace', 'eyeDist', 'lightReach', 'seesLit', 'leafInTheWay']) delete c.env[stub]
+  for (const stub of ['nearestCells', 'eyeDist', 'lightReach', 'seesLit', 'leafInTheWay']) delete c.env[stub]
   const blockAt = c.bot.blockAt
   c.bot.blockAt = (p) => {
     const b = blockAt(p)
@@ -2017,7 +2046,9 @@ function leafyRig (t, cells, opts) {
     c.leafDigs.push([k, c.seen.digs])
     delete c.blocks[k]
   }
+  sectionWorld(c.env, Object.keys(c.blocks))
   Object.assign(c.env, {
+    ...groundMemory(),
     ESTIMATED_LIGHT: new Map(),
     GRAVESTONE,
     LEGACY_1710: false,
@@ -2042,7 +2073,7 @@ test('mine takes the logs of a tree seen through its leaves, digging only the le
     const reply = awaitRoute('/mine', { name: 'oak_log', count: '3', natural }, c.env)
     for (const k of [1, 2, 3]) await pickUpLog(c, k)
     assert.deepStrictEqual(await within(reply), { mined: 3, requested: 3, gathered: 3, reason: null }, `natural ${natural}`)
-    assert.deepStrictEqual(c.leafDigs, [['2,65,0', 1]], `natural ${natural}`)
+    assert.deepStrictEqual(c.leafDigs, [['2,65,0', 0]], `natural ${natural}`)
   }
 })
 
@@ -2114,4 +2145,11 @@ test('a gather passes a log it cannot clear within 2 leaves, digging 2 for it on
 test('mine with no block of the name in sight says so', async (t) => {
   const c = woodRig(t, { '20,64,0': 'oak_log', '20,65,0': 'oak_leaves' })
   assert.deepStrictEqual(await within(awaitRoute('/mine', { name: 'oak_log', radius: '8' }, c.env)), { mined: 0, requested: 1, gathered: 0, reason: 'no oak_log in sight within 8 of the start' })
+})
+
+test('mine whose search stops early with nothing found says so, never that none is in sight', async (t) => {
+  const c = woodRig(t, { '2,64,0': 'oak_log', '2,65,0': 'oak_leaves' })
+  c.env.nearestCells = () => true
+  assert.deepStrictEqual(await within(awaitRoute('/mine', { name: 'oak_log', radius: '8' }, c.env)), { mined: 0, requested: 1, gathered: 0, reason: 'the search for oak_log within 8 of the start stopped early' })
+  assert.strictEqual(c.seen.digs, 0)
 })

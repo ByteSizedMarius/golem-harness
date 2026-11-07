@@ -4,6 +4,17 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-07: bucket pours land in the cell they aim at
+
+A bucket poured with `use` into an empty cell aimed at the cell's centre, and the fluid could land
+in a cell beside it. The pour now aims at the face of a seen block beside the cell, the one the
+fluid rests on, and lands in the target cell. With no such face in reach it walks closer, and
+refuses if it still finds none. `/digat` walked back into a trench or tunnel it had just dug, and
+now ends its walk on ground it didn't dig whenever such ground lies in reach. `find` searches
+nearest the bot first, and a search that stops early says `partial: true`. An `/enchant` whose
+click failed left the item on the cursor until the window closed, and now puts it back in its
+slot. A walk whose plan came back empty short of the goal left that goal set, and now clears it.
+
 ## 2026-11-07: useon takes turns over the animals
 
 Feeding cows with `useon` fed the same cow on every call, though it was already in love and took

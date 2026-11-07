@@ -8,7 +8,7 @@ const { sameVein } = require('../lib/wake')
 const { routeDeadline } = require('../lib/walk')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const { GRAVESTONE } = require('../lib/server-overrides')
-const { botConstant, groundMemory, blockWorld, awaitRoute } = require('./helpers')
+const { botConstant, groundMemory, blockWorld, sectionWorld, awaitRoute } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4 }
@@ -33,11 +33,6 @@ function world ({ len = 20, open = [], ores = {}, light = LIT }) {
     const air = name === 'air'
     return { name, type: IDS[name], boundingBox: air ? 'empty' : 'block', shapes: air ? [] : [[0, 0, 0, 1, 1, 1]], position: p, light: air ? light : 0, skyLight: 0, getProperties: () => ({}) }
   }
-  bot.findBlocks = ({ matching, maxDistance, count }) => Object.keys(ores)
-    .map((k) => new Vec3(...k.split(',').map(Number)))
-    .filter((p) => matching.includes(IDS[ores[ck(p.x, p.y, p.z)]]) && p.distanceTo(bot.entity.position) <= maxDistance)
-    .sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position))
-    .slice(0, count)
   return bot
 }
 
@@ -87,7 +82,7 @@ async function walkEast (scene) {
     GRAVESTONE,
     ...groundMemory()
   }
-  const reply = await awaitRoute('/goto', { x: String(len), z: '0' }, blockWorld(env))
+  const reply = await awaitRoute('/goto', { x: String(len), z: '0' }, sectionWorld(blockWorld(env), Object.keys(scene.ores || {})))
   if (!scene.reply) assert.strictEqual(reply.arrived, true, 'control: the walk arrived')
   return reply
 }

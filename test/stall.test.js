@@ -12,9 +12,9 @@ const { awaitRoute, botConstant, buildVerbEnv, fakeClock, loadBotFunctions, refl
 const AIR = { name: 'air', boundingBox: 'empty' }
 const solid = (name) => ({ name, boundingBox: 'block' })
 
-// The body faces oak planks (to the west by default) and never moves, and its pathfinder resets as stuck every third tick.
-// known is cellKnown, lit is seesLit.
-function stuckBot ({ known = true, lit = known, yaw = Math.PI / 2, planks = new Vec3(-1, 64, 0) } = {}) {
+// The body faces oak planks (to the west by default) and never moves.
+// Its pathfinder resets as stuck every third tick, or with planning sends only partial paths.
+function stuckBot ({ known = true, lit = known, yaw = Math.PI / 2, planks = new Vec3(-1, 64, 0), planning = false } = {}) {
   const bot = new EventEmitter()
   bot.entity = { position: new Vec3(0.5, 64, 0.5), yaw, width: 0.6, height: 1.8 }
   bot.blockAt = (p) => ({ ...(p.y < 64 ? solid('stone') : p.equals(planks) ? solid('oak_planks') : AIR), position: p })
@@ -25,7 +25,7 @@ function stuckBot ({ known = true, lit = known, yaw = Math.PI / 2, planks = new 
   bot.inventory = { items: () => [{ name: 'cobblestone', count: 64 }, { name: 'oak_planks', count: 64 }] }
   let path = []
   let ticks = 0
-  const seen = { resets: 0, placed, logs: [] }
+  const seen = { resets: 0, partials: 0, placed, logs: [] }
   bot.pathfinder = {
     goal: null,
     thinkTimeout: 10000,
@@ -44,7 +44,12 @@ function stuckBot ({ known = true, lit = known, yaw = Math.PI / 2, planks = new 
   let running = true
   const tick = () => {
     if (!running) return
-    if (bot.pathfinder.goal && !path.length) {
+    if (planning) {
+      if (bot.pathfinder.goal) {
+        bot.emit('path_update', { status: 'partial', path: [new Vec3(-1, 64, 0)] })
+        seen.partials++
+      }
+    } else if (bot.pathfinder.goal && !path.length) {
       path = [new Vec3(-1, 64, 0)]
       bot.emit('path_update', { status: 'success', path })
     } else if (path.length && ++ticks % 3 === 0) {
@@ -92,6 +97,21 @@ test('a goto stuck in a replan loop rejects as stalled, naming where the body st
   assert.deepStrictEqual((await timed(walk, 2000)).out, { reason: 'stalled', message: stall })
   assert.strictEqual(s.bot.pathfinder.goal, null, 'the walk is stopped')
   assert.deepStrictEqual(s.seen.logs, [`[path] ${stall}`])
+})
+
+test('a goto whose search outlasts the think timeout rejects as stalled and marked as planning, and a body stall carries no such mark', async (t) => {
+  const marked = (p) => p.then(() => 'arrived', (e) => ({ reason: e.reason, planning: e.planning }))
+  const planning = stuckBot({ planning: true })
+  t.after(planning.stop)
+  const search = marked(planning.bot.pathfinder.goto(new goals.GoalNear(-5, 64, 0, 1)))
+  assert.ok(await waitFor(() => planning.seen.partials > 0, 2000), 'control: the search sent a partial path')
+  planning.clock.advance(planning.bot.pathfinder.thinkTimeout + 500)
+  assert.deepStrictEqual((await timed(search, 2000)).out, { reason: 'stalled', planning: true })
+  const s = stuckBot()
+  t.after(s.stop)
+  const walk = marked(s.bot.pathfinder.goto(new goals.GoalNear(-5, 64, 0, 1)))
+  await stallOut(s)
+  assert.deepStrictEqual((await timed(walk, 2000)).out, { reason: 'stalled', planning: undefined })
 })
 
 test('the stall names no block the body neither touches nor sees now, a remembered one included', async (t) => {

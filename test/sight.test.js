@@ -5,13 +5,14 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const vm = require('node:vm')
 const { Vec3 } = require('vec3')
+const { goals, Movements } = require('mineflayer-pathfinder')
 const { ambientChange, sameVein } = require('../lib/wake')
 const { sectionColumns, floorPhrase } = require('../lib/section')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const { flatText } = require('../lib/flat-text')
 const { STANCES } = require('../lib/bot/stances')
 const { expireConfirmed } = require('../lib/shelter')
-const { balanced, botConstant, wiredSource, groundMemory, blockWorld, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn, claimRescue } = require('./helpers')
+const { balanced, botConstant, wiredSource, groundMemory, blockWorld, sectionWorld, loadBotFunctions, routeHandler, runRoute, reflexIn, combatReflexIn, claimRescue } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const IDS = { air: 0, coal_ore: 1, iron_ore: 2, stone: 3, diamond_ore: 4, wheat: 11, chest: 12, oak_log: 13 }
@@ -34,10 +35,11 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     .sort((a, b) => a.distanceTo(position) - b.distanceTo(position))
     .slice(0, count)
   const blocks = [{ id: 1, name: 'coal_ore' }, { id: 2, name: 'iron_ore' }, { id: 4, name: 'diamond_ore' }, { id: 11, name: 'wheat', states: [{ name: 'age', num_values: 8 }] }]
-  return blockWorld({
+  return sectionWorld(blockWorld({
     shared: { ready: true, mcData: { blocksArray: blocks, blocksByName: Object.fromEntries(blocks.map((b) => [b.name, b])), blocks: Object.fromEntries(blocks.map((b) => [b.id, b])) } },
     bot: { entity: { position, yaw: 0 }, blockAt, findBlocks, time: { timeOfDay, age: 100000, doDaylightCycle: true }, game: { minY: -64, height: 384 }, inventory: { slots: [] }, registry: REGISTRY },
     ck,
+    recentOwnEdits: new Map(),
     Vec3,
     SEEN: new Set(),
     ESTIMATED_LIGHT: new Map(),
@@ -48,7 +50,7 @@ function world ({ open, ores = {}, light, skyLight = () => 0, at = 0, timeOfDay 
     LEGACY_1710: false,
     GRAVESTONE,
     ...groundMemory()
-  })
+  }), Object.keys(ores))
 }
 
 // An empty station memory as bot.js keeps it.
@@ -549,14 +551,8 @@ test('ore under lava or more than three cells of water is not named', () => {
 // A tunnel along z 0 to x 12, walled at x 5 with wall, with lava at chunk light 0 at each key of lava, at its level.
 function lavaTunnel (lava, { wall = false, light = DARK } = {}) {
   const cells = Object.fromEntries(Object.entries(lava).map(([k, level]) => [k, { ...LAVA, light: DARK, getProperties: () => ({ level: String(level) }) }]))
-  const env = withCells(world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 12 && !(wall && x === 5), light: () => light }), cells)
+  const env = sectionWorld(withCells(world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 12 && !(wall && x === 5), light: () => light }), cells), Object.keys(lava))
   env.shared.mcData.blocksByName.lava = { id: LAVA.type, name: 'lava' }
-  const at = env.bot.entity.position
-  env.bot.findBlocks = ({ matching, maxDistance, count }) => Object.keys(lava)
-    .map((k) => new Vec3(...k.split(',').map(Number)))
-    .filter((p) => matching.includes(LAVA.type) && p.distanceTo(at) <= maxDistance)
-    .sort((a, b) => a.distanceTo(at) - b.distanceTo(at))
-    .slice(0, count)
   return env
 }
 
@@ -583,10 +579,44 @@ test('find names lava in sight past more than 300 nearer cells of lava sealed in
   const lava = { '10,64,0': 0 }
   for (let x = -8; x <= 8; x++) for (let y = 50; y <= 58; y++) for (let z = -8; z <= 8; z++) lava[ck(x, y, z)] = 0
   const env = lavaTunnel(lava, { light: LIT })
+  env.Date = { now: () => 0 }
   const at = env.bot.entity.position
   const sealed = Object.keys(lava).filter((k) => new Vec3(...k.split(',').map(Number)).distanceTo(at) < at.distanceTo(new Vec3(10, 64, 0)))
   assert.ok(sealed.length > 300, `control: ${sealed.length} sealed cells nearer`)
   assert.deepStrictEqual(runRoute('/find', { name: 'lava' }, env).blocks.map((b) => [b.pos.x, b.pos.y, b.pos.z]), [[10, 64, 0]])
+})
+
+// A lit tunnel along z 0 to x 20, with lava at each key of lava and air where pocket(x, y, z).
+function lavaPockets (lava, pocket) {
+  const cells = Object.fromEntries(Object.keys(lava).map((k) => [k, { ...LAVA, light: DARK }]))
+  const open = (x, y, z) => (z === 0 && (y === 64 || y === 65) && x >= 0 && x <= 20) || pocket(x, y, z)
+  const env = sectionWorld(withCells(world({ open, light: () => LIT }), cells), Object.keys(lava))
+  env.shared.mcData.blocksByName.lava = { id: LAVA.type, name: 'lava' }
+  // A clock that stands still keeps the search budget from running out.
+  env.Date = { now: () => 0 }
+  return env
+}
+const nearer = (env, lava, target) => Object.keys(lava).filter((k) => k !== ck(target.x, target.y, target.z) &&
+  new Vec3(...k.split(',').map(Number)).distanceTo(env.bot.entity.position) < env.bot.entity.position.distanceTo(target)).length
+
+test('find names lava in sight past more than 256 nearer cells of lava under sealed air', () => {
+  // Lava at x 12 in the tunnel, over a sheet of lava at y 62 under a sealed layer of air at y 63 that skips the tunnel floor.
+  const target = new Vec3(12, 64, 0)
+  const lava = { '12,64,0': 0 }
+  for (let x = -12; x <= 12; x++) for (let z = -12; z <= 12; z++) lava[ck(x, 62, z)] = 0
+  const env = lavaPockets(lava, (x, y, z) => y === 63 && Math.abs(x) <= 12 && Math.abs(z) <= 12 && z !== 0)
+  assert.ok(nearer(env, lava, target) > 256, `control: ${nearer(env, lava, target)} cells under sealed air nearer`)
+  assert.deepStrictEqual(runRoute('/find', { name: 'lava' }, env).blocks.map((b) => [b.pos.x, b.pos.y, b.pos.z]), [[12, 64, 0]])
+})
+
+test('find names lava in sight past more than 4096 nearer cells of lava sealed in rock', () => {
+  // Lava at x 20 in the tunnel, over a lake of lava sealed in rock from y 44 to 62.
+  const target = new Vec3(20, 64, 0)
+  const lava = { '20,64,0': 0 }
+  for (let x = -16; x <= 16; x++) for (let y = 44; y <= 62; y++) for (let z = -16; z <= 16; z++) lava[ck(x, y, z)] = 0
+  const env = lavaPockets(lava, () => false)
+  assert.ok(nearer(env, lava, target) > 4096, `control: ${nearer(env, lava, target)} sealed cells nearer`)
+  assert.deepStrictEqual(runRoute('/find', { name: 'lava' }, env).blocks.map((b) => [b.pos.x, b.pos.y, b.pos.z]), [[20, 64, 0]])
 })
 
 test('gaze names lava past the light on its way by its own glow, and a dark coal wall there stays unnamed', () => {
@@ -604,7 +634,7 @@ function coalGallery (ores, z, half) {
   for (let x = -half; x <= half; x++) for (const [y, dz] of [[63, 0], [65, 0], [64, 1], [64, -1]]) ores[ck(x, y, z + dz)] = 'coal_ore'
 }
 
-test('find runs a sight line for at most the nearest 256 lit candidates with an open face', () => {
+test('find runs a sight line only for a candidate with an open face within its light\'s reach', () => {
   // A dark tunnel at z 0 from x 0 to 3, and a lit gallery out of sight at z 40 from x -40 to 40.
   // Nearer than the lit gallery lie 325 sealed coal cells and a dark gallery at z 12 beyond its light's reach.
   const ores = {}
@@ -619,11 +649,44 @@ test('find runs a sight line for at most the nearest 256 lit candidates with an 
   })
   const { sightCell } = loadBotFunctions(['sightCell'], { ...env })
   let lines = 0
-  const { findVisible } = loadBotFunctions(['findVisible'], { ...env, sightCell: (...a) => { lines++; return sightCell(...a) } })
-  assert.strictEqual(sealed.length, 325, 'control: sealed cells beyond the cap')
+  // A clock that stands still keeps the search budget from running out.
+  const { findVisible } = loadBotFunctions(['findVisible'], { ...env, Date: { now: () => 0 }, sightCell: (...a) => { lines++; return sightCell(...a) } })
+  assert.strictEqual(sealed.length, 325, 'control: sealed cells')
   assert.strictEqual(Object.keys(ores).length - sealed.length, 284 + 324, 'control: dark and lit gallery cells')
   assert.strictEqual(findVisible([IDS.coal_ore], 64, 10).length, 0)
-  assert.strictEqual(lines, 256)
+  assert.strictEqual(lines, 324)
+})
+
+test('find stops its sight lines once they took 100 ms and names the hits it has, nearest first', () => {
+  // A lit tunnel at z 0 from x 0 to 40 with coal in its floor at every x, each sight line taking 10 ms.
+  const ores = {}
+  for (let x = 0; x <= 40; x++) ores[ck(x, 63, 0)] = 'coal_ore'
+  const env = world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 40 && (y === 64 || y === 65), ores, light: () => LIT })
+  const { sightCell } = loadBotFunctions(['sightCell'], { ...env })
+  let now = 0
+  const { findVisible } = loadBotFunctions(['findVisible'], { ...env, Date: { now: () => now }, sightCell: (...a) => { now += 10; return sightCell(...a) } })
+  assert.deepStrictEqual(Array.from(findVisible([IDS.coal_ore], 64, 100), (f) => f.pos.x), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+})
+
+test('find marks its hits partial when its sight lines run out of time, and only then', () => {
+  // The lit tunnel of the test above.
+  const ores = {}
+  for (let x = 0; x <= 40; x++) ores[ck(x, 63, 0)] = 'coal_ore'
+  const env = world({ open: (x, y, z) => z === 0 && x >= 0 && x <= 40 && (y === 64 || y === 65), ores, light: () => LIT })
+  const { sightCell } = loadBotFunctions(['sightCell'], { ...env })
+  let now = 0
+  const slow = { ...env, Date: { now: () => now }, sightCell: (...a) => { now += 10; return sightCell(...a) } }
+  const stopped = { ...env, Date: { now: () => 0 } }
+  assert.strictEqual(Object.hasOwn(loadBotFunctions(['findVisible'], stopped).findVisible([IDS.coal_ore], 64, 100), 'partial'), false, 'control: a search that ends')
+  assert.strictEqual(Object.hasOwn(loadBotFunctions(['findVisible'], slow).findVisible([IDS.coal_ore], 64, 5), 'partial'), false, 'control: a search that found its count')
+  now = 0
+  assert.strictEqual(loadBotFunctions(['findVisible'], slow).findVisible([IDS.coal_ore], 64, 100).partial, true)
+  now = 0
+  const reply = runRoute('/find', { name: 'coal', count: '50' }, slow)
+  assert.strictEqual(reply.count, 10)
+  assert.strictEqual(reply.partial, true)
+  assert.match(reply.note, /stopped early/)
+  assert.strictEqual(Object.hasOwn(runRoute('/find', { name: 'coal', count: '50' }, stopped), 'partial'), false, 'control: /find after a search that ends')
 })
 
 test('find names a lit coal in sight behind more than 256 nearer dark candidates with an open face', () => {
@@ -642,17 +705,10 @@ test('find names a lit coal in sight behind more than 256 nearer dark candidates
   assert.strictEqual(found[0].pos.x, 41)
 })
 
-test('findVisible looks within maxDist of the point it is given, nearest the body first, and sees what lies there however far the body stands from it', () => {
+test('findVisible looks within maxDist of the point it is given, nearest the eye first, and sees what lies there however far the body stands from it', () => {
   // A lit tunnel along z 0 from x -6 to 12, coal in its floor at x -3, 3 and 9, the body at x 0.
   const ores = { '-3,63,0': 'coal_ore', '3,63,0': 'coal_ore', '9,63,0': 'coal_ore' }
   const env = world({ open: (x, y, z) => z === 0 && (y === 64 || y === 65) && x >= -6 && x <= 12, ores, light: () => LIT })
-  const matches = (matching, p) => Array.isArray(matching) ? matching.includes(IDS[ores[ck(p.x, p.y, p.z)]]) : matching(env.bot.blockAt(p))
-  // mineflayer's search, nearest its point first.
-  env.bot.findBlocks = ({ matching, maxDistance, count, point = env.bot.entity.position }) => Object.keys(ores)
-    .map((k) => new Vec3(...k.split(',').map(Number)))
-    .filter((p) => matches(matching, p) && p.distanceTo(point.floored()) <= maxDistance)
-    .sort((a, b) => a.distanceTo(point.floored()) - b.distanceTo(point.floored()))
-    .slice(0, count)
   const { findVisible } = loadBotFunctions(['findVisible'], env)
   const xs = (found) => Array.from(found, (f) => f.pos.x).sort((a, b) => a - b)
   assert.deepStrictEqual(xs(findVisible([IDS.coal_ore], 4, 10)), [-3, 3], 'control: around the body')
@@ -1216,6 +1272,12 @@ test('the ore sweep runs each second while the body moves underground, every fou
   assert.deepStrictEqual(oreSweeps(plain, true), [4, 8])
 })
 
+const FULL_REGISTRY = require('prismarine-registry')('1.21.11')
+
+// The rig's registry holds only light values, which is too little for Movements.
+const planMoves = (env) => loadBotFunctions(['knownMoves'], { ...env, PLAN_KNOWN: new Map() })
+  .knownMoves(new Movements(Object.create(env.bot, { registry: { value: FULL_REGISTRY } })))
+
 // The walk into reach moves the body to walkTo.
 function withHands (env, walkTo = null) {
   const base = env.bot.blockAt
@@ -1223,7 +1285,7 @@ function withHands (env, walkTo = null) {
   Object.assign(env.bot, {
     heldItem: null,
     inventory: { items: () => [] },
-    pathfinder: { goto: async () => { if (walkTo) env.bot.entity.position = walkTo } },
+    pathfinder: { startCell: (p) => p.floored(), goto: async () => { if (walkTo) env.bot.entity.position = walkTo } },
     lookAt: async () => {},
     waitForTicks: async () => {},
     activateBlock: async () => {},
@@ -1231,6 +1293,7 @@ function withHands (env, walkTo = null) {
     deactivateItem () {},
     isABed: (b) => b.name.endsWith('_bed')
   })
+  env.bot.pathfinder.movements = planMoves(env)
   return Object.assign(env, { require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals: { GoalNear: class {} } })
 }
 
@@ -1915,8 +1978,8 @@ test('digat at a cell seen before and out of sight now walks there before it say
     const env = pocket()
     env.SEEN.add(ck(6, 64, -2))
     const acts = []
-    env.bot.pathfinder = { goto: async () => { acts.push('walk'); if (arrive) env.bot.entity.position = new Vec3(4.5, 64, -1.5) } }
-    Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, digLock: botConstant('digLock'), stopPath () {}, require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals: require('mineflayer-pathfinder').goals })
+    env.bot.pathfinder = { startCell: (p) => p.floored(), goto: async () => { acts.push('walk'); if (arrive) env.bot.entity.position = new Vec3(4.5, 64, -1.5) }, movements: planMoves(env) }
+    Object.assign(env, { bunker: { building: false }, reflexes: [], guardState: { hand: null }, digLock: botConstant('digLock'), stopPath () {}, require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals })
     const { handle, res } = routeHandler('/digat', env)
     await handle({ query: { x: '6', y: '64', z: '-2' } }, res)
     return { body: res.body, error: res.error, acts }

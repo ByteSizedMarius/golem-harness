@@ -5,7 +5,7 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const { sameVein } = require('../lib/wake')
-const { awaitRoute, botConstant } = require('./helpers')
+const { awaitRoute, botConstant, groundMemory, sectionWorld } = require('./helpers')
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
 const IDS = { air: 0, stone: 1, coal_ore: 2, iron_ore: 3, redstone_ore: 4, diamond_ore: 5, lava: 6 }
@@ -38,8 +38,8 @@ async function dig (route, query, { open = [], blocks = {}, lit = DARK, refuse =
       const name = nameAt(p)
       return { name, type: IDS[name], boundingBox: name === 'air' ? 'empty' : 'block', position: p, skyLight: 0 }
     },
-    findBlocks: ({ matching, maxDistance }) => Object.keys(blocks).map((k) => new Vec3(...k.split(',').map(Number)))
-      .filter((p) => matching.includes(IDS[nameAt(p)]) && p.distanceTo(bot.entity.position) <= maxDistance),
+    game: { minY: -64, height: 384 },
+    registry: {},
     async waitForTicks () {},
     // mineflayer writes the air before the dig resolves.
     async dig (b) {
@@ -50,7 +50,7 @@ async function dig (route, query, { open = [], blocks = {}, lit = DARK, refuse =
   })
   const NEIGHBOURS = botConstant('NEIGHBOURS')
   let job = null
-  await awaitRoute(route, query, {
+  await awaitRoute(route, query, sectionWorld({
     bot,
     require,
     NEIGHBOURS,
@@ -78,10 +78,12 @@ async function dig (route, query, { open = [], blocks = {}, lit = DARK, refuse =
     FALL_TICKS: botConstant('FALL_TICKS'),
     FALL_START_TICKS: botConstant('FALL_START_TICKS'),
     ck,
+    Vec3,
     sameVein,
     shared: { mcData: { blocksByName: BLOCKS_BY_NAME } },
-    ORE_IDS: botConstant('ORE_IDS')
-  })
+    ORE_IDS: botConstant('ORE_IDS'),
+    ...groundMemory()
+  }, Object.keys(blocks)))
   return { ...JSON.parse(JSON.stringify(await job)), events, progress }
 }
 

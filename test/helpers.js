@@ -764,6 +764,41 @@ function blockWorld (env) {
   return env
 }
 
+// Fakes env.bot.world's column sections from env.bot.blockAt, with matching blocks only at keys.
+function sectionWorld (env, keys) {
+  const { minY, height } = env.bot.game
+  const searched = new Set(keys)
+  const bySection = new Map()
+  for (const k of searched) {
+    const p = new Vec3(...k.split(',').map(Number))
+    const s = `${p.x >> 4},${(p.y - minY) >> 4},${p.z >> 4}`
+    if (!bySection.has(s)) bySection.set(s, [])
+    bySection.get(s).push(p)
+  }
+  const columns = new Map()
+  env.bot.world ??= {}
+  env.bot.world.getColumn = (cx, cz) => {
+    const k = `${cx},${cz}`
+    if (!columns.has(k)) {
+      columns.set(k, {
+        getBlockStateId: (q) => env.bot.blockAt(new Vec3(cx * 16 + q.x, q.y, cz * 16 + q.z)),
+        sections: Array.from({ length: height >> 4 }, (_, i) => {
+          const inside = bySection.get(`${cx},${i},${cz}`) || []
+          return {
+            get palette () { return inside.map((p) => env.bot.blockAt(p)) },
+            get (q) {
+              const p = new Vec3(cx * 16 + q.x, minY + i * 16 + q.y, cz * 16 + q.z)
+              return searched.has(`${p.x},${p.y},${p.z}`) ? env.bot.blockAt(p) : {}
+            }
+          }
+        })
+      })
+    }
+    return columns.get(k)
+  }
+  return env
+}
+
 // A body at pos on the real pathfinder with the walk's legs, over a stone floor plus cells ('x,y,z' -> [name, properties]).
 async function walkingBody (t, pos, cells = {}) {
   const client = new EventEmitter()
@@ -1381,7 +1416,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, blockWorld, walkingBody, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
+  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, blockWorld, sectionWorld, walkingBody, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, laneAt,
   buildVerbEnv, digInProblemWith, facings, digJob, claimRescue, routeJobs

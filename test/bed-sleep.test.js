@@ -419,7 +419,6 @@ test('grave names a gravestone out of reach after the walk instead of waiting fo
   const gb = { name: GRAVESTONE, type: 9, position: new Vec3(20, 156, 40) }
   s.bot.entity.position = new Vec3(20.5, 150, 40.5)
   s.bot.blockAt = (p) => (p.equals(gb.position) ? gb : { name: 'air', type: 0, position: p })
-  s.bot.findBlocks = () => [gb.position]
   s.bot.pathfinder = { goto: async () => {} }
   const env = {
     bot: s.bot,
@@ -427,6 +426,7 @@ test('grave names a gravestone out of reach after the walk instead of waiting fo
     reflexes: [{ name: 'combat', fightBusy: () => false, _threat: null }],
     bunkerHolds: () => false,
     guardState: { hand: null },
+    nearestCells: (matching, point, maxDist, sight, deadline, visit) => { visit(gb.position) },
     lightReach: () => Infinity,
     seesLit: () => true,
     leafInTheWay: () => null,

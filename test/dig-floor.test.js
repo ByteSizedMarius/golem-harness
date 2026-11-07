@@ -4,7 +4,7 @@ const assert = require('node:assert')
 const { AsyncLocalStorage } = require('node:async_hooks')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
-const { goals } = require('mineflayer-pathfinder')
+const { goals, Movements } = require('mineflayer-pathfinder')
 const registry = require('prismarine-registry')('1.21.11')
 const Block = require('prismarine-block')(registry)
 const { loadBotFunctions, botConstant, routeHandler } = require('./helpers')
@@ -29,6 +29,7 @@ function floorWorld (pos, walls = [], holes = [], { gravel = [], short = 0.35 } 
   }
   const log = { walks: [], goals: [], centred: [], digs: [] }
   const bot = Object.assign(new EventEmitter(), {
+    registry,
     entity: { position: pos, width: 0.6, height: 1.8 },
     heldItem: null,
     inventory: { items: () => [] },
@@ -39,6 +40,7 @@ function floorWorld (pos, walls = [], holes = [], { gravel = [], short = 0.35 } 
       raycast: (from) => (Math.hypot(from.x - ORE.x - 0.5, from.z - ORE.z - 0.5) <= 2 ? { position: ORE, face: 1 } : null)
     },
     pathfinder: {
+      startCell: (p) => p.floored(),
       async goto (goal) {
         log.walks.push(goal.x === undefined ? 'look' : `${goal.x},${goal.y},${goal.z}`)
         log.goals.push(goal)
@@ -66,6 +68,7 @@ function floorWorld (pos, walls = [], holes = [], { gravel = [], short = 0.35 } 
       cells.set(`${b.position.x},${b.position.y},${b.position.z}`, 'air')
     }
   })
+  bot.pathfinder.movements = new Movements(bot)
   const env = {
     bot,
     require,
@@ -87,7 +90,9 @@ function floorWorld (pos, walls = [], holes = [], { gravel = [], short = 0.35 } 
     holdDigTool: async () => {},
     holdHarvester: async () => null,
     neededPickTier: () => 0,
-    PICK_TIER: {}
+    PICK_TIER: {},
+    ck: (x, y, z) => `${x},${y},${z}`,
+    recentOwnEdits: new Map()
   }
   return { bot, env, log }
 }

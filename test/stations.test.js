@@ -106,39 +106,55 @@ function enchantingTable (pockets, levels, applies, sent) {
   return table
 }
 
-// mineflayer's clickWindow over the table's slots and a cursor, for mode 0 clicks.
-function clicker (table, clicks) {
-  let cursor = null
+// mineflayer's mode 0 clickWindow, where a click whose index is in unanswered moves the items and then throws.
+function clicker (table, clicks, unanswered) {
   return async (slot, button, mode) => {
     clicks.push([slot, button, mode])
     const there = table.slots[slot]
+    const cursor = table.selectedItem
     if (button === 1 && cursor && !there) {
       table.slots[slot] = { ...cursor, count: 1, slot }
-      cursor = cursor.count > 1 ? { ...cursor, count: cursor.count - 1 } : null
+      table.selectedItem = cursor.count > 1 ? { ...cursor, count: cursor.count - 1 } : null
     } else {
       table.slots[slot] = cursor && { ...cursor, slot }
-      cursor = there
+      table.selectedItem = there
     }
+    if (unanswered.includes(clicks.length - 1)) throw new Error(`Server didn't respond to transaction for clicking on slot ${slot} on window with id ${table.id}.`)
   }
 }
 
-// stuck lists the table slots whose putAway throws. inTable holds the names in the table's item and lapis slots when the reply went out.
-async function enchantRun (query, { legacy = false, overrides = null, levels = [2, 5, 9], applies = true, item = { name: 'iron_sword', count: 1 }, stuck = [] } = {}) {
+// pickedUp fills the clicked slot when the click throws.
+async function enchantRun (query, { legacy = false, overrides = null, levels = [2, 5, 9], applies = true, item = { name: 'iron_sword', count: 1 }, stuck = [], unanswered = [], cursor = null, clickItem = false, clickLapis = false, pickedUp = null } = {}) {
   const pockets = [item, { name: 'lapis_lazuli', count: 3 }]
   const { env, walks } = stationEnv('enchanting_table', true)
   const sent = sentRegistry()
   const table = enchantingTable(pockets, levels, applies, sent)
+  table.selectedItem = cursor
   table.takeTargetItem = () => env.bot.putAway(0)
+  const moveSlotItem = (to) => async (from) => {
+    await env.bot.clickWindow(from.slot, 0, 0)
+    await env.bot.clickWindow(to, 0, 0)
+  }
+  if (clickItem) table.putTargetItem = moveSlotItem(0)
+  if (clickLapis) table.putLapis = moveSlotItem(1)
   const writes = []
   const clicks = []
   let inTable = null
+  const click = clicker(table, clicks, unanswered)
   const replied = (send) => (res, body) => {
     inTable = [table.slots[0], table.slots[1]].map((s) => s && s.name)
     send(res, body)
   }
   Object.assign(env.bot, {
     registry: sent,
-    clickWindow: clicker(table, clicks),
+    async clickWindow (slot, button, mode) {
+      try {
+        await click(slot, button, mode)
+      } catch (e) {
+        if (pickedUp) table.slots[slot] = { ...pickedUp, slot }
+        throw e
+      }
+    },
     inventory: { items: () => pockets },
     experience: { level: 10 },
     openEnchantmentTable: async () => table,
@@ -258,6 +274,79 @@ test('enchant names what a failed put-away left out of the pockets', async () =>
 
   const refused = await enchantRun({ item: 'iron_sword', slot: '1' }, { levels: [3, 0, 0], stuck: [0] })
   assert.deepStrictEqual(refused.reply, { ok: false, error: 'slot 1 holds no offer', notBack: { iron_sword: 1 } })
+})
+
+const inPockets = (table, name) => table.slots.slice(table.inventoryStart, table.inventoryEnd).reduce((n, s) => n + (s && s.name === name ? s.count : 0), 0)
+
+test('enchant clicks what a failed click left on the cursor back into its pocket slot', async () => {
+  for (const [unanswered, expected] of [
+    [[0], [[30, 0, 0], [30, 0, 0]]],
+    [[1], [[30, 0, 0], [0, 1, 0], [30, 0, 0]]]
+  ]) {
+    const { reply, error, clicks, table } = await enchantRun({ item: 'book' }, { item: { name: 'book', count: 3 }, unanswered })
+    assert.deepStrictEqual(clicks, expected)
+    assert.deepStrictEqual([reply, error], [undefined, `Server didn't respond to transaction for clicking on slot ${expected[unanswered[0]][0]} on window with id 7.`])
+    assert.deepStrictEqual([table.selectedItem, inPockets(table, 'book')], [null, 3], `click ${unanswered[0]} threw`)
+  }
+
+  const lapis = await enchantRun({ item: 'iron_sword' }, { clickLapis: true, unanswered: [0] })
+  assert.deepStrictEqual(lapis.clicks, [[31, 0, 0], [31, 0, 0]])
+  assert.deepStrictEqual([lapis.reply, lapis.table.selectedItem, inPockets(lapis.table, 'lapis_lazuli')], [undefined, null, 3])
+})
+
+test('enchant names the books a failed put-back left out of the pockets', async () => {
+  const { reply, clicks } = await enchantRun({ item: 'book' }, { item: { name: 'book', count: 3 }, unanswered: [1, 2] })
+  assert.deepStrictEqual(clicks, [[30, 0, 0], [0, 1, 0], [30, 0, 0]])
+  assert.deepStrictEqual(reply, { ok: false, error: "Server didn't respond to transaction for clicking on slot 0 on window with id 7.", notBack: { book: 2 } })
+})
+
+test('enchant leaves the books on the cursor and names them when another item filled their pocket slot', async () => {
+  const { reply, clicks, table } = await enchantRun({ item: 'book' }, { item: { name: 'book', count: 3 }, unanswered: [0], pickedUp: { name: 'dirt', count: 1 } })
+  assert.deepStrictEqual(clicks, [[30, 0, 0]])
+  assert.deepStrictEqual(reply, { ok: false, error: "Server didn't respond to transaction for clicking on slot 30 on window with id 7.", notBack: { book: 3 } })
+  assert.deepStrictEqual([table.slots[30].name, table.selectedItem.name], ['dirt', 'book'])
+})
+
+test('enchant leaves the item on the cursor and names it when it would overfill the stack that filled its pocket slot', async () => {
+  const fail = (slot) => `Server didn't respond to transaction for clicking on slot ${slot} on window with id 7.`
+  const sword = { name: 'iron_sword', count: 1, stackSize: 1 }
+  const swords = await enchantRun({ item: 'iron_sword' }, { item: sword, clickItem: true, unanswered: [0], pickedUp: sword })
+  assert.deepStrictEqual(swords.clicks, [[30, 0, 0]])
+  assert.deepStrictEqual(swords.reply, { ok: false, error: fail(30), notBack: { iron_sword: 1 } })
+
+  const book = { name: 'book', count: 3, stackSize: 64 }
+  const books = await enchantRun({ item: 'book' }, { item: book, unanswered: [0], pickedUp: { ...book, count: 62 } })
+  assert.deepStrictEqual(books.clicks, [[30, 0, 0]])
+  assert.deepStrictEqual(books.reply, { ok: false, error: fail(30), notBack: { book: 3 } })
+
+  const fits = await enchantRun({ item: 'book' }, { item: book, unanswered: [0], pickedUp: { ...book, count: 61 } })
+  assert.deepStrictEqual(fits.clicks, [[30, 0, 0], [30, 0, 0]], 'control: books that fill the stack exactly go back')
+})
+
+test('enchant leaves the item on the cursor and names it when the stack that filled its pocket slot carries other components', async () => {
+  const book = { name: 'book', count: 3, stackSize: 64 }
+  const named = { ...book, count: 1, components: [{ type: 'custom_name', data: 'Ledger' }] }
+  const { reply, clicks, table } = await enchantRun({ item: 'book' }, { item: book, unanswered: [0], pickedUp: named })
+  assert.deepStrictEqual(clicks, [[30, 0, 0]])
+  assert.deepStrictEqual(reply, { ok: false, error: "Server didn't respond to transaction for clicking on slot 30 on window with id 7.", notBack: { book: 3 } })
+  assert.deepStrictEqual([table.slots[30].components, table.selectedItem.count], [named.components, 3])
+})
+
+test('enchant takes nothing out of the table while its lapis stays on the cursor', async () => {
+  const { reply, clicks, table } = await enchantRun({ item: 'book' }, { item: { name: 'book', count: 3 }, clickLapis: true, unanswered: [3], pickedUp: { name: 'dirt', count: 1 } })
+  assert.deepStrictEqual(clicks, [[30, 0, 0], [0, 1, 0], [30, 0, 0], [31, 0, 0]])
+  assert.deepStrictEqual(reply, { ok: false, error: "Server didn't respond to transaction for clicking on slot 31 on window with id 7.", notBack: { book: 1, lapis_lazuli: 3 } })
+  assert.deepStrictEqual([table.slots[0].name, table.selectedItem.name, table.closed], ['book', 'lapis_lazuli', true])
+})
+
+test('enchant ignores a cursor left over from before its clicks', async () => {
+  const cursor = { name: 'book', count: 2 }
+  const look = await enchantRun({ item: 'iron_sword' }, { cursor })
+  assert.strictEqual(look.reply.offers.length, 3)
+  assert.deepStrictEqual([look.reply.ok, look.reply.notBack, look.table.selectedItem], [undefined, undefined, cursor])
+
+  const refused = await enchantRun({ item: 'iron_sword', slot: '1' }, { levels: [3, 0, 0], cursor })
+  assert.deepStrictEqual([refused.reply, refused.error], [undefined, 'slot 1 holds no offer'])
 })
 
 test('rename renames the named pocket item at a seen anvil', async () => {
