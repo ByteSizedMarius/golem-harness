@@ -4,6 +4,15 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-08: blocks in a corridor wall and logs overhead are in reach
+
+Walks that end beside a block to dig judged the block's faces from the corner of the cell the bot
+stood in, and measured reach from the feet to a point above the block, so they turned down some
+corridor walls and logs overhead. mineflayer-pathfinder's `GoalLookAtBlock` now measures reach from
+the eye to the block's centre and picks the faces the bot can see from the cell's centre. Mining,
+gathering and tidying now end their walk beside a block in the wall of a 1-wide corridor on any
+side, and below a log 3 or 4 blocks above the feet. A walk to a floor block far out on flat ground
+ends one cell closer.
 ## 2026-11-07: bucket pours land in the cell they aim at
 
 A bucket poured with `use` into an empty cell aimed at the cell's centre, and the fluid could land

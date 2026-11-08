@@ -6,6 +6,7 @@ const { Vec3 } = require('vec3')
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
 const { Physics } = require('prismarine-physics')
+const WorldSync = require('prismarine-world/src/worldsync')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const { panelAcross } = require('../lib/doors')
 const { CREEPER_ZONE_SLACK, inCreeperZone, zoneCrossed, summarizePlan } = require('../lib/plan')
@@ -611,4 +612,49 @@ test('a walk that passes a creeper at fleeDist + 1 runs through its zone and is 
   const b = await zonedBody(START, cells, new Vec3(10.5, 64, 9.5), fleeDist + CREEPER_ZONE_SLACK)
   const { open, zoned } = bothWays(b, new goals.GoalBlock(20, 64, 0))
   assert.deepStrictEqual([open.status, zoned.status], ['success', 'noPath'])
+})
+
+const LookBlock = require('prismarine-block')(require('prismarine-registry')('1.21.11'))
+const SIDES = [[1, 0], [0, 1], [-1, 0], [0, -1]]
+
+// Named cells ('x,y,z' -> name) over stone at y 63 and below.
+function lookWorld (cells) {
+  const getBlock = (p) => {
+    const c = p.floored()
+    const b = LookBlock.fromProperties(cells[`${c.x},${c.y},${c.z}`] || (c.y <= 63 ? 'stone' : 'air'), {}, 0)
+    b.position = c
+    return b
+  }
+  const world = { rays: 0, raycast: (...ray) => { world.rays++; return WorldSync.prototype.raycast.apply({ getBlock }, ray) } }
+  return world
+}
+
+test('a block in the wall of a 1-wide corridor is in reach from the corridor cell beside it, on every side', () => {
+  const missed = SIDES.filter(([sx, sz]) => {
+    // Stone 3 high round the ore, with an open-top corridor through the cell on side sx, sz.
+    const cells = {}
+    for (let x = -3; x <= 3; x++) for (let z = -3; z <= 3; z++) for (let y = 64; y <= 66; y++) cells[`${x},${y},${z}`] = 'stone'
+    for (let k = -3; k <= 3; k++) for (let y = 64; y <= 66; y++) cells[sx ? `${sx},${y},${k}` : `${k},${y},${sz}`] = 'air'
+    cells['0,64,0'] = 'coal_ore'
+    return !new goals.GoalLookAtBlock(new Vec3(0, 64, 0), lookWorld(cells)).isEnd(new Vec3(sx, 64, sz))
+  })
+  assert.deepStrictEqual(missed, [])
+})
+
+test('a log 3 or 4 above the feet on a stone column is in reach from the ground beside the column', () => {
+  for (const up of [3, 4]) {
+    const cells = { [`0,${64 + up},0`]: 'oak_log' }
+    for (let y = 64; y < 64 + up; y++) cells[`0,${y},0`] = 'stone'
+    const goal = new goals.GoalLookAtBlock(new Vec3(0, 64 + up, 0), lookWorld(cells))
+    assert.deepStrictEqual(SIDES.filter(([sx, sz]) => !goal.isEnd(new Vec3(sx, 64, sz))), [], `log ${up} up`)
+  }
+})
+
+test('a look at a floor block whose centre lies 4.52 from the eye is no end and casts no ray, while one cell nearer is an end', () => {
+  const world = lookWorld({})
+  const goal = new goals.GoalLookAtBlock(new Vec3(0, 63, 0), world)
+  assert.ok(goal.isEnd(new Vec3(3, 64, 0)), 'control: 3 out')
+  world.rays = 0
+  assert.strictEqual(goal.isEnd(new Vec3(4, 64, 0)), false)
+  assert.strictEqual(world.rays, 0)
 })

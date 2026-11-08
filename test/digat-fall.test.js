@@ -612,8 +612,8 @@ function walksAfter (w, first, end) {
 }
 
 // An ore out of reach from the body at UNDER, with gravel over it that lands on feet at FAR_UNDER.
-const FAR = { '4,66,0': 'iron_ore', '4,67,0': 'gravel' }
-const FAR_UNDER = new Vec3(4.5, 64, 0.5)
+const FAR = { '5,66,0': 'iron_ore', '5,67,0': 'gravel' }
+const FAR_UNDER = new Vec3(5.5, 64, 0.5)
 
 test('mine digs nothing when its walk away from a fall is stopped', async () => {
   const w = cave(UNDER, FAR)
@@ -632,7 +632,7 @@ test('mine stops with the gravel named when its walk finds no path and the ore n
   assert.strictEqual(r.error, undefined, r.error && r.error.message)
   assert.deepStrictEqual(w.digs, [])
   assert.strictEqual(walks(), 1)
-  assert.match(r.reply.reason, /^refusing to dig iron_ore at 4,66,0: gravel at 4,67,0 would fall on me\b/)
+  assert.match(r.reply.reason, /^refusing to dig iron_ore at 5,66,0: gravel at 5,67,0 would fall on me\b/)
 })
 
 // On the slab at 0,64,0 the eye sees the ore at 3,65,0 from the slab's cell, and the stone at 1,66,0 hides it from the cell above.

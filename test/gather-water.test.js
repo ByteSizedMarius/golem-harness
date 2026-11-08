@@ -185,8 +185,8 @@ test('gather digs pit dirt in reach from the farmland cell the body stands in bu
 })
 
 // Dirt in reach of a walk that starts one cell above the body, not of one that starts in the body's cell.
-const ABOVE_ONLY = new Vec3(-3, 64, -3)
-const SKIP_ABOVE_ONLY = 'skip @ -3,64,-3: the walk ended out of reach of it (spots with my head under water don\'t count)'
+const ABOVE_ONLY = new Vec3(-3, 67, -3)
+const SKIP_ABOVE_ONLY = 'skip @ -3,67,-3: the walk ended out of reach of it (spots with my head under water don\'t count)'
 
 test('gather plans from the snow cell the body stands in, as the pathfinder does, and leaves dirt in reach only from above it', async () => {
   const r = await gather(new Vec3(0.5, 64.25, 0.5), [ABOVE_ONLY], { blocks: { '0,64,0': ['snow', { layers: 3 }] }, walk: 'empty' })
@@ -203,7 +203,7 @@ test('gather plans from the ladder cell the body stands in at its floor and leav
 test('gather plans from the slab cell the body is in while off the ground and from the cell above it on the ground', async () => {
   const at = new Vec3(0.5, 64.5, 0.5)
   const slab = { '0,64,0': 'smooth_stone_slab' }
-  assert.deepStrictEqual((await gather(at, [ABOVE_ONLY], { blocks: slab, walk: 'empty' })).digs, [{ at: '-3,64,-3', head: 'air' }], 'control: on the ground')
+  assert.deepStrictEqual((await gather(at, [ABOVE_ONLY], { blocks: slab, walk: 'empty' })).digs, [{ at: '-3,67,-3', head: 'air' }], 'control: on the ground')
   const r = await gather(at, [ABOVE_ONLY], { blocks: slab, walk: 'empty', onGround: false })
   assert.deepStrictEqual(r.digs, [])
   assert.ok(r.progress.includes(SKIP_ABOVE_ONLY), r.progress.join('\n'))
