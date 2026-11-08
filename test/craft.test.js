@@ -238,6 +238,27 @@ test('1.21.11 counts the recipe yield at once and refuses an unreachable table f
   assert.deepStrictEqual(await far.done, { error: 'cannot reach the crafting table at 10,64,0' })
 })
 
+// From pass from on, the rig's craft takes the materials and lands no result in the pockets.
+function dropsResult (rig, from) {
+  const craft = rig.bot.craft
+  let pass = 0
+  rig.bot.craft = async (recipe, ...rest) => {
+    if (++pass < from) return craft(recipe, ...rest)
+    for (const d of recipe.delta) {
+      const name = mcData.items[d.id].name
+      if (d.count < 0) rig.held.set(name, rig.held.get(name) + d.count)
+    }
+  }
+  return rig
+}
+
+test('1.21.11 counts what each pass added to the pockets and ends at a pass that added nothing', async () => {
+  const later = dropsResult(craftRig({ items: { stick: 14 }, legacy: false }), 2).run({ item: 'ladder', count: '6' })
+  assert.deepStrictEqual(await later.done, { crafted: 'ladder', requested: 6, made: 3, usedTable: true, nowHave: 3, note: 'the server made no ladder on pass 2' })
+  const first = dropsResult(craftRig({ items: { stick: 7 }, legacy: false }), 1).run({ item: 'ladder', count: '3' })
+  assert.deepStrictEqual(await first.done, { error: 'the server made no ladder on pass 1' })
+})
+
 test('1.7.10 a 1.21 name the server knows as another item is noted, an old 1.7 alias is not', async () => {
   const aliases = { birch_button: 'oak_button', wooden_button: 'oak_button' }
   const birch = craftRig({ items: { oak_planks: 1 }, table: false, aliases }).run({ item: 'birch_button', count: '1' })

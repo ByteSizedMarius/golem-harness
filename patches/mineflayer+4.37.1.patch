@@ -12,6 +12,49 @@ index e75e90c..014d207 100644
    ) => Promise<void>
  
    writeBook: (
+diff --git a/node_modules/mineflayer/lib/plugins/anvil.js b/node_modules/mineflayer/lib/plugins/anvil.js
+index 9675a3a..6f0e56f 100644
+--- a/node_modules/mineflayer/lib/plugins/anvil.js
++++ b/node_modules/mineflayer/lib/plugins/anvil.js
+@@ -1,6 +1,9 @@
+ const assert = require('assert')
+ const { sleep } = require('../promise_utils')
+-const { once } = require('../promise_utils')
++const { once, createTask } = require('../promise_utils')
++
++// ms to wait after taking the result for the experience update before the rename counts as refused
++const RENAME_TIMEOUT = 3000
+ 
+ module.exports = inject
+ 
+@@ -81,13 +84,24 @@ function inject (bot) {
+       if (bot.game.gameMode !== 'creative' && bot.experience.level < normalCost) {
+         err('Player does not have enough xp to do action, cancelling.')
+       }
+-      const xpPromise = once(bot, 'experience')
+       await putSomething(0, item.type, item.metadata, item.count, item.nbt)
+       sendItemName('') // sent like this by vnailla
+       if (!bot.supportFeature('useMCItemName')) sendItemName('')
+       await addCustomName(name)
+-      await bot.putAway(2)
+-      await xpPromise
++      // In creative mode the server sends no experience update.
++      if (bot.game.gameMode === 'creative') {
++        await bot.putAway(2)
++        return
++      }
++      const paid = createTask()
++      bot.once('experience', paid.finish)
++      try {
++        await bot.putAway(2)
++        const deadline = setTimeout(() => paid.cancel(new Error('the anvil refused the rename')), RENAME_TIMEOUT)
++        await paid.promise.finally(() => clearTimeout(deadline))
++      } finally {
++        bot.removeListener('experience', paid.finish)
++      }
+     }
+ 
+     async function putSomething (destSlot, itemId, metadata, count, nbt) {
 diff --git a/node_modules/mineflayer/lib/plugins/craft.js b/node_modules/mineflayer/lib/plugins/craft.js
 index a5fe563..9498bb2 100644
 --- a/node_modules/mineflayer/lib/plugins/craft.js
@@ -92,25 +135,26 @@ index 507a618..73d608f 100644
  
    bot._client.on('entity_destroy', (packet) => {
 diff --git a/node_modules/mineflayer/lib/plugins/inventory.js b/node_modules/mineflayer/lib/plugins/inventory.js
-index 0636faa..52adf24 100644
+index 0636faa..b0a055d 100644
 --- a/node_modules/mineflayer/lib/plugins/inventory.js
 +++ b/node_modules/mineflayer/lib/plugins/inventory.js
-@@ -154,37 +154,34 @@ function inject (bot, { hideErrors }) {
+@@ -154,37 +154,36 @@ function inject (bot, { hideErrors }) {
      bot.usingHeldItem = false
    }
  
 -  async function putSelectedItemRange (start, end, window, slot) {
 -    // put the selected item back indow the slot range in window
--
--    // try to put it in an item that already exists and just increase
--    // the count.
 +  // a non-full stack in [start, end) whose components match item's too
 +  function joinableItem (window, start, end, item, nbt, withoutCraftResultSlot = false) {
 +    return window.findItemsRange(start, end, item.type, item.metadata, true, nbt, withoutCraftResultSlot).find((s) => windows.Window.sameComponents(s, item)) ?? null
 +  }
  
+-    // try to put it in an item that already exists and just increase
+-    // the count.
++  const plainClick = (slot, mouseButton) => clickWindow(slot, mouseButton, 0)
+ 
 +  // clicks the selected item into [start, end) until it is gone or the range has no room
-+  async function fillRange (start, end, window) {
++  async function fillRange (start, end, window, click = plainClick) {
      while (window.selectedItem) {
 -      const item = window.findItemRange(start, end, window.selectedItem.type, window.selectedItem.metadata, true, window.selectedItem.nbt)
 -
@@ -134,7 +178,7 @@ index 0636faa..52adf24 100644
 +      // the crafting result slot takes nothing from the cursor
 +      if (slot === window.craftingResultSlot) slot = window.firstEmptySlotRange(slot + 1, end)
 +      if (slot === null) return
-+      await clickWindow(slot, 0, 0)
++      await click(slot, 0)
      }
 +  }
  
@@ -143,21 +187,21 @@ index 0636faa..52adf24 100644
 -        await clickWindow(-999, 0, 0)
 -      }
 -    }
-+  async function tossLeftover (window) {
++  async function tossLeftover (window, click = plainClick) {
 +    if (!window.selectedItem) return null
 +    const leftover = { count: window.selectedItem.count, name: window.selectedItem.name }
-+    await clickWindow(-999, 0, 0)
++    await click(-999, 0)
 +    return leftover
 +  }
 +
-+  async function putSelectedItemRange (start, end, window, slot) {
-+    await fillRange(start, end, window)
-+    if (window.selectedItem && slot !== null) await clickWindow(slot, 0, 0)
-+    return await tossLeftover(window)
++  async function putSelectedItemRange (start, end, window, slot, click = plainClick) {
++    await fillRange(start, end, window, click)
++    if (window.selectedItem && slot !== null) await click(slot, 0)
++    return await tossLeftover(window, click)
    }
  
    async function activateBlock (block, direction, cursorPos) {
-@@ -271,7 +268,7 @@ function inject (bot, { hideErrors }) {
+@@ -271,7 +270,7 @@ function inject (bot, { hideErrors }) {
      const metadata = options.metadata
      const nbt = options.nbt
      let count = (options.count === undefined || options.count === null) ? 1 : options.count
@@ -166,28 +210,44 @@ index 0636faa..52adf24 100644
  
      // ranges
      const sourceStart = options.sourceStart
-@@ -285,7 +282,11 @@ function inject (bot, { hideErrors }) {
+@@ -281,11 +280,24 @@ function inject (bot, { hideErrors }) {
+     const sourceEnd = options.sourceEnd === null ? sourceStart + 1 : options.sourceEnd
+     const destEnd = options.destEnd === null ? destStart + 1 : options.destEnd
+ 
++    // a click with this window's slot numbers never goes to another window
++    async function click (slot, mouseButton) {
++      if ((bot.currentWindow || bot.inventory) !== window) {
++        const held = window.selectedItem
++        throw new Error(held ? `the window closed with ${held.count} ${held.name} on the cursor, which the server returns to the pockets or drops` : 'the window closed')
++      }
++      await clickWindow(slot, mouseButton, 0)
++    }
++
+     await transferOne()
  
      async function transferOne () {
        if (count === 0) {
 -        await putSelectedItemRange(sourceStart, sourceEnd, window, firstSourceSlot)
-+        await fillRange(sourceStart, sourceEnd, window)
++        await fillRange(sourceStart, sourceEnd, window, click)
 +        // a source range with no slot that takes the stack (a furnace output) leaves it in the cursor
-+        if (destStart !== -999) await fillRange(destStart, destEnd, window)
-+        const tossed = await tossLeftover(window)
++        if (destStart !== -999) await fillRange(destStart, destEnd, window, click)
++        const tossed = await tossLeftover(window, click)
 +        if (tossed) throw new Error(`moved ${requested}, tossed ${tossed.count} ${tossed.name} the source had no room for`)
          return
        }
        if (!window.selectedItem || window.selectedItem.type !== itemType ||
-@@ -296,7 +297,6 @@ function inject (bot, { hideErrors }) {
+@@ -296,9 +308,8 @@ function inject (bot, { hideErrors }) {
          const mcDataEntry = bot.registry.itemsArray.find(x => x.id === itemType)
          assert(mcDataEntry, 'Invalid itemType')
          if (!sourceItem) throw new Error(`Can't find ${mcDataEntry.name} in slots [${sourceStart} - ${sourceEnd}], (item id: ${itemType})`)
 -        if (firstSourceSlot === null) firstSourceSlot = sourceItem.slot
          // number of item that can be moved from that slot
-         await clickWindow(sourceItem.slot, 0, 0)
+-        await clickWindow(sourceItem.slot, 0, 0)
++        await click(sourceItem.slot, 0)
        }
-@@ -312,15 +312,15 @@ function inject (bot, { hideErrors }) {
+       await clickDest()
+ 
+@@ -312,15 +323,15 @@ function inject (bot, { hideErrors }) {
            destSlot = -999
          } else {
            // find a non full item that we can drop into
@@ -202,12 +262,28 @@ index 0636faa..52adf24 100644
 +          // if that didn't work, put the cursor back and give up
            if (destSlot === null) {
 -            throw new Error('destination full')
-+            const tossed = await putSelectedItemRange(sourceStart, sourceEnd, window, null)
++            const tossed = await putSelectedItemRange(sourceStart, sourceEnd, window, null, click)
 +            throw new Error(tossed ? `destination full, tossed ${tossed.count} ${tossed.name} the source had no room for` : 'destination full')
            }
          }
          // move the maximum number of item that can be moved
-@@ -350,7 +350,8 @@ function inject (bot, { hideErrors }) {
+@@ -329,13 +340,13 @@ function inject (bot, { hideErrors }) {
+         // if the number of item the left click moves is less than the number of item we want to move
+         // several at the same time (left click)
+         if (movedItems <= count) {
+-          await clickWindow(destSlot, 0, 0)
++          await click(destSlot, 0)
+           // update the number of item we want to move (count)
+           count -= movedItems
+           await transferOne()
+         } else {
+           // one by one (right click)
+-          await clickWindow(destSlot, 1, 0)
++          await click(destSlot, 1)
+           count -= 1
+           await transferOne()
+         }
+@@ -350,7 +361,8 @@ function inject (bot, { hideErrors }) {
      }
  
      window.withdraw = async (itemType, metadata, count, nbt) => {
@@ -217,7 +293,7 @@ index 0636faa..52adf24 100644
          throw new Error('Unable to withdraw, Bot inventory is full.')
        }
        const options = {
-@@ -422,7 +423,8 @@ function inject (bot, { hideErrors }) {
+@@ -422,7 +434,8 @@ function inject (bot, { hideErrors }) {
        if (item) {
          item.slot = slot
        }
@@ -227,6 +303,21 @@ index 0636faa..52adf24 100644
      }
    }
  
+@@ -656,12 +669,13 @@ function inject (bot, { hideErrors }) {
+   }
+ 
+   async function moveSlotItem (sourceSlot, destSlot) {
++    const window = bot.currentWindow || bot.inventory
+     await clickWindow(sourceSlot, 0, 0)
+     await clickWindow(destSlot, 0, 0)
+     // if we're holding an item, put it back where the source item was.
+     // otherwise we're done.
+     updateHeldItem()
+-    if (bot.inventory.selectedItem) {
++    if (window.selectedItem) {
+       await clickWindow(sourceSlot, 0, 0)
+     }
+   }
 diff --git a/node_modules/mineflayer/lib/plugins/physics.js b/node_modules/mineflayer/lib/plugins/physics.js
 index cecae69..0675e25 100644
 --- a/node_modules/mineflayer/lib/plugins/physics.js

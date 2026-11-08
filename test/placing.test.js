@@ -214,13 +214,17 @@ function crafter ({ tableAt = null, needsTable = true, seen = true, unreachable 
   const log = []
   const recipe = { result: { count: needsTable ? 1 : 4 } }
   const placed = tableAt ? { [key(tableAt)]: { name: 'crafting_table', boundingBox: 'block' } } : {}
+  const items = [{ name: 'crafting_table', count: 1 }]
   const env = placingEnv(entity, ground(placed), {
-    items: [{ name: 'crafting_table', count: 1 }],
+    items,
     bot: {
       recipesFor: (id, meta, min, t) => (t || !needsTable ? [recipe] : []),
       findBlocks: ({ maxDistance }) => (tableAt && tableAt.distanceTo(entity.position) <= maxDistance ? [tableAt] : []),
       pathfinder: { goto: async (g) => { log.push(['goto', g.x, g.y, g.z, g.r]); if (unreachable) throw new Error('No path to the goal!'); entity.position = new Vec3(g.x - 2.5, g.y, g.z + 0.5) } },
-      async craft (r, n, t) { log.push(['craft', t ? key(t.position) : null]) },
+      async craft (r, n, t) {
+        log.push(['craft', t ? key(t.position) : null])
+        items.push({ name: needsTable ? 'chest' : 'oak_planks', count: r.result.count })
+      },
       async placeBlock () { log.push(['placeBlock']) },
       async equip (item) { log.push(['equip', item.name]) }
     },
@@ -261,7 +265,7 @@ test('craft walks to a table 10 blocks off and crafts at it', async () => {
   const { log, ctx } = crafter({ tableAt: new Vec3(10, 64, 0) })
   const r = await ctx.craftItem({ id: 1, name: 'chest' }, 1)
   assert.deepStrictEqual(log, [['goto', 10, 64, 0, 3], ['craft', '10,64,0']])
-  assert.deepStrictEqual({ ...r }, { crafted: 'chest', requested: 1, made: 1, usedTable: true, nowHave: 0, note: undefined })
+  assert.deepStrictEqual({ ...r }, { crafted: 'chest', requested: 1, made: 1, usedTable: true, nowHave: 1, note: undefined })
 })
 
 test('craft names a seen table it cannot reach', async () => {

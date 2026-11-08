@@ -2,6 +2,8 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { AsyncLocalStorage } = require('node:async_hooks')
+const { EventEmitter, once } = require('node:events')
+const mineflayer = require('mineflayer')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const WorldSync = require('prismarine-world/src/worldsync')
@@ -11,6 +13,7 @@ const { guardWork } = require('../lib/walk')
 const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 const { LEGACY_CLICK_REACH } = require('../lib/bot/legacy-1710')
 const { TOOLS } = require('../mcp/tools')
+const { CHEST_WINDOW, server1710 } = require('./chest-1710')
 const mcData = require('minecraft-data')('1.21.11')
 const registry = require('prismarine-registry')('1.21.11')
 const loadItem = require('prismarine-item')
@@ -528,6 +531,35 @@ test('a chest closed during the stack pause stops withdraw and deposit, and the 
   const error = await refusal('/deposit', { name: 'stone' }, env)
   assert.match(error, /^deposited 64 then failed: the chest closed; stone in chest now 64; /)
   assert.ok(chest.closed, 'the window stays open')
+})
+
+// A chest window on mineflayer's inventory plugin over a 1.7.10 server, which closes it right after the nth click.
+async function closingChest (contents, n) {
+  const client = new EventEmitter()
+  client.version = '1.21.11'
+  client.end = () => {}
+  const server = server1710(client, contents)
+  const bot = mineflayer.createBot({ client, username: 'Claude', loadInternalPlugins: false })
+  await once(bot, 'inject_allowed')
+  bot.loadPlugin(require('mineflayer/lib/plugins/inventory'))
+  const BotItem = require('prismarine-item')(bot.registry)
+  client.emit('window_items', server.notch(BotItem, 0))
+  const opened = once(bot, 'windowOpen')
+  client.emit('open_window', { windowId: CHEST_WINDOW, inventoryType: 2, windowTitle: 'Chest' })
+  client.emit('window_items', server.notch(BotItem, CHEST_WINDOW))
+  const write = client.write
+  let clicks = 0
+  client.write = (name, data) => {
+    write(name, data)
+    if (name === 'window_click' && ++clicks === n) client.emit('close_window', { windowId: CHEST_WINDOW })
+  }
+  return (await opened)[0]
+}
+
+test('withdraw names the stack left on the cursor when the server closes the chest mid-transfer', async () => {
+  const chest = await closingChest({ chest: [[0, 'cobblestone', 64]], pockets: [] }, 1)
+  const { env } = chestEnv([NEAR], { '5,64,0': chest })
+  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone' }, env), 'the window closed with 64 cobblestone on the cursor, which the server returns to the pockets or drops')
 })
 
 test('withdraw and deposit refuse during a fight before walking or opening anything', async () => {

@@ -233,6 +233,96 @@ test('a left click with a cursor of 1 on an empty armour slot moves the cursor i
   assert.deepStrictEqual([window.slots[5].nbt === nbt, window.selectedItem], [true, null])
 })
 
+test('moveSlotItem in a chest puts the stack a swap left in the cursor back into the source slot', async () => {
+  const { bot, server, window } = await openChest({ chest: [[0, 'stone', 10, 'Named'], [1, 'stone', 5]], pockets: [] })
+  const clicked = []
+  server.onClick = (slot) => clicked.push(slot)
+  await bot.moveSlotItem(0, 1)
+  assert.deepStrictEqual(clicked, [0, 1, 0])
+  assert.deepStrictEqual(server.chestStacks(), [[0, 'stone', 5, undefined], [1, 'stone', 10, 'Named']])
+  assert.deepStrictEqual(view(window), server.chestStacks())
+  assert.deepStrictEqual([window.selectedItem, server.cursor], [null, null])
+})
+
+// Closes the chest after the nth click and returns the [windowId, slot] of every click after it.
+function closeAfterClick (bot, n) {
+  const after = []
+  const write = bot._client.write
+  let clicks = 0
+  bot._client.write = (name, data) => {
+    if (name === 'window_click') {
+      if (clicks >= n) after.push([data.windowId, data.slot])
+      // A click loop on the wrong window never lets a test timeout fire.
+      if (++clicks > 50) throw new Error('more than 50 clicks')
+    }
+    write(name, data)
+    if (name === 'window_click' && clicks === n) bot._client.emit('close_window', { windowId: CHEST_WINDOW })
+  }
+  return after
+}
+
+const failure = (promise) => promise.then(() => null, (e) => e.message)
+const closedWith = (count, name) => `the window closed with ${count} ${name} on the cursor, which the server returns to the pockets or drops`
+
+test('a withdrawal the server closes the chest on after its first click rejects naming the held stack and clicks nothing more', async () => {
+  const { bot, window } = await openChest({ chest: [[0, 'cobblestone', 64], [1, 'cobblestone', 64]], pockets: dirtBut(9) })
+  const after = closeAfterClick(bot, 1)
+  const error = await failure(window.withdraw(id('cobblestone'), null, 128))
+  assert.deepStrictEqual([error, after], [closedWith(64, 'cobblestone'), []])
+})
+
+test('a withdrawal the server closes the chest on while the cursor is empty rejects without naming a stack', async () => {
+  const { bot, window } = await openChest({ chest: [[0, 'cobblestone', 64], [1, 'cobblestone', 64]], pockets: dirtBut(9) })
+  const after = closeAfterClick(bot, 2)
+  const error = await failure(window.withdraw(id('cobblestone'), null, 128))
+  assert.deepStrictEqual([error, after], ['the window closed', []])
+})
+
+test('a deposit the server closes the chest on after its first click rejects and writes no chest slot to the player window', async () => {
+  const { bot, window } = await openChest({ chest: [], pockets: [[36, 'cobblestone', 64]] })
+  const after = closeAfterClick(bot, 1)
+  const error = await failure(window.deposit(id('cobblestone'), null, 64))
+  assert.deepStrictEqual(after, [])
+  assert.strictEqual(error, closedWith(64, 'cobblestone'))
+})
+
+test('a withdrawal of part of a stack the server closes the chest on after the drop rejects without the put-back click', async () => {
+  const { bot, window } = await openChest({ chest: [[0, 'cobblestone', 64]], pockets: [] })
+  const after = closeAfterClick(bot, 2)
+  const error = await failure(window.withdraw(id('cobblestone'), null, 1))
+  assert.deepStrictEqual(after, [])
+  assert.strictEqual(error, closedWith(63, 'cobblestone'))
+})
+
+test('a withdrawal the server closes the chest on before the toss of a stack no slot takes rejects naming it and tosses nothing', async () => {
+  const chest = [[0, 'cobblestone', 64], ...Array.from({ length: CHEST_SLOTS - 1 }, (_, i) => [i + 1, 'stone', 64])]
+  const { bot, server, window } = await openChest({ chest, pockets: [...dirtBut(1), [44, 'cobblestone', 63]] })
+  refillSlot0(bot, server)
+  const after = closeAfterClick(bot, 2)
+  const error = await failure(window.withdraw(id('cobblestone'), null, 1))
+  assert.deepStrictEqual([error, after, server.dropped], [closedWith(63, 'cobblestone'), [], []])
+})
+
+test('a withdrawal the server closes the chest on before the put-back of a stack the full pockets refused rejects naming it', async () => {
+  const { bot, window } = await openChest({ chest: [[0, 'cobblestone', 64], [1, 'cobblestone', 64]], pockets: dirtBut(1) })
+  const after = closeAfterClick(bot, 3)
+  const error = await failure(window.withdraw(id('cobblestone'), null, 128))
+  assert.deepStrictEqual([error, after], [closedWith(64, 'cobblestone'), []])
+})
+
+test('a withdrawal from a chest the server closed before the call rejects and clicks nothing', async () => {
+  const { bot, window } = await openChest({ chest: [[0, 'cobblestone', 64]], pockets: [] })
+  const clicks = []
+  const write = bot._client.write
+  bot._client.write = (name, data) => {
+    if (name === 'window_click') clicks.push([data.windowId, data.slot])
+    write(name, data)
+  }
+  bot._client.emit('close_window', { windowId: CHEST_WINDOW })
+  const error = await failure(window.withdraw(id('cobblestone'), null, 64))
+  assert.deepStrictEqual([error, clicks], ['the window closed', []])
+})
+
 test('closing a chest takes a pocket item from the window when it differs from the inventory only in components', async () => {
   const { bot, window } = await openChest({ chest: [], pockets: [[36, 'stone', 10, 'Old']] })
   const Item = require('prismarine-item')(bot.registry)

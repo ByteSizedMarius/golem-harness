@@ -4,6 +4,17 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-08: renames, smelting and tosses report what the server did
+
+`/rename`, `/smelt`, `/furnace` and `/toss` reported what the bot predicted, not what the server
+did, so a rename the server refused, or one it charged a different number of levels for, read as
+done. `/rename` now reports the levels the server took and fails when the item comes back
+unrenamed. On a 1.7.10 server it refuses a rename the bot can't afford and a name over 30
+characters before walking to the anvil. `/smelt` and `/furnace` report the counts the server
+moved, and say so when it moved more than asked. `/toss` counts the items the server threw from
+the drops that appear at the bot's hand. On a vanilla 1.7.10 enchanting table, `/enchant` no longer
+clicks lapis that the table never takes. This patches mineflayer's anvil and inventory plugins.
+
 ## 2026-11-08: equipping one of two lookalike items holds the one asked for
 
 Equipping one of two items of the same kind that differ only in their data (a silk touch and a

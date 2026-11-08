@@ -83,8 +83,9 @@ function enchantingTable (pockets, levels, applies, sent) {
     async putLapis (item) {
       table.slots[1] = { ...item, slot: 1 }
       table.held = table.slots[0] && table.slots[0].count
-      table.enchantments = levels.map((level, i) => ({ level, expected: { enchant: level > 0 ? i : -1, level: level > 0 ? 2 : -1 } }))
+      table.offer()
     },
+    offer () { table.enchantments = levels.map((level, i) => ({ level, expected: { enchant: level > 0 ? i : -1, level: level > 0 ? 2 : -1 } })) },
     targetItem: () => table.slots[0],
     async putAway (slot) {
       const empty = table.slots.findIndex((s, i) => i >= table.inventoryStart && i < table.inventoryEnd && !s)
@@ -123,8 +124,7 @@ function clicker (table, clicks, unanswered) {
   }
 }
 
-// pickedUp fills the clicked slot when the click throws.
-async function enchantRun (query, { legacy = false, overrides = null, levels = [2, 5, 9], applies = true, item = { name: 'iron_sword', count: 1 }, stuck = [], unanswered = [], cursor = null, clickItem = false, clickLapis = false, pickedUp = null } = {}) {
+async function enchantRun (query, { legacy = false, overrides = null, levels = [2, 5, 9], applies = true, item = { name: 'iron_sword', count: 1 }, stuck = [], unanswered = [], cursor = null, clickItem = false, clickLapis = false, pickedUp = null, shownLapis = false } = {}) {
   const pockets = [item, { name: 'lapis_lazuli', count: 3 }]
   const { env, walks } = stationEnv('enchanting_table', true)
   const sent = sentRegistry()
@@ -136,7 +136,13 @@ async function enchantRun (query, { legacy = false, overrides = null, levels = [
     await env.bot.clickWindow(to, 0, 0)
   }
   if (clickItem) table.putTargetItem = moveSlotItem(0)
-  if (clickLapis) table.putLapis = moveSlotItem(1)
+  if (clickLapis) table.putLapis = async (it) => { await moveSlotItem(1)(it); table.offer() }
+  if (shownLapis) {
+    table.slots[1] = { name: 'lapis_lazuli', count: 3, slot: 1 }
+    const put = table.putTargetItem
+    table.putTargetItem = async (it) => { await put(it); table.offer() }
+  }
+  const putAways = []
   const writes = []
   const clicks = []
   let inTable = null
@@ -159,6 +165,7 @@ async function enchantRun (query, { legacy = false, overrides = null, levels = [
     experience: { level: 10 },
     openEnchantmentTable: async () => table,
     putAway: async (slot) => {
+      putAways.push(slot)
       if (stuck.includes(slot)) throw new Error(`no answer for slot ${slot}`)
       await table.putAway(slot)
     },
@@ -185,7 +192,7 @@ async function enchantRun (query, { legacy = false, overrides = null, levels = [
   })
   const { handle, res } = routeHandler('/enchant', env)
   await handle({ query }, res)
-  return { reply: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error && res.error.message, writes, table, walks, clicks, inTable }
+  return { reply: res.body && JSON.parse(JSON.stringify(res.body)), error: res.error && res.error.message, writes, table, walks, clicks, inTable, putAways }
 }
 
 const offersBy = (model, levels = [2, 5, 9]) => levels.map((levelNeeded, slot) => ({
@@ -349,16 +356,51 @@ test('enchant ignores a cursor left over from before its clicks', async () => {
   assert.deepStrictEqual([refused.reply, refused.error], [undefined, 'slot 1 holds no offer'])
 })
 
+const DECLARED = { lapisCost: [1, 2, 3], levelCost: [1, 2, 3] }
+
+test('enchant at a 1.7.10 table that opens with a lapis in slot 1 never clicks or counts that lapis', async () => {
+  const shown = { name: 'lapis_lazuli', count: 3, slot: 1 }
+  for (const [query, levels, refusal] of [[{ item: 'iron_sword' }], [{ item: 'iron_sword', slot: '1' }], [{ item: 'iron_sword', slot: '1' }, [3, 0, 0], 'slot 1 holds no offer']]) {
+    const { reply, error, clicks, putAways, table } = await enchantRun(query, { legacy: true, overrides: { enchanting: DECLARED }, levels, shownLapis: true, clickItem: true, clickLapis: true })
+    const label = JSON.stringify([query, levels])
+    assert.strictEqual(error, refusal, label)
+    assert.deepStrictEqual(clicks.filter(([slot]) => slot === 1), [], label)
+    assert.ok(!putAways.includes(1), `${label}: put away slot 1`)
+    assert.strictEqual(reply && reply.notBack, undefined, label)
+    assert.deepStrictEqual([table.slots[1], inPockets(table, 'lapis_lazuli'), inPockets(table, 'iron_sword')], [shown, 3, 1], label)
+  }
+})
+
+test('enchant puts the lapis into a 1.7.10 table that opens with slot 1 empty, and into a baseline table', async () => {
+  for (const [legacy, shownLapis] of [[true, false], [false, true]]) {
+    const { clicks } = await enchantRun({ item: 'iron_sword' }, { legacy, overrides: legacy ? { enchanting: DECLARED } : null, shownLapis, clickLapis: true })
+    assert.deepStrictEqual(clicks.slice(0, 2), [[31, 0, 0], [1, 0, 0]], `legacy ${legacy}`)
+  }
+  const { reply, putAways, table } = await enchantRun({ item: 'iron_sword' }, { legacy: true, overrides: { enchanting: DECLARED }, clickLapis: true })
+  assert.deepStrictEqual([reply.offers.length, reply.notBack, putAways, table.slots[1], inPockets(table, 'lapis_lazuli')], [3, undefined, [0, 1], null, 3])
+})
+
 test('rename renames the named pocket item at a seen anvil', async () => {
   const { env } = stationEnv('anvil', true)
   const sword = { name: 'iron_sword', count: 1 }
+  const pockets = [{ name: 'stick', count: 2 }, sword]
   const renamed = []
   Object.assign(env.bot, {
-    inventory: { items: () => [{ name: 'stick', count: 2 }, sword] },
+    inventory: { inventoryStart: 9, items: () => pockets },
     experience: { level: 9 },
-    openAnvil: async () => ({ rename: async (item, name) => { renamed.push([item, name]) }, close () {} })
+    openAnvil: async () => ({
+      slots: [null, null, null, ...pockets],
+      inventoryStart: 3,
+      inventoryEnd: 5,
+      rename: async (item, name) => {
+        renamed.push([item, name])
+        item.customName = { type: 'string', value: name }
+        env.bot.experience.level -= 1
+      },
+      close () {}
+    })
   })
   env.emitEvent = () => {}
-  assert.deepStrictEqual(await awaitRoute('/rename', { item: 'iron_sword', name: 'Occam' }, env), { renamed: 'iron_sword', name: 'Occam', myLevelNow: 9 })
+  assert.deepStrictEqual(await awaitRoute('/rename', { item: 'iron_sword', name: 'Occam' }, env), { renamed: 'iron_sword', name: 'Occam', levelsSpent: 1, myLevelNow: 8 })
   assert.deepStrictEqual(renamed, [[sword, 'Occam']])
 })
