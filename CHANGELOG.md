@@ -4,6 +4,17 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-08: equipping one of two lookalike items holds the one asked for
+
+Equipping one of two items of the same kind that differ only in their data (a silk touch and a
+fortune pickaxe, a worn and a fresh sword) made the server swap them while the bot still saw the
+old layout, until it reconnected. A silk touch dig could run with the fortune pickaxe and still
+report success. The bot's click prediction now treats such items as different, and closing a
+container repairs a slot that differs only in its data. `/equip` refuses an item the chosen armour
+slot can't take. It wears one item of a stack (pumpkins, skulls) and returns the rest, and it says
+when nothing went on. This patches prismarine-windows' click prediction and mineflayer's inventory
+plugin.
+
 ## 2026-11-08: items taken from a chest with full pockets stay in the chest
 
 Taking items out of a chest or grave with too little room in the pockets left the extra stack on

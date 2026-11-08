@@ -7,6 +7,7 @@ const registry = require('prismarine-registry')('1.21.11')
 const Block = require('prismarine-block')(registry)
 const Item = require('prismarine-item')(registry)
 const { botConstant, claimRescue, fakeClock, loadBotFunctions, routeHandler, runRoute } = require('./helpers')
+const { playerBody, stacksOf } = require('./chest-1710')
 
 // A carried item built from the enchantment components a 1.21.11 server sends.
 function item (name, slot, enchants = {}, used = 0) {
@@ -126,29 +127,21 @@ test('a dig tool choice keeps the held tool over an equal one elsewhere in the p
 const CELL = new Vec3(2, 64, 0)
 const cellBlock = (name) => Object.assign(Block.fromStateId(registry.blocksByName[name].defaultState, 0), { position: CELL })
 
-// hotbar entries are [name, enchants] or null, held is the selected hotbar index.
-async function digat (blockName, hotbar, held, query = {}) {
+// dugWith reads the held item at the moment of the dig.
+async function runDigat (bot, blockName, query = {}, dugWith = () => bot.heldItem) {
   const clock = fakeClock()
   let cell = cellBlock(blockName)
-  const slots = new Array(46).fill(null)
-  hotbar.forEach((spec, i) => { if (spec) slots[36 + i] = item(spec[0], 36 + i, spec[1]) })
-  const bot = Object.assign(new EventEmitter(), {
+  Object.assign(bot, {
     entity: { position: new Vec3(0.5, 64, 0.5) },
-    inventory: Object.assign(new EventEmitter(), { slots, hotbarStart: 36, items: () => slots.filter(Boolean) }),
-    quickBarSlot: held,
-    setQuickBarSlot (i) { this.quickBarSlot = i },
     walks: 0,
-    async equip (it) { this.quickBarSlot = slots.indexOf(it) - 36 },
     blockAt: () => cell,
-    _client: { write () {} },
     digTime: () => 0,
     async dig (b) {
-      this.dugWith = this.heldItem
+      this.dugWith = dugWith()
       cell = cellBlock('air')
       this.emit(`blockUpdate:${CELL}`, b, cell)
     }
   })
-  Object.defineProperty(bot, 'heldItem', { get () { return slots[36 + this.quickBarSlot] } })
   const env = {
     bot,
     bunker: { building: false },
@@ -176,6 +169,21 @@ async function digat (blockName, hotbar, held, query = {}) {
   return { reply: res.body, error: res.error, dugWith: bot.dugWith, cell }
 }
 
+// hotbar entries are [name, enchants] or null, held is the selected hotbar index.
+function digat (blockName, hotbar, held, query = {}) {
+  const slots = new Array(46).fill(null)
+  hotbar.forEach((spec, i) => { if (spec) slots[36 + i] = item(spec[0], 36 + i, spec[1]) })
+  const bot = Object.assign(new EventEmitter(), {
+    inventory: Object.assign(new EventEmitter(), { slots, hotbarStart: 36, items: () => slots.filter(Boolean) }),
+    quickBarSlot: held,
+    setQuickBarSlot (i) { this.quickBarSlot = i },
+    async equip (it) { this.quickBarSlot = slots.indexOf(it) - 36 },
+    _client: { write () {} }
+  })
+  Object.defineProperty(bot, 'heldItem', { get () { return slots[36 + this.quickBarSlot] } })
+  return runDigat(bot, blockName, query)
+}
+
 test('digat digs coal ore with the fortune pick when a plain pick of the same name is held', async () => {
   const r = await digat('coal_ore', [['iron_pickaxe', PLAIN], ['iron_pickaxe', FORTUNE]], 0)
   assert.strictEqual(r.error, undefined, r.error && r.error.message)
@@ -195,6 +203,15 @@ test('digat digs glass with the silk touch pick only when silk is asked', async 
 test('digat with silk takes the silk touch pick over an axe on a bookshelf', async () => {
   const r = await digat('bookshelf', [['iron_axe'], ['iron_pickaxe', SILK]], 0, { silk: '1' })
   assert.strictEqual(r.dugWith && r.dugWith.slot, 37)
+})
+
+test('digat with silk digs with the silk touch pick from a pocket while a fortune pick is held and the hotbar is full', async () => {
+  const dirt = Array.from({ length: 8 }, (_, i) => [37 + i, 'dirt', 64])
+  const { bot, server } = await playerBody([[9, 'iron_pickaxe', 1, SILK], [36, 'iron_pickaxe', 1, FORTUNE], ...dirt])
+  const r = await runDigat(bot, 'stone', { silk: '1' }, () => server.heldItem())
+  assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  assert.deepStrictEqual(r.dugWith.tag, SILK)
+  assert.deepStrictEqual(stacksOf(bot.inventory), server.stacks())
 })
 
 test('digat refuses silk without a silk touch pick that harvests the block, and digs nothing', async () => {

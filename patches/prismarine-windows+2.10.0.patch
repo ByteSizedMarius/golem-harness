@@ -1,10 +1,13 @@
 diff --git a/node_modules/prismarine-windows/lib/Window.js b/node_modules/prismarine-windows/lib/Window.js
-index 1733ff1..21111ff 100644
+index 1733ff1..a046e13 100644
 --- a/node_modules/prismarine-windows/lib/Window.js
 +++ b/node_modules/prismarine-windows/lib/Window.js
-@@ -2,6 +2,16 @@ const assert = require('assert')
+@@ -1,7 +1,19 @@
+ const assert = require('assert')
  const EventEmitter = require('events').EventEmitter
  
++const componentsKey = (item) => JSON.stringify([item?.components ?? [], item?.removedComponents ?? []])
++
  module.exports = (Item, registry) => {
 +  // Copies the item components (1.20.5+) from `from` onto `item` and returns `item`.
 +  function withComponents (item, from) {
@@ -19,7 +22,52 @@ index 1733ff1..21111ff 100644
    return class Window extends EventEmitter {
      constructor (id, type, title, slotCount,
        inventorySlotsRange = { start: 27, end: 62 },
-@@ -101,7 +111,7 @@ module.exports = (Item, registry) => {
+@@ -22,6 +34,10 @@ module.exports = (Item, registry) => {
+       this.selectedItem = null
+     }
+ 
++    static sameComponents (a, b) {
++      return componentsKey(a) === componentsKey(b)
++    }
++
+     acceptClick (click, gamemode = 0) {
+       const { mode, slot, mouseButton } = click
+       assert.ok(
+@@ -67,10 +83,14 @@ module.exports = (Item, registry) => {
+         this.dropSelectedItem(click.mouseButton === 0)
+       } else {
+         let { item } = click
++        if (this.selectedItem && this.type === 'minecraft:inventory' && click.slot >= 5 && click.slot <= 8) {
++          return this.armorClick(click)
++        }
+         if (click.mouseButton === 0) { // left click
+           if (item && this.selectedItem) {
+             if (Item.equal(item, this.selectedItem, false)) {
+               if (click.slot === this.craftingResultSlot) {
++                if (!Window.sameComponents(item, this.selectedItem)) return []
+                 const maxTransferrable = this.selectedItem.stackSize - this.selectedItem.count
+                 if (item.count > maxTransferrable) {
+                   this.selectedItem.count += maxTransferrable
+@@ -79,8 +99,10 @@ module.exports = (Item, registry) => {
+                   this.selectedItem.count += item.count
+                   this.updateSlot(item.slot, null)
+                 }
+-              } else {
++              } else if (Window.sameComponents(item, this.selectedItem)) {
+                 this.fillSlotWithSelectedItem(item, true)
++              } else {
++                this.swapSelectedItem(click.slot, item)
+               }
+             } else {
+               this.swapSelectedItem(click.slot, item)
+@@ -95,13 +117,13 @@ module.exports = (Item, registry) => {
+         } else if (click.mouseButton === 1) { // right click
+           if (this.selectedItem) {
+             if (item) {
+-              if (Item.equal(item, this.selectedItem, false)) {
++              if (Item.equal(item, this.selectedItem, false) && Window.sameComponents(item, this.selectedItem)) {
+                 this.fillSlotWithSelectedItem(item, false)
+               } else {
                  this.swapSelectedItem(click.slot, item)
                }
              } else {
@@ -28,7 +76,26 @@ index 1733ff1..21111ff 100644
                this.updateSlot(click.slot, item)
                this.fillSlotWithSelectedItem(item, false)
              }
-@@ -269,7 +279,7 @@ module.exports = (Item, registry) => {
+@@ -118,6 +140,18 @@ module.exports = (Item, registry) => {
+       return []
+     }
+ 
++    // An armour slot holds one item.
++    armorClick (click) {
++      const { item } = click
++      if (this.selectedItem.count === 1) {
++        this.swapSelectedItem(click.slot, item)
++      } else if (!item) {
++        this.updateSlot(click.slot, withComponents(new Item(this.selectedItem.type, 1, this.selectedItem.metadata, this.selectedItem.nbt), this.selectedItem))
++        this.selectedItem.count--
++      }
++      return [click.slot]
++    }
++
+     shiftClick (click) {
+       const { item } = click
+       if (!item) return
+@@ -269,7 +303,7 @@ module.exports = (Item, registry) => {
  
      splitSlot (item) {
        if (!item) return

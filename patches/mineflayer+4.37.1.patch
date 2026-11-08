@@ -92,10 +92,10 @@ index 507a618..73d608f 100644
  
    bot._client.on('entity_destroy', (packet) => {
 diff --git a/node_modules/mineflayer/lib/plugins/inventory.js b/node_modules/mineflayer/lib/plugins/inventory.js
-index 0636faa..85a7593 100644
+index 0636faa..52adf24 100644
 --- a/node_modules/mineflayer/lib/plugins/inventory.js
 +++ b/node_modules/mineflayer/lib/plugins/inventory.js
-@@ -154,37 +154,35 @@ function inject (bot, { hideErrors }) {
+@@ -154,37 +154,34 @@ function inject (bot, { hideErrors }) {
      bot.usingHeldItem = false
    }
  
@@ -106,8 +106,7 @@ index 0636faa..85a7593 100644
 -    // the count.
 +  // a non-full stack in [start, end) whose components match item's too
 +  function joinableItem (window, start, end, item, nbt, withoutCraftResultSlot = false) {
-+    const components = (s) => JSON.stringify([s.components ?? [], s.removedComponents ?? []])
-+    return window.findItemsRange(start, end, item.type, item.metadata, true, nbt, withoutCraftResultSlot).find((s) => components(s) === components(item)) ?? null
++    return window.findItemsRange(start, end, item.type, item.metadata, true, nbt, withoutCraftResultSlot).find((s) => windows.Window.sameComponents(s, item)) ?? null
 +  }
  
 +  // clicks the selected item into [start, end) until it is gone or the range has no room
@@ -158,7 +157,7 @@ index 0636faa..85a7593 100644
    }
  
    async function activateBlock (block, direction, cursorPos) {
-@@ -271,7 +269,7 @@ function inject (bot, { hideErrors }) {
+@@ -271,7 +268,7 @@ function inject (bot, { hideErrors }) {
      const metadata = options.metadata
      const nbt = options.nbt
      let count = (options.count === undefined || options.count === null) ? 1 : options.count
@@ -167,7 +166,7 @@ index 0636faa..85a7593 100644
  
      // ranges
      const sourceStart = options.sourceStart
-@@ -285,7 +283,11 @@ function inject (bot, { hideErrors }) {
+@@ -285,7 +282,11 @@ function inject (bot, { hideErrors }) {
  
      async function transferOne () {
        if (count === 0) {
@@ -180,7 +179,7 @@ index 0636faa..85a7593 100644
          return
        }
        if (!window.selectedItem || window.selectedItem.type !== itemType ||
-@@ -296,7 +298,6 @@ function inject (bot, { hideErrors }) {
+@@ -296,7 +297,6 @@ function inject (bot, { hideErrors }) {
          const mcDataEntry = bot.registry.itemsArray.find(x => x.id === itemType)
          assert(mcDataEntry, 'Invalid itemType')
          if (!sourceItem) throw new Error(`Can't find ${mcDataEntry.name} in slots [${sourceStart} - ${sourceEnd}], (item id: ${itemType})`)
@@ -188,7 +187,7 @@ index 0636faa..85a7593 100644
          // number of item that can be moved from that slot
          await clickWindow(sourceItem.slot, 0, 0)
        }
-@@ -312,15 +313,15 @@ function inject (bot, { hideErrors }) {
+@@ -312,15 +312,15 @@ function inject (bot, { hideErrors }) {
            destSlot = -999
          } else {
            // find a non full item that we can drop into
@@ -208,7 +207,7 @@ index 0636faa..85a7593 100644
            }
          }
          // move the maximum number of item that can be moved
-@@ -350,7 +351,8 @@ function inject (bot, { hideErrors }) {
+@@ -350,7 +350,8 @@ function inject (bot, { hideErrors }) {
      }
  
      window.withdraw = async (itemType, metadata, count, nbt) => {
@@ -218,6 +217,16 @@ index 0636faa..85a7593 100644
          throw new Error('Unable to withdraw, Bot inventory is full.')
        }
        const options = {
+@@ -422,7 +423,8 @@ function inject (bot, { hideErrors }) {
+       if (item) {
+         item.slot = slot
+       }
+-      if (!Item.equal(bot.inventory.slots[slot], item, true)) bot.inventory.updateSlot(slot, item)
++      const old = bot.inventory.slots[slot]
++      if (!Item.equal(old, item, true) || !windows.Window.sameComponents(old, item)) bot.inventory.updateSlot(slot, item)
+     }
+   }
+ 
 diff --git a/node_modules/mineflayer/lib/plugins/physics.js b/node_modules/mineflayer/lib/plugins/physics.js
 index cecae69..0675e25 100644
 --- a/node_modules/mineflayer/lib/plugins/physics.js

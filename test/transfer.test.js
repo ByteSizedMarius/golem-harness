@@ -176,3 +176,69 @@ test('withdraw refuses before any click when the only pocket room is a stack of 
   await assert.rejects(window.withdraw(id('stone'), null, 64), { message: 'Unable to withdraw, Bot inventory is full.' })
   assert.strictEqual(server.clicks, 0)
 })
+
+test('a left or right click of a stack onto the same item with other components swaps the two, as the server does', async (t) => {
+  for (const [button, side] of [[0, 'left'], [1, 'right']]) {
+    await t.test(side, async () => {
+      const { bot, server, window } = await openChest({ chest: [[0, 'stone', 10, 'Named'], [1, 'stone', 5]], pockets: [] })
+      await bot.clickWindow(0, 0, 0)
+      await bot.clickWindow(1, button, 0)
+      assert.deepStrictEqual(view(window), server.chestStacks())
+      assert.deepStrictEqual([window.selectedItem.count, window.selectedItem.components[0]?.data], [server.cursor.count, server.cursor.tag])
+      await bot.clickWindow(0, 0, 0)
+      assert.deepStrictEqual(view(window), [[0, 'stone', 5, undefined], [1, 'stone', 10, 'Named']])
+      assert.deepStrictEqual(view(window), server.chestStacks())
+      assert.deepStrictEqual([window.selectedItem, server.cursor], [null, null])
+    })
+  }
+})
+
+test('a left click on a crafting result slot changes nothing for a cursor of the same item with other components, as the server does', () => {
+  const Item = require('prismarine-item')(VERSION)
+  const window = require('prismarine-windows')(VERSION).createWindow(0, 'minecraft:inventory', 'Inventory')
+  window.updateSlot(window.craftingResultSlot, new Item(id('stone'), 4))
+  window.selectedItem = Object.assign(new Item(id('stone'), 10), { components: [{ type: 'custom_name', data: 'Named' }] })
+  window.acceptClick({ mode: 0, mouseButton: 0, slot: window.craftingResultSlot, item: window.slots[window.craftingResultSlot] })
+  assert.deepStrictEqual([window.selectedItem.count, window.selectedItem.components[0].data, window.slots[window.craftingResultSlot].count], [10, 'Named', 4])
+})
+
+// A player window wearing an iron helmet, its cursor holding count carved pumpkins.
+function wornHelmet (count) {
+  const Item = require('prismarine-item')(VERSION)
+  const window = require('prismarine-windows')(VERSION).createWindow(0, 'minecraft:inventory', 'Inventory')
+  window.updateSlot(5, new Item(id('iron_helmet'), 1))
+  window.selectedItem = new Item(id('carved_pumpkin'), count)
+  window.acceptClick({ mode: 0, mouseButton: 0, slot: 5, item: window.slots[5] })
+  return window
+}
+
+test('a left click with a cursor of 1 on a worn armour piece of another kind swaps them', () => {
+  const window = wornHelmet(1)
+  assert.deepStrictEqual([window.slots[5].name, window.selectedItem.name, window.selectedItem.count], ['carved_pumpkin', 'iron_helmet', 1])
+})
+
+test('a left click with a cursor of 3 on a worn armour piece leaves the slot and the cursor as they were', () => {
+  const window = wornHelmet(3)
+  assert.deepStrictEqual([window.slots[5].name, window.selectedItem.name, window.selectedItem.count], ['iron_helmet', 'carved_pumpkin', 3])
+})
+
+test('a left click with a cursor of 1 on an empty armour slot moves the cursor item itself into it', () => {
+  const Item = require('prismarine-item')(VERSION)
+  const window = require('prismarine-windows')(VERSION).createWindow(0, 'minecraft:inventory', 'Inventory')
+  const helmet = new Item(id('iron_helmet'), 1)
+  const nbt = helmet.nbt
+  window.selectedItem = helmet
+  window.acceptClick({ mode: 0, mouseButton: 0, slot: 5, item: window.slots[5] })
+  assert.ok(window.slots[5] === helmet, 'the slot holds another object')
+  assert.deepStrictEqual([window.slots[5].nbt === nbt, window.selectedItem], [true, null])
+})
+
+test('closing a chest takes a pocket item from the window when it differs from the inventory only in components', async () => {
+  const { bot, window } = await openChest({ chest: [], pockets: [[36, 'stone', 10, 'Old']] })
+  const Item = require('prismarine-item')(bot.registry)
+  const renamed = Object.assign(new Item(id('stone'), 10), { components: [{ type: 'custom_name', data: 'New' }] })
+  bot._client.emit('set_slot', { windowId: CHEST_WINDOW, stateId: 1, slot: inWindow(36), item: Item.toNotch(renamed) })
+  window.close()
+  const kept = bot.inventory.slots[36]
+  assert.deepStrictEqual([kept.slot, kept.name, kept.count, kept.components[0].data], [36, 'stone', 10, 'New'])
+})

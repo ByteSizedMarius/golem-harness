@@ -2,6 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { routeHandler, awaitRoute, botConstant, claimRescue, loadBotFunctions } = require('./helpers')
+const { playerBody, stacksOf } = require('./chest-1710')
 
 // mineflayer 4.37.1's inventory window: armor in 5 to 8, pockets from 9, the hotbar from 36, the off-hand at 45.
 const ARMOR = { head: 5, torso: 6, legs: 7, feet: 8 }
@@ -15,7 +16,10 @@ function body (names, worn = {}, held = null) {
   const bot = { quickBarSlot: 0, equips: [] }
   bot.inventory = { slots, items: () => slots.slice(9, 45).filter(Boolean) }
   bot.getEquipmentDestSlot = (dest) => dest === 'hand' ? 36 + bot.quickBarSlot : dest === 'off-hand' ? 45 : ARMOR[dest]
-  bot.equip = async (it, dest) => { bot.equips.push([it.name, dest]) }
+  bot.equip = async (it, dest) => {
+    bot.equips.push([it.name, dest])
+    if (ARMOR[dest]) slots[ARMOR[dest]] = { name: it.name, slot: ARMOR[dest] }
+  }
   return bot
 }
 
@@ -65,6 +69,62 @@ test('an explicit dest wins over the armor slot and swaps a worn piece', async (
   assert.deepStrictEqual(await awaitRoute('/equip', { name: 'iron_helmet', dest: 'head' }, env(bot)), { equipped: 'iron_helmet', dest: 'head' })
   assert.deepStrictEqual(await awaitRoute('/equip', { name: 'iron_helmet', dest: 'hand' }, env(bot)), { equipped: 'iron_helmet', dest: 'hand' })
   assert.deepStrictEqual(bot.equips, [['iron_helmet', 'head'], ['iron_helmet', 'hand']])
+})
+
+test('equip refuses an explicit armour slot the item does not go into', async () => {
+  const bot = body(['stone', 'iron_helmet'])
+  assert.strictEqual(await refusal({ name: 'stone', dest: 'head' }, bot), 'stone does not go on head')
+  assert.strictEqual(await refusal({ name: 'iron_helmet', dest: 'feet' }, bot), 'iron_helmet does not go on feet')
+  assert.deepStrictEqual(bot.equips, [])
+})
+
+test('equip puts every armour piece, the carved pumpkin and every skull into its slot by an explicit dest', async () => {
+  const sets = ['leather', 'chainmail', 'iron', 'golden', 'diamond']
+  const heads = ['carved_pumpkin', 'skeleton_skull', 'wither_skeleton_skull', 'zombie_head', 'player_head', 'creeper_head', 'dragon_head', 'piglin_head']
+  const wears = [
+    ...sets.flatMap((m) => [[`${m}_helmet`, 'head'], [`${m}_chestplate`, 'torso'], [`${m}_leggings`, 'legs'], [`${m}_boots`, 'feet']]),
+    ['elytra', 'torso'],
+    ...heads.map((name) => [name, 'head'])
+  ]
+  for (const [name, dest] of wears) {
+    assert.deepStrictEqual(await awaitRoute('/equip', { name, dest }, env(body([name]))), { equipped: name, dest })
+  }
+})
+
+test('equip into a full hotbar swaps the held pick for one that differs only in its enchantments, as the server does', async () => {
+  const dirt = Array.from({ length: 8 }, (_, i) => [37 + i, 'dirt', 64])
+  const { bot, server } = await playerBody([[9, 'iron_pickaxe', 1, { silk_touch: 1 }], [36, 'iron_pickaxe', 1, { fortune: 3 }], ...dirt])
+  await bot.equip(bot.inventory.slots[9], 'hand')
+  assert.deepStrictEqual(stacksOf(bot.inventory), server.stacks())
+  assert.deepStrictEqual([bot.heldItem.enchants, server.heldItem().tag], [[{ name: 'silk_touch', lvl: 1 }], { silk_touch: 1 }])
+  assert.deepStrictEqual([bot.inventory.selectedItem, server.cursor], [null, null])
+})
+
+test('equipping 3 carved pumpkins wears one and puts the other two back where the stack was, as the server does', async () => {
+  const { bot, server } = await playerBody([[36, 'carved_pumpkin', 3]])
+  await bot.equip(bot.inventory.slots[36], 'head')
+  assert.deepStrictEqual(server.stacks(), [[5, 'carved_pumpkin', 1, undefined], [36, 'carved_pumpkin', 2, undefined]])
+  assert.deepStrictEqual(stacksOf(bot.inventory), server.stacks())
+  assert.deepStrictEqual([bot.inventory.selectedItem, server.cursor], [null, null])
+})
+
+test('equipping 3 carved pumpkins onto a worn helmet refuses and names the helmet still on', async () => {
+  const { bot, server } = await playerBody([[5, 'iron_helmet', 1], [36, 'carved_pumpkin', 3]])
+  assert.strictEqual(await refusal({ name: 'carved_pumpkin', dest: 'head' }, bot), 'carved_pumpkin did not go on head (wearing iron_helmet)')
+  assert.deepStrictEqual(stacksOf(bot.inventory), server.stacks())
+})
+
+test('equipping 3 carved pumpkins onto a worn carved pumpkin refuses, since nothing moved', async () => {
+  const { bot, server } = await playerBody([[5, 'carved_pumpkin', 1], [36, 'carved_pumpkin', 3]])
+  assert.strictEqual(await refusal({ name: 'carved_pumpkin', dest: 'head' }, bot), 'carved_pumpkin did not go on head (wearing carved_pumpkin)')
+  assert.deepStrictEqual(stacksOf(bot.inventory), server.stacks())
+})
+
+test('equip with dest head swaps a worn iron helmet for another one with other components', async () => {
+  const { bot, server } = await playerBody([[5, 'iron_helmet', 1, { protection: 1 }], [36, 'iron_helmet', 1, { unbreaking: 3 }]])
+  assert.deepStrictEqual(await awaitRoute('/equip', { name: 'iron_helmet', dest: 'head' }, env(bot)), { equipped: 'iron_helmet', dest: 'head' })
+  assert.deepStrictEqual(server.stacks(), [[5, 'iron_helmet', 1, { unbreaking: 3 }], [36, 'iron_helmet', 1, { protection: 1 }]])
+  assert.deepStrictEqual(stacksOf(bot.inventory), server.stacks())
 })
 
 test('on 1.7.10 equip refuses the off-hand and puts a shield without dest in the hand', async () => {
