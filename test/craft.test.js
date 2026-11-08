@@ -282,15 +282,15 @@ bindCraftCheck({ shared: { mcData } })
 
 const recipeFor = (name) => Recipe.find(mcData.itemsByName[name].id)[0]
 
-// Pockets holding fill, slot to [name, count, damage].
+// Pockets holding fill, slot to [name, count, damage, components].
 function pockets (fill, full = false) {
   const slots = new Array(46).fill(null)
-  const stack = (slot, name, count, damage = 0) => {
+  const stack = (slot, name, count, damage = 0, components = []) => {
     const { id, stackSize, maxDurability } = mcData.itemsByName[name]
-    return { type: id, name, count, slot, stackSize, maxDurability, durabilityUsed: maxDurability ? damage : null }
+    return { type: id, name, count, slot, stackSize, maxDurability, durabilityUsed: maxDurability ? damage : null, components, removedComponents: [] }
   }
   if (full) for (let i = 9; i < 45; i++) slots[i] = stack(i, 'dirt', 64)
-  for (const [slot, [name, count, damage]] of Object.entries(fill)) slots[slot] = stack(Number(slot), name, count, damage)
+  for (const [slot, [name, count, damage, components]] of Object.entries(fill)) slots[slot] = stack(Number(slot), name, count, damage, components)
   return { slots, inventoryStart: 9, inventoryEnd: 45 }
 }
 
@@ -324,9 +324,10 @@ test('full pockets take a bucket when the leftover iron joins a part-full stack 
   assert.strictEqual(craftBlocker(pockets({ 9: ['iron_ingot', 10], 20: ['iron_ingot', 60] }, true), recipeFor('bucket'), true), NO_POCKET)
 })
 
-test('full pockets take a bucket into a bucket stack with room', () => {
-  const inv = pockets({ 9: ['iron_ingot', 64], 30: ['bucket', 5] }, true)
-  assert.strictEqual(craftBlocker(inv, recipeFor('bucket'), true), null)
+test('full pockets take a bucket into a bucket stack with room, and refuse it when that stack has other components', () => {
+  const inv = (components) => pockets({ 9: ['iron_ingot', 64], 30: ['bucket', 5, 0, components] }, true)
+  assert.strictEqual(craftBlocker(inv([]), recipeFor('bucket'), true), null)
+  assert.strictEqual(craftBlocker(inv([{ type: 'custom_name', data: 'Milk run' }]), recipeFor('bucket'), true), NO_POCKET)
 })
 
 test('full pockets take 4 sticks when all of them join a stick stack, and refuse when 2 are left', () => {

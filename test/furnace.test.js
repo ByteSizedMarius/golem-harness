@@ -20,12 +20,13 @@ function furnaceWindow ({ input = null, fuel = null, output = null, pockets = []
   while (slots.length < 39) slots.push(null)
   const set = (i, item) => { slots[i] = item && { ...item, slot: i } }
   slots.forEach((s, i) => set(i, s))
+  const components = (s) => JSON.stringify([s.components ?? [], s.removedComponents ?? []])
   function transfer ({ itemType, count, sourceStart, sourceEnd, destStart, destEnd }) {
     while (count > 0) {
       const from = slots.findIndex((s, i) => i >= sourceStart && i < sourceEnd && s && s.type === itemType)
       if (from < 0) throw new Error(`no item ${itemType} in slots ${sourceStart} to ${sourceEnd}`)
       const src = slots[from]
-      let to = slots.findIndex((s, i) => i >= destStart && i < destEnd && s && s.type === itemType && s.count < s.stackSize)
+      let to = slots.findIndex((s, i) => i >= destStart && i < destEnd && s && s.type === itemType && s.count < s.stackSize && components(s) === components(src))
       if (to < 0) to = slots.findIndex((s, i) => i >= destStart && i < destEnd && !s)
       if (to < 0) throw new Error('destination full')
       const moved = Math.min(count, src.count, src.stackSize - (slots[to] ? slots[to].count : 0))
@@ -139,6 +140,15 @@ test('smelt takes its own finished output into the pockets and leaves a foreign 
   assert.strictEqual(foreignReply.output, '5 glass')
   assert.match(foreignReply.note, /5 glass/)
   assert.strictEqual(foreign.pocket('glass'), 0)
+})
+
+test('smelt leaves its output in the furnace when only a pocket stack with other components has room for it', async () => {
+  const renamed = { ...stack('iron_ingot', 60), components: [{ type: 'custom_name', data: 'Loot' }] }
+  const pockets = [stack('iron_ore', 6), renamed, ...Array.from({ length: 34 }, () => stack('stone', 64))]
+  const f = furnaceWindow({ input: stack('iron_ore', 2), fuel: stack('coal', 1), output: stack('iron_ingot', 4), pockets })
+  const reply = await awaitRoute('/smelt', { item: 'iron_ore', count: '6' }, furnaceEnv(f).env)
+  assert.deepStrictEqual([reply.took, reply.output, reply.note], [undefined, '4 iron_ingot', 'left 4 iron_ingot in the output'])
+  assert.strictEqual(f.pocket('iron_ingot'), 60)
 })
 
 test('the furnace tool lists the slots and the burn progress of the seen furnace at x,y,z', async () => {

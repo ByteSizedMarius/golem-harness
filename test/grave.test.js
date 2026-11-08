@@ -20,13 +20,14 @@ function graveWindow (items, pockets = []) {
   const set = (i, item) => { slots[i] = item && { ...item, slot: i } }
   items.forEach((s, i) => set(i, s))
   pockets.forEach((s, i) => set(GRAVE_SLOTS + i, s))
+  const components = (s) => JSON.stringify([s.components ?? [], s.removedComponents ?? []])
   const range = (from, to) => slots.slice(from, to).filter(Boolean)
   function transfer (itemType, count, sourceStart, sourceEnd, destStart, destEnd) {
     while (count > 0) {
       const from = slots.findIndex((s, i) => i >= sourceStart && i < sourceEnd && s && s.type === itemType)
       if (from < 0) throw new Error(`no item ${itemType} in slots ${sourceStart} to ${sourceEnd}`)
       const src = slots[from]
-      let to = slots.findIndex((s, i) => i >= destStart && i < destEnd && s && s.type === itemType && s.count < s.stackSize)
+      let to = slots.findIndex((s, i) => i >= destStart && i < destEnd && s && s.type === itemType && s.count < s.stackSize && components(s) === components(src))
       if (to < 0) to = slots.findIndex((s, i) => i >= destStart && i < destEnd && !s)
       if (to < 0) throw new Error('destination full')
       const moved = Math.min(count, src.count, src.stackSize - (slots[to] ? slots[to].count : 0))
@@ -40,7 +41,12 @@ function graveWindow (items, pockets = []) {
     inventoryStart: GRAVE_SLOTS,
     containerItems: () => range(0, GRAVE_SLOTS),
     count: (type) => range(GRAVE_SLOTS, slots.length).filter((s) => s.type === type).reduce((n, s) => n + s.count, 0),
-    withdraw: async (type, metadata, count) => transfer(type, count, 0, GRAVE_SLOTS, GRAVE_SLOTS, slots.length),
+    withdraw: async (type, metadata, count) => {
+      const src = range(0, GRAVE_SLOTS).find((s) => s.type === type)
+      const joinable = src && range(GRAVE_SLOTS, slots.length).some((s) => s.type === type && s.count < s.stackSize && components(s) === components(src))
+      if (!slots.slice(GRAVE_SLOTS).includes(null) && !joinable) throw new Error('Unable to withdraw, Bot inventory is full.')
+      transfer(type, count, 0, GRAVE_SLOTS, GRAVE_SLOTS, slots.length)
+    },
     close () { window.closed = true }
   }
   const pocket = (name) => window.count(IDS[name])
@@ -142,8 +148,15 @@ test('grave reports what it took before full pockets stopped it', async () => {
   const g = graveWindow([stack('cobblestone', 64), stack('bread', 5)], full)
   const reply = await awaitRoute('/grave', { take: 'all' }, graveEnv(g.window).env)
   assert.deepStrictEqual(reply.took, ['64 cobblestone'])
-  assert.match(reply.stopped, /full/)
+  assert.strictEqual(reply.stopped, 'Unable to withdraw, Bot inventory is full.')
   assert.deepStrictEqual(reply.items, [{ name: 'bread', count: 5 }])
+})
+
+test('grave fills a part-full pocket stack when no pocket slot is empty and reports what stayed', async () => {
+  const full = [...Array.from({ length: POCKETS - 1 }, () => stack('torch', 64)), stack('cobblestone', 40)]
+  const g = graveWindow([stack('cobblestone', 30), stack('bread', 5)], full)
+  const reply = await awaitRoute('/grave', { take: 'all' }, graveEnv(g.window).env)
+  assert.deepStrictEqual([reply.took, reply.stopped, reply.items], [['24 cobblestone'], 'destination full', [{ name: 'cobblestone', count: 6 }, { name: 'bread', count: 5 }]])
 })
 
 test('grave take moves one source slot per mineflayer call, a stack pause apart', async (t) => {

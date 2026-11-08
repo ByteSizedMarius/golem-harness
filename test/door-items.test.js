@@ -8,13 +8,12 @@ const mineflayer = require('mineflayer')
 const inventoryPlugin = require('mineflayer/lib/plugins/inventory')
 const { awaitRoute, botConstant } = require('./helpers')
 const { setStackSizes } = require('../lib/server-overrides')
+const { CHEST_WINDOW, server1710 } = require('./chest-1710')
 
 const VERSION = '1.21.11'
 const registry = require('minecraft-data')(VERSION)
 const CHEST_ID = registry.blocksByName.chest.id
 const CHEST_AT = new Vec3(3, 64, 0)
-const CHEST_WINDOW = 1
-const CHEST_SLOTS = 27
 // The 1.7.10 server's max stack where it differs from the 1.21.11 data.
 const CAPS_1710 = { oak_door: 1, iron_door: 1 }
 const ORIGINAL_SIZES = Object.fromEntries(['oak_door', 'iron_door'].map((n) => [n, registry.itemsByName[n].stackSize]))
@@ -34,67 +33,13 @@ function loadConnection (legacy) {
   }
 }
 
-// A 1.7.10 server's chest and pockets, replaying each window_click by its rules and returning the cursor to the pockets at close. Pockets are player window slots 9-44.
-function server1710 (client, { chest, pockets }) {
-  const chestSlots = Array(CHEST_SLOTS).fill(null)
-  const inv = Array(46).fill(null)
-  for (const [slot, name, count] of chest) chestSlots[slot] = { name, count }
-  for (const [slot, name, count] of pockets) inv[slot] = { name, count }
-  const s = { cursor: null, cursorAtClose: undefined }
-  const cap = (name) => CAPS_1710[name] ?? registry.itemsByName[name].stackSize
-  const get = (slot) => (slot < CHEST_SLOTS ? chestSlots[slot] : inv[slot - CHEST_SLOTS + 9])
-  const set = (slot, v) => { if (slot < CHEST_SLOTS) chestSlots[slot] = v; else inv[slot - CHEST_SLOTS + 9] = v }
-  const click = (slot, button) => {
-    const here = get(slot)
-    const cur = s.cursor
-    if (!cur) {
-      if (!here) return
-      const take = button === 0 ? here.count : Math.ceil(here.count / 2)
-      s.cursor = { name: here.name, count: take }
-      set(slot, here.count > take ? { name: here.name, count: here.count - take } : null)
-    } else if (!here) {
-      const put = Math.min(button === 0 ? cur.count : 1, 64)
-      set(slot, { name: cur.name, count: put })
-      s.cursor = cur.count > put ? { name: cur.name, count: cur.count - put } : null
-    } else if (here.name === cur.name) {
-      const k = Math.min(button === 0 ? cur.count : 1, cap(cur.name) - here.count)
-      if (k <= 0) return
-      here.count += k
-      s.cursor = cur.count > k ? { name: cur.name, count: cur.count - k } : null
-    } else if (cur.count <= cap(cur.name)) {
-      set(slot, cur)
-      s.cursor = here
-    }
-  }
-  client.write = (name, data) => {
-    if (name === 'window_click' && data.windowId === CHEST_WINDOW && data.mode === 0) click(data.slot, data.mouseButton)
-    if (name === 'close_window') {
-      s.cursorAtClose = s.cursor
-      if (s.cursor) {
-        const free = [...Array(9).keys()].map((i) => 36 + i).concat([...Array(27).keys()].map((i) => 9 + i)).find((i) => !inv[i])
-        inv[free] = s.cursor
-        s.cursor = null
-      }
-    }
-  }
-  const sum = (slots, name) => slots.filter((x) => x && x.name === name).reduce((n, x) => n + x.count, 0)
-  s.inChest = (name) => sum(chestSlots, name)
-  s.inPockets = (name) => sum(inv.slice(9, 45), name)
-  s.notch = (Item, windowId) => {
-    const item = (x) => Item.toNotch(x && new Item(registry.itemsByName[x.name].id, x.count))
-    const slots = windowId === 0 ? inv : [...chestSlots, ...inv.slice(9, 45)]
-    return { windowId, stateId: 1, items: slots.map(item), carriedItem: Item.toNotch(null) }
-  }
-  return s
-}
-
 // A body on mineflayer's real inventory plugin, logged in through the connection wiring, beside a chest on a 1.7.10 server.
 async function doorBody (t, legacy, contents) {
   t.after(restoreSizes)
   const client = new EventEmitter()
   client.version = VERSION
   client.end = () => {}
-  const server = server1710(client, contents)
+  const server = server1710(client, contents, CAPS_1710)
   const bot = mineflayer.createBot({ client, username: 'Claude', loadInternalPlugins: false })
   await once(bot, 'inject_allowed')
   bot.loadPlugin(inventoryPlugin)

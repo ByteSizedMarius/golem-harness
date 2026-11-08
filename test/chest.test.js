@@ -5,7 +5,8 @@ const { AsyncLocalStorage } = require('node:async_hooks')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const WorldSync = require('prismarine-world/src/worldsync')
-const { awaitRoute, routeHandler, botConstant, loadBotFunctions, claimRescue, walkingBody } = require('./helpers')
+const { awaitRoute, routeHandler, botConstant, loadBotFunctions, claimRescue, walkingBody, groundMemory, blockWorld } = require('./helpers')
+const { GRAVESTONE } = require('../lib/server-overrides')
 const { guardWork } = require('../lib/walk')
 const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 const { LEGACY_CLICK_REACH } = require('../lib/bot/legacy-1710')
@@ -19,6 +20,7 @@ const CHEST_ID = 54
 const IDS = { stone: 1, cobblestone: 4, sticky_piston: 29, iron_pickaxe: 257, diamond: 264, iron_ingot: 265, iron_sword: 267, stick: 280, wheat_seeds: 295, wheat: 296, ender_pearl: 368, cobbled_deepslate: 1101 }
 const NAMES = Object.fromEntries(Object.entries(IDS).map(([n, id]) => [id, n]))
 const CHEST_SLOTS = 27
+const POCKETS = 36
 const HERE = new Vec3(0.5, 64, 0.5)
 const NEAR = new Vec3(5, 64, 0)
 const FAR = new Vec3(-7, 64, 3)
@@ -42,6 +44,7 @@ function frameOn (wall, face, item, seen = true) {
   return { id: frameIds++, name: 'item_frame', objectData, position: wall.offset(dx, dy, dz), metadata, seen }
 }
 
+const components = (s) => JSON.stringify([s.components ?? [], s.removedComponents ?? []])
 const pocketItems = (pockets, from) => pockets.flatMap((s, i) => (s.count ? [{ ...s, slot: from + i }] : []))
 
 // A single chest whose deposit and withdraw throw mineflayer's errors.
@@ -68,11 +71,23 @@ function chestWindow (items) {
         count -= n
       }
     },
+    count: (type) => window.items().filter((i) => i.type === type).reduce((n, i) => n + i.count, 0),
+    emptySlotCount: () => POCKETS - window.items().length,
     async withdraw (type, metadata, count) {
+      if (window.emptySlotCount() === 0) throw new Error('Unable to withdraw, Bot inventory is full.')
       while (count > 0) {
         const s = slots.find((x) => x.type === type)
         if (!s) throw new Error(`Can't find ${NAMES[type]} in slots [0 - ${CHEST_SLOTS}], (item id: ${type})`)
-        const n = Math.min(count, s.count)
+        let to = window.pockets.find((p) => p.type === type && p.count && p.count < p.stackSize && components(p) === components(s))
+        if (!to) {
+          if (window.emptySlotCount() === 0) throw new Error('destination full')
+          to = { ...s, count: 0 }
+          const free = window.pockets.findIndex((p) => !p.count)
+          if (free < 0) window.pockets.push(to)
+          else window.pockets[free] = to
+        }
+        const n = Math.min(count, s.count, to.stackSize - to.count)
+        to.count += n
         s.count -= n
         count -= n
         if (!s.count) slots.splice(slots.indexOf(s), 1)
@@ -360,15 +375,21 @@ test('withdraw of several names opens the chest once, closes it, and lists the u
 
 test('withdraw of several names that fails partway closes the window and names what already moved', async () => {
   const windows = { '5,64,0': chestWindow([stack('cobblestone', 10), stack('diamond', 3)]) }
-  const real = windows['5,64,0'].withdraw
-  windows['5,64,0'].withdraw = async (type, metadata, count) => {
-    if (type === IDS.diamond) throw new Error('destination full')
-    return real(type, metadata, count)
-  }
-  const { env, opened } = chestEnv([NEAR], windows)
-  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone|diamond' }, env), 'withdrew cobblestone 10; then diamond: destination full')
+  const { env, opened } = chestEnv([NEAR], windows, Array.from({ length: POCKETS - 1 }, () => stack('stone', 64)))
+  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone|diamond' }, env), 'withdrew cobblestone 10; then diamond: Unable to withdraw, Bot inventory is full.')
   assert.deepStrictEqual(opened, ['5,64,0'])
   assert.ok(windows['5,64,0'].closed, 'the window stays open')
+})
+
+test('withdraw counts the part of a stack that reached the pockets before mineflayer threw', async () => {
+  const chest = chestWindow([stack('cobblestone', 10)])
+  const take = chest.withdraw
+  chest.withdraw = async (type, metadata, count) => {
+    await take(type, metadata, 3)
+    throw new Error('moved 3, tossed 1 cobblestone the source had no room for')
+  }
+  const { env } = chestEnv([NEAR], { '5,64,0': chest })
+  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone', count: '4' }, env), 'withdrew cobblestone 3; then cobblestone: moved 3, tossed 1 cobblestone the source had no room for')
 })
 
 test('withdraw and deposit refuse more than 8 names before walking or opening anything', async () => {
@@ -732,8 +753,8 @@ test('a failing chest, withdraw or deposit names the other seen chests and no un
   assert.ok(stocked['5,64,0'].closed, 'withdraw: the window stays open')
 
   const pocketsFull = { '5,64,0': chestWindow([stack('cobblestone', 10)]) }
-  pocketsFull['5,64,0'].withdraw = async () => { throw new Error('destination full') }
-  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone' }, chestEnv([NEAR], pocketsFull).env), 'destination full')
+  const fullPockets = Array.from({ length: POCKETS }, () => stack('stone', 64))
+  assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone' }, chestEnv([NEAR], pocketsFull, fullPockets).env), 'Unable to withdraw, Bot inventory is full.')
   assert.ok(pocketsFull['5,64,0'].closed, 'withdraw into full pockets: the window stays open')
 
   const full = [...Array.from({ length: CHEST_SLOTS - 1 }, () => stack('stone', 64)), stack('cobblestone', 50)]
@@ -949,6 +970,23 @@ test('chest opens a chest already in reach and sight without a step', async (t) 
   const { env, opened, walks, pathfinder } = await plannedChestEnv(t, feet, raisedWorld(), RAISED)
   await awaitRoute('/chest', AT_RAISED, env)
   assert.deepStrictEqual([walks, opened, env.bot.entity.position, pathfinder.goal], [[0], ['0,65,0'], feet, null])
+})
+
+// A seesLit gate cannot fail here, as the walk ends within 3.7 of the chest, inside the 4 blocks levelRange sees at light 0.
+test('withdraw opens an unlit remembered chest at night once the walk ends in reach, through the real sight functions', async (t) => {
+  const at = new Vec3(0, 63, 0)
+  const planned = await plannedChestEnv(t, corridorFeet('+x', 8), corridorWorld('+x', 63), at, [stack('cobblestone', 10)])
+  const { env } = planned
+  env.STATIONS.set('0,63,0', CHEST_ID)
+  env.seenNow = () => false
+  delete env.leafInTheWay
+  const { raycast } = env.bot.world
+  blockWorld(env).bot.world.raycast = raycast
+  Object.assign(env.bot, { game: { dimension: 'overworld', minY: -64, height: 384 }, time: { timeOfDay: 18000 } })
+  Object.assign(env, { ...groundMemory(), Vec3, ESTIMATED_LIGHT: new Map(), GRAVESTONE, LEGACY_1710: false })
+  const front = env.bot.blockAt(at.offset(1, 0, 0))
+  assert.deepStrictEqual([front.light, front.skyLight], [0, 0])
+  assert.deepStrictEqual(await chestWalk('/withdraw', cellQuery(at), planned), walked(5, '0,63,0', corridorFeet('+x', 3)))
 })
 
 test('chest opens a chest on a pillar 4 above a slab floor from a slab beside it without a step', async (t) => {

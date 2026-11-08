@@ -1,0 +1,39 @@
+diff --git a/node_modules/prismarine-windows/lib/Window.js b/node_modules/prismarine-windows/lib/Window.js
+index 1733ff1..21111ff 100644
+--- a/node_modules/prismarine-windows/lib/Window.js
++++ b/node_modules/prismarine-windows/lib/Window.js
+@@ -2,6 +2,16 @@ const assert = require('assert')
+ const EventEmitter = require('events').EventEmitter
+ 
+ module.exports = (Item, registry) => {
++  // Copies the item components (1.20.5+) from `from` onto `item` and returns `item`.
++  function withComponents (item, from) {
++    if (from.components) {
++      item.components = [...from.components]
++      item.removedComponents = [...(from.removedComponents ?? [])]
++      item.componentMap = new Map(from.componentMap)
++    }
++    return item
++  }
++
+   return class Window extends EventEmitter {
+     constructor (id, type, title, slotCount,
+       inventorySlotsRange = { start: 27, end: 62 },
+@@ -101,7 +111,7 @@ module.exports = (Item, registry) => {
+                 this.swapSelectedItem(click.slot, item)
+               }
+             } else {
+-              item = new Item(this.selectedItem.type, 0, this.selectedItem.metadata, this.selectedItem.nbt)
++              item = withComponents(new Item(this.selectedItem.type, 0, this.selectedItem.metadata, this.selectedItem.nbt), this.selectedItem)
+               this.updateSlot(click.slot, item)
+               this.fillSlotWithSelectedItem(item, false)
+             }
+@@ -269,7 +279,7 @@ module.exports = (Item, registry) => {
+ 
+     splitSlot (item) {
+       if (!item) return
+-      this.selectedItem = new Item(item.type, Math.ceil(item.count / 2), item.metadata, item.nbt)
++      this.selectedItem = withComponents(new Item(item.type, Math.ceil(item.count / 2), item.metadata, item.nbt), item)
+       item.count -= this.selectedItem.count
+       if (item.count === 0) this.updateSlot(item.slot, null)
+     }
