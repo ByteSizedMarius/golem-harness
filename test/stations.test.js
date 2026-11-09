@@ -6,6 +6,7 @@ const { Vec3 } = require('vec3')
 const registry = require('prismarine-registry')('1.21.11')
 const { ENCHANTING_1_21 } = require('../lib/server-overrides')
 const { routeHandler, awaitRoute } = require('./helpers')
+const { playerBody } = require('./chest-1710')
 
 const HERE = new Vec3(0.5, 64, 0.5)
 const AT = new Vec3(5, 64, 0)
@@ -87,10 +88,14 @@ function enchantingTable (pockets, levels, applies, sent) {
     },
     offer () { table.enchantments = levels.map((level, i) => ({ level, expected: { enchant: level > 0 ? i : -1, level: level > 0 ? 2 : -1 } })) },
     targetItem: () => table.slots[0],
+    // mineflayer's putAway, which tosses what the pockets have no room for and returns it.
     async putAway (slot) {
+      const item = table.slots[slot]
       const empty = table.slots.findIndex((s, i) => i >= table.inventoryStart && i < table.inventoryEnd && !s)
-      table.slots[empty] = table.slots[slot]
       table.slots[slot] = null
+      if (empty === -1) return { count: item.count, name: item.name }
+      table.slots[empty] = item
+      return null
     },
     close () { table.closed = true },
     commit (slot) {
@@ -124,13 +129,13 @@ function clicker (table, clicks, unanswered) {
   }
 }
 
-async function enchantRun (query, { legacy = false, overrides = null, levels = [2, 5, 9], applies = true, item = { name: 'iron_sword', count: 1 }, stuck = [], unanswered = [], cursor = null, clickItem = false, clickLapis = false, pickedUp = null, shownLapis = false } = {}) {
+async function enchantRun (query, { legacy = false, overrides = null, levels = [2, 5, 9], applies = true, item = { name: 'iron_sword', count: 1 }, stuck = [], unanswered = [], cursor = null, clickItem = false, clickLapis = false, pickedUp = null, shownLapis = false, full = false } = {}) {
   const pockets = [item, { name: 'lapis_lazuli', count: 3 }]
   const { env, walks } = stationEnv('enchanting_table', true)
   const sent = sentRegistry()
   const table = enchantingTable(pockets, levels, applies, sent)
+  if (full) for (let i = table.inventoryStart; i < table.inventoryEnd; i++) table.slots[i] ??= { name: 'dirt', count: 64, slot: i }
   table.selectedItem = cursor
-  table.takeTargetItem = () => env.bot.putAway(0)
   const moveSlotItem = (to) => async (from) => {
     await env.bot.clickWindow(from.slot, 0, 0)
     await env.bot.clickWindow(to, 0, 0)
@@ -167,7 +172,7 @@ async function enchantRun (query, { legacy = false, overrides = null, levels = [
     putAway: async (slot) => {
       putAways.push(slot)
       if (stuck.includes(slot)) throw new Error(`no answer for slot ${slot}`)
-      await table.putAway(slot)
+      return await table.putAway(slot)
     },
     _client: {
       on () {},
@@ -281,6 +286,28 @@ test('enchant names what a failed put-away left out of the pockets', async () =>
 
   const refused = await enchantRun({ item: 'iron_sword', slot: '1' }, { levels: [3, 0, 0], stuck: [0] })
   assert.deepStrictEqual(refused.reply, { ok: false, error: 'slot 1 holds no offer', notBack: { iron_sword: 1 } })
+})
+
+test('enchant names what its take-back tossed for want of pocket room', async () => {
+  const lost = { iron_sword: 1, lapis_lazuli: 3 }
+  const look = await enchantRun({ item: 'iron_sword' }, { full: true })
+  assert.strictEqual(look.reply.offers.length, 3)
+  assert.deepStrictEqual([look.reply.ok, look.reply.notBack, look.reply.tossed, look.reply.reason],
+    [false, lost, lost, 'iron_sword x1, lapis_lazuli x3 did not come back from the table to my pockets, tossed iron_sword x1, lapis_lazuli x3 with no pocket room'])
+
+  const refused = await enchantRun({ item: 'iron_sword', slot: '1' }, { levels: [3, 0, 0], full: true })
+  assert.deepStrictEqual(refused.reply, { ok: false, error: 'slot 1 holds no offer', notBack: lost, tossed: lost })
+})
+
+test('putAway returns what it tossed for want of pocket room, and null when the pockets took it', async () => {
+  const dirt = Array.from({ length: 36 }, (_, i) => [9 + i, 'dirt', 64])
+  const full = await playerBody([[5, 'iron_helmet', 1], ...dirt])
+  assert.deepStrictEqual(await full.bot.putAway(5), { count: 1, name: 'iron_helmet' })
+  assert.deepStrictEqual(full.server.dropped, [{ name: 'iron_helmet', count: 1, tag: undefined }])
+
+  const room = await playerBody([[5, 'iron_helmet', 1], ...dirt.slice(1)])
+  assert.strictEqual(await room.bot.putAway(5), null)
+  assert.deepStrictEqual(room.server.dropped, [])
 })
 
 const inPockets = (table, name) => table.slots.slice(table.inventoryStart, table.inventoryEnd).reduce((n, s) => n + (s && s.name === name ? s.count : 0), 0)

@@ -4,6 +4,25 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-09: the lava watch warns about every new lava, and digs pick up their drops
+
+The bot died three times beside lava it had poured itself, with no warning. After one warning the
+lava watch remembered where the bot stood and how far the lava was, and a later lava at the same
+spot and distance muted it for 30 seconds. It now remembers the lava cells it has seen and warns
+about every new one, or one that comes closer, and forgets them once no lava is in view.
+
+`/mine` and `/gather` left drops lying where a player would have picked them up: in the 1-high
+niche a dig leaves in a wall, or where a log dug from above fell. The walk to a drop now ends
+wherever a player's pickup reach covers it, reached through open cells only, and steps to the edge
+of that cell nearest the drop. A drop the walk misses is chased once more. A drop of the bot's own
+dig counts as seen while it lies within a block of the dug cell, and a falling drop is judged once
+it lands. A drop out of every player's reach, such as one on top of a pillar, stays where it is.
+
+Smaller fixes: a walk that stalls while still planning says so, instead of naming the block in
+front of the bot. The block search behind vein scans, `/gather`, door and station lookups no longer
+misses a block a step or two away diagonally. `/enchant` names an item it had to drop because the
+pockets were full. This patches mineflayer's block search and inventory plugin.
+
 ## 2026-11-08: renames, smelting and tosses report what the server did
 
 `/rename`, `/smelt`, `/furnace` and `/toss` reported what the bot predicted, not what the server

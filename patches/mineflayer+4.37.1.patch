@@ -55,6 +55,102 @@ index 9675a3a..6f0e56f 100644
      }
  
      async function putSomething (destSlot, itemId, metadata, count, nbt) {
+diff --git a/node_modules/mineflayer/lib/plugins/blocks.js b/node_modules/mineflayer/lib/plugins/blocks.js
+index 4c98d57..2e818a7 100644
+--- a/node_modules/mineflayer/lib/plugins/blocks.js
++++ b/node_modules/mineflayer/lib/plugins/blocks.js
+@@ -3,8 +3,6 @@ const assert = require('assert')
+ const Painting = require('../painting')
+ const { onceWithCleanup } = require('../promise_utils')
+ 
+-const { OctahedronIterator } = require('prismarine-world').iterators
+-
+ module.exports = inject
+ 
+ const paintingFaceToVec = [
+@@ -160,50 +158,44 @@ function inject (bot, { version, storageBuilder, hideErrors }) {
+     const count = options.count || 1
+     const useExtraInfo = options.useExtraInfo || false
+     const fullMatcher = getFullMatchingFunction(matcher, useExtraInfo)
+-    const start = new Vec3(Math.floor(point.x / 16), Math.floor(point.y / 16), Math.floor(point.z / 16))
+-    const it = new OctahedronIterator(start, Math.ceil((maxDistance + 8) / 16))
+-    // the octahedron iterator can sometime go through the same section again
+-    // we use a set to keep track of visited sections
+-    const visitedSections = new Set()
++    const byDistance = (a, b) => a.distanceTo(point) - b.distanceTo(point)
++    // distance along one axis from v to the nearest of the 16 cells from lo
++    const gap = (v, lo) => Math.max(lo - v, 0, v - lo - 15)
++
++    // every section holding a cell within maxDistance, nearest first
++    const sections = []
++    const lowest = Math.max(0, Math.floor((point.y - maxDistance - bot.game.minY) / 16))
++    const highest = Math.min((bot.game.height >> 4) - 1, Math.floor((point.y + maxDistance - bot.game.minY) / 16))
++    for (let x = Math.floor((point.x - maxDistance) / 16); x <= Math.floor((point.x + maxDistance) / 16); x++) {
++      for (let z = Math.floor((point.z - maxDistance) / 16); z <= Math.floor((point.z + maxDistance) / 16); z++) {
++        for (let sectionY = lowest; sectionY <= highest; sectionY++) {
++          const begin = new Vec3(x * 16, sectionY * 16 + bot.game.minY, z * 16)
++          const distance = Math.hypot(gap(point.x, begin.x), gap(point.y, begin.y), gap(point.z, begin.z))
++          if (distance <= maxDistance) sections.push({ x, z, sectionY, begin, distance })
++        }
++      }
++    }
++    sections.sort((a, b) => a.distance - b.distance)
+ 
+     let blocks = []
+-    let startedLayer = 0
+-    let next = start
+-    while (next) {
+-      const column = bot.world.getColumn(next.x, next.z)
+-      const sectionY = next.y + Math.abs(bot.game.minY >> 4)
+-      const totalSections = bot.game.height >> 4
+-      if (sectionY >= 0 && sectionY < totalSections && column && !visitedSections.has(next.toString())) {
+-        const section = column.sections[sectionY]
+-        if (useExtraInfo === true || isBlockInSection(section, matcher)) {
+-          const begin = new Vec3(next.x * 16, sectionY * 16 + bot.game.minY, next.z * 16)
+-          const cursor = begin.clone()
+-          const end = cursor.offset(16, 16, 16)
+-          for (cursor.x = begin.x; cursor.x < end.x; cursor.x++) {
+-            for (cursor.y = begin.y; cursor.y < end.y; cursor.y++) {
+-              for (cursor.z = begin.z; cursor.z < end.z; cursor.z++) {
+-                if (fullMatcher(cursor) && cursor.distanceTo(point) <= maxDistance) blocks.push(cursor.clone())
+-              }
+-            }
++    for (const { x, z, sectionY, begin, distance } of sections) {
++      // no later section holds a cell nearer than the count-th block found
++      if (blocks.length === count && distance > blocks[count - 1].distanceTo(point)) break
++      const column = bot.world.getColumn(x, z)
++      if (!column || (useExtraInfo !== true && !isBlockInSection(column.sections[sectionY], matcher))) continue
++      const found = blocks.length
++      const cursor = begin.clone()
++      const end = cursor.offset(16, 16, 16)
++      for (cursor.x = begin.x; cursor.x < end.x; cursor.x++) {
++        for (cursor.y = begin.y; cursor.y < end.y; cursor.y++) {
++          for (cursor.z = begin.z; cursor.z < end.z; cursor.z++) {
++            if (fullMatcher(cursor) && cursor.distanceTo(point) <= maxDistance) blocks.push(cursor.clone())
+           }
+         }
+-        visitedSections.add(next.toString())
+       }
+-      // If we started a layer, we have to finish it otherwise we might miss closer blocks
+-      if (startedLayer !== it.apothem && blocks.length >= count) {
+-        break
+-      }
+-      startedLayer = it.apothem
+-      next = it.next()
+-    }
+-    blocks.sort((a, b) => {
+-      return a.distanceTo(point) - b.distanceTo(point)
+-    })
+-    // We found more blocks than needed, shorten the array to not confuse people
+-    if (blocks.length > count) {
+-      blocks = blocks.slice(0, count)
++      if (blocks.length > found && blocks.length >= count) blocks = blocks.sort(byDistance).slice(0, count)
+     }
+-    return blocks
++    return blocks.sort(byDistance)
+   }
+ 
+   function findBlock (options) {
 diff --git a/node_modules/mineflayer/lib/plugins/craft.js b/node_modules/mineflayer/lib/plugins/craft.js
 index a5fe563..9498bb2 100644
 --- a/node_modules/mineflayer/lib/plugins/craft.js
@@ -135,7 +231,7 @@ index 507a618..73d608f 100644
  
    bot._client.on('entity_destroy', (packet) => {
 diff --git a/node_modules/mineflayer/lib/plugins/inventory.js b/node_modules/mineflayer/lib/plugins/inventory.js
-index 0636faa..b0a055d 100644
+index 0636faa..2c6d2be 100644
 --- a/node_modules/mineflayer/lib/plugins/inventory.js
 +++ b/node_modules/mineflayer/lib/plugins/inventory.js
 @@ -154,37 +154,36 @@ function inject (bot, { hideErrors }) {
@@ -303,7 +399,14 @@ index 0636faa..b0a055d 100644
      }
    }
  
-@@ -656,12 +669,13 @@ function inject (bot, { hideErrors }) {
+@@ -651,17 +664,19 @@ function inject (bot, { hideErrors }) {
+     await clickWindow(slot, 0, 0)
+     const start = window.inventoryStart
+     const end = window.inventoryEnd
+-    await putSelectedItemRange(start, end, window, null)
++    const tossed = await putSelectedItemRange(start, end, window, null)
+     await promisePutAway
++    return tossed
    }
  
    async function moveSlotItem (sourceSlot, destSlot) {
