@@ -114,6 +114,22 @@ test('a goto whose search outlasts the think timeout rejects as stalled and mark
   assert.deepStrictEqual((await timed(walk, 2000)).out, { reason: 'stalled', planning: undefined })
 })
 
+test('a goto whose search outlasts the think timeout rejects with the still planning text, and a body stall keeps the position text', async (t) => {
+  const planning = stuckBot({ planning: true })
+  t.after(planning.stop)
+  const search = outcome(planning.bot.pathfinder.goto(new goals.GoalNear(-5, 64, 0, 1)))
+  assert.ok(await waitFor(() => planning.seen.partials > 0, 2000), 'control: the search sent a partial path')
+  planning.clock.advance(planning.bot.pathfinder.thinkTimeout + 500)
+  const text = 'stalled, still planning after 10 s'
+  assert.deepStrictEqual((await timed(search, 2000)).out, { reason: 'stalled', message: text })
+  assert.deepStrictEqual(planning.seen.logs, [`[path] ${text}`])
+  const s = stuckBot()
+  t.after(s.stop)
+  const walk = outcome(s.bot.pathfinder.goto(new goals.GoalNear(-5, 64, 0, 1)))
+  await stallOut(s)
+  assert.deepStrictEqual((await timed(walk, 2000)).out, { reason: 'stalled', message: 'stalled at 0,64,0 against oak_planks at -1,64,0' })
+})
+
 test('the stall names no block the body neither touches nor sees now, a remembered one included', async (t) => {
   for (const lit of [true, false]) {
     // Facing north-west, the cell ahead touches the body only at a corner.
