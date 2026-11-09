@@ -2,13 +2,14 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
+const { AsyncLocalStorage } = require('node:async_hooks')
 const { Vec3 } = require('vec3')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const rules = require('../lib/combat-rules')
 const legacy1710 = require('../lib/bot/legacy-1710')
 const { babyFlag } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
-const { watchProgress } = require('../lib/walk')
+const { watchProgress, guardWork } = require('../lib/walk')
 const { panelAcross } = require('../lib/doors')
 const { routeHandler, fakeClock, botConstant, walkingBody, loadBotFunctions } = require('./helpers')
 const mcData = require('minecraft-data')('1.21.11')
@@ -814,6 +815,8 @@ test('a useon walk that ends out of swing reach once a block shows in the swing 
       }
     }
     const world = await plannedUseon(t, [cow(21, 6.5)], cells, undefined, PACE, unseen)
+    const { watchGoto } = loadBotFunctions(['watchGoto'], { ...world.env, guardWork: (work, o) => guardWork(work, { ...o, clock: world.clock }), watchScope: new AsyncLocalStorage(), litFuse: () => null })
+    world.pathfinder.goto = watchGoto(world.pathfinder.goto)
     const ends = []
     world.bot.on('path_update', (r) => ends.push(r.path.length ? r.path[r.path.length - 1].floored().toArray() : null))
     world.bot.once('path_update', () => {

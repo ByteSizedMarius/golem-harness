@@ -43,7 +43,7 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
       raycast (from, dir, range) {
         for (let d = 0; d <= range; d += 0.02) {
           const c = from.plus(dir.scaled(d)).floored()
-          if (solid(c)) return { position: c, face: 1 }
+          if (solid(c)) return blockAt(c)
         }
         return null
       }
@@ -92,6 +92,7 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
     leafInTheWay: () => null,
     cellKnown: () => true,
     seenNow: (p) => !hidden.includes(`${p.x},${p.y},${p.z}`),
+    seenWorld: () => bot.world,
     GATHER_MAX_DROP: 2,
     GATHER_MAX_RISE: 4,
     PICK_TIER: botConstant('PICK_TIER'),

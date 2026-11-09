@@ -82,6 +82,7 @@ async function doorBody (t, legacy, contents) {
     resolveBlockIds: (name) => (name === 'chest' ? [CHEST_ID] : []),
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     goals,
+    seenWorld: () => bot.world,
     CHEST_RADIUS: botConstant('CHEST_RADIUS'),
     CHEST_REACH: botConstant('CHEST_REACH')
   }

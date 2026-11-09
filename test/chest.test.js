@@ -165,6 +165,7 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
     resolveBlockIds: (name) => (name === 'chest' ? [CHEST_ID] : []),
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     goals,
+    seenWorld: () => env.bot.world,
     CHEST_RADIUS: botConstant('CHEST_RADIUS'),
     CHEST_REACH: botConstant('CHEST_REACH')
   }
@@ -859,6 +860,7 @@ async function plannedChestEnv (t, feet, world, at, items = [], pockets = []) {
   const walks = []
   const watch = {
     bot: walk.bot,
+    goals,
     COLLECT_STALL_MS: botConstant('COLLECT_STALL_MS'),
     COLLECT_BUDGET_MS: botConstant('COLLECT_BUDGET_MS'),
     guardWork,

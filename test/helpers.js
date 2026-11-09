@@ -876,6 +876,7 @@ function loadBotFunctions (names, env, code = '') {
     }
     // Unless env has its own, soleClaim reads a free dig lock.
     if (name === 'soleClaim') env.digLock ??= botConstant('digLock')
+    if (name === 'seenWorld') env.WorldSync ??= require('prismarine-world/src/worldsync')
     sources.push(body)
     reach(body, name)
   }

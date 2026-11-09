@@ -80,6 +80,7 @@ function floorWorld (pos, walls = [], holes = [], { gravel = [], short = 0.35 } 
     stopPath () {},
     cellKnown: () => true,
     seenNow: () => true,
+    seenWorld: () => bot.world,
     leafInTheWay: () => null,
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     canStepOutTo: loadBotFunctions(['canStepOutTo'], { bot, knownCell: () => true, seenNow: () => true }).canStepOutTo,

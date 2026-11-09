@@ -9,6 +9,7 @@ const registry = require('prismarine-registry')('1.21.11')
 const Block = require('prismarine-block')(registry)
 const { HUNG, botConstant, loadBotFunctions, routeHandler, waitFor, timed } = require('./helpers')
 const { entityInCell } = require('../lib/shelter')
+const { guardWork } = require('../lib/walk')
 
 const noPath = () => Object.assign(new Error('No path to the goal!'), { name: 'NoPath' })
 
@@ -509,6 +510,25 @@ test('digat walks into its tunnel in a single walk when the only other cell in r
   }
 })
 
+// The open cell at 6,60,2 sees the wall's south face past the stone at 6,60,1 and 6,61,1 the body has not seen.
+test('digat tries an open cell outside its tunnel that sees the wall past cells the body has not seen before it walks into the tunnel', async () => {
+  const w = cave(UNDER, { ...Object.fromEntries(TUNNEL.map((k) => [k, 'air'])), '6,60,2': 'air', '6,61,2': 'air' }, { own: TUNNEL, unseen: ['6,60,1', '6,61,1'] })
+  const end = new Vec3(5, 60, 0)
+  const ends = []
+  w.bot.pathfinder.goto = async (goal) => {
+    w.walks.push('goto')
+    w.bot.pathfinder.goal = goal
+    ends.push(goal.isEnd(end))
+    if (!ends[ends.length - 1]) throw noPath()
+    w.bot.entity.position = end.offset(0.5, 0, 0.5)
+    w.bot.pathfinder.goal = null
+  }
+  const { res, done } = w.digat('6,60,0')
+  await done
+  assert.strictEqual(res.error, undefined, res.error && res.error.message)
+  assert.deepStrictEqual([w.walks, ends, w.digs], [['goto', 'setGoal null', 'goto'], [false, true], ['6,60,0 from (5, 60, 0)']])
+})
+
 // A hill of stone from y 64 to 66 with a tunnel the bot dug along z 0 from x 0 to 5, ending at the face at 6,64,0.
 const HILL = {}
 for (let x = 0; x <= 12; x++) for (let z = -4; z <= 4; z++) for (const y of [64, 65, 66]) HILL[`${x},${y},${z}`] = 'stone'
@@ -664,4 +684,29 @@ test('mine digs a gravel-capped ore in reach of the cell the pathfinder starts f
   assert.strictEqual(r.error, undefined, r.error && r.error.message)
   assert.strictEqual(r.reply.reason, null)
   assert.deepStrictEqual(w.digs, ['-5,64,0 from (0, 64, 0)'])
+})
+
+// Every goto passes through watchGoto, as the bot's own does.
+function watchedGotos (w) {
+  const { watchGoto } = loadBotFunctions(['watchGoto'], {
+    ...w.env,
+    Vec3,
+    guardWork,
+    watchScope: new AsyncLocalStorage(),
+    COLLECT_STALL_MS: botConstant('COLLECT_STALL_MS'),
+    COLLECT_BUDGET_MS: botConstant('COLLECT_BUDGET_MS'),
+    reflexes: [],
+    console: { log () {} },
+    litFuse: () => null
+  })
+  w.bot.pathfinder.goto = watchGoto(w.bot.pathfinder.goto)
+}
+
+// The body at 0,64,0 sees the ore at 3,65,0 past the stone at 2,65,0 it has not seen, and the gravel on the ore lands at 3,64,0.
+test('mine digs an ore it sees past a block it has not seen from where it stands, with no burial refusal for a walk the collect never takes', async () => {
+  const w = cave(UNDER, { '3,65,0': 'iron_ore', '3,66,0': 'gravel', '2,65,0': 'stone' }, { unseen: ['2,65,0'] })
+  watchedGotos(w)
+  const r = await w.mine('iron_ore')
+  assert.strictEqual(r.error, undefined, r.error && r.error.message)
+  assert.deepStrictEqual([r.reply.reason, w.digs], [null, ['3,65,0 from (0, 64, 0)']])
 })

@@ -175,7 +175,8 @@ function collector (t, { blocks, reach, plan = () => ({ status: 'success', path:
     leafInTheWay: () => null,
     holdCollectTool: async () => {},
     reflexes: [{ name: 'unstuck', active: false }],
-    litFuse: () => null
+    litFuse: () => null,
+    seenWorld: () => bot.world
   }
   // collectSafely hands abandonCollect on uncalled, so the route loader would not find it.
   const { watchGoto } = loadBotFunctions(['abandonCollect', 'watchGoto'], env)
@@ -1722,8 +1723,8 @@ function woodRig (t, cells, { hidden = [], rig = collector, plan } = {}) {
   c.bot.world = {
     raycast (from, dir, range) {
       for (let d = 0; d <= range; d += 0.02) {
-        const p = from.plus(dir.scaled(d)).floored()
-        if (at(p).shapes.length) return { position: p, face: 1 }
+        const b = at(from.plus(dir.scaled(d)).floored())
+        if (b.shapes.length) return b
       }
       return null
     }

@@ -2,6 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter, once } = require('node:events')
+const { AsyncLocalStorage } = require('node:async_hooks')
 const { Vec3 } = require('vec3')
 const mineflayer = require('mineflayer')
 const { goals } = require('mineflayer-pathfinder')
@@ -11,7 +12,7 @@ const { isDoor } = require('../lib/doors')
 const { routeWithin, walkersTo, groundCell, walkFlood } = require('../lib/flee')
 const { expireConfirmed, babyFlag } = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
-const { watchProgress } = require('../lib/walk')
+const { watchProgress, guardWork } = require('../lib/walk')
 const { createLane } = require('../lib/bot/lane')
 const vm = require('node:vm')
 const { SPRINT_FLOOR } = require('../lib/sprint')
@@ -1012,8 +1013,9 @@ test('strike and useon on a frame whose walk ends on a cell out of swing reach p
   for (const [route, item, fill, act] of [['/strike', 'iron_sword', 'wheat', 'swing 20'], ['/useon', 'wheat', null, 'use 20']]) {
     const world = frameWorld([frame(20, 3.5, fill)])
     const { bot, clock, did } = world
+    const { watchGoto } = loadBotFunctions(['watchGoto'], { ...world.env, guardWork: (work, o) => guardWork(work, { ...o, clock }), watchScope: new AsyncLocalStorage(), litFuse: () => null })
     // As in mineflayer-pathfinder, a path that ends off its goal leaves the walk standing until setGoal plans it again.
-    bot.pathfinder.goto = (goal) => new Promise((resolve) => {
+    bot.pathfinder.goto = watchGoto((goal) => new Promise((resolve) => {
       did.push('walk')
       bot.pathfinder.goal = goal
       clock.setTimeout(() => bot.emit('path_update', { status: 'success', path: [new Vec3(0, 64, 1), new Vec3(0, 64, 2)] }), 500)
@@ -1031,7 +1033,7 @@ test('strike and useon on a frame whose walk ends on a cell out of swing reach p
           resolve()
         }, 500)
       }
-    })
+    }))
     bot.attack = (en) => {
       did.push(`swing ${en.id}`)
       world.hold(en, null)
