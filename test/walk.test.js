@@ -142,6 +142,7 @@ function sources (over = {}) {
     cellKnown: () => true,
     seenNow: () => true,
     feetY: 64,
+    here: new Vec3(0.5, 64, 0.5),
     ...over
   }
 }
@@ -256,12 +257,13 @@ test('a block walks next to the nearest visible one with GoalGetToBlock', () => 
   assert.deepStrictEqual([r.goal.x, r.goal.y, r.goal.z], [5, 64, 5])
 })
 
-test('a known drop walks onto the stand cell under it', () => {
+test('a known drop walks to where the body picks it up, the stand cell under it included', () => {
   const drop = { position: { x: 5.2, y: 63.73, z: 5.9 } }
   const r = resolveTarget({ drop }, sources())
   assert.strictEqual(r.kind, 'drop')
-  assert.ok(r.goal instanceof goals.GoalBlock)
-  assert.deepStrictEqual([r.goal.x, r.goal.y, r.goal.z], [5, 64, 5])
+  assert.ok(r.goal instanceof walk.GoalPickup)
+  assert.ok(r.goal.isEnd(new Vec3(5, 64, 5)))
+  assert.deepStrictEqual(r.target, { x: 5, y: 64, z: 5 })
 })
 
 test('a hidden player, drop or block resolves to unseen, naming only what was asked', () => {
@@ -507,6 +509,10 @@ function walkBot ({ answer = () => {}, setup = () => {}, over = {} } = {}) {
     standCell,
     resolveTarget,
     arrivedAt,
+    pickupCovers: walk.pickupCovers,
+    pickupStep: walk.pickupStep,
+    PICKUP_STEP_TICKS: botConstant('PICKUP_STEP_TICKS'),
+    PICKUP_STEP_MARGIN: botConstant('PICKUP_STEP_MARGIN'),
     walkAttempt: (b, g, o) => walkAttempt(b, g, { ...o, clock: FAST }),
     routeDeadline,
     legs: legLedger(),

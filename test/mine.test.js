@@ -11,7 +11,7 @@ const registry = require('prismarine-registry')('1.21.11')
 const PBlock = require('prismarine-block')(registry)
 const { CollectBlock } = require('mineflayer-collectblock/lib/CollectBlock')
 const { Targets } = require('mineflayer-collectblock/lib/Targets')
-const { guardWork } = require('../lib/walk')
+const { guardWork, GoalPickup, overPickup } = require('../lib/walk')
 const { createJobs } = require('../lib/jobs')
 const { deathLedger } = require('../lib/deaths')
 const { entityInCell } = require('../lib/shelter')
@@ -158,6 +158,12 @@ function collector (t, { blocks, reach, plan = () => ({ status: 'success', path:
     COLLECT_STALL_MS: botConstant('COLLECT_STALL_MS'),
     COLLECT_BUDGET_MS: botConstant('COLLECT_BUDGET_MS'),
     guardWork: (work, o) => guardWork(work, { ...o, clock }),
+    GoalPickup,
+    overPickup,
+    // The rig's body never moves.
+    stepToPickup: async () => true,
+    // The rig's server picks a drop up when the test emits its entityGone.
+    PICKUP_WAIT_TICKS: Infinity,
     watchScope: new AsyncLocalStorage(),
     Vec3,
     ck: (x, y, z) => x + ',' + y + ',' + z,
@@ -192,8 +198,9 @@ test('mine returns with stalled when the path to the block never gets anywhere',
   assert.strictEqual(c.bot.pathfinder.goal, null, 'the walk is stopped')
 })
 
-test('mine counts the dug block and returns with stalled when its drop is never picked up, lists that drop, and the next collect starts afresh', async (t) => {
+test('mine counts the dug block and lists its drop when the drop is never picked up after the walk to it, and the next collect starts afresh', async (t) => {
   const c = collector(t, { blocks: ORE, reach: () => true, chase: () => false })
+  c.env.PICKUP_WAIT_TICKS = botConstant('PICKUP_WAIT_TICKS')
   for (const round of [1, 2]) {
     c.blocks['1,64,0'] = ORE['1,64,0']
     const reply = awaitRoute('/mine', { name: 'iron_ore' }, c.env)
@@ -204,8 +211,7 @@ test('mine counts the dug block and returns with stalled when its drop is never 
       await new Promise(setImmediate)
       assert.strictEqual(c.seen.followed, 2, 'the first collect walks nowhere')
     }
-    c.clock.advance(botConstant('COLLECT_STALL_MS') + 500)
-    assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 0, reason: 'stalled', unreached: [{ item: 'raw_iron', count: 1, pos: { x: 1.5, y: 64.5, z: 0.5 } }] })
+    assert.deepStrictEqual(await within(reply), { mined: 1, requested: 1, gathered: 0, reason: null, unreached: [{ item: 'raw_iron', count: 1, pos: { x: 1.5, y: 64.5, z: 0.5 } }] })
     assert.strictEqual(c.seen.digs, round)
   }
 })
@@ -269,12 +275,12 @@ function unreachedRig (t, { status = 'noPath', out = 1, ores = 2, rig = collecto
   return c
 }
 
-test('mine counts a dug block whose drop walk finds no path or no plan in time, walks to that drop once after the next dig, lists it and mines on', async (t) => {
+test('mine counts a dug block whose drop walk finds no path or no plan in time, walks to that drop at once and again after the next dig, lists it and mines on', async (t) => {
   for (const status of ['noPath', 'timeout']) {
     const c = unreachedRig(t, { status, chase: () => false })
     const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '2' }, c.env))
     assert.deepStrictEqual(reply, { mined: 2, requested: 2, gathered: 1, reason: null, unreached: [{ item: 'raw_iron', count: 1, pos: { x: 1.5, y: 64.5, z: 0.5 } }] }, status)
-    assert.deepStrictEqual(c.seen.chases, [c.seen.drops[0]], status)
+    assert.deepStrictEqual(c.seen.chases, [c.seen.drops[0], c.seen.drops[0]], status)
     assert.strictEqual(c.bot.pathfinder.goal, null, status)
   }
 })
@@ -285,8 +291,8 @@ test('mine stops after two drops in a row whose walks fail again after a later d
   const at = (x) => ({ item: 'raw_iron', count: 1, pos: { x, y: 64.5, z: 0.5 } })
   assert.deepStrictEqual(counts, { mined: 3, requested: 4, gathered: 0, unreached: [at(1.5), at(2.5), at(3.5)] })
   assert.strictEqual(reason, 'two drops in a row out of reach: raw_iron at 1.5,64.5,0.5 and raw_iron at 2.5,64.5,0.5')
-  const [a, b] = c.seen.drops
-  assert.deepStrictEqual(c.seen.chases, [a, a, b])
+  const [a, b, d] = c.seen.drops
+  assert.deepStrictEqual(c.seen.chases, [a, a, b, a, b, d])
   assert.strictEqual(c.seen.digs, 3)
   assert.strictEqual(c.bot.pathfinder.goal, null)
 })
@@ -296,7 +302,7 @@ test('mine walks again to a drop collectblock could not reach once its next dig 
   const c = unreachedRig(t, { out: 1, ores: 3, chase: () => !c.blocks['2,64,0'].type })
   const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '3' }, c.env))
   assert.deepStrictEqual(reply, { mined: 3, requested: 3, gathered: 3, reason: null })
-  assert.deepStrictEqual(c.seen.chases, [c.seen.drops[0]])
+  assert.deepStrictEqual(c.seen.chases, [c.seen.drops[0], c.seen.drops[0]])
 })
 
 test('mine does not stop for two drops in a row collectblock could not reach once both are picked up after the next digs', async (t) => {
@@ -304,7 +310,8 @@ test('mine does not stop for two drops in a row collectblock could not reach onc
   const c = unreachedRig(t, { out: 2, ores: 3, chase: (d) => !c.blocks[`${Math.floor(d.position.x) + 1},64,0`].type })
   const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '3' }, c.env))
   assert.deepStrictEqual(reply, { mined: 3, requested: 3, gathered: 3, reason: null })
-  assert.deepStrictEqual(c.seen.chases, c.seen.drops.slice(0, 2))
+  const [a, b] = c.seen.drops
+  assert.deepStrictEqual(c.seen.chases, [a, a, b, b])
 })
 
 test('mine lists an unreached drop where it lies at the reply, not where it was when its walk failed', async (t) => {
@@ -316,14 +323,14 @@ test('mine lists an unreached drop where it lies at the reply, not where it was 
 })
 
 test('mine leaves out an unreached drop that is gone by the reply', async (t) => {
-  const c = unreachedRig(t)
+  const c = unreachedRig(t, { chase: () => false })
   c.bot.on('itemDrop', (d) => { if (d === c.seen.drops[1]) c.bot.emit('entityGone', c.seen.drops[0]) })
   const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '2' }, c.env))
   assert.deepStrictEqual(reply, { mined: 2, requested: 2, gathered: 1, reason: null })
 })
 
 test('mine lists the unreached drop of a dug block after the pathfinder dropped every dig listener', async (t) => {
-  const c = unreachedRig(t, { ores: 1 })
+  const c = unreachedRig(t, { ores: 1, chase: () => false })
   // The pathfinder's resetPath during one of its own digs removes every diggingCompleted listener.
   c.bot.on('goal_updated', (g) => { if (g instanceof goals.GoalLookAtBlock) c.bot.removeAllListeners('diggingCompleted') })
   const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
@@ -1322,7 +1329,7 @@ test('a gather whose digs land nothing in the pockets gathers zero and fails', a
 })
 
 test('a gather counts a dug block whose drop it cannot reach', async (t) => {
-  const c = unreachedRig(t, { ores: 1, rig: jobRig })
+  const c = unreachedRig(t, { ores: 1, rig: jobRig, chase: () => false })
   const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
   assert.ok(await waitFor(() => c.env.jobs.get(job).status !== 'running', 2000), 'the job ended')
   const { dug, gathered } = c.env.jobs.get(job).result
@@ -1336,7 +1343,7 @@ test('a gather walks again to a drop collectblock could not reach once its next 
   c.bot.world = { raycast: () => ({ position: left()[0]?.position }) }
   const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
   assert.deepStrictEqual(await jobResult(c, job), { gathered: 2, dug: 2, requested: 2, inventoryMatching: 2 })
-  assert.deepStrictEqual(c.seen.chases, [c.seen.drops[0]])
+  assert.deepStrictEqual(c.seen.chases, [c.seen.drops[0], c.seen.drops[0]])
 })
 
 test('/stop ends the collect of a gather job at once and frees the collect for the next caller', async (t) => {
