@@ -427,6 +427,268 @@ test('a fill from a water source still looks at the source\'s middle', async () 
   assert.deepStrictEqual(looks, [new Vec3(1.5, 64.5, 0.5)])
 })
 
+const SOIL = new Vec3(1, 64, 0)
+const CROP = '1,65,0'
+const FARMLAND = { name: 'farmland', stateId: 30, shapes: [[0, 0, 0, 1, 0.9375, 1]] }
+const WHEAT = { name: 'wheat', stateId: 31, shapes: [] }
+
+// /use of wheat_seeds on SOIL, each answer [ms after the click (negative during the look), 'soil' | 'crop' | 'slot' | 'tick', state or count].
+async function sowUse ({ feet = new Vec3(0.5, 64, 0.5), cells = {}, count = 8, hand = 'wheat_seeds', answers = [], unseen = [], walk = {}, reflex = false, ticks = true, env: extra = {} } = {}) {
+  const clock = fakeClock()
+  const key = (c) => `${c.x},${c.y},${c.z}`
+  const world = { [key(SOIL)]: FARMLAND, ...cells }
+  const hidden = new Set(unseen)
+  const seen = (c) => !hidden.has(key(c))
+  const log = []
+  const unseenReads = []
+  const guardState = { hand: null }
+  const inventory = Object.assign(new EventEmitter(), { hotbarStart: 36, slots: [], items: () => inventory.slots.filter(Boolean) })
+  inventory.slots[36] = { name: 'wheat_seeds', count, slot: 36 }
+  inventory.slots[37] = { name: 'iron_sword', count: 1, slot: 37 }
+  const setSlot = (n) => {
+    const old = inventory.slots[36]
+    inventory.slots[36] = n ? { name: 'wheat_seeds', count: n, slot: 36 } : null
+    inventory.emit('updateSlot', 36, old, inventory.slots[36])
+  }
+  const cellAt = (c) => block(world[key(c)] || (c.y < 64 ? STONE : AIR), c)
+  const bot = Object.assign(new EventEmitter(), {
+    entity: { position: feet },
+    inventory,
+    quickBarSlot: hand === 'iron_sword' ? 1 : 0,
+    time: { age: 0 },
+    blockAt: (c) => {
+      if (!seen(c)) unseenReads.push(key(c))
+      return cellAt(c)
+    },
+    pathfinder: {
+      movements: { getBlock: (c) => (seen(c) ? {} : { name: 'unknown' }) },
+      goto: () => new Promise((resolve) => {
+        log.push('walk')
+        clock.setTimeout(() => {
+          bot.entity.position = walk.to || new Vec3(0.5, 64, 0.5)
+          for (const k of walk.hides || []) hidden.add(k)
+          Object.assign(world, walk.sets)
+          if (reflex && !guardState.hand) bot.quickBarSlot = 1
+          resolve()
+        }, walk.ms || 0)
+      })
+    },
+    lookAt: async () => {},
+    equip: async (it) => { log.push(`equip ${it.name}`); bot.quickBarSlot = it.slot - 36 },
+    activateBlock: async (b) => {
+      const look = Math.max(0, ...answers.map(([ms]) => -ms))
+      for (const [ms, kind, value] of answers) {
+        clock.setTimeout(() => {
+          if (kind === 'slot') return setSlot(value)
+          if (kind === 'tick') return tick()
+          const at = kind === 'soil' ? SOIL : SOIL.offset(0, 1, 0)
+          const old = cellAt(at)
+          if (kind === 'crop') world[CROP] = value
+          bot.emit('blockUpdate', old, cellAt(at))
+        }, look + ms)
+      }
+      if (look) await new Promise((resolve) => clock.setTimeout(resolve, look))
+      log.push(`click ${bot.heldItem ? bot.heldItem.name : 'nothing'} on ${key(b.position)}`)
+    }
+  })
+  Object.defineProperty(bot, 'heldItem', { get: () => inventory.slots[inventory.hotbarStart + bot.quickBarSlot] })
+  const tick = () => { bot.time.age++; bot.emit('time') }
+  if (ticks) clock.setInterval(tick, 50)
+  const env = {
+    bot,
+    Vec3,
+    guardState,
+    reflexes: [],
+    seesLit: seen,
+    seenNow: seen,
+    cellKnown: seen,
+    leafInTheWay: () => null,
+    goals: { GoalNear: class {} },
+    round: (v) => v,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    Date: { now: clock.now },
+    POUR_REACH: botConstant('POUR_REACH'),
+    SEED_ANSWER_MS: botConstant('SEED_ANSWER_MS'),
+    SEED_ANSWER_CAP_MS: botConstant('SEED_ANSWER_CAP_MS'),
+    SEED_DROP_MS: botConstant('SEED_DROP_MS'),
+    ok: (res, body) => { res.body = { ok: true, ...body } },
+    ...extra
+  }
+  const { res, ms } = await useOnClock(clock, env, { x: '1', y: '64', z: '0', item: 'wheat_seeds' })
+  return { reply: res.body, error: res.error, ms, log, guardState, unseenReads, held: bot.heldItem && bot.heldItem.name }
+}
+
+const PLANTS = [[30, 'soil'], [30, 'crop', WHEAT], [31, 'slot', 7]]
+const IGNORES = [[45, 'soil'], [45, 'crop', AIR]]
+
+test('a seed whose crop cell is out of sight and whose click the server ignored replies ok false once the server answered, reading no cell', async () => {
+  const { reply, ms, unseenReads } = await sowUse({ unseen: [CROP], answers: IGNORES })
+  assert.strictEqual(reply.ok, false)
+  assert.match(reply.reason, /ignored/)
+  assert.doesNotMatch(reply.reason, /air|1,65,0/)
+  assert.ok(!('now' in reply), `now ${reply.now}`)
+  assert.ok(ms >= 145 && ms < 500, `replied after ${ms} ms`)
+  assert.deepStrictEqual(unseenReads, [])
+})
+
+test('a seed out of sight counts as planted on a count drop one tick after the crop update, and names no crop', async () => {
+  const { reply, unseenReads } = await sowUse({ unseen: [CROP], answers: [[30, 'soil'], [30, 'crop', WHEAT], [80, 'slot', 7]] })
+  assert.deepStrictEqual([reply.ok, reply.planted, 'crop' in reply, 'now' in reply], [true, true, false, false])
+  assert.deepStrictEqual(unseenReads, [])
+})
+
+test('a pickup into the seed stack during the wait neither hides the seed\'s drop nor stands in for one', async () => {
+  for (const answers of [[[20, 'slot', 9], [30, 'soil'], [40, 'slot', 8]], [[30, 'soil'], [35, 'slot', 7], [40, 'slot', 10]]]) {
+    const { reply, unseenReads } = await sowUse({ unseen: [CROP], answers })
+    assert.deepStrictEqual([reply.ok, reply.planted], [true, true], JSON.stringify(answers))
+    assert.deepStrictEqual(unseenReads, [])
+  }
+  const { reply, unseenReads } = await sowUse({ unseen: [CROP], answers: [[20, 'slot', 9], [30, 'soil']] })
+  assert.strictEqual(reply.ok, false, 'a pickup alone')
+  assert.deepStrictEqual(unseenReads, [])
+})
+
+test('a seed count drop before the server answered the click is no planted seed', async () => {
+  const { reply, unseenReads } = await sowUse({ unseen: [CROP], answers: [[20, 'slot', 7], [30, 'soil']] })
+  assert.strictEqual(reply.ok, false)
+  assert.match(reply.reason, /ignored/)
+  assert.deepStrictEqual(unseenReads, [])
+})
+
+test('a farmland update during the look before the click is no answer, and the later answer plants, in sight and out of it', async () => {
+  for (const unseen of [[], [CROP]]) {
+    const { reply } = await sowUse({ unseen, answers: [[-100, 'soil'], [150, 'soil'], [150, 'crop', WHEAT], [170, 'slot', 7]] })
+    assert.deepStrictEqual([reply.ok, reply.planted], [true, true], `unseen ${unseen}`)
+  }
+})
+
+test('a seed out of sight counts as planted on a count drop 300 ms after the answer with one server tick between them', async () => {
+  const { reply } = await sowUse({ unseen: [CROP], ticks: false, answers: [[30, 'soil'], [50, 'tick'], [330, 'slot', 7]] })
+  assert.deepStrictEqual([reply.ok, reply.planted], [true, true])
+})
+
+test('a seed click on a server that sends no age and no answer replies unanswered at the wall-clock cap', async () => {
+  for (const unseen of [[], [CROP]]) {
+    const { reply, ms } = await sowUse({ unseen, ticks: false })
+    const label = `unseen ${unseen}`
+    assert.strictEqual(reply.ok, false, label)
+    assert.match(reply.reason, /no answer/, label)
+    assert.ok(ms >= 5000 && ms < 6000, `${label}: replied after ${ms} ms`)
+  }
+})
+
+test('the last seed counts as planted when its slot empties', async () => {
+  const { reply, unseenReads } = await sowUse({ unseen: [CROP], count: 1, answers: [[30, 'soil'], [30, 'slot', 0]] })
+  assert.deepStrictEqual([reply.ok, reply.planted, reply.used], [true, true, 'wheat_seeds'])
+  assert.deepStrictEqual(unseenReads, [])
+})
+
+test('a seed slot update that keeps the count is no planted seed', async () => {
+  const { reply, unseenReads } = await sowUse({ unseen: [CROP], answers: [[30, 'soil'], [30, 'slot', 8]] })
+  assert.strictEqual(reply.ok, false)
+  assert.match(reply.reason, /ignored/)
+  assert.deepStrictEqual(unseenReads, [])
+})
+
+test('a seed whose crop cell is in sight names the crop it planted', async () => {
+  const { reply } = await sowUse({ answers: PLANTS })
+  assert.deepStrictEqual([reply.ok, reply.planted, reply.crop, 'now' in reply], [true, true, 'wheat', false])
+})
+
+test('a seed whose crop cell is in sight and stays air fails as an ignored click', async () => {
+  const { reply } = await sowUse({ answers: IGNORES })
+  assert.strictEqual(reply.ok, false)
+  assert.match(reply.reason, /ignored/)
+  assert.ok(!('now' in reply), `now ${reply.now}`)
+})
+
+test('a seed planted in sight returns only after its count drop one tick after the crop update', async () => {
+  const { reply, ms } = await sowUse({ answers: [[30, 'soil'], [30, 'crop', WHEAT], [80, 'slot', 7]] })
+  assert.deepStrictEqual([reply.ok, reply.crop], [true, 'wheat'])
+  assert.ok(ms >= 80, `replied after ${ms} ms`)
+})
+
+test('a seed counts as planted when the server answers after 600 ms, in sight and out of it', async () => {
+  const late = [[600, 'soil'], [600, 'crop', WHEAT], [620, 'slot', 7]]
+  for (const unseen of [[], [CROP]]) {
+    const { reply } = await sowUse({ unseen, answers: late })
+    assert.deepStrictEqual([reply.ok, reply.planted], [true, true], `unseen ${unseen}`)
+  }
+})
+
+test('a seed click the server never answers replies that it is unknown whether the seed went in, never an ignored click', async () => {
+  for (const unseen of [[], [CROP]]) {
+    const { reply, ms, unseenReads } = await sowUse({ unseen })
+    const label = `unseen ${unseen}`
+    assert.strictEqual(reply.ok, false, label)
+    assert.match(reply.reason, /no answer/, label)
+    assert.match(reply.reason, /unknown whether/, label)
+    assert.doesNotMatch(reply.reason, /ignored/, label)
+    assert.ok(ms >= 1000 && ms < 2000, `${label}: replied after ${ms} ms`)
+    assert.deepStrictEqual(unseenReads, [], label)
+  }
+})
+
+test('a seed onto farmland under visible wheat is refused naming the wheat, and clicks nothing', async () => {
+  const { error, log } = await sowUse({ cells: { [CROP]: WHEAT }, answers: PLANTS })
+  assert.match(error ? error.message : 'no refusal', /wheat at 1,65,0/)
+  assert.deepStrictEqual(log.filter((l) => l.startsWith('click')), [])
+})
+
+test('a seed whose farmland the walk left out of sight is refused for sight, reading and naming no block there', async () => {
+  const walk = { to: new Vec3(2.5, 64, 0.5), hides: ['1,64,0'], sets: { '1,64,0': { name: 'dirt', stateId: 2, shapes: [[0, 0, 0, 1, 1, 1]] } } }
+  const { error, log, unseenReads } = await sowUse({ feet: new Vec3(6.5, 64, 0.5), walk, answers: PLANTS })
+  assert.match(error ? error.message : 'no refusal', /not in my sight/)
+  assert.doesNotMatch(error.message, /dirt|farmland/)
+  assert.deepStrictEqual(unseenReads, [])
+  assert.deepStrictEqual(log.filter((l) => l.startsWith('click')), [])
+})
+
+test('an unseen block on the ray to the farmland top does not hide the top', async () => {
+  const { reply, error, unseenReads } = await sowUse({ feet: new Vec3(-0.5, 64, 0.5), cells: { '0,65,0': STONE }, unseen: ['0,65,0'], answers: PLANTS })
+  assert.strictEqual(error, undefined, error && error.message)
+  assert.strictEqual(reply.planted, true)
+  assert.deepStrictEqual(unseenReads, [])
+})
+
+test('a seed is clicked from a stand beside the bed or one terrace level down', async () => {
+  for (const feet of [new Vec3(0.5, 65, 0.5), new Vec3(0.5, 64, 0.5)]) {
+    const { reply, log } = await sowUse({ feet, answers: PLANTS })
+    assert.deepStrictEqual([reply && reply.planted, log.at(-1)], [true, 'click wheat_seeds on 1,64,0'], `feet at ${feet}`)
+  }
+})
+
+test('a seed is refused with the eye below the farmland top or its top hidden, and nothing is clicked', async () => {
+  const below = await sowUse({ feet: new Vec3(0.5, 63, 0.5), cells: { '0,63,0': AIR }, answers: PLANTS })
+  const hidden = await sowUse({ feet: new Vec3(-0.5, 64, 0.5), cells: { '0,65,0': STONE }, answers: PLANTS })
+  const texts = [below, hidden].map((r) => (r.error ? r.error.message : `replied ${JSON.stringify(r.reply)}`))
+  assert.deepStrictEqual(texts.map((t) => /stand higher/.test(t)), [true, true], texts.join(' | '))
+  assert.deepStrictEqual([/eye is below/.test(texts[0]), /hidden/.test(texts[1])], [true, true], texts.join(' | '))
+  assert.deepStrictEqual([below, hidden].map((r) => r.log.filter((l) => l.startsWith('click'))), [[], []])
+})
+
+test('a seed use refuses while fighting before it equips, walks or clicks', async () => {
+  const refuseWhileFighting = () => { throw Object.assign(new Error('refused: fighting zombie'), { reason: 'fighting' }) }
+  const { error, log } = await sowUse({ feet: new Vec3(6.5, 64, 0.5), answers: PLANTS, env: { refuseWhileFighting } })
+  assert.strictEqual(error && error.reason, 'fighting')
+  assert.deepStrictEqual(log, [])
+})
+
+test('a seed use takes the hand after a walk longer than a lease, and the click goes out with the seed', async () => {
+  const { reply, log, guardState } = await sowUse({ feet: new Vec3(6.5, 64, 0.5), walk: { ms: 3000 }, reflex: true, answers: PLANTS })
+  assert.deepStrictEqual(log, ['walk', 'equip wheat_seeds', 'click wheat_seeds on 1,64,0'])
+  assert.deepStrictEqual([reply.ok, reply.planted], [true, true])
+  assert.strictEqual(guardState.hand, null, 'the lease outlived the use')
+})
+
+test('a seed use refused for its stand after the walk leaves the hand as it was', async () => {
+  const walk = { to: new Vec3(0.5, 63, 0.5) }
+  const { error, log, held } = await sowUse({ feet: new Vec3(6.5, 64, 0.5), hand: 'iron_sword', cells: { '0,63,0': AIR }, walk, answers: PLANTS })
+  assert.match(error ? error.message : 'no refusal', /eye is below/)
+  assert.deepStrictEqual([log, held], [['walk'], 'iron_sword'])
+})
+
 // A body holding an iron shovel beside a seen dirt cell at 1,64,0, an iron hoe in its pockets, over digLock. done records walks, looks, equips and clicks.
 function rescueBody (digLock) {
   const done = []
