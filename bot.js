@@ -67,11 +67,11 @@ const bot = mineflayer.createBot({
 })
 
 // Connection hardening adapted from Mindcraft's mcdata.js (MIT, https://github.com/kolbytn/mindcraft).
-// Move packets go out at most once per 50 ms. A PartialReadError the client emits is logged and dropped.
+// Move packets go out at most once per 50 ms, except the answer to a server position. A PartialReadError the client emits is logged and dropped.
 function wireConnectionHardening () {
   try {
     const _write = bot._client.write.bind(bot._client)
-    let lastPos = 0, posTimer = null, pending = null
+    let lastPos = 0, posTimer = null, pending = null, answering = false
     const flush = () => {
       posTimer = null
       lastPos = Date.now()
@@ -81,6 +81,13 @@ function wireConnectionHardening () {
     }
     bot._client.write = (name, data) => {
       if (name !== 'position' && name !== 'position_look' && name !== 'look') return _write(name, data)
+      // The 1.7.10 server ignores a block placement after its correction until a move packet carries the corrected x and z.
+      if (answering && name === 'position_look') {
+        answering = false
+        clearTimeout(posTimer)
+        pending = { name, data }
+        return flush()
+      }
       // A burst inside one window goes out as one packet with its newest position, look and flags.
       if (!pending || pending.name === name || name === 'position_look') pending = { name, data }
       else {
@@ -101,7 +108,9 @@ function wireConnectionHardening () {
         console.log('[bot] swallowed PartialReadError (protocol desync)')
         return true
       }
-      return _emit(event, ...args)
+      if (event !== 'position') return _emit(event, ...args)
+      answering = true
+      try { return _emit(event, ...args) } finally { answering = false }
     }
   } catch (e) { console.log('[bot] connection hardening skipped:', e.message) }
 }
