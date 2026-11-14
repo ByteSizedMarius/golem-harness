@@ -211,6 +211,43 @@ test('the pathfinder walks straight across a field', async () => {
   assert.deepStrictEqual([controls.forward, controls.jump], [true, false])
 })
 
+// Three walled terraces one block apart along x, farmland between stone paths at x 0, 5 and 8, and a stone row at z 61 when stairs is set.
+function terraces (stairs) {
+  const cells = {}
+  for (let z = -1; z <= 62; z++) {
+    for (let x = -1; x <= 9; x++) {
+      if (x === -1 || x === 9 || z === -1 || z === 62) {
+        cells[`${x},64,${z}`] = cells[`${x},65,${z}`] = STONE
+        continue
+      }
+      const floor = x < 3 ? 63 : x < 6 ? 62 : 61
+      for (let y = floor + 1; y <= 63; y++) cells[`${x},${y},${z}`] = ['air', {}]
+      cells[`${x},${floor},${z}`] = [0, 5, 8].includes(x) || (stairs && z === 61) ? STONE : FARMLAND
+    }
+  }
+  return cells
+}
+
+// The bottom level's path beside its beds.
+const BOTTOM = new goals.GoalBlock(8, 62, 0)
+const farmlandLandings = (cells, path) => path.filter((n) => drops(path).includes(n) || n.parkour).filter((n) => floorAt(cells, n) === 'farmland').map((n) => n.hash)
+
+test('a field walk down three terraces lands no drop or jump on farmland, where the default walk does', async (t) => {
+  const cells = terraces(true)
+  const { plan, shared } = await walkingBody(t, START, cells)
+  assert.ok(farmlandLandings(cells, plan(BOTTOM).path).length > 0, 'control: the default walk drops onto the beds')
+  const field = plan(BOTTOM, shared.fieldMoves)
+  assert.deepStrictEqual([field.status, farmlandLandings(cells, field.path)], ['success', []])
+})
+
+test('a field walk to a level reached only by drops onto farmland finds no path and plans no such drop', async (t) => {
+  const cells = terraces(false)
+  const { plan, shared } = await walkingBody(t, START, cells)
+  assert.strictEqual(plan(BOTTOM).status, 'success', 'control: the default walk drops onto the beds')
+  const field = plan(BOTTOM, shared.fieldMoves)
+  assert.deepStrictEqual([field.status, farmlandLandings(cells, field.path)], ['noPath', []])
+})
+
 // body() over stone with air where open(p) holds and sky light 15 where sky(p) holds, planning through
 // bot.js's knownMoves for a bot that has seen the cells seen(p) holds.
 async function knowing (pos, { open, sky = () => false, seen }) {

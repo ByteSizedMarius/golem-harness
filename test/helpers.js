@@ -149,7 +149,7 @@ const DUMMY_ROUTES = [
   '/waypoint', '/waypoints', '/snapshot', '/record', '/stream', '/pov', '/sign', '/rename', '/bunker',
   '/strike', '/shoot', '/brace', '/hold', '/pillar', '/pathdebug', '/threatdebug', '/journal', '/lookat', '/stance', '/gaze',
   '/scene', '/section', '/passages', '/map', '/entities', '/listen', '/blockat', '/pulse', '/events', '/bridging', '/tidy',
-  '/dig_tunnel', '/dig_stair', '/digat', '/enchant', '/placeitem', '/equip', '/activate', '/use', '/fish', '/reflexes',
+  '/dig_tunnel', '/dig_stair', '/digat', '/enchant', '/placeitem', '/equip', '/activate', '/use', '/fish', '/sow', '/reflexes',
   '/gesture', '/job', '/job_stop', '/guard', '/where', '/place', '/eat', '/useon', '/grave', '/book'
 ]
 

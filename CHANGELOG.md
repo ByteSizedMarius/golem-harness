@@ -4,6 +4,26 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-14: a seed click reports what the server did, and `sow` plants a whole bed
+
+The pilot planted a terraced field plot by plot and counted about 90 seeds sown while a fifth of
+the field held wheat. `/use` with a seed replied ok whenever the cell above the farmland was out of
+sight, planted or not. It now replies from the server's answer: the crop when the cell above is in
+sight, otherwise the seed count dropping by one. A click the server ignored replies `ok: false`,
+and so does one the server never answered. A seed is clicked only from where a player could aim at
+the farmland's top, and a plot whose crop is in sight is refused.
+
+One cause of ignored clicks was in the bot. A 1.7.10 server ignores block clicks after it corrects
+a player's position until a move packet carries the corrected position exactly, and the bot's
+move-packet throttle could replace that answer with the next tick's position. The answer to a
+server position now goes out at once and unchanged.
+
+`sow` is a new job for a rectangle of farmland. It plants every empty plot the bot has seen there,
+the highest terrace first, and clicks each plot once. Its walks plan no drop or jump onto farmland
+the bot can see, since a landing can trample the plot. The result counts the plots sown and
+occupied, lists the ones the server ignored, the ones no walk reached and the ones that turned
+into another block, and counts the columns the bot has not seen.
+
 ## 2026-11-09: the lava watch warns about every new lava, and digs pick up their drops
 
 The bot died three times beside lava it had poured itself, with no warning. After one warning the

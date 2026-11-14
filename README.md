@@ -225,7 +225,7 @@ off. With `GOLEM_REPLIES` set, the server also appends the reply of each tool ca
 Code's tool-use id as a JSON line under that id, so the reply of a call moved to the background
 can still be read.
 
-The pilot sees 77 tools: 73 that each call one bot route (`goto` calls `/goto`), plus
+The pilot sees 78 tools: 74 that each call one bot route (`goto` calls `/goto`), plus
 
 - `wait_events`: new chat, whispers and bot events.
 - `note`: a note of kind `memory`, `lesson` or `papercut`. Memory notes, at most 30, are kept in
@@ -325,9 +325,10 @@ the body, so a pilot with ten-second round trips gets the same protection as a f
   buried body steps aside or digs out, and a submerged one swims up.
 - Reflexes run every 300 ms: lava watch, bunker, fire, combat, unstuck, current watch, narrator,
   trek and flee to player. `reflexes` lists them and switches each on or off.
-- `build`, `gather`, `dig_tunnel`, `dig_stair` and `fish` run as background jobs the pilot polls.
-  One runs at a time, and a new job stops the running one. Every other body tool answers when its
-  action ends, a long walk after up to 10 minutes, and other body tools answer busy until then.
+- `build`, `gather`, `dig_tunnel`, `dig_stair`, `fish` and `sow` run as background jobs the pilot
+  polls. One runs at a time, and a new job stops the running one. Every other body tool answers
+  when its action ends, a long walk after up to 10 minutes, and other body tools answer busy until
+  then.
 - While a fight event is unread, the MCP server refuses world work until the pilot has read it.
 
 ## How the model fights
