@@ -29,14 +29,41 @@ This is a fork of [cormundus/golem-harness](https://github.com/cormundus/golem-h
 Golem to play Minecraft 1.7.10, the best version ever made. That it is also the version I grew up
 with is a complete coincidence.
 
-It adds over upstream:
+About 300 commits separate it from upstream. Most of them trace back to play sessions on a 1.7.10
+survival server with other players, where something went wrong and the harness changed afterwards.
+`CHANGELOG.md` has each fix with the failure behind it. What they add up to:
 
-- 1.7.10 support through ViaProxy, with a mode that gives the body the old combat and senses.
-- Request signing on the control API, which upstream served unauthenticated.
-- The MCP server.
-- Stricter fairness rules: sight needs light, a block's current state shows only while it is in
-  sight, and walks plan only through cells the bot knows.
-- A bunker the body digs or pillars when a fight goes badly.
+- 1.7.10 support through ViaProxy. One switch gives the body the old combat, hitboxes, sounds,
+  light, suffocation and starvation rules. Digs, crafts and door toggles wait for the server's
+  answer there, since a 1.7.10 server confirms less than a 1.21 client expects.
+- A closed control API. Upstream served it unauthenticated. Here every request is signed, every
+  reply carries a proof, and queries are checked against the tool schemas. The viewer, which
+  streamed the world on a second port with no token, is gone.
+- The MCP server, and a pilot text split into a short `DRIVING.md` and manual topics the pilot
+  fetches when an activity starts.
+- Stricter fairness. Sight needs light and follows block shapes, a block's current state shows only
+  while it is in sight, walks plan only through cells the bot knows, and replies name only what
+  it saw. The body keeps to a player's limits too. It sprints only where it looks, reaches as far
+  as a player's arm and moves chest stacks at a player's pace.
+- A body that looks after itself. It digs or pillars a bunker when a fight goes badly, pours its
+  water bucket when it burns, frees itself when buried or wedged into a block and swims up out of
+  deep water. From a creeper it takes cover behind a shut door, and it refuses a walk toward a lit
+  fuse.
+- Work that reports what the server did. Digs, crafts, smelting, renames, tosses and animal feeding
+  count from the server's answer, not from the client's prediction. `mine` and `gather` leave built
+  logs standing, `gather` takes only ripe crops, and a dig picks the tool that keeps the drop.
+- Walks that explain themselves. A `goto` that gives up names what blocks the way. It refuses long
+  swims, stops sprinting and eats when food runs low, takes double doors, and lists the ore veins
+  it passed. `follow` keeps up down a staircase.
+- Playing with people. A chat line says where its speaker stands, a player can show a spot by
+  punching toward it twice, long messages split into paced lines, and a bed someone sleeps in is
+  refused by name.
+- A memory for the pilot: notes shown at every `boot`, a todo list with priorities, and notebooks
+  kept in in-game books.
+- Underneath: `bot.js` broken up into `lib/`, a test suite that runs without a server, and fixes to
+  eight packages of the PrismarineJS stack in `patches/`.
+
+Gone from upstream: the viewer with its film rig, and the sample pilot memory system.
 
 ## A player, not a god
 
@@ -56,13 +83,15 @@ but playing fairly is what makes it playing at all.
   test. A block's current state shows only while it is in sight or touched by the body, otherwise a
   reply gives what the bot last saw there, or nothing. Chests, furnaces, crafting tables, anvils
   and enchanting tables are used only where the bot saw one.
-- Considerate movement. The walker never breaks blocks to travel, except leaves and logs while
-  `gather` collects wood. Scaffold blocks it places are tracked and mined back with `tidy`. Doors
-  and gates it opens are closed behind it. A `goto` plans before it walks and refuses a plan that
-  ends more than 2 off the asked height or drops more than 3, unless told `accept=1`. `preview=1`
-  returns the plan without taking a step.
-- No teleporting. The body eats on its own only right after a fight, at food 14 or lower, and wears
-  the best armor it carries.
+- Considerate movement. A `goto` never breaks blocks to travel. The walk of `mine`, `gather` and
+  `tidy` to a target may break leaves and blocks of the kind it collects, so `mine cobblestone`
+  can cut through a cobblestone wall on its way. Scaffold blocks the walker places are tracked
+  until the bot restarts and mined back with `tidy`. Doors and gates it opens are closed behind
+  it. A `goto` plans before it walks and refuses a plan that ends more than 2 (or its `range`) off
+  the asked height, drops more than 3 or swims more than 3 blocks of deep water, unless told
+  `accept=1`. `preview=1` returns the plan without taking a step.
+- No teleporting. The body eats on its own only right after a fight or on a `goto`, at food 14 or
+  lower, and wears the best armor it carries.
 - Silence means "didn't look", never "all clear". Unknown space reads as unknown.
 
 The anti-cheat checks and the perception system are the same code. The ray-march that once only
@@ -88,7 +117,7 @@ at login whatever `MC_VERSION` says.
 
 The bot still speaks 1.21.11, to the proxy, and ViaProxy translates down to the server.
 `GOLEM_MC_1710=1` switches the body to 1.7.10 rules: no attack cooldown, a sword block instead of a
-shield, no off-hand, and the old hitboxes, sounds and underwater light. Every 1.7.10 value lives in
+shield, no off-hand, and the old hitboxes, sounds and underwater light. The 1.7.10 tables live in
 `lib/bot/legacy-1710.js`.
 
 - Set `MC_VERSION=1.21.11` explicitly. `auto` would take the version the proxy reports.
@@ -97,9 +126,10 @@ shield, no off-hand, and the old hitboxes, sounds and underwater light. Every 1.
   stalls until the server's 30 s timeout.
 - A Forge server also needs its FML handshake answered. That takes a ViaProxy plugin that is not
   part of this repo.
-- `GOLEM_SERVER_OVERRIDES` names a JSON file of recipe overrides and block renames, for a server
-  whose recipes or blocks differ from what the bot knows. A block renamed to `gravestone` turns on
-  the `grave` tool. `.env.example` shows the format.
+- `GOLEM_SERVER_OVERRIDES` names a JSON file of recipe overrides, block and item renames and
+  enchanting costs, for a server whose recipes or blocks differ from what the bot knows. A block
+  renamed to `gravestone` turns on the `grave` tool, and `enchant` is refused on 1.7.10 until the
+  file has an `enchanting` entry. `.env.example` shows the format.
 - `GOLEM_CHAT_MAX` (100 to 256) sets the longest chat line the bot sends, by default 100 here and
   256 on 1.21.11. Raising it only helps when the proxy lets longer lines through.
 
@@ -111,9 +141,10 @@ Node 22 or newer.
 npm install
 ```
 
-The install applies `patches/` with patch-package: fixes to mineflayer-pathfinder's door, wall and
-farmland handling, to how mineflayer and minecraft-protocol decode velocity from 1.21.9 on, and to
-how prismarine-chunk reads and writes chunk light.
+The install applies `patches/` with patch-package: fixes to eight packages of the PrismarineJS
+stack (mineflayer, mineflayer-pathfinder, minecraft-protocol and five prismarine packages). They
+cover path planning around doors, walls and farmland, velocity decoding from 1.21.9 on, chunk
+light, dig times, enchantment data, the block search and inventory click prediction.
 
 ## Running it
 
@@ -146,7 +177,8 @@ GOLEM_TOKEN=<token> MC_HOST=<host> MC_PORT=<port> node bot.js
 | `CTRL_PORT` | `3000` | control API port, always on 127.0.0.1 |
 | `GOLEM_MC_1710` | off | `1` for 1.7.10 behind ViaProxy |
 
-`.env.example` describes the rest: `MC_OWNER` (the default player for `where`),
+`.env.example` describes the rest: `MC_OWNER` (the default player of a `/where` request without a
+name, which only a client of your own can send),
 `GOLEM_SERVER_OVERRIDES`, `GOLEM_CHAT_MAX`, `GOLEM_BOOKS` (the file of the pilot's copy of the
 books it writes, for the `book` tool), and the MCP server's `GOLEM_PAPERCUTS`,
 `GOLEM_LESSONS`, `GOLEM_MEMORY`, `GOLEM_TODO`, `GOLEM_TOPICS` (the gated manual topics to
@@ -162,8 +194,9 @@ Unlike `node bot.js`, it falls back to `MC_VERSION=auto`. `touch stop.flag` in t
 the watchdog the next time the bot exits.
 
 The bot keeps its memory in its working directory: `seen.json`, `waypoints.json` and `journal.md`.
-`seen.json` holds one map per world. The waypoints and the journal carry over to every world the bot
-joins from the same directory.
+`seen.json` holds one map per world, told apart by host, port, dimension, seed and spawn point. The
+same server reached under another host name or port starts with a blank map. The waypoints and the
+journal carry over to every world the bot joins from the same directory.
 
 ### Connect a pilot
 
@@ -204,8 +237,8 @@ The pilot sees 77 tools: 73 that each call one bot route (`goto` calls `/goto`),
   progress, and is listed first.
 - `manual`: one topic of `manual/`, whole. A gated topic only while `GOLEM_TOPICS` names it.
 
-Each of the four files must be an absolute path. Without one, its tool or note kind answers that it
-is off.
+Each of the four files must be an absolute path, and the server refuses to start on a relative one.
+Without a file, its tool or note kind answers that it is off.
 
 The pilot cannot start, kill or restart the bot process, and it has no camera. Chat and whispers that
 `wait_events` returns are written by players and are untrusted, and so is the text of its `server`
@@ -225,8 +258,9 @@ A client of your own signs each request with three headers:
   query, the time and the nonce, joined by newlines.
 
 The `Host` header must be `127.0.0.1:<port>` or `localhost:<port>`. A request that fails any check
-gets a 401. Every reply carries an `X-Golem-Proof` header, an HMAC over the nonce and the SHA-256 of
-the body, which the client should verify. `lib/sig.js` has both computations.
+gets a 401, or a 429 while the nonce cache is full. Every reply carries an `X-Golem-Proof` header,
+an HMAC over the nonce and the SHA-256 of the body, which the client should verify. `lib/sig.js`
+has both computations.
 
 ## How the model sees
 
@@ -251,8 +285,10 @@ distance and screen position, and misses become open space.
 Everywhere, a bare name means seen: in lit sight now or when the bot looked earlier. `?` or silence
 means unseen. A dark cave around the corner stays unknown even though the raw API knows it. Full
 light (level 6 and up) lets sight reach as far as the line of sight does. In the dark it shrinks
-from 24 blocks at level 5 to 4 at level 0. A player's nametag shows through walls within 64 blocks
-unless they sneak or are invisible, as in the game.
+from 24 blocks at level 5 to 4 at level 0. Within 16 blocks the bot still makes out the shape of an
+unlit cell in its line of sight (solid, air, water or a ladder), enough to walk by and never enough
+to name the block. A player's nametag shows through walls within 64 blocks unless they sneak or are
+invisible, as in the game.
 
 There is no camera. The model works from text.
 
@@ -266,8 +302,9 @@ looks again.
 `waypoints.json` is a graph of named places. Each has a kind, `place` for a lasting landmark or
 `resource` for a claim that mining it out falsifies, and a one-line note. Edges record walks: a
 `goto` arrival at a waypoint links it to the waypoint the bot last stood at, and that pointer resets
-on every restart. The pilot can assert an edge it walked with `linkto`. No routes are stored, and
-the pathfinder solves each walk fresh.
+on a restart, a death and a walk that ends anywhere else. The pilot can assert an edge it walked
+with `linkto`. A death sets the waypoint `lastdeath`. No routes are stored, and the pathfinder
+solves each walk fresh.
 
 `journal.md` is the bot's append-only trip log: arrivals at waypoints, and waypoints set, removed
 or linked.
@@ -280,15 +317,18 @@ knowing nothing.
 A pilot's reaction time is seconds to minutes, and the body covers the gap. The reflexes live in
 the body, so a pilot with ten-second round trips gets the same protection as a fast one.
 
-- Events wake the pilot from `wait_events` for what matters: drowning with an oxygen count, damage,
-  a tool below 12% durability, dangerous sounds, low food. Watched threats and ambient world changes
-  wake nothing and wait for the next call.
+- Events wake the pilot from `wait_events` for what matters: damage, drowning with an oxygen count,
+  a hostile within 16 blocks, low food, the held tool below 12% durability, dangerous sounds,
+  nightfall, the end of a job. Watched threats, ambient world changes and most server lines wake
+  nothing and ride along with the next wake.
 - Damage from an unknown source freezes the body, so the pilot can look before anything moves. A
   buried body steps aside or digs out, and a submerged one swims up.
-- Reflexes run every 300 ms: lava watch, bunker, combat, unstuck, current watch, narrator, trek and
-  flee to player. `reflexes` lists them and switches each on or off.
-- Long actions run as background jobs the pilot polls. One runs at a time, and a new job stops the
-  running one.
+- Reflexes run every 300 ms: lava watch, bunker, fire, combat, unstuck, current watch, narrator,
+  trek and flee to player. `reflexes` lists them and switches each on or off.
+- `build`, `gather`, `dig_tunnel`, `dig_stair` and `fish` run as background jobs the pilot polls.
+  One runs at a time, and a new job stops the running one. Every other body tool answers when its
+  action ends, a long walk after up to 10 minutes, and other body tools answer busy until then.
+- While a fight event is unread, the MCP server refuses world work until the pilot has read it.
 
 ## How the model fights
 
@@ -299,14 +339,14 @@ Combat is where pilot latency would be fatal, so the body fights on its own and 
   keeps closing faster than 0.6 blocks a second (a chasing zombie closes at about 2.3). Unproven
   mobs count within 24 blocks and only while perceived.
 - Damage attribution names the attacker of a hit from the server's damage events. An attacker
-  that hit the body stays a threat for 45 s, out to 48 blocks, seen or not.
+  that hit the body stays a threat out to 48 blocks, seen or not, for 20 s after its last hit and
+  up to 45 s while it stays within melee reach.
 - Players are never weapons targets. Creepers and heavy hitters (vindicator, ravager, piglin brute,
   wither skeleton) are never met in melee. The reflex shoots them from the stance's bow range or
   runs.
 - Low health disengages, at 8 HP (5 HP against a hostile in the vanguard stance) or at 2.5
-  times the last fresh hit. Three or more hostiles within
-  16 blocks start a fighting withdrawal, unless a partner stands within 10 and the bot has 12 HP or
-  more.
+  times the last fresh hit. Three or more hostiles within 16 blocks start a fighting withdrawal,
+  unless a partner stands in sight within 10 and the bot has 12 HP or more.
 - Below 8 HP within 15 s of a mob's hit, the body builds a bunker, dug down or pillared up,
   whichever holds against the mobs near. When none holds, it flees.
 
