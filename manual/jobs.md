@@ -14,7 +14,7 @@
 - A job's status is running, done, cancelled or error, and its note is the latest progress line. Progress is stored, not sent: read it with `jobs` or `job`.
 - A job's end (done, error or cancelled) arrives as an event through `wait_events`, and so do gather and build milestones.
 - Rhythm: start the job, glance at `jobs` once to confirm it started, do something else, and let the end event wake you.
-- `sow` plants a whole bed from its corner and size and clicks each plot once. Plots in `missed` need another `sow` or a `use`. For plots in `unreached`, walk to a path beside them at their level, then `sow` again.
+- `sow` plants a whole bed from its corner and size and clicks each plot once. Plots in `missed` or `refused` need another `sow` or a `use`. For plots in `unreached`, walk to a path beside them at their level, then `sow` again.
 - No walk comes down hard on farmland you have seen (a drop, a jump across a gap, a jump up out of water), since that tramples it. Walking across a field on its own level and stepping up onto it from dry ground are fine. A `goto` that finds only such a way answers `farmland` with the farmland block it would come down on first. Pick another point, or repeat it with `trample` when it is the only way off the spot you stand on, never to cut across a field. A flee from danger ignores the rule.
 - `eat` fails while a job holds the hand. Eat between jobs.
 - At food 14 or less `goto` eats on the way, but not while a job holds the hand.

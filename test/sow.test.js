@@ -137,7 +137,9 @@ const { PLACE_GAP_MS } = require('../lib/pace')
 
 // Runs /sow `runs` times on a fake clock over stone below y 64 and air above, with blocks keyed by 'x,y,z'.
 // A job it replaced runs until `replaced` ms and holds the movements named `inPlace` until then.
-async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5), held = 'wheat_seeds', count = 16, unseen = [], dark = new Set(), ignore = [], stands = [], stay = false, fuse = false, onClick = () => {}, onPace = () => {}, onWalk = () => {}, throwAfter = Infinity, runs = 1, walkMs = 100, think = 10000, replaced = null, inPlace = null, cancelAt = null } = {}) {
+// pockets fill the hotbar from slot 37, and hand is the hotbar slot held at the start.
+// With restartAt, each run after the first starts restartAt ms after the one before started, or when it ends if that comes sooner.
+async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5), held = 'wheat_seeds', count = 16, pockets = [], hand = 0, unseen = [], dark = new Set(), ignore = [], stands = [], stay = false, fuse = false, combat = null, onClick = () => {}, onPace = () => {}, onWalk = () => {}, onLook = () => {}, onEquip = () => {}, throwAfter = Infinity, runs = 1, walkMs = 100, think = 10000, replaced = null, inPlace = null, cancelAt = null, restartAt = null } = {}) {
   const clock = fakeClock()
   const paced = pacedOn(clock)((click) => click())
   const world = new Map(Object.entries(blocks))
@@ -156,6 +158,9 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
   const server = { planted: 0 }
   const inventory = Object.assign(new EventEmitter(), { hotbarStart: 36, slots: [], items: () => inventory.slots.filter(Boolean) })
   inventory.slots[36] = { name: held, count, slot: 36 }
+  pockets.forEach((name, i) => { inventory.slots[37 + i] = { name, count: 1, slot: 37 + i } })
+  const looks = []
+  let equips = 0
   const setCount = (n) => {
     const old = inventory.slots[36]
     inventory.slots[36] = n ? { name: held, count: n, slot: 36 } : null
@@ -167,8 +172,9 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
   const bot = Object.assign(new EventEmitter(), {
     entity: { position: feet, width: 0.6, height: 1.8 },
     inventory,
-    quickBarSlot: 0,
+    quickBarSlot: hand,
     time: { age: 0 },
+    waitForTicks: (n) => new Promise((resolve) => clock.setTimeout(resolve, 50 * n)),
     blockAt: (c) => {
       if (!seen(c)) unseenReads.push(key(c))
       return cellAt(c)
@@ -200,8 +206,15 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
         }, walkMs)
       })
     },
-    lookAt: async () => {},
-    equip: async (it) => { bot.quickBarSlot = it.slot - 36 },
+    // A seed's look aims at the top face of its plot.
+    lookAt: async (aim) => {
+      looks.push({ at: clock.now(), plot: key(aim.floored()) })
+      onLook(looks.length, bot, env, key(aim.floored()))
+    },
+    equip: async (it) => {
+      onEquip(++equips, bot, env)
+      bot.quickBarSlot = it.slot - 36
+    },
     activateBlock: async (b) => {
       const p = b.position
       const crop = p.offset(0, 1, 0)
@@ -235,7 +248,6 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
   let job = null
   let result
   let error
-  let done = false
   let ended = null
   const env = {
     bot,
@@ -243,7 +255,9 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
     goals,
     shared,
     guardState: { hand: null },
-    reflexes: [],
+    digLock: { holder: null },
+    reflexes: combat ? [combat] : [],
+    bunkerHolds: () => false,
     seesLit: lit,
     seenNow: lit,
     cellKnown: (c) => {
@@ -253,6 +267,8 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
     leafInTheWay: () => null,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
+    setInterval: clock.setInterval,
+    clearInterval: clock.clearInterval,
     Date: { now: clock.now },
     POUR_REACH: botConstant('POUR_REACH'),
     SEED_ANSWER_MS: botConstant('SEED_ANSWER_MS'),
@@ -265,16 +281,16 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
     },
     sowPace: (click) => {
       log.push('pace')
-      onPace(++paces, job)
+      onPace(++paces, job, world)
       return paced(click)
     },
     jobs: {
       start: (name, fn) => {
-        const own = job = { id: 7 + started.length, name, status: 'running', cancelled: false, notes: [], progress: (msg) => own.notes.push(msg) }
+        for (const j of started) if (j.status === 'running') j.cancelled = true
+        const own = job = { id: 7 + started.length, name, status: 'running', cancelled: false, note: '', progress: (msg) => { own.note = msg } }
         started.push(own)
         Promise.resolve().then(() => fn(own)).then((r) => { result = r }, (e) => { error = e }).finally(() => {
           own.status = 'done'
-          done = true
           ended = clock.now()
         })
         return { id: 7 }
@@ -284,19 +300,26 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
     ok: (res, body) => { res.body = { ok: true, ...body } }
   }
   const { handle, res } = routeHandler('/sow', env)
+  const step = async () => {
+    await new Promise(setImmediate)
+    clock.advance(10)
+  }
   for (let run = 0; run < runs; run++) {
     job = null
-    done = false
     await handle({ query: { item: 'wheat_seeds', x: '1', z: '0', w: '3', d: '3', ...query } }, res)
     const own = job
     if (own && cancelAt !== null) clock.setTimeout(() => { own.cancelled = true }, cancelAt)
-    while (job && !done && clock.now() < 120000) {
-      await new Promise(setImmediate)
-      clock.advance(10)
-    }
+    const next = restartAt !== null && run < runs - 1 ? clock.now() + restartAt : Infinity
+    while (own && own.status !== 'done' && clock.now() < Math.min(next, 120000)) await step()
   }
+  while (started.some((j) => j.status === 'running' && 'note' in j) && clock.now() < 120000) await step()
   const { movements, thinkTimeout, goal } = bot.pathfinder
-  return { reply: res.body, refusal: res.error, result: result && JSON.parse(JSON.stringify(result)), error, notes: job ? job.notes : [], ended, clicks, clickTimes, moves, walks, plans, log, server, unseenReads, goal, after: { moves: movements.name, think: thinkTimeout } }
+  // Counts the pending timers other than the age tick, after another ms on the clock.
+  const timersAfter = async (ms) => {
+    for (const end = clock.now() + ms; clock.now() < end;) await step()
+    return clock.pending() - 1
+  }
+  return { reply: res.body, refusal: res.error, result: result && JSON.parse(JSON.stringify(result)), error, note: job ? job.note : '', ended, clicks, clickTimes, looks, moves, walks, plans, log, server, unseenReads, goal, after: { moves: movements.name, think: thinkTimeout }, timersAfter }
 }
 
 // A 3 by 3 bed of farmland beside the default feet.
@@ -304,14 +327,14 @@ const BED = Object.fromEntries([1, 2, 3].flatMap((x) => [0, 1, 2].map((z) => [`$
 const times = (list, k) => list.filter((c) => c === k).length
 
 test('sow plants every plot of a flat bed once, one paced click each, and the server planted as many as it counts', async () => {
-  const { reply, result, clicks, server, moves, log, notes } = await sowJob({ blocks: BED })
+  const { reply, result, clicks, server, moves, log, note } = await sowJob({ blocks: BED })
   assert.deepStrictEqual(reply, { ok: true, job: 7 })
   assert.strictEqual(result.sown, 9)
   assert.strictEqual(server.planted, 9)
   assert.deepStrictEqual(clicks.slice().sort(), Object.keys(BED).sort())
   assert.strictEqual(times(log, 'pace'), 9)
-  assert.deepStrictEqual(result, { sown: 9, occupied: 0, missed: [], lost: [], unseen: 0, unreached: [], open: 0, left: 7 })
-  assert.strictEqual(notes[notes.length - 1], 'sown 9, occupied 0, missed 0, lost 0, unseen 0, unreached 0, left 7')
+  assert.deepStrictEqual(result, { sown: 9, occupied: 0, missed: [], refused: [], lost: [], unseen: 0, unseenAt: [], unreached: [], open: 0, left: 7 })
+  assert.strictEqual(note, 'sown 9, occupied 0, missed 0, refused 0, lost 0, unseen 0, unreached 0, left 7')
   assert.deepStrictEqual(moves, [])
 })
 
@@ -416,11 +439,11 @@ test('sow lists a plot it sees turned to dirt in lost and never clicks it', asyn
   assert.deepStrictEqual([result.lost, result.sown, times(clicks, '3,63,2')], [['3,63,2'], 8, 0])
 })
 
-test('sow counts a column it never saw in unseen, reads none of its cells and names none in its reply or notes', async () => {
+test('sow counts a column it never saw in unseen, reads none of its cells and names none in its reply or note', async () => {
   const column = [...Array(11).keys()].map((i) => `3,${59 + i},2`)
   const run = await sowJob({ blocks: BED, unseen: column })
   assert.deepStrictEqual([run.result.unseen, run.result.sown, run.unseenReads], [1, 8, []])
-  const text = JSON.stringify([run.reply, run.result, run.notes, run.error?.message ?? null])
+  const text = JSON.stringify([run.reply, run.result, run.note, run.error?.message ?? null])
   assert.doesNotMatch(text, /3,6\d,2/)
 })
 
@@ -433,6 +456,196 @@ test('sow keeps the columns it planted out of unseen after a walk takes them out
   const hide = (n, bot, shared, hidden) => { for (const x of [1, 2, 3]) for (let y = 59; y <= 69; y++) hidden.add(`${x},${y},0`) }
   const { result, clicks } = await sowJob({ blocks: { '1,63,0': 'farmland', '2,63,0': 'farmland', '3,63,0': 'farmland', '6,63,0': 'farmland' }, stands: [new Vec3(5, 64, 0)], onWalk: hide, query: { w: '6', d: '1' } })
   assert.deepStrictEqual([clicks, result.sown, result.unseen], [['1,63,0', '2,63,0', '3,63,0', '6,63,0'], 4, 0])
+})
+
+test('sow lists its unseen columns as runs along x, then the rest as runs along z, each ordered by z and x', async () => {
+  const columns = ['4,3', '5,3', '6,3', '6,1', '6,2', '4,1']
+  const unseen = columns.flatMap((c) => { const [x, z] = c.split(','); return [...Array(11).keys()].map((i) => `${x},${59 + i},${z}`) })
+  const { result } = await sowJob({ blocks: BED, unseen, query: { w: '6', d: '4' } })
+  assert.deepStrictEqual([result.sown, result.unseen, result.unseenAt], [9, 6, ['4..6,3', '4,1', '6,1..2']])
+})
+
+test('sow tries a plot again after the guard reflex took the hand back before the click, and clicks it once', async () => {
+  const swap = (n, bot) => { if (n === 1) bot.quickBarSlot = 1 }
+  const { result, clicks, looks } = await sowJob({ blocks: BED, pockets: ['iron_sword'], onLook: swap })
+  assert.deepStrictEqual([result.sown, result.missed, result.refused, result.stopped, clicks.length, new Set(clicks).size], [9, [], [], undefined, 9, 9])
+  assert.strictEqual(looks[1].plot, looks[0].plot)
+  assert.ok(looks[1].at - looks[0].at >= PLACE_GAP_MS, looks.map((l) => l.at).join(' '))
+})
+
+test('sow tries a plot again after another action took the hand lease and held its own item before the click', async () => {
+  const take = (n, bot, env) => {
+    if (n !== 1) return
+    const { guardState, digLock, setTimeout, clearTimeout } = env
+    loadBotFunctions(['holdHand'], { guardState, digLock, setTimeout, clearTimeout }).holdHand()
+    bot.quickBarSlot = 1
+  }
+  const { result, clicks } = await sowJob({ blocks: BED, pockets: ['bread'], onLook: take })
+  assert.deepStrictEqual([result.sown, result.missed, result.refused, result.stopped, clicks.length, new Set(clicks).size], [9, [], [], undefined, 9, 9])
+})
+
+// At the first look another action leases the hand and ends the lease holdMs later.
+const takeHand = (holdMs, onEnd = () => {}) => (n, bot, env) => {
+  if (n !== 1) return
+  const { guardState, digLock, setTimeout, clearTimeout } = env
+  const { holdHand, endHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState, digLock, setTimeout, clearTimeout })
+  const lease = holdHand()
+  const end = lease.end
+  lease.end = () => {
+    onEnd(env.Date.now())
+    end()
+  }
+  bot.quickBarSlot = 1
+  setTimeout(() => endHand(lease), holdMs)
+}
+
+test('sow tries a plot again only after the action that took the hand ended its lease', async () => {
+  const ends = []
+  const { result, clicks, looks } = await sowJob({ blocks: BED, pockets: ['bread'], onLook: takeHand(800, (t) => ends.push(t)) })
+  assert.deepStrictEqual([ends.map((t) => t - looks[0].at), looks[1].at >= ends[0]], [[800], true])
+  assert.deepStrictEqual([result.sown, result.refused, clicks.length, new Set(clicks).size, looks[1].plot], [9, [], 9, 9, looks[0].plot])
+})
+
+test('a sow retry leaves the hand to an action that let it go and took it again until that action ends its lease', async () => {
+  const ends = []
+  const take = (n, bot, env) => {
+    if (n !== 1) return
+    const { guardState, digLock, setTimeout, clearTimeout } = env
+    const { holdHand, endHand } = loadBotFunctions(['holdHand', 'endHand'], { guardState, digLock, setTimeout, clearTimeout })
+    const t0 = env.Date.now()
+    const lease = () => {
+      const held = holdHand()
+      const end = held.end
+      held.end = () => {
+        ends.push(env.Date.now() - t0)
+        end()
+      }
+      return held
+    }
+    const first = lease()
+    bot.quickBarSlot = 1
+    setTimeout(() => endHand(first), 20)
+    setTimeout(() => {
+      const second = lease()
+      setTimeout(() => endHand(second), 1500)
+    }, 50)
+  }
+  const { result, clicks, clickTimes, looks, timersAfter } = await sowJob({ blocks: BED, pockets: ['bread'], onLook: take })
+  assert.deepStrictEqual([ends, looks[1].plot, clicks[0], clickTimes[0] - looks[0].at >= 1550], [[20, 1550], looks[0].plot, looks[0].plot, true])
+  assert.deepStrictEqual([result.sown, result.refused, clicks.length, new Set(clicks).size], [9, [], 9, 9])
+  assert.strictEqual(await timersAfter(3000), 0)
+})
+
+test('a cancel while sow waits for the hand to try a plot again ends it at once, with no click and no timer left', async () => {
+  const { result, clicks, looks, ended, timersAfter } = await sowJob({ blocks: BED, pockets: ['bread'], onLook: takeHand(800), cancelAt: 400 })
+  assert.deepStrictEqual([result.stopped, result.sown, clicks.length, looks.length], ['cancelled', 0, 0, 1])
+  assert.ok(ended < 500, `ended at ${ended}`)
+  assert.strictEqual(await timersAfter(3000), 0)
+})
+
+test('a sow started while a cancelled one waits for the hand clicks its first plot before the other action lets the hand go', async () => {
+  const { result, clicks, clickTimes } = await sowJob({ blocks: BED, pockets: ['bread'], onLook: takeHand(1500), runs: 2, restartAt: 400 })
+  assert.ok(clickTimes[0] >= 400 && clickTimes[0] < 600, clickTimes.join(' '))
+  assert.deepStrictEqual([result.sown, new Set(clicks).size, clicks.length], [9, 9, 9])
+})
+
+test('sow tries a plot again after the equip of its seed threw', async () => {
+  const fail = (n) => { if (n === 1) throw new Error('destination full') }
+  const { result, clicks } = await sowJob({ blocks: BED, pockets: ['iron_sword'], hand: 1, onEquip: fail })
+  assert.deepStrictEqual([result.sown, result.missed, result.refused, result.stopped, clicks.length, new Set(clicks).size], [9, [], [], undefined, 9, 9])
+})
+
+const TAKEN = 'the guard reflex took the hand back from the wheat_seeds (holding iron_sword), nothing planted, retry'
+// The guard swaps the sword in at every look at one of the plots.
+const swapAt = (plots) => (n, bot, env, plot) => { if (plots.includes(plot)) bot.quickBarSlot = 1 }
+
+test('sow lists a plot in refused with its refusal after three refusals before its click, and plants the rest', async () => {
+  const { result, clicks, looks } = await sowJob({ blocks: BED, pockets: ['iron_sword'], onLook: swapAt(['2,63,1']) })
+  const tries = looks.filter((l) => l.plot === '2,63,1')
+  assert.deepStrictEqual(result, { sown: 8, occupied: 0, missed: [], refused: [`2,63,1: ${TAKEN}`], lost: [], unseen: 0, unseenAt: [], unreached: [], open: 0, left: 8 })
+  assert.deepStrictEqual([times(clicks, '2,63,1'), tries.length], [0, 3])
+  assert.ok(tries.every((l, i) => i === 0 || l.at - tries[i - 1].at >= PLACE_GAP_MS), tries.map((l) => l.at).join(' '))
+})
+
+test('sow stops with the refusal after three plots in a row end in refused, and keeps what it did', async () => {
+  const { result, clicks } = await sowJob({ blocks: BED, pockets: ['iron_sword'], onLook: swapAt(['1,63,0', '1,63,2', '2,63,1']) })
+  assert.deepStrictEqual(result, { sown: 1, occupied: 0, missed: [], refused: ['1,63,0', '1,63,2', '2,63,1'].map((p) => `${p}: ${TAKEN}`), lost: [], unseen: 0, unseenAt: [], unreached: [], open: 5, left: 15, stopped: TAKEN })
+  assert.deepStrictEqual(clicks, ['1,63,1'])
+})
+
+test('the note sow ends with counts the plots in refused', async () => {
+  const { note } = await sowJob({ blocks: BED, pockets: ['iron_sword'], onLook: swapAt(['2,63,1']) })
+  assert.strictEqual(note, 'sown 8, occupied 0, missed 0, refused 1, lost 0, unseen 0, unreached 0, left 8')
+})
+
+test('three plots in a row ending in refused as the last plots of the bed end sow without stopped', async () => {
+  const { result } = await sowJob({ blocks: BED, pockets: ['iron_sword'], onLook: swapAt(['3,63,0', '3,63,1', '3,63,2']) })
+  assert.deepStrictEqual([result.sown, result.refused.length, result.open, result.stopped], [6, 3, 0, undefined])
+})
+
+test('a plot found occupied between refused plots starts their count again, and a lost or unreached one does not', async () => {
+  // The survey after pace 7 sees the change, while at pace 8 only the click on 2,63,1 does.
+  const cases = [
+    ['occupied', ['1,63,0', '1,63,2', '2,63,0', '2,63,2'], 7, (world) => world.set('2,64,1', 'wheat'), { occupied: 1, stopped: undefined }],
+    ['lost', ['1,63,0', '1,63,2', '2,63,0'], 7, (world) => world.set('2,63,1', 'dirt'), { lost: ['2,63,1'], stopped: TAKEN }],
+    ['unreached', ['1,63,0', '1,63,2', '2,63,0'], 8, (world) => world.set('2,64,1', 'wheat'), { unreached: ['2,63,1'], stopped: TAKEN }]
+  ]
+  for (const [name, refusing, at, change, want] of cases) {
+    const onPace = (n, job, world) => { if (n === at) change(world) }
+    const { result } = await sowJob({ blocks: BED, pockets: ['iron_sword'], onLook: swapAt(refusing), onPace })
+    assert.deepStrictEqual(Object.keys(want).map((k) => result[k]), Object.values(want), name)
+  }
+})
+
+test('a plot sown or missed between refused plots starts their count again', async () => {
+  const refusing = ['1,63,0', '1,63,2', '2,63,0', '2,63,2']
+  const cases = [
+    ['sown', {}, 5, []],
+    ['missed', { ignore: ['2,63,1'] }, 4, ['2,63,1']]
+  ]
+  for (const [name, opts, sown, missed] of cases) {
+    const { result } = await sowJob({ blocks: BED, pockets: ['iron_sword'], onLook: swapAt(refusing), ...opts })
+    assert.deepStrictEqual([result.sown, result.missed, result.refused.length, result.stopped, result.open], [sown, missed, 4, undefined, 0], name)
+  }
+})
+
+test('a sole claim taken during the seed equip ends sow with its busy refusal and no second try', async () => {
+  let equips = 0
+  const claim = (n, bot, env) => {
+    equips = n
+    if (n > 1) return
+    const held = env.digLock.holder = { what: 'the bunker build', sole: true }
+    env.setTimeout(() => { if (env.digLock.holder === held) env.digLock.holder = null }, 300)
+  }
+  const { result, clicks, looks } = await sowJob({ blocks: BED, pockets: ['iron_sword'], hand: 1, onEquip: claim })
+  assert.deepStrictEqual([equips, looks.length, clicks.length, result.refused, result.stopped], [1, 0, 0, [], 'busy: the bunker build is running, nothing planted'])
+})
+
+test('a sole claim or a fire pour holding the hand before a click ends sow with its busy refusal and no second try', async () => {
+  const claim = (env) => { env.digLock.holder = { what: 'the bunker build', sole: true } }
+  const pour = (env) => { env.guardState.hand = Object.assign(new Promise(() => {}), { owner: 'fire', end () {} }) }
+  const cases = [
+    ['a claim at the next plot', { onLook: (n, bot, env) => { if (n === 2) claim(env) } }, 2, /^busy: the bunker build is running/],
+    ['a pour', { onLook: (n, bot, env) => { if (n === 2) pour(env) } }, 2, /pouring water on the fire/]
+  ]
+  for (const [name, opts, clicked, refusal] of cases) {
+    const { result, clicks, looks } = await sowJob({ blocks: BED, ...opts })
+    assert.deepStrictEqual([clicks.length, looks.length, result.missed], [clicked, clicked, []], name)
+    assert.match(result.stopped ?? '', refusal, name)
+  }
+})
+
+test('a fight before a click ends sow with the fighting refusal and no second try', async () => {
+  let fighting = false
+  const combat = { name: 'combat', fightBusy: () => fighting, _threat: null }
+  const { result, clicks, looks } = await sowJob({ blocks: BED, combat, onClick: (n) => { if (n === 2) fighting = true } })
+  assert.deepStrictEqual([clicks.length, looks.length, result.sown, result.missed], [2, 2, 2, []])
+  assert.match(result.stopped ?? '', /^refused: fighting/)
+})
+
+test('a refusal after the click went out ends sow and that plot gets no second click', async () => {
+  const { result, clicks } = await sowJob({ blocks: BED, onClick: (n) => { if (n === 2) throw new Error('the connection broke after the click') } })
+  assert.deepStrictEqual([clicks.length, new Set(clicks).size, result.sown, result.missed, result.stopped], [2, 2, 1, [], 'the connection broke after the click'])
 })
 
 // 6,63,0 lies out of reach of the default feet.
