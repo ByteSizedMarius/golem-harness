@@ -3,7 +3,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { Vec3 } = require('vec3')
-const { reflexIn, fakeClock } = require('./helpers')
+const { reflexIn, fakeClock, botConstant } = require('./helpers')
 
 const LAVA = { name: 'lava', boundingBox: 'empty' }
 const AIR = { name: 'air', boundingBox: 'empty' }
@@ -18,6 +18,7 @@ function rig () {
   const unseen = new Set()
   const events = []
   const goals = []
+  const TRAMPLE = botConstant('TRAMPLE')
   const bot = {
     entity: { position: SPOT.clone() },
     blockAt: (p) => ({ ...(lava.has(ck(p.x, p.y, p.z)) ? LAVA : p.y < 81 ? STONE : AIR), position: p }),
@@ -32,6 +33,7 @@ function rig () {
     takeLegs () {},
     stopPath () {},
     emitEvent: (kind, msg) => events.push(`${kind} ${msg}`),
+    TRAMPLE,
     goals: { GoalNear: class { constructor (x, y, z, range) { Object.assign(this, { x, y, z, range }) } } }
   })
   const tick = async (ms) => {
@@ -40,8 +42,19 @@ function rig () {
       if (r.check(bot)) await r.act(bot)
     }
   }
-  return { bot, lava, unseen, events, goals, tick }
+  return { bot, lava, unseen, events, goals, tick, TRAMPLE }
 }
+
+test('a back-off from lava beside the body and from lava under it walks to a goal free to land on farmland', async () => {
+  const marks = []
+  for (const at of [ck(10, 81, 8), ck(8, 81, 8)]) {
+    const { lava, goals, tick, TRAMPLE } = rig()
+    lava.add(at)
+    await tick(600)
+    marks.push([at, goals.length, goals.every((g) => TRAMPLE.goals.has(g))])
+  }
+  assert.deepStrictEqual(marks, [['10,81,8', 1, true], ['8,81,8', 1, true]])
+})
 
 test('new lava after the shell held none acts with the body back on the cell of its last act', async () => {
   const { bot, lava, events, goals, tick } = rig()

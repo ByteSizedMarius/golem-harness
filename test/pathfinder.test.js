@@ -11,6 +11,8 @@ const { GRAVESTONE } = require('../lib/server-overrides')
 const { panelAcross } = require('../lib/doors')
 const { CREEPER_ZONE_SLACK, inCreeperZone, zoneCrossed, summarizePlan } = require('../lib/plan')
 const { botConstant, groundMemory, blockWorld, loadBotFunctions, walkingBody } = require('./helpers')
+const { SWING_REACH } = require('../lib/combat-rules')
+const { HITBOX_1710, LEGACY_SNEAK_EYE } = require('../lib/bot/legacy-1710')
 
 const WALL_ARM = ['cobblestone_wall', { up: 'false', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
 const WALL_POST = ['cobblestone_wall', { up: 'true', north: 'low', south: 'low', east: 'none', west: 'none', waterlogged: 'false' }]
@@ -232,37 +234,106 @@ function terraces (stairs) {
 const BOTTOM = new goals.GoalBlock(8, 62, 0)
 const farmlandLandings = (cells, path) => path.filter((n) => drops(path).includes(n) || n.parkour).filter((n) => floorAt(cells, n) === 'farmland').map((n) => n.hash)
 
-test('a field walk down three terraces lands no drop or jump on farmland, where the default walk does', async (t) => {
+async function legsOf (t, pos, cells) {
+  const b = await walkingBody(t, pos, cells)
+  let cage = null
+  b.bot.collectBlock = { movements: null, async collect () { cage = this.movements } }
+  b.bot.tool = { equipForBlock: async () => {} }
+  const env = { bot: b.bot, collectLock: botConstant('collectLock'), digLock: botConstant('digLock'), knownMoves: b.farmlandRule, Movements, shared: b.shared, watchedWork: (work) => work(), pastUnstuck: (walk) => walk(), abandonCollect () {} }
+  await loadBotFunctions(['collectSafely'], env).collectSafely({ type: b.bot.registry.blocksByName.iron_ore.id, shapes: [[0, 0, 0, 1, 1, 1]] }, 'iron_ore')
+  return { ...b, legs: { default: b.bot.pathfinder.movements, forestry: b.shared.forestryMoves, collect: cage } }
+}
+
+test('a walk down three terraces lands no drop or jump on farmland in any legs, where a goal marked to trample does', async (t) => {
   const cells = terraces(true)
-  const { plan, shared } = await walkingBody(t, START, cells)
-  assert.ok(farmlandLandings(cells, plan(BOTTOM).path).length > 0, 'control: the default walk drops onto the beds')
-  const field = plan(BOTTOM, shared.fieldMoves)
-  assert.deepStrictEqual([field.status, farmlandLandings(cells, field.path)], ['success', []])
+  const { bot, plan, legs, trampleGoal } = await legsOf(t, START, cells)
+  for (const [name, moves] of Object.entries(legs)) {
+    const r = plan(BOTTOM, moves)
+    assert.deepStrictEqual([r.status, farmlandLandings(cells, r.path)], ['success', []], name)
+  }
+  const goal = trampleGoal(new goals.GoalBlock(8, 62, 0))
+  bot.pathfinder.setGoal(goal)
+  assert.ok(farmlandLandings(cells, plan(goal).path).length > 0, 'control: the cheaper way drops onto the beds')
 })
 
-test('a field walk to a level reached only by drops onto farmland finds no path and plans no such drop', async (t) => {
+test('a walk to a level reached only by drops onto farmland finds no path in any legs, and one across a bed on its level is planned', async (t) => {
   const cells = terraces(false)
-  const { plan, shared } = await walkingBody(t, START, cells)
-  assert.strictEqual(plan(BOTTOM).status, 'success', 'control: the default walk drops onto the beds')
-  const field = plan(BOTTOM, shared.fieldMoves)
-  assert.deepStrictEqual([field.status, farmlandLandings(cells, field.path)], ['noPath', []])
+  const { plan, legs } = await legsOf(t, START, cells)
+  for (const [name, moves] of Object.entries(legs)) {
+    assert.strictEqual(plan(new goals.GoalBlock(2, 64, 30), moves).status, 'success', `${name}: across the top bed`)
+    const r = plan(BOTTOM, moves)
+    assert.deepStrictEqual([r.status, farmlandLandings(cells, r.path)], ['noPath', []], name)
+  }
 })
 
-// body() over stone with air where open(p) holds and sky light 15 where sky(p) holds, planning through
-// bot.js's knownMoves for a bot that has seen the cells seen(p) holds.
-async function knowing (pos, { open, sky = () => false, seen }) {
+test('a goal marked to trample walks a strand of farmland drops in its walk and its planPath, and no other search does', async (t) => {
+  const cells = terraces(false)
+  const { bot, plan, TRAMPLE, trampleGoal } = await legsOf(t, START, cells)
+  const { planPath } = loadBotFunctions(['planPath'], { bot, TRAMPLE, routeEnd: () => null })
+  bot.pathfinder.tickTimeout = bot.pathfinder.thinkTimeout
+  const marked = trampleGoal(new goals.GoalBlock(8, 62, 0))
+  const plain = new goals.GoalBlock(8, 62, 0)
+  assert.strictEqual((await planPath(marked)).status, 'success', 'planPath before the walk')
+  bot.pathfinder.setGoal(marked)
+  const walk = plan(marked)
+  assert.ok(walk.status === 'success' && farmlandLandings(cells, walk.path).length > 0, 'the walk')
+  assert.strictEqual((await planPath(plain)).status, 'noPath', 'planPath for another goal during the walk')
+  bot.pathfinder.setGoal(null)
+  assert.strictEqual(plan(marked).status, 'noPath', 'a search with no walk set')
+})
+
+test('a reach walk stranded only by farmland drops is not counted as a way through unseen cells', async (t) => {
+  const { bot } = await walkingBody(t, START, terraces(false))
+  bot.pathfinder.tickTimeout = bot.pathfinder.thinkTimeout
+  const env = { bot, Vec3, Movements, goals, shared: {}, LEGACY_1710: false, HITBOX_1710, LEGACY_SNEAK_EYE, SWING_REACH, UNSEEN_PLAN_MS: botConstant('UNSEEN_PLAN_MS') }
+  const { unseenWay } = loadBotFunctions(['unseenWay'], env)
+  const zombie = (x, y) => ({ id: 3, name: 'zombie', width: 0.6, height: 1.95, position: new Vec3(x, y, 20.5) })
+  assert.strictEqual(await unseenWay(zombie(1.5, 64)), 'success', 'control: a zombie on the top bed')
+  assert.strictEqual(await unseenWay(zombie(8.5, 62)), 'noPath')
+})
+
+test('a strand probe names the bed the first farmland drop of a way down the terraces lands on, and nothing for a goal no way reaches', async (t) => {
+  const cells = terraces(false)
+  const { bot, plan, TRAMPLE } = await walkingBody(t, START, cells)
+  const { farmlandStrand } = loadBotFunctions(['farmlandStrand'], { bot, TRAMPLE, routeEnd: () => null })
+  bot.pathfinder.tickTimeout = bot.pathfinder.thinkTimeout
+  const { farmland: bed } = await farmlandStrand(BOTTOM, null, null)
+  assert.deepStrictEqual([cells[`${bed.x},${bed.y},${bed.z}`][0], bed.y], ['farmland', 62], `the middle terrace's bed, ${JSON.stringify(bed)}`)
+  assert.strictEqual(await farmlandStrand(new goals.GoalBlock(4, 70, 30), null, null), null, 'a goal in the air')
+  assert.strictEqual(plan(BOTTOM).status, 'noPath', 'the goal stays unmarked')
+})
+
+test('a strand probe maps a jump over a bed to that bed and a drop onto a bed to the bed under the landing', async (t) => {
+  const Move = require('mineflayer-pathfinder/lib/move')
+  const cells = { '1,63,0': FARMLAND, '-1,63,0': ['air', {}], '-1,62,0': FARMLAND }
+  const { bot, TRAMPLE, trampleGoal } = await walkingBody(t, START, cells)
+  const probe = trampleGoal(new goals.GoalBlock(5, 64, 0))
+  const landed = new Map()
+  TRAMPLE.probes.set(probe, landed)
+  TRAMPLE.search = probe
+  let moves
+  try { moves = bot.pathfinder.movements.getNeighbors(new Move(0, 64, 0, 0, 0)) } finally { TRAMPLE.search = null }
+  const at = (x, y, z, parkour) => moves.find((m) => m.x === x && m.y === y && m.z === z && !!m.parkour === parkour)
+  const bed = (move) => { const b = landed.get(move); return b && [b.x, b.y, b.z] }
+  assert.deepStrictEqual([bed(at(2, 64, 0, true)), bed(at(-1, 63, 0, false))], [[1, 63, 0], [-1, 62, 0]])
+  assert.strictEqual(landed.has(at(1, 64, 0, false)), false, 'a step onto the bed on its level')
+  assert.strictEqual(landed.size, 2)
+})
+
+async function knowing (pos, { open, sky = () => false, seen, solid = () => 'stone' }) {
   const b = await body(pos, {})
   const Block = require('prismarine-block')(b.bot.registry)
   b.bot.blockAt = (p) => {
     const c = p.floored()
-    const block = Block.fromProperties(open(c) ? 'air' : 'stone', {}, 0)
+    const block = Block.fromProperties(open(c) ? 'air' : solid(c), {}, 0)
     block.position = c
     block.skyLight = sky(c) ? 15 : 0
     return block
   }
-  const env = { bot: b.bot, Vec3, cellKnown: seen, heldLight: (p, block) => block, ck: (x, y, z) => `${x},${y},${z}`, PLAN_KNOWN: new Map(), ...groundMemory() }
+  const TRAMPLE = botConstant('TRAMPLE')
+  const env = { bot: b.bot, Vec3, cellKnown: seen, heldLight: (p, block) => block, ck: (x, y, z) => `${x},${y},${z}`, PLAN_KNOWN: new Map(), TRAMPLE, ...groundMemory() }
   loadBotFunctions(['knownMoves'], blockWorld(env)).knownMoves(b.moves)
-  return b
+  return { ...b, TRAMPLE }
 }
 const cellsOf = (path) => path.map((n) => [Math.floor(n.x), Math.floor(n.y), Math.floor(n.z)])
 
@@ -303,6 +374,113 @@ test('the pathfinder plans over open ground the bot has not seen', async () => {
   const open = (p) => p.y > 63 && !hill(p)
   const { plan } = await knowing(START, { open, sky: open, seen: (p) => p.x <= 1 })
   assert.strictEqual(plan(new goals.GoalBlock(8, 64, 0)).status, 'success')
+})
+
+test('the walk legs leave out a drop onto farmland the bot has seen', async () => {
+  // A room 2 high over x and z -5 to 5 with a trench at z 0 from x 1 to 4, its floor at y 62.
+  const trench = (p) => p.z === 0 && p.x >= 1 && p.x <= 4
+  const open = (p) => (Math.abs(p.x) <= 5 && Math.abs(p.z) <= 5 && (p.y === 64 || p.y === 65)) || (trench(p) && p.y === 63)
+  const statusOf = async (floor) => {
+    const { plan } = await knowing(START, { open, sky: open, seen: () => true, solid: (p) => (trench(p) && p.y === 62 ? floor : 'stone') })
+    return plan(new goals.GoalBlock(4, 63, 0)).status
+  }
+  assert.strictEqual(await statusOf('stone'), 'success', 'control: a stone floor')
+  assert.strictEqual(await statusOf('farmland'), 'noPath')
+})
+
+test('a strand probe on the walk legs names only farmland the bot has seen', async () => {
+  // From x 17 on the corridor lies past the 16 blocks the eye makes out shapes in.
+  const corridor = (p) => p.z === 0 && p.x >= 0 && p.x <= 22 && p.y >= 64 && p.y <= 66
+  const strand = async ({ open = corridor, farmland, seen, goal }) => {
+    const { bot, moves, TRAMPLE } = await knowing(START, { open, seen, solid: (p) => (farmland(p) ? 'farmland' : 'stone') })
+    bot.pathfinder.setMovements(moves)
+    bot.pathfinder.tickTimeout = bot.pathfinder.thinkTimeout
+    const { farmlandStrand } = loadBotFunctions(['farmlandStrand'], { bot, TRAMPLE, routeEnd: () => null })
+    const r = await farmlandStrand(goal, null, null)
+    return r && [r.farmland.x, r.farmland.y, r.farmland.z]
+  }
+  // A pit 1 deep at x 19 to 21 with a floor of farmland.
+  const pitFloor = (p) => p.z === 0 && p.x >= 19 && p.x <= 21 && p.y === 62
+  const pit = { open: (p) => corridor(p) || pitFloor(p.offset(0, -1, 0)), farmland: pitFloor, goal: new goals.GoalBlock(20, 63, 0) }
+  assert.deepStrictEqual(await strand({ ...pit, seen: () => true }), [19, 62, 0], 'the pit floor in sight')
+  // The way jumps over the unseen bed at x 19 onto the one at x 20.
+  const beds = (p) => p.z === 0 && p.y === 63 && (p.x === 19 || p.x === 20)
+  const jump = await strand({ farmland: beds, seen: (p) => !(p.x === 19 && p.y === 63 && p.z === 0), goal: new goals.GoalBlock(22, 64, 0) })
+  assert.deepStrictEqual(jump, [20, 63, 0])
+})
+
+// Terraces down along z in a walled box over x 0 to 6, paths at z 0, 3 and 6 each a block lower, beds over x 2 to 5 at z 1, 2, 4 and 5.
+const STEP_FLOOR = [63, 63, 63, 62, 62, 62, 61]
+function steps (over = () => null) {
+  const inside = (p) => p.x >= 0 && p.x <= 6 && p.z >= 0 && p.z <= 6
+  const bed = (p) => p.x >= 2 && p.x <= 5 && [1, 2, 4, 5].includes(p.z)
+  const own = (p) => !inside(p) || p.y > 66 ? 'stone' : p.y > STEP_FLOOR[p.z] ? 'air' : bed(p) && p.y === STEP_FLOOR[p.z] ? 'farmland' : 'stone'
+  const at = (p) => over(p) ?? own(p)
+  return { at, open: (p) => at(p) === 'air', solid: at }
+}
+const cellIs = (x, y, z) => (p) => p.x === x && p.y === y && p.z === z
+const STEP_DROPS = ['3,63,3', '4,63,3', '2,63,3']
+// The walk legs' moves from the node at from, searching for goal marked to trample when one is given.
+async function stepMoves (over, from, goal = null) {
+  const Move = require('mineflayer-pathfinder/lib/move')
+  const { moves, TRAMPLE } = await knowing(START, { ...steps(over), seen: () => true })
+  if (goal) TRAMPLE.goals.add(goal)
+  TRAMPLE.search = goal
+  try {
+    return moves.getNeighbors(new Move(...from, 0, 0)).map((m) => ({ key: `${m.x},${m.y},${m.z}`, cost: m.cost }))
+  } finally {
+    TRAMPLE.search = null
+  }
+}
+const keysOf = (moves) => moves.map((m) => m.key)
+
+test('the walk legs drop onto a 1-wide path with a seen bed beyond it, straight and diagonal', async () => {
+  const keys = keysOf(await stepMoves(() => null, [3, 64, 2]))
+  assert.deepStrictEqual(STEP_DROPS.filter((k) => keys.includes(k)), STEP_DROPS)
+})
+
+test('the walk legs leave out a jump up out of water onto a seen bed, and plan it from dry ground', async () => {
+  const pool = (block) => (p) => (cellIs(3, 63, 1)(p) ? block : null)
+  const wet = keysOf(await stepMoves(pool('water'), [3, 63, 1]))
+  assert.deepStrictEqual([wet.includes('4,64,1'), wet.includes('3,64,0')], [false, true], 'onto the bed, and onto the top path')
+  assert.strictEqual(keysOf(await stepMoves(pool('air'), [3, 63, 1])).includes('4,64,1'), true, 'from a dry hole')
+})
+
+test('a goal marked to trample plans the jump out of water onto a bed for farmlandCost more', async () => {
+  const goal = new goals.GoalBlock(3, 62, 6)
+  const cost = async (over, from, key) => (await stepMoves(over, from, goal)).find((m) => m.key === key).cost
+  const pool = (p) => (cellIs(3, 63, 1)(p) ? 'water' : null)
+  const pathPool = (p) => pool(p) ?? (cellIs(4, 63, 1)(p) ? 'stone' : null)
+  assert.strictEqual(await cost(pool, [3, 63, 1], '4,64,1') - await cost(pathPool, [3, 63, 1], '4,64,1'), 50, 'out of the water')
+})
+
+test('a strand probe names the bed a jump out of water lands on', async () => {
+  // The only way out of this walled pool is a jump up onto the bed at 4,63,1.
+  const walls = [[2, 1], [3, 0], [3, 2], [4, 0], [4, 2]]
+  const pool = (p) => (cellIs(3, 63, 1)(p) ? 'water' : walls.some(([x, z]) => p.x === x && p.z === z && (p.y === 64 || p.y === 65)) ? 'stone' : null)
+  const { bot, moves, TRAMPLE } = await knowing(new Vec3(3.5, 63, 1.5), { ...steps(pool), seen: () => true })
+  bot.pathfinder.setMovements(moves)
+  bot.pathfinder.tickTimeout = bot.pathfinder.thinkTimeout
+  const { farmlandStrand } = loadBotFunctions(['farmlandStrand'], { bot, TRAMPLE, routeEnd: () => null })
+  const r = await farmlandStrand(new goals.GoalBlock(6, 64, 1), null, null)
+  assert.deepStrictEqual(r && [r.farmland.x, r.farmland.y, r.farmland.z], [4, 63, 1])
+})
+
+test('a walk down the terraces finds a way to each lower path that comes down on no seen bed, also where the beds run wall to wall', async () => {
+  const wide = (p) => ([1, 2, 4, 5].includes(p.z) && p.y === STEP_FLOOR[p.z] && p.x >= 0 && p.x <= 6 ? 'farmland' : null)
+  // A path node's y is the top of the block it stands on, a fraction below the feet cell on farmland.
+  const feet = (n) => new Vec3(Math.floor(n.x), Math.ceil(n.y), Math.floor(n.z))
+  for (const [name, over] of [['paths at x 0, 1 and 6', () => null], ['wall to wall', wide]]) {
+    const { at, open, solid } = steps(over)
+    const trampled = (path) => path.map(feet).filter((n, i, cells) => {
+      const p = i ? cells[i - 1] : START.floored()
+      return (n.y < p.y || (n.y > p.y && at(p) === 'water')) && at(n.offset(0, -1, 0)) === 'farmland'
+    }).map((n) => n.toString())
+    for (const goal of [new goals.GoalBlock(3, 63, 3), new goals.GoalBlock(3, 62, 6)]) {
+      const r = (await knowing(START, { open, solid, seen: () => true })).plan(goal)
+      assert.deepStrictEqual([r.status, trampled(r.path)], ['success', []], `${name}: ${goal.x},${goal.y},${goal.z}`)
+    }
+  }
 })
 
 test('the pathfinder never plans along a sky-lit ravine floor 20 under the ground that the bot has not seen', async () => {
@@ -577,13 +755,8 @@ test('the walk and a collect drop 3 blocks off a pillar and not 4, the forestry 
   const ground = new goals.GoalBlock(3, 64, 0)
   const statuses = []
   for (const height of [2, 3, 4]) {
-    const { bot, plan, shared } = await walkingBody(t, new Vec3(0.5, 64 + height, 0.5), pillar(height))
-    let cage = null
-    bot.collectBlock = { movements: null, async collect () { cage = this.movements } }
-    bot.tool = { equipForBlock: async () => {} }
-    const env = { bot, collectLock: botConstant('collectLock'), digLock: botConstant('digLock'), knownMoves: (m) => m, Movements, shared, watchedWork: (work) => work(), pastUnstuck: (walk) => walk(), abandonCollect () {} }
-    await loadBotFunctions(['collectSafely'], env).collectSafely({ type: bot.registry.blocksByName.iron_ore.id, shapes: [[0, 0, 0, 1, 1, 1]] }, 'iron_ore')
-    statuses.push([height, plan(ground).status, plan(ground, cage).status, plan(ground, shared.forestryMoves).status])
+    const { plan, legs } = await legsOf(t, new Vec3(0.5, 64 + height, 0.5), pillar(height))
+    statuses.push([height, plan(ground, legs.default).status, plan(ground, legs.collect).status, plan(ground, legs.forestry).status])
   }
   assert.deepStrictEqual(statuses, [
     [2, 'success', 'success', 'success'],

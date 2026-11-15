@@ -128,8 +128,7 @@ test('a sow walk casts no look ray from a cell too far from the plot', () => {
   assert.deepStrictEqual([goal.isEnd(new Vec3(10, 64, 0)), rays], [false, []])
 })
 
-const FIELD = 'field'
-const CONSIDERATE = 'considerate'
+const DEFAULT = 'default'
 
 const PACE_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'lib', 'pace.js'), 'utf8')
 // The pacePlacements of lib/pace.js on a fake clock.
@@ -137,7 +136,8 @@ const pacedOn = (clock) => vm.runInNewContext(`${PACE_SOURCE}\npacePlacements`, 
 const { PLACE_GAP_MS } = require('../lib/pace')
 
 // Runs /sow `runs` times on a fake clock over stone below y 64 and air above, with blocks keyed by 'x,y,z'.
-async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5), held = 'wheat_seeds', count = 16, unseen = [], dark = new Set(), ignore = [], stands = [], stay = false, fuse = false, onClick = () => {}, onPace = () => {}, onWalk = () => {}, throwAfter = Infinity, runs = 1, walkMs = 100, think = 10000, replaced = null } = {}) {
+// A job it replaced runs until `replaced` ms and holds the movements named `inPlace` until then.
+async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5), held = 'wheat_seeds', count = 16, unseen = [], dark = new Set(), ignore = [], stands = [], stay = false, fuse = false, onClick = () => {}, onPace = () => {}, onWalk = () => {}, throwAfter = Infinity, runs = 1, walkMs = 100, think = 10000, replaced = null, inPlace = null, cancelAt = null } = {}) {
   const clock = fakeClock()
   const paced = pacedOn(clock)((click) => click())
   const world = new Map(Object.entries(blocks))
@@ -151,6 +151,7 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
   const clickTimes = []
   const moves = []
   const walks = []
+  const plans = []
   const log = []
   const server = { planted: 0 }
   const inventory = Object.assign(new EventEmitter(), { hotbarStart: 36, slots: [], items: () => inventory.slots.filter(Boolean) })
@@ -161,7 +162,8 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
     inventory.emit('updateSlot', 36, old, inventory.slots[36])
   }
   const getBlock = (c) => (seen(c) ? {} : { name: 'unknown' })
-  const shared = { fieldMoves: { name: FIELD, getBlock }, considerateMoves: { name: CONSIDERATE, getBlock } }
+  const shared = { ready: true }
+  const defaultMoves = { name: DEFAULT, getBlock }
   const bot = Object.assign(new EventEmitter(), {
     entity: { position: feet, width: 0.6, height: 1.8 },
     inventory,
@@ -173,7 +175,7 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
     },
     pathfinder: {
       goal: null,
-      movements: shared.considerateMoves,
+      movements: inPlace ? { name: inPlace, getBlock } : defaultMoves,
       thinkTimeout: think,
       setMovements: (m) => {
         moves.push(m.name)
@@ -183,6 +185,7 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
       goto: (goal) => new Promise((resolve, reject) => {
         bot.pathfinder.goal = goal
         log.push('walk')
+        plans.push({ at: clock.now(), moves: bot.pathfinder.movements.name })
         clock.setTimeout(() => {
           // The movements a walk ends with are the ones its last plan used.
           walks.push({ moves: bot.pathfinder.movements.name, think: bot.pathfinder.thinkTimeout })
@@ -224,7 +227,7 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
     const old = { id: 6, status: 'running' }
     started.push(old)
     clock.setTimeout(() => {
-      bot.pathfinder.setMovements(shared.considerateMoves)
+      if (inPlace) bot.pathfinder.setMovements(defaultMoves)
       old.status = 'cancelled'
     }, replaced)
   }
@@ -233,6 +236,7 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
   let result
   let error
   let done = false
+  let ended = null
   const env = {
     bot,
     Vec3,
@@ -271,6 +275,7 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
         Promise.resolve().then(() => fn(own)).then((r) => { result = r }, (e) => { error = e }).finally(() => {
           own.status = 'done'
           done = true
+          ended = clock.now()
         })
         return { id: 7 }
       },
@@ -283,13 +288,15 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
     job = null
     done = false
     await handle({ query: { item: 'wheat_seeds', x: '1', z: '0', w: '3', d: '3', ...query } }, res)
+    const own = job
+    if (own && cancelAt !== null) clock.setTimeout(() => { own.cancelled = true }, cancelAt)
     while (job && !done && clock.now() < 120000) {
       await new Promise(setImmediate)
       clock.advance(10)
     }
   }
   const { movements, thinkTimeout, goal } = bot.pathfinder
-  return { reply: res.body, refusal: res.error, result: result && JSON.parse(JSON.stringify(result)), error, notes: job ? job.notes : [], clicks, clickTimes, moves, walks, log, server, unseenReads, goal, after: { moves: movements.name, think: thinkTimeout } }
+  return { reply: res.body, refusal: res.error, result: result && JSON.parse(JSON.stringify(result)), error, notes: job ? job.notes : [], ended, clicks, clickTimes, moves, walks, plans, log, server, unseenReads, goal, after: { moves: movements.name, think: thinkTimeout } }
 }
 
 // A 3 by 3 bed of farmland beside the default feet.
@@ -305,7 +312,7 @@ test('sow plants every plot of a flat bed once, one paced click each, and the se
   assert.strictEqual(times(log, 'pace'), 9)
   assert.deepStrictEqual(result, { sown: 9, occupied: 0, missed: [], lost: [], unseen: 0, unreached: [], open: 0, left: 7 })
   assert.strictEqual(notes[notes.length - 1], 'sown 9, occupied 0, missed 0, lost 0, unseen 0, unreached 0, left 7')
-  assert.deepStrictEqual(moves, [FIELD, CONSIDERATE])
+  assert.deepStrictEqual(moves, [])
 })
 
 // Farmland two rows deep at y 65, 64 and 63 down along x, with a stand path at z -1 and the feet on stone at the top.
@@ -326,20 +333,21 @@ test('sow plants a terraced bed level by level from the highest, walking to stan
   assert.ok(times(log, 'walk') >= 2, log.join(' '))
 })
 
-test('every sow walk plans with the field movements, also after the cleanup of a replaced job reset them between walks', async () => {
-  const putBack = (n, bot, shared) => bot.pathfinder.setMovements(shared.considerateMoves)
-  const { result, walks } = await sowJob({ ...TERRACES, onWalk: putBack })
+test('every sow walk keeps the movements the job found', async () => {
+  const { result, walks, moves } = await sowJob(TERRACES)
   assert.strictEqual(result.sown, 12)
   assert.ok(walks.length >= 2, JSON.stringify(walks))
-  assert.deepStrictEqual(walks.filter((w) => w.moves !== FIELD), [])
+  assert.deepStrictEqual([moves, [...new Set(walks.map((w) => w.moves))]], [[], [DEFAULT]])
 })
 
-// 6,63,0 lies out of reach of the default feet.
+// One plot out of reach of the default feet and one stand beside it.
 const FAR = { blocks: { '6,63,0': 'farmland' }, stands: [new Vec3(5, 64, 0)], query: { w: '6', d: '1' } }
 
-test('a sow that replaced a job waits for it to wind down before it sets the field movements', async () => {
-  const { result, walks } = await sowJob({ ...FAR, walkMs: 2000, replaced: 1000 })
-  assert.deepStrictEqual([result.sown, walks.map((w) => w.moves)], [1, [FIELD]])
+test('a sow that replaced a job holding the forestry or cage movements plans its first walk once that job wound down and put the default ones back', async () => {
+  for (const inPlace of ['forestry', 'cage']) {
+    const { result, plans } = await sowJob({ ...FAR, replaced: 1000, inPlace })
+    assert.deepStrictEqual([result.sown, plans.map((p) => [p.moves, p.at >= 1000])], [1, [[DEFAULT, true]]], inPlace)
+  }
 })
 
 test('a sow waits 5 s at most for a replaced job that does not wind down, and not at all when it replaced none', async () => {
@@ -347,6 +355,11 @@ test('a sow waits 5 s at most for a replaced job that does not wind down, and no
   const held = await sowJob({ blocks: BED, replaced: Infinity })
   assert.ok(alone.clickTimes[0] < 100, alone.clickTimes.join(' '))
   assert.ok(held.clickTimes[0] >= 5000 && held.clickTimes[0] < 5100, held.clickTimes.join(' '))
+})
+
+test('a sow cancelled while it waits for a replaced job stops waiting at once and clicks nothing', async () => {
+  const { result, clicks, ended } = await sowJob({ blocks: BED, replaced: Infinity, cancelAt: 500 })
+  assert.deepStrictEqual([clicks.length, result.stopped, ended < 600], [0, 'cancelled', true], String(ended))
 })
 
 test('no sow job sets or restores the pathfinder think budget', async () => {
@@ -438,13 +451,6 @@ test('sow clears the goal of a walk that ended without arriving and lists its pl
   assert.strictEqual(log[log.indexOf('walk') + 1], 'stopPath')
 })
 
-test('two sow jobs in a row each walk with the field movements and leave the default movements', async () => {
-  const { moves, walks, after } = await sowJob({ blocks: ROW, query: { w: '6', d: '1' }, runs: 2 })
-  assert.deepStrictEqual(moves, [FIELD, CONSIDERATE, FIELD, CONSIDERATE])
-  assert.deepStrictEqual(walks.map((w) => w.moves), [FIELD, FIELD])
-  assert.strictEqual(after.moves, CONSIDERATE)
-})
-
 test('a lit fuse refusing the walk to a higher plot lists it nowhere, the plots below in reach get planted, and the fuse ends the job', async () => {
   const { result, clicks } = await sowJob({ blocks: { ...ROW, '6,63,0': 'stone', '6,64,0': 'farmland' }, query: { w: '6', d: '1' }, fuse: true })
   assert.deepStrictEqual([result.sown, result.unreached, times(clicks, '6,64,0')], [3, [], 0])
@@ -467,28 +473,10 @@ test('a sow job started after a cancelled one clicks no sooner than the placemen
   assert.ok(clickTimes[2] - clickTimes[1] >= PLACE_GAP_MS, clickTimes.join(' '))
 })
 
-test('a collect that started on the field movements puts the default movements back once their sow has ended', async () => {
-  const restored = async (sowEnds) => {
-    const shared = { mcData: { blocksArray: [] }, fieldMoves: { name: FIELD }, considerateMoves: { name: CONSIDERATE }, fieldOwner: {} }
-    const bot = {
-      on () {},
-      removeListener () {},
-      tool: {},
-      collectBlock: { movements: null, async collect () { if (sowEnds) shared.fieldOwner = null } },
-      pathfinder: { movements: shared.fieldMoves, setMovements (m) { bot.pathfinder.movements = m } }
-    }
-    class Movements { constructor () { this.openable = new Set() } }
-    const env = { bot, Movements, shared, knownMoves: (m) => m, watchedWork: (work) => work(), pastUnstuck: (walk) => walk(), abandonCollect () {}, collectLock: botConstant('collectLock'), digLock: botConstant('digLock'), holdCollectTool: async () => {}, digToolFor: () => null }
-    await loadBotFunctions(['collectSafely'], env).collectSafely({ type: 7, name: 'coal_ore', shapes: [[0, 0, 0, 1, 1, 1]] }, 'mine coal_ore')
-    return bot.pathfinder.movements.name
-  }
-  assert.deepStrictEqual([await restored(true), await restored(false)], [CONSIDERATE, FIELD])
-})
-
-test('sow puts the default movements back after a job that threw', async () => {
+test('a sow job that throws ends with its error after one click and sets no movements', async () => {
   const { error, moves, clicks } = await sowJob({ blocks: BED, throwAfter: 1 })
   assert.match(error?.message ?? '', /the world went away/)
-  assert.deepStrictEqual([clicks.length, moves], [1, [FIELD, CONSIDERATE]])
+  assert.deepStrictEqual([clicks.length, moves], [1, []])
 })
 
 test('sow refuses a rectangle side over 16 and an item it does not carry, and starts no job', async () => {

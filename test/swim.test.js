@@ -228,7 +228,7 @@ test('water in cells the bot neither sees nor makes out leaves the preview and t
 })
 
 const ck = (x, y, z) => x + ',' + y + ',' + z
-const knownMoves = () => loadBotFunctions(['knownMoves'], { ck, knownCell: () => true, PLAN_KNOWN: new Map() }).knownMoves
+const knownMoves = (bot) => loadBotFunctions(['knownMoves'], { bot, ck, knownCell: () => true, PLAN_KNOWN: new Map() }).knownMoves
 
 // Water at the heights ys for x x0 to x0 + 3 and z -50 to 50, with a causeway of floor across at z gap.
 function pool (ys, gap, x0 = 3) {
@@ -251,13 +251,13 @@ test('the walk and a collect take a causeway over a swim that is shorter only wi
   const cages = []
   bot.collectBlock = { movements: null, async collect () { cages.push(this.movements) } }
   bot.tool = { equipForBlock: async () => {} }
-  for (const legs of [(m) => m, knownMoves()]) {
+  for (const legs of [(m) => m, knownMoves(bot)]) {
     const env = { bot, collectLock: botConstant('collectLock'), digLock: botConstant('digLock'), knownMoves: legs, Movements, shared, watchedWork: (work) => work(), pastUnstuck: (walk) => walk(), abandonCollect () {} }
     await loadBotFunctions(['collectSafely'], env).collectSafely({ type: bot.registry.blocksByName.iron_ore.id, shapes: [[0, 0, 0, 1, 1, 1]] }, 'iron_ore')
   }
   const control = [crossing(bot, plan, shared.considerateMoves), crossing(bot, plan, cages[0])]
   assert.deepStrictEqual(control, [['success', 4], ['success', 4]], 'control: both swim')
-  knownMoves()(shared.considerateMoves)
+  knownMoves(bot)(shared.considerateMoves)
   assert.deepStrictEqual([crossing(bot, plan, shared.considerateMoves), crossing(bot, plan, cages[1])], [['success', 0], ['success', 0]])
 })
 
@@ -309,7 +309,7 @@ test('a far goto crosses two lakes on their causeways, and is refused for the sw
   const q = { x: 30, y: 64, z: 0 }
   const control = await bodyGoto(bot, q)
   assert.deepStrictEqual([control.r.reason, control.r.plan.swim, control.walked.length], ['risky', 4, 0], 'control: the first hop swims')
-  knownMoves()(shared.considerateMoves)
+  knownMoves(bot)(shared.considerateMoves)
   const { r, walked } = await bodyGoto(bot, q)
   assert.deepStrictEqual([r.arrived, r.reason], [true, null])
   assert.deepStrictEqual(walked.map(lakeNodes), [[4, 0], [4, 0]], 'the hop and the last leg each walk a causeway')
@@ -325,10 +325,10 @@ function entryCosts (m) {
 const extra = (costs, control) => costs.map((c, i) => c - control[i])
 
 test('a step and a drop into deep water pay the water cost, and a step on through it pays it once', async (t) => {
-  const { shared } = await walkingBody(t, ORIGIN, ENTRIES)
+  const { bot, shared } = await walkingBody(t, ORIGIN, ENTRIES)
   const paid = [shared.considerateMoves, shared.forestryMoves].map((m) => {
     const control = entryCosts(m)
-    knownMoves()(m)
+    knownMoves(bot)(m)
     return extra(entryCosts(m), control)
   })
   const c = shared.considerateMoves.liquidCost
@@ -344,7 +344,7 @@ test('a ford plans as it does without the water cost', async (t) => {
   }
   const control = wade()
   assert.strictEqual(control[2], 4, 'control: the plan wades')
-  knownMoves()(shared.considerateMoves)
+  knownMoves(bot)(shared.considerateMoves)
   assert.deepStrictEqual(wade(), control)
 })
 
@@ -352,7 +352,7 @@ test('a creeper zone laid over the water cost keeps it, and leaves it in place w
   const { bot, shared } = await walkingBody(t, ORIGIN, ENTRIES)
   const m = shared.considerateMoves
   const control = entryCosts(m)
-  knownMoves()(m)
+  knownMoves(bot)(m)
   const env = {
     bot: { entity: bot.entity, pathfinder: { movements: m } },
     reflexes: [{ name: 'combat', watchedCreepers: () => [{ id: 9, at: new Vec3(0, 64, 40), radius: 3 }] }],

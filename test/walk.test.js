@@ -1166,6 +1166,82 @@ test('a preview answers the plan and walks nothing', async () => {
   assert.deepStrictEqual([far.walks, far.r.reason, far.r.plan], [0, 'unresolved', null], 'an unloaded target has no plan yet')
 })
 
+test('a goto with trample lets every goal it plans and walks, its hops included, land on farmland, and one without lets none', async () => {
+  const marks = async (q, walkOpts, over = {}, setup = () => {}) => {
+    const TRAMPLE = botConstant('TRAMPLE')
+    const goalsSeen = []
+    const planPath = async (g) => { goalsSeen.push(g); return { status: 'success', path: [new Vec3(g.x + 0.5, g.y, g.z + 0.5)] } }
+    await plannedGoto(q, walkOpts, { setup, answer: (bot, g) => { goalsSeen.push(g); arrive(bot, g) }, over: { TRAMPLE, planPath, ...over } })
+    return [goalsSeen.length, goalsSeen.every((g) => TRAMPLE.goals.has(g)), goalsSeen.some((g) => TRAMPLE.goals.has(g))]
+  }
+  const tagged = { entityPerceptible: () => false, nametagVisible: () => true }
+  const steve = steveAt(new Vec3(40.3, 64, -2.6))
+  assert.deepStrictEqual(await marks({ x: 5, z: 5 }, { trample: true }), [2, true, true], 'a planned walk')
+  const hops = await marks({ player: 'Steve' }, { trample: true }, tagged, steve)
+  assert.ok(hops[0] >= 2 && hops[1], `hops toward a nametag: ${hops}`)
+  assert.deepStrictEqual([(await marks({ x: 5, z: 5 }, {}))[2], (await marks({ player: 'Steve' }, {}, tagged, steve))[2]], [false, false], 'without trample')
+})
+
+const BED_HINT = 'the only known way lands a drop or a jump on the farmland at 3,63,0 and would trample it: pick another point, or walk it with trample if it is the only way off this spot'
+
+// Plans: the first `found` succeed, later ones find no way, and a strand probe's lands on the farmland at 3,63,0.
+function strandPlanner (TRAMPLE, { found = 0, probes = [], landing = true } = {}) {
+  let plans = 0
+  return async (g) => {
+    const landed = TRAMPLE.probes.get(g)
+    if (!landed) return plans++ < found ? { status: 'success', path: [new Vec3(g.x + 0.5, g.y, g.z + 0.5)] } : { status: 'noPath', path: [] }
+    probes.push(g)
+    if (!landing) return { status: 'noPath', path: [] }
+    const path = [new Vec3(2.5, 64, 0.5), new Vec3(3.5, 64, 0.5), new Vec3(g.x + 0.5, g.y, g.z + 0.5)]
+    landed.set(path[1], { x: 3, y: 63, z: 0 })
+    return { status: 'success', path }
+  }
+}
+const strandOver = (opts) => {
+  const TRAMPLE = botConstant('TRAMPLE')
+  return { TRAMPLE, planPath: strandPlanner(TRAMPLE, opts) }
+}
+
+test('a goto whose plan lands on farmland where no other way exists replies farmland with the first bed and walks nothing, previewed too', async () => {
+  const stranded = { arrived: false, kind: 'coordinate', target: { x: 5, y: 64, z: 5 }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: 7.1, reason: 'farmland', hint: BED_HINT }
+  const walked = await plannedGoto({ x: 5, z: 5 }, {}, { over: strandOver(), answer: arrive })
+  assert.deepStrictEqual([walked.walks, walked.r], [0, stranded])
+  const preview = await plannedGoto({ x: 5, z: 5 }, { preview: true }, { over: strandOver() })
+  assert.deepStrictEqual([preview.walks, preview.r], [0, { ...stranded, plan: null }])
+})
+
+test('a goto with no way round a watched creeper and none through it replies farmland when only a way onto farmland exists', async () => {
+  const { r, walks } = await watchedGoto({ x: 10, z: 0 }, {}, { moves: new EastMoves(), watched: [WATCHED], over: strandOver() })
+  assert.deepStrictEqual([walks, r.reason, r.hint], [0, 'farmland', BED_HINT])
+})
+
+test('a hop toward a target out of sight stranded by farmland replies farmland, from its plan and from its walk with accept', async () => {
+  const outOfSight = { cellKnown: (p) => p.x < 10 }
+  const planned = await plannedGoto({ x: 12, y: 64, z: 0 }, {}, { over: { ...outOfSight, ...strandOver() }, answer: arrive })
+  assert.deepStrictEqual([planned.walks, planned.r.reason, planned.r.hint, planned.r.target], [0, 'farmland', BED_HINT, { x: 12, y: 64, z: 0 }])
+  const accepted = await plannedGoto({ x: 12, y: 64, z: 0 }, { accept: true }, { over: { ...outOfSight, ...strandOver() }, answer: update('noPath') })
+  assert.deepStrictEqual([accepted.walks, accepted.r.reason, accepted.r.hint], [1, 'farmland', BED_HINT])
+})
+
+test('a goto whose walk found no way replies farmland when only a way onto farmland exists, with accept, toward a nametag and in the march after a timeout', async () => {
+  const accepted = await plannedGoto({ x: 5, z: 5 }, { accept: true }, { over: strandOver(), answer: update('noPath') })
+  assert.deepStrictEqual([accepted.walks, accepted.r.reason, accepted.r.hint], [1, 'farmland', BED_HINT], 'accept')
+  const tagged = { entityPerceptible: () => false, nametagVisible: () => true }
+  const steve = await plannedGoto({ player: 'Steve' }, {}, { setup: steveAt(new Vec3(13.3, 64, -2.6)), over: { ...tagged, ...strandOver() }, answer: update('noPath') })
+  assert.deepStrictEqual([steve.walks, steve.r.reason, steve.r.hint, steve.r.bearing], [1, 'farmland', BED_HINT, 'E'], 'nametag')
+  const marched = await plannedGoto({ x: 5, z: 5 }, {}, { over: strandOver({ found: 1 }), answer: update('timeout') })
+  assert.deepStrictEqual([marched.walks, marched.r.reason, marched.r.hint], [1, 'farmland', BED_HINT], 'march')
+})
+
+test('a goto with no way even onto farmland replies no-path after one probe, and one with trample probes nothing', async () => {
+  const probes = []
+  const lost = await plannedGoto({ x: 5, z: 5 }, {}, { over: { WALK_HINTS: HINTS, ...strandOver({ probes, landing: false }) }, answer: update('noPath') })
+  assert.deepStrictEqual([lost.walks, lost.r.reason, lost.r.hint, probes.length], [1, 'no-path', HINTS['no-path'], 1])
+  const trampled = []
+  const r = await plannedGoto({ x: 5, z: 5 }, { trample: true }, { over: { WALK_HINTS: HINTS, ...strandOver({ probes: trampled }) }, answer: update('noPath') })
+  assert.deepStrictEqual([r.walks, r.r.reason, r.r.hint, trampled.length], [1, 'no-path', HINTS['no-path'], 0])
+})
+
 test('a goto refuses a plan that ends far from the y asked or drops more than 3, without a step, and accept walks it', async () => {
   const cliff = async (g) => ({ status: 'success', path: [new Vec3(1.5, 64, 0.5), new Vec3(2.5, 59, 0.5), new Vec3(g.x + 0.5, g.y, g.z + 0.5)] })
   const refused = await plannedGoto({ x: 5, z: 5 }, {}, { over: { planPath: cliff }, answer: arrive })
@@ -1229,8 +1305,10 @@ test('a player known only by the nametag gets no plan, so neither a preview nor 
   const tagged = { entityPerceptible: () => false, nametagVisible: () => true, planPath }
   const { r } = await plannedGoto({ player: 'Steve' }, { preview: true }, { setup, over: tagged })
   assert.deepStrictEqual(r, { arrived: false, kind: 'player', target: { player: 'Steve' }, pos: { x: 0.5, y: 64, z: 0.5 }, dist: 10, reason: 'unresolved', hint: r.hint, bearing: 'E', plan: null })
-  const walked = await plannedGoto({ player: 'Steve' }, {}, { setup, over: tagged, answer: update('noPath') })
-  assert.deepStrictEqual([walked.r.reason, planned], ['no-path', 1], 'the walk toward a nametag plans nothing up front')
+  let upFront = null
+  const answer = (bot) => { upFront ??= planned; update('noPath')(bot) }
+  const walked = await plannedGoto({ player: 'Steve' }, {}, { setup, over: tagged, answer })
+  assert.deepStrictEqual([walked.r.reason, upFront], ['no-path', 1], 'the walk toward a nametag plans nothing up front')
 })
 
 // Movements offering the moves from the start cell east onto 1,64,0 and north onto 0,64,-1.
@@ -1260,10 +1338,10 @@ const searchOver = (moves, round = ROUND) => async () => {
 }
 
 // plannedGoto over moves, the combat reflex watching the creepers in watched, or without watchedCreepers when watched is undefined.
-function watchedGoto (q, walkOpts, { moves, watched, round, answer = arrive, search = searchOver(moves, round) } = {}) {
+function watchedGoto (q, walkOpts, { moves, watched, round, answer = arrive, search = searchOver(moves, round), over = {} } = {}) {
   const reflexes = [{ name: 'combat', fairFill: () => ({}), ...(watched && { watchedCreepers: () => watched }) }]
   const setup = (bot) => { bot.pathfinder.movements = moves }
-  return plannedGoto(q, walkOpts, { setup, answer, over: { reflexes, planPath: search } })
+  return plannedGoto(q, walkOpts, { setup, answer, over: { reflexes, planPath: search, ...over } })
 }
 
 test('a goto plans, previews and walks round the zone of a creeper the combat reflex watches, and refuses a risk on that plan', async () => {

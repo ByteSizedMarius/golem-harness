@@ -1321,6 +1321,22 @@ test('a creeper with no flee goal in a closed yard is escaped through the shut h
   assert.match(r.logs.find((l) => l.startsWith('[flee]')), /^\[flee\] from creeper at \(0,64,-5\): no safe cell, goal \(0,64,4\) out of its sight behind seen blocks, 4 steps, 9\.0 from it, flood \d+ cells,/)
 })
 
+test('a flee, a creeper cover, an escape through a shut door and a take cover each walk to a goal free to land on farmland', () => {
+  const marked = (env, goal) => !!goal && env.TRAMPLE.goals.has(goal)
+  const column = (x, y, z) => x === 0 && z === 1 && y >= 64 && y <= 66
+  const corner = plateau({ solid: (x, y, z) => plateau().solid(x, y, z) || column(x, y, z) })
+  const walks = {
+    flee: fleeIn(plateau(), creeper(3.5, 64, 0.5)),
+    cover: fleeIn(corner, swellingCreeper(3.5, 64, 0.5)),
+    door: fleeIn(doorYard(), creeper(0.5, 64, -4.5))
+  }
+  const marks = Object.entries(walks).map(([name, r]) => [name, marked(r.env, r.bot.pathfinder.goal)])
+  const { bot, env, skeleton } = windowRoom()
+  combatReflexIn(env).takeCover(bot, skeleton, 'skeleton E ~6')
+  marks.push(['take cover', marked(env, bot.pathfinder.goal)])
+  assert.deepStrictEqual(marks, [['flee', true], ['cover', true], ['door', true], ['take cover', true]])
+})
+
 test('a wooden door standing open lets the walk through but hides nothing', () => {
   const r = fleeIn(doorYard({ open: true }), creeper(0.5, 64, -4.5))
   // The creeper sees down the middle of the house through the doorway, the front wall hides the cells beside it.

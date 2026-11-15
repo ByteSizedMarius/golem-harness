@@ -803,7 +803,7 @@ function sectionWorld (env, keys) {
   return env
 }
 
-// A body at pos on the real pathfinder with the walk's legs, over a stone floor plus cells ('x,y,z' -> [name, properties]).
+// A body at pos on the real pathfinder with the walk's legs under the farmland rule, over a stone floor plus cells ('x,y,z' -> [name, properties]).
 async function walkingBody (t, pos, cells = {}) {
   const client = new EventEmitter()
   client.version = '1.21.11'
@@ -829,7 +829,9 @@ async function walkingBody (t, pos, cells = {}) {
       return b
     }
   })
-  const ctx = { bot, knownMoves: (m) => m, navPlaced: [], startReflexes () {}, vecStr: (p) => `${p.x},${p.y},${p.z}` }
+  const TRAMPLE = botConstant('TRAMPLE')
+  const { farmlandRule, trampleGoal } = loadBotFunctions(['farmlandRule', 'trampleGoal'], { bot, TRAMPLE })
+  const ctx = { bot, knownMoves: farmlandRule, navPlaced: [], startReflexes () {}, vecStr: (p) => `${p.x},${p.y},${p.z}` }
   createConnection(ctx)
   bindConnection(ctx)
   wireConnectionSpawn()
@@ -842,7 +844,7 @@ async function walkingBody (t, pos, cells = {}) {
     bot.pathfinder.tickTimeout = bot.pathfinder.thinkTimeout
     return bot.pathfinder.getPathFromTo(moves, bot.entity.position, goal).next().value.result
   }
-  return { bot, plan, shared: ctx.shared }
+  return { bot, plan, shared: ctx.shared, TRAMPLE, farmlandRule, trampleGoal }
 }
 
 // A walkingBody world of stone up to y 62 and air above, except where cell(x, y, z) returns [name, properties].
@@ -981,6 +983,8 @@ function loadBotFunctions (names, env, code = '') {
       env.BUNKER_WALK ??= botConstant('BUNKER_WALK')
     }
     if (name === 'seenWorld') env.WorldSync ??= require('prismarine-world/src/worldsync')
+    // Unless env has its own, the goals marked to trample start empty.
+    if (['trampleGoal', 'farmlandRule', 'planPath'].includes(name)) env.TRAMPLE ??= botConstant('TRAMPLE')
     sources.push(body)
     reach(body, name)
   }
@@ -1110,6 +1114,8 @@ function combatReflexIn (env) {
   env.seenNow ??= () => true
   env.seesShape ??= () => true
   env.soleClaim ??= loadBotFunctions(['soleClaim'], { digLock: env.digLock || botConstant('digLock') }).soleClaim
+  env.TRAMPLE ??= botConstant('TRAMPLE')
+  env.trampleGoal ??= loadBotFunctions(['trampleGoal'], { TRAMPLE: env.TRAMPLE }).trampleGoal
   return vm.runInContext(`(${literal})`, vm.createContext(env))
 }
 

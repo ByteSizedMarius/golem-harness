@@ -242,6 +242,12 @@ test('the goto tool sends only signed GETs to its own route on 127.0.0.1', async
   }
 })
 
+test('the goto tool takes trample and sends it to its route as trample=1', async () => {
+  const { srv, calls } = mcpServer()
+  assertOk(await call(srv, 'goto', { x: 4, z: -2, trample: true }))
+  assert.deepStrictEqual(Object.fromEntries(calls[0].url.searchParams), { x: '4', z: '-2', trample: '1' })
+})
+
 // ---- JSON-RPC framing ----
 
 test('a JSON-RPC batch array gets an error and issues no request', async () => {
