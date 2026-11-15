@@ -1,0 +1,60 @@
+diff --git a/node_modules/prismarine-physics/lib/aabb.js b/node_modules/prismarine-physics/lib/aabb.js
+index 6b78f46..a219885 100644
+--- a/node_modules/prismarine-physics/lib/aabb.js
++++ b/node_modules/prismarine-physics/lib/aabb.js
+@@ -1,3 +1,6 @@
++// A box this close to a face touches it (vanilla's collision tolerance).
++const EPSILON = 1e-7
++
+ class AABB {
+   constructor (x0, y0, z0, x1, y1, z1) {
+     this.minX = x0
+@@ -65,33 +68,33 @@ class AABB {
+   }
+ 
+   computeOffsetX (other, offsetX) {
+-    if (other.maxY > this.minY && other.minY < this.maxY && other.maxZ > this.minZ && other.minZ < this.maxZ) {
+-      if (offsetX > 0.0 && other.maxX <= this.minX) {
+-        offsetX = Math.min(this.minX - other.maxX, offsetX)
+-      } else if (offsetX < 0.0 && other.minX >= this.maxX) {
+-        offsetX = Math.max(this.maxX - other.minX, offsetX)
++    if (other.maxY > this.minY + EPSILON && other.minY < this.maxY - EPSILON && other.maxZ > this.minZ + EPSILON && other.minZ < this.maxZ - EPSILON) {
++      if (offsetX > 0.0 && other.maxX <= this.minX + EPSILON) {
++        offsetX = Math.min(Math.max(this.minX - other.maxX, 0), offsetX)
++      } else if (offsetX < 0.0 && other.minX >= this.maxX - EPSILON) {
++        offsetX = Math.max(Math.min(this.maxX - other.minX, 0), offsetX)
+       }
+     }
+     return offsetX
+   }
+ 
+   computeOffsetY (other, offsetY) {
+-    if (other.maxX > this.minX && other.minX < this.maxX && other.maxZ > this.minZ && other.minZ < this.maxZ) {
+-      if (offsetY > 0.0 && other.maxY <= this.minY) {
+-        offsetY = Math.min(this.minY - other.maxY, offsetY)
+-      } else if (offsetY < 0.0 && other.minY >= this.maxY) {
+-        offsetY = Math.max(this.maxY - other.minY, offsetY)
++    if (other.maxX > this.minX + EPSILON && other.minX < this.maxX - EPSILON && other.maxZ > this.minZ + EPSILON && other.minZ < this.maxZ - EPSILON) {
++      if (offsetY > 0.0 && other.maxY <= this.minY + EPSILON) {
++        offsetY = Math.min(Math.max(this.minY - other.maxY, 0), offsetY)
++      } else if (offsetY < 0.0 && other.minY >= this.maxY - EPSILON) {
++        offsetY = Math.max(Math.min(this.maxY - other.minY, 0), offsetY)
+       }
+     }
+     return offsetY
+   }
+ 
+   computeOffsetZ (other, offsetZ) {
+-    if (other.maxX > this.minX && other.minX < this.maxX && other.maxY > this.minY && other.minY < this.maxY) {
+-      if (offsetZ > 0.0 && other.maxZ <= this.minZ) {
+-        offsetZ = Math.min(this.minZ - other.maxZ, offsetZ)
+-      } else if (offsetZ < 0.0 && other.minZ >= this.maxZ) {
+-        offsetZ = Math.max(this.maxZ - other.minZ, offsetZ)
++    if (other.maxX > this.minX + EPSILON && other.minX < this.maxX - EPSILON && other.maxY > this.minY + EPSILON && other.minY < this.maxY - EPSILON) {
++      if (offsetZ > 0.0 && other.maxZ <= this.minZ + EPSILON) {
++        offsetZ = Math.min(Math.max(this.minZ - other.maxZ, 0), offsetZ)
++      } else if (offsetZ < 0.0 && other.minZ >= this.maxZ - EPSILON) {
++        offsetZ = Math.max(Math.min(this.maxZ - other.minZ, 0), offsetZ)
+       }
+     }
+     return offsetZ
