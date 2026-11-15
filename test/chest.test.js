@@ -1,15 +1,13 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
-const { AsyncLocalStorage } = require('node:async_hooks')
 const { EventEmitter, once } = require('node:events')
 const mineflayer = require('mineflayer')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const WorldSync = require('prismarine-world/src/worldsync')
-const { awaitRoute, routeHandler, botConstant, loadBotFunctions, claimRescue, walkingBody, groundMemory, blockWorld } = require('./helpers')
+const { awaitRoute, routeHandler, botConstant, loadBotFunctions, claimRescue, plannedWalk, groundMemory, blockWorld } = require('./helpers')
 const { GRAVESTONE } = require('../lib/server-overrides')
-const { guardWork } = require('../lib/walk')
 const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 const { LEGACY_CLICK_REACH } = require('../lib/bot/legacy-1710')
 const { TOOLS } = require('../mcp/tools')
@@ -122,7 +120,7 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
   const env = {
     bot: {
       entity: { position: HERE },
-      blockAt: (p) => (cells.has(at(p)) ? chest(p) : { name: 'air', type: 0, position: p, shapes: [] }),
+      blockAt: (p) => (cells.has(at(p)) ? chest(p) : p.y < HERE.y ? { name: 'stone', type: 1, position: p, shapes: [[0, 0, 0, 1, 1, 1]] } : { name: 'air', type: 0, position: p, shapes: [] }),
       world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => env.bot.blockAt(p) }, ray) },
       findBlocks: ({ matching, maxDistance }) => (matching.includes(CHEST_ID) ? chests.filter((p) => HERE.distanceTo(p) <= maxDistance) : []),
       pathfinder: {
@@ -166,8 +164,10 @@ function chestEnv (chests, windows, pockets = [], states = {}) {
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     goals,
     seenWorld: () => env.bot.world,
+    seenBlock: (p) => env.bot.blockAt(p),
+    Vec3,
     CHEST_RADIUS: botConstant('CHEST_RADIUS'),
-    CHEST_REACH: botConstant('CHEST_REACH')
+    CLICK_REACH: botConstant('CLICK_REACH')
   }
   loadBotFunctions(['wireHandLease'], { bot: env.bot, guardState: env.guardState, ...timers }).wireHandLease()
   return { env, opened, fight, entities }
@@ -602,6 +602,7 @@ test('a buried self-rescue starting during the walk stops withdraw and deposit a
       endHand(rescue)
       digLock.holder = null
       chest.closed = false
+      env.bot.entity.position = HERE
       assert.strictEqual(await refusal(route, { name }, env), 'busy: the buried self-rescue is running, nothing done', route)
       assert.ok(chest.closed, `${route} left the chest open`)
       assert.strictEqual(env.guardState.hand, rescue, `${route} ended the rescue's lease`)
@@ -738,7 +739,11 @@ test('a fight starting during the walk or a stack pause stops withdraw and depos
   assert.deepStrictEqual([leased, env.guardState.hand], [[true, true], null])
 
   fight.busy = false
-  env.bot.pathfinder.goto = async () => { fight.busy = true }
+  env.bot.entity.position = HERE
+  env.bot.pathfinder.goto = async () => {
+    fight.busy = true
+    env.bot.entity.position = new Vec3(3.5, 64, 0.5)
+  }
   assert.strictEqual(await refusal('/withdraw', { name: 'cobblestone' }, env), 'a fight started')
   assert.strictEqual(clicks.length, 2)
 })
@@ -832,76 +837,15 @@ function raisedWorld (cells = {}) {
   })
 }
 
-// A 3 by 3 grid of points on each face of a cell, as offsets from its corner, with the face's axis and whether it faces up the axis.
-const FACE_POINTS = []
-for (let k = 0; k < 3; k++) {
-  for (const up of [0, 1]) {
-    for (const u of [0.2, 0.5, 0.8]) {
-      for (const v of [0.2, 0.5, 0.8]) {
-        const q = [0, 0, 0]
-        q[k] = up
-        q[(k + 1) % 3] = u
-        q[(k + 2) % 3] = v
-        FACE_POINTS.push({ k: 'xyz'[k], up, q: new Vec3(...q) })
-      }
-    }
-  }
-}
-
-// chestEnv on the real planner, whose goto leaves the goal set where mineflayer-pathfinder's goto does.
+// chestEnv on plannedWalk. Its openContainer opens a chest only where the feet can click it.
 async function plannedChestEnv (t, feet, world, at, items = [], pockets = []) {
-  const walk = await walkingBody(t, feet, world)
-  // The Timeout case runs out this budget.
-  walk.bot.pathfinder.thinkTimeout = 1000
   const { env, opened } = chestEnv([at], { [`${at.x},${at.y},${at.z}`]: chestWindow(items) }, pockets)
   const { bot } = env
-  const { pathfinder } = walk.bot
-  const named = (name, message) => Object.assign(new Error(message), { name })
-  const walks = []
-  const watch = {
-    bot: walk.bot,
-    goals,
-    COLLECT_STALL_MS: botConstant('COLLECT_STALL_MS'),
-    COLLECT_BUDGET_MS: botConstant('COLLECT_BUDGET_MS'),
-    guardWork,
-    watchScope: new AsyncLocalStorage(),
-    reflexes: [{ name: 'unstuck', active: false }],
-    litFuse: () => null
-  }
-  pathfinder.goto = loadBotFunctions(['watchGoto', 'stopPath'], watch).watchGoto(async (goal) => {
-    pathfinder.setGoal(goal)
-    let result
-    for (const step of pathfinder.getPathFromTo(pathfinder.movements, bot.entity.position, goal)) result = step.result
-    const { status, path } = result
-    walks.push(path.length)
-    if (!path.length) {
-      if (goal.isEnd(bot.entity.position.floored())) pathfinder.setGoal(null)
-      return
-    }
-    if (status === 'noPath') throw named('NoPath', 'No path to the goal!')
-    if (status === 'timeout') throw named('Timeout', 'Took to long to decide path to goal!')
-    const end = path[path.length - 1]
-    bot.entity.position = new Vec3(end.x, end.y, end.z)
-    pathfinder.setGoal(null)
-  })
-  const raycast = (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => walk.bot.blockAt(p) }, ray)
-  Object.assign(bot, { entity: walk.bot.entity, blockAt: walk.bot.blockAt, world: { raycast }, pathfinder })
-  // Whether a line from the eye reaches a point of FACE_POINTS on a face of p turned to it, crossing only empty cells besides p.
-  const sees = (eye, p) => FACE_POINTS.some(({ k, up, q }) => {
-    const point = p.plus(q)
-    if ((eye[k] - point[k]) * (up ? 1 : -1) <= 0) return false
-    const steps = Math.ceil(eye.distanceTo(point) / 0.05)
-    for (let i = 1; i < steps; i++) {
-      const c = eye.plus(point.minus(eye).scaled(i / steps)).floored()
-      if (!c.equals(p) && walk.bot.blockAt(c).boundingBox !== 'empty') return false
-    }
-    return true
-  })
+  const { walks, pathfinder, unclickable } = await plannedWalk(t, feet, world, bot)
   const open = bot.openContainer
   bot.openContainer = async (b) => {
-    const feet = bot.entity.position
-    if (!sees(feet.offset(0, 1.62, 0), b.position)) throw new Error(`the chest is out of sight from ${feet}`)
-    if (feet.distanceTo(b.position.offset(0.5, 0.5, 0.5)) >= LEGACY_CLICK_REACH) throw new Error(`the chest is out of reach from ${feet}`)
+    const why = unclickable(b.position)
+    if (why) throw new Error(`the chest is ${why}`)
     return open(b)
   }
   return { env, opened, walks, pathfinder }
@@ -939,7 +883,7 @@ async function chestWalk (route, query, planned) {
   const goal = planned.pathfinder.goal
   return { walks: planned.walks, opened: planned.opened, goal: goal && goal.constructor.name, feet: [x, y, z], error: res.error && res.error.message }
 }
-const walked = (steps, cell, feet) => ({ walks: [steps], opened: [cell], goal: null, feet: [feet.x, feet.y, feet.z], error: undefined })
+const walked = (steps, cell, feet) => ({ walks: steps ? [steps] : [], opened: [cell], goal: null, feet: [feet.x, feet.y, feet.z], error: undefined })
 
 test('chest opens a chest in the wall beside a 1-wide corridor from the cell beside it without a step, on each side and at both heights', async (t) => {
   const got = {}
@@ -1003,7 +947,25 @@ test('chest opens a chest already in reach and sight without a step', async (t) 
   const feet = new Vec3(-0.5, 63, 0.5)
   const { env, opened, walks, pathfinder } = await plannedChestEnv(t, feet, raisedWorld(), RAISED)
   await awaitRoute('/chest', AT_RAISED, env)
-  assert.deepStrictEqual([walks, opened, env.bot.entity.position, pathfinder.goal], [[0], ['0,65,0'], feet, null])
+  assert.deepStrictEqual([walks, opened, env.bot.entity.position, pathfinder.goal], [[], ['0,65,0'], feet, null])
+})
+
+test('chest refuses a chest already in reach while a bunker is built, naming the build, and opens nothing', async (t) => {
+  const feet = new Vec3(-0.5, 63, 0.5)
+  const BUNKER_WALK = botConstant('BUNKER_WALK')
+  const open = async (building) => {
+    const { env, opened } = await plannedChestEnv(t, feet, raisedWorld(), RAISED)
+    Object.assign(env, { bunker: { building }, BUNKER_WALK })
+    // The build swaps goto for a refusal.
+    if (building) env.bot.pathfinder.goto = async () => { throw new Error(BUNKER_WALK) }
+    const { handle, res } = routeHandler('/chest', env)
+    await handle({ query: AT_RAISED }, res)
+    return { opened, error: res.error?.message }
+  }
+  assert.deepStrictEqual(await open(false), { opened: ['0,65,0'], error: undefined }, 'control: no build')
+  const { opened, error } = await open(true)
+  assert.deepStrictEqual(opened, [])
+  assert.ok(error?.includes(BUNKER_WALK), `the reply does not name the build: ${error}`)
 })
 
 // A seesLit gate cannot fail here, as the walk ends within 3.7 of the chest, inside the 4 blocks levelRange sees at light 0.

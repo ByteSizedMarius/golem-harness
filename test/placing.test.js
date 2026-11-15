@@ -10,6 +10,7 @@ const { overrideRecipes, GRAVESTONE } = require('../lib/server-overrides')
 const { deathLedger } = require('../lib/deaths')
 const { summarizePlan, DROP_MAX } = require('../lib/plan')
 const { goals } = require('mineflayer-pathfinder')
+const WorldSync = require('prismarine-world/src/worldsync')
 const { loadBotFunctions, fakeClock, botConstant, awaitRoute, hookedRoute, routeHandler, buildVerbEnv, groundMemory, blockWorld, claimRescue, routeJobs } = require('./helpers')
 
 const AIR = { name: 'air', boundingBox: 'empty' }
@@ -215,12 +216,14 @@ function crafter ({ tableAt = null, needsTable = true, seen = true, unreachable 
   const recipe = { result: { count: needsTable ? 1 : 4 } }
   const placed = tableAt ? { [key(tableAt)]: { name: 'crafting_table', boundingBox: 'block' } } : {}
   const items = [{ name: 'crafting_table', count: 1 }]
-  const env = placingEnv(entity, ground(placed), {
+  const blockAt = (p) => { const b = ground(placed)(p); return { ...b, shapes: b.boundingBox === 'block' ? [[0, 0, 0, 1, 1, 1]] : [] } }
+  const env = placingEnv(entity, blockAt, {
     items,
     bot: {
       recipesFor: (id, meta, min, t) => (t || !needsTable ? [recipe] : []),
       findBlocks: ({ maxDistance }) => (tableAt && tableAt.distanceTo(entity.position) <= maxDistance ? [tableAt] : []),
-      pathfinder: { goto: async (g) => { log.push(['goto', g.x, g.y, g.z, g.r]); if (unreachable) throw new Error('No path to the goal!'); entity.position = new Vec3(g.x - 2.5, g.y, g.z + 0.5) } },
+      world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: blockAt }, ray) },
+      pathfinder: { startCell: (p) => p.floored(), goto: async () => { log.push(['goto']); if (unreachable) throw new Error('No path to the goal!'); entity.position = new Vec3(tableAt.x - 2.5, tableAt.y, tableAt.z + 0.5) } },
       async craft (r, n, t) {
         log.push(['craft', t ? key(t.position) : null])
         items.push({ name: needsTable ? 'chest' : 'oak_planks', count: r.result.count })
@@ -230,7 +233,10 @@ function crafter ({ tableAt = null, needsTable = true, seen = true, unreachable 
     },
     env: {
       resolveBlockIds: () => [58],
-      goals: { GoalNear: function (x, y, z, r) { Object.assign(this, { x, y, z, r }) } },
+      goals,
+      seenWorld: () => env.bot.world,
+      seenBlock: (p) => env.bot.blockAt(p),
+      CLICK_REACH: botConstant('CLICK_REACH'),
       SERVER_RECIPES: null,
       overrideRecipes,
       shared: { mcData: { itemsByName: {} } },
@@ -264,14 +270,14 @@ test('craft treats an unseen crafting table as none, without walking to it or na
 test('craft walks to a table 10 blocks off and crafts at it', async () => {
   const { log, ctx } = crafter({ tableAt: new Vec3(10, 64, 0) })
   const r = await ctx.craftItem({ id: 1, name: 'chest' }, 1)
-  assert.deepStrictEqual(log, [['goto', 10, 64, 0, 3], ['craft', '10,64,0']])
+  assert.deepStrictEqual(log, [['goto'], ['craft', '10,64,0']])
   assert.deepStrictEqual({ ...r }, { crafted: 'chest', requested: 1, made: 1, usedTable: true, nowHave: 1, note: undefined })
 })
 
 test('craft names a seen table it cannot reach', async () => {
   const { log, ctx } = crafter({ tableAt: new Vec3(10, 64, 0), unreachable: true })
   await assert.rejects(ctx.craftItem({ id: 1, name: 'chest' }, 1), { message: 'cannot reach the crafting table at 10,64,0' })
-  assert.deepStrictEqual(log, [['goto', 10, 64, 0, 3]])
+  assert.deepStrictEqual(log, [['goto']])
 })
 
 test('craft makes a 2x2 recipe in the inventory grid with no table about', async () => {

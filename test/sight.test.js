@@ -1294,7 +1294,7 @@ function withHands (env, walkTo = null) {
     isABed: (b) => b.name.endsWith('_bed')
   })
   env.bot.pathfinder.movements = planMoves(env)
-  return Object.assign(env, { require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals: { GoalNear: class {} } })
+  return Object.assign(env, { require, round: (v) => ({ x: v.x, y: v.y, z: v.z }), goals, CLICK_REACH: botConstant('CLICK_REACH') })
 }
 
 const UNSEEN = /not in my sight, blocked or unlit/
@@ -1335,12 +1335,14 @@ test('digat digs a block in lit sight, never one seen before and dark now, aroun
   }
 })
 
-test('activate presses a block in lit sight and gives its state only while it stays in sight', async () => {
+test('activate presses a block in lit sight and gives its state only when the block is in lit sight after the walk', async () => {
   const coal = { x: '-1', y: '65', z: '0' }
   assert.deepStrictEqual((await activate(withHands(cave(LIT)), coal)).body, { activated: 'coal_ore', at: { x: -1, y: 65, z: 0 }, properties: { lit: false } }, 'control: in sight')
   assert.match((await activate(withHands(cave(DARK, FAR_END)), coal)).error.message, UNSEEN)
-  const away = await activate(withHands(cave(LIT, FAR_END), new Vec3(8.5, 64, 0.5)), coal)
-  assert.deepStrictEqual(away.body, { activated: 'coal_ore', at: { x: -1, y: 65, z: 0 } }, 'the walk went round the corner')
+  const round = withHands(cave(LIT, FAR_END))
+  round.walkToClick = async () => { round.bot.entity.position = new Vec3(8.5, 64, 0.5) }
+  const away = await activate(round, coal)
+  assert.deepStrictEqual(away.body, { activated: 'coal_ore', at: { x: -1, y: 65, z: 0 } }, 'out of lit sight after the walk')
 })
 
 const PLAYER_KEYS = require('minecraft-data')('1.21.11').entitiesByName.player.metadataKeys
@@ -1365,7 +1367,10 @@ function bedRoom (foot, facing, players = [], { legacy = false, walkTo = null } 
 async function activateBed (env, at) {
   const acts = []
   const walk = env.bot.pathfinder.goto
-  env.bot.pathfinder.goto = async (g) => { acts.push('walk'); await walk(g) }
+  env.bot.pathfinder.goto = async (g) => {
+    if (!g.isEnd(env.bot.entity.position.floored())) acts.push('walk')
+    await walk(g)
+  }
   env.bot.lookAt = async () => { acts.push('look') }
   env.bot.activateBlock = async (b) => { acts.push(`click ${b.name}`) }
   return { ...(await activate(env, at)), acts }
@@ -1867,6 +1872,7 @@ test('activate refuses a log seen only through a leaf without clicking, and clic
     const clicks = []
     withHands(env)
     env.bot.activateBlock = async (b) => { clicks.push(b.name) }
+    env.walkToClick = async () => {}
     return { ...(await activate(env, TRUNK_QUERY)), clicks }
   }
   const leafy = await run(treeLog('oak_log'))

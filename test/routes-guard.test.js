@@ -3,10 +3,11 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
+const WorldSync = require('prismarine-world/src/worldsync')
 const { ROUTE_BOUNDS } = require('../lib/bounds')
 const { goals } = require('mineflayer-pathfinder')
 const { GRAVESTONE } = require('../lib/server-overrides')
-const { startApp, routeHandler, runRoute, awaitRoute, fakeClock, fakeFile, toolNamed } = require('./helpers')
+const { startApp, routeHandler, runRoute, awaitRoute, fakeClock, fakeFile, toolNamed, botConstant } = require('./helpers')
 
 const PROTO_KEYS = ['__proto__', 'constructor', 'toString', 'hasOwnProperty']
 
@@ -220,19 +221,24 @@ test('/pathdebug holds one tap: repeated calls leave one listener per event, rem
 const RAW_AT = '0x5, +64.9 ,0.5'
 const STATION = new Vec3(5, 64, 0)
 
-// The env of /grave and /furnace with a block named name at STATION and every cell in sight.
+// The env of /grave and /furnace with a block named name at STATION in click reach and every cell in sight.
 function stationEnv (name) {
-  const block = { name, type: 7, position: STATION }
+  const block = { name, type: 7, position: STATION, shapes: [[0, 0, 0, 1, 1, 1]] }
   const window = { containerItems: () => [], inputItem: () => null, fuelItem: () => null, outputItem: () => null, close () {} }
+  const bot = {
+    entity: { position: new Vec3(3.5, 64, 0.5) },
+    blockAt: (p) => (p.equals(STATION) ? block : p.y < STATION.y ? { name: 'stone', type: 1, position: p, shapes: [[0, 0, 0, 1, 1, 1]] } : { name: 'air', type: 0, position: p, shapes: [] }),
+    world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => bot.blockAt(p) }, ray) },
+    pathfinder: { goto: async () => {}, startCell: (p) => p.floored() },
+    openBlock: async () => window,
+    openFurnace: async () => window,
+    waitForTicks: async () => {}
+  }
   return {
-    bot: {
-      entity: { position: new Vec3(0.5, 64, 0.5) },
-      blockAt: (p) => (p.equals(STATION) ? block : { name: 'air', type: 0, position: p }),
-      pathfinder: { goto: async () => {} },
-      openBlock: async () => window,
-      openFurnace: async () => window,
-      waitForTicks: async () => {}
-    },
+    bot,
+    seenWorld: () => bot.world,
+    seenBlock: (p) => bot.blockAt(p),
+    CLICK_REACH: botConstant('CLICK_REACH'),
     shared: { ready: true, mcData: { blocksByName: { [GRAVESTONE]: { id: 7, name: GRAVESTONE } } } },
     seesLit: () => true,
     seenNow: () => true,

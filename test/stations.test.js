@@ -3,16 +3,18 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
+const WorldSync = require('prismarine-world/src/worldsync')
 const registry = require('prismarine-registry')('1.21.11')
 const { ENCHANTING_1_21 } = require('../lib/server-overrides')
-const { routeHandler, awaitRoute } = require('./helpers')
+const { routeHandler, awaitRoute, botConstant, floorWorld, PILLAR_TOP, pillarWorld, WALLED, walledWorld, plannedWalk } = require('./helpers')
 const { playerBody } = require('./chest-1710')
 
 const HERE = new Vec3(0.5, 64, 0.5)
 const AT = new Vec3(5, 64, 0)
+const BESIDE = new Vec3(4.5, 64, 0.5)
 const IDS = { enchanting_table: [116], anvil: [145], chipped_anvil: [146], damaged_anvil: [147] }
 
-// A body at HERE with empty pockets and one block of name at AT, unseen when seen is false.
+// A body at HERE with empty pockets and one block of name at AT on a floor at y 63, unseen when seen is false.
 function stationEnv (name, seen) {
   const walks = []
   const env = {
@@ -20,8 +22,9 @@ function stationEnv (name, seen) {
     bot: {
       entity: { position: HERE },
       findBlocks: ({ matching }) => (matching.includes(IDS[name][0]) ? [AT] : []),
-      blockAt: (p) => ({ name: p.equals(AT) ? name : 'stone', position: p }),
-      pathfinder: { goto: async (g) => { walks.push([g.x, g.y, g.z]) } },
+      blockAt: (p) => (p.equals(AT) ? { name, position: p, shapes: [[0, 0, 0, 1, 1, 1]] } : p.y < AT.y ? { name: 'stone', position: p, shapes: [[0, 0, 0, 1, 1, 1]] } : { name: 'air', position: p, shapes: [] }),
+      world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => env.bot.blockAt(p) }, ray) },
+      pathfinder: { startCell: (p) => p.floored(), goto: async (g) => { walks.push(g); env.bot.entity.position = BESIDE } },
       inventory: { items: () => [] },
       openEnchantmentTable: async () => assert.fail('opened the table'),
       openAnvil: async () => assert.fail('opened the anvil')
@@ -33,7 +36,11 @@ function stationEnv (name, seen) {
     goals,
     LEGACY_1710: false,
     SERVER_OVERRIDES: null,
-    ENCHANTING_1_21
+    ENCHANTING_1_21,
+    seenWorld: () => env.bot.world,
+    seenBlock: (p) => env.bot.blockAt(p),
+    Vec3,
+    CLICK_REACH: botConstant('CLICK_REACH')
   }
   return { env, walks }
 }
@@ -52,7 +59,7 @@ test('enchant and rename walk only to a seen enchanting table or anvil, and refu
   ]) {
     const seen = stationEnv(name, true)
     assert.strictEqual(await refusal(route, query, seen.env), 'no iron_sword in pockets', `control: ${route} reaches a seen ${name}`)
-    assert.deepStrictEqual(seen.walks, [[5, 64, 0]], route)
+    assert.deepStrictEqual(seen.walks.map((g) => [g.isEnd(HERE.floored()), g.isEnd(BESIDE.floored())]), [[false, true]], route)
 
     const hidden = stationEnv(name, false)
     assert.strictEqual(await refusal(route, query, hidden.env), none)
@@ -430,4 +437,66 @@ test('rename renames the named pocket item at a seen anvil', async () => {
   env.emitEvent = () => {}
   assert.deepStrictEqual(await awaitRoute('/rename', { item: 'iron_sword', name: 'Occam' }, env), { renamed: 'iron_sword', name: 'Occam', levelsSpent: 1, myLevelNow: 8 })
   assert.deepStrictEqual(renamed, [[sword, 'Occam']])
+})
+
+// stationEnv on plannedWalk. Opening the block where the feet can click it throws 'opened'.
+async function plannedStation (t, name, feet, world, at) {
+  const { env } = stationEnv(name, true)
+  const { walks, pathfinder, unclickable } = await plannedWalk(t, feet, world, env.bot)
+  const opened = []
+  const open = async (b) => {
+    assert.ok(b.position.equals(at), `opened ${b.position}`)
+    const why = unclickable(at)
+    if (why) throw new Error(`the ${name} is ${why}`)
+    opened.push(env.bot.entity.position.clone())
+    throw new Error('opened')
+  }
+  Object.assign(env.bot, {
+    findBlocks: () => [at],
+    inventory: { items: () => [{ name: 'iron_sword', count: 1 }, { name: 'lapis_lazuli', count: 3 }] },
+    openEnchantmentTable: open,
+    openAnvil: open
+  })
+  Object.assign(env, { seenWorld: () => env.bot.world, seenBlock: (p) => env.bot.blockAt(p), Vec3, CLICK_REACH: botConstant('CLICK_REACH') })
+  return { env, walks, opened, pathfinder }
+}
+
+const STATIONS = [
+  ['/enchant', 'enchanting_table', ['enchanting_table', {}], { item: 'iron_sword' }],
+  ['/rename', 'anvil', ['anvil', { facing: 'north' }], { item: 'iron_sword', name: 'Occam' }]
+]
+async function stationWalk (route, query, planned) {
+  const { handle, res } = routeHandler(route, planned.env)
+  await handle({ query }, res)
+  const { x, y, z } = planned.env.bot.entity.position
+  return { opened: planned.opened.length, goal: planned.pathfinder.goal, feet: new Vec3(x, y, z), error: res.error && res.error.message }
+}
+
+test('enchant and rename walk from the floor to a cell that clicks a table or anvil 2 above it and open it there', async (t) => {
+  for (const [route, name, block, query] of STATIONS) {
+    for (const from of [4, 8]) {
+      const planned = await plannedStation(t, name, new Vec3(from + 0.5, 63, 0.5), pillarWorld(block), PILLAR_TOP)
+      const { feet, ...got } = await stationWalk(route, query, planned)
+      assert.deepStrictEqual(got, { opened: 1, goal: null, error: 'opened' }, `${route} from ${from}, ended at ${feet}`)
+      assert.strictEqual(feet.y, 63, `${route} from ${from} opened from ${feet}`)
+    }
+  }
+})
+
+test('enchant and rename walk round a wall to a cell that sees a table or anvil behind it and open it there', async (t) => {
+  for (const [route, name, block, query] of STATIONS) {
+    const planned = await plannedStation(t, name, new Vec3(3.5, 63, 0.5), walledWorld(block), WALLED)
+    const { feet, ...got } = await stationWalk(route, query, planned)
+    assert.deepStrictEqual(got, { opened: 1, goal: null, error: 'opened' }, `${route} ended at ${feet}`)
+    assert.ok(feet.x < 1, `${route} opened from ${feet}, east of the wall`)
+  }
+})
+
+test('enchant opens the enchanting table it stands on from its top', async (t) => {
+  const at = new Vec3(0, 63, 0)
+  const world = floorWorld((x, y, z) => (at.equals(new Vec3(x, y, z)) ? ['enchanting_table', {}] : null))
+  const planned = await plannedStation(t, 'enchanting_table', new Vec3(0.5, 63.75, 0.5), world, at)
+  const { feet, ...got } = await stationWalk('/enchant', { item: 'iron_sword' }, planned)
+  assert.deepStrictEqual([got, feet], [{ opened: 1, goal: null, error: 'opened' }, new Vec3(0.5, 63.75, 0.5)])
+  assert.deepStrictEqual(planned.walks, [])
 })

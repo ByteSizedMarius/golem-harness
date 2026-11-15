@@ -414,7 +414,7 @@ test('on 1.7.10 a window opens within 6 blocks of the feet, and a block past tha
   assert.deepStrictEqual(later.done, [['open', GRAVESTONE]], 'a 1.21.11 server has its own reach')
 })
 
-test('grave names a gravestone out of reach after the walk instead of waiting for its window', async () => {
+test('grave passes on the 1.7.10 window reach refusal of a gravestone instead of waiting for its window', async () => {
   const s = sleeper({ legacy: true })
   const gb = { name: GRAVESTONE, type: 9, position: new Vec3(20, 156, 40) }
   s.bot.entity.position = new Vec3(20.5, 150, 40.5)
@@ -433,7 +433,8 @@ test('grave names a gravestone out of reach after the walk instead of waiting fo
     goals,
     Vec3,
     GRAVESTONE,
-    GRAVE_SIGHT: 32
+    GRAVE_SIGHT: 32,
+    walkToClick: async () => {}
   }
   const { handle, res } = routeHandler('/grave', env)
   await handle({ query: {} }, res)

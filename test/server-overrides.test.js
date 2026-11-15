@@ -7,10 +7,12 @@ const path = require('node:path')
 const mcData = require('minecraft-data')('1.21.11')
 const { Vec3 } = require('vec3')
 const { readServerOverrides, renameBlocks, overrideRecipes, craftable } = require('../lib/server-overrides')
-const { awaitRoute, loadBotFunctions } = require('./helpers')
+const { goals } = require('mineflayer-pathfinder')
+const WorldSync = require('prismarine-world/src/worldsync')
+const { awaitRoute, loadBotFunctions, botConstant } = require('./helpers')
 
 const id = (name) => mcData.itemsByName[name].id
-const TABLE = { name: 'crafting_table', position: new Vec3(2, 64, 0) }
+const TABLE = { name: 'crafting_table', position: new Vec3(2, 64, 0), shapes: [[0, 0, 0, 1, 1, 1]] }
 const OVERRIDES = {
   ingredients: {
     planks: { items: ['oak_planks', 'spruce_planks'] },
@@ -52,8 +54,9 @@ function crafter (items) {
     },
     entity: { position: new Vec3(0.5, 64, 0.5) },
     findBlocks: () => [TABLE.position],
-    blockAt: () => TABLE,
-    pathfinder: { goto: async () => {} }
+    blockAt: (p) => (p.equals(TABLE.position) ? TABLE : { name: p.y < 64 ? 'stone' : 'air', position: p, shapes: p.y < 64 ? [[0, 0, 0, 1, 1, 1]] : [] }),
+    world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => bot.blockAt(p) }, ray) },
+    pathfinder: { startCell: (p) => p.floored(), goto: async () => {} }
   }
   return { bot, crafts, held }
 }
@@ -72,7 +75,11 @@ function craftEnv (bot, serverRecipes) {
     cellKnown: () => true,
     seenNow: () => true,
     STATIONS: new Map(),
-    goals: { GoalNear: class {} }
+    goals,
+    seenWorld: () => bot.world,
+    seenBlock: (p) => bot.blockAt(p),
+    Vec3,
+    CLICK_REACH: botConstant('CLICK_REACH')
   }
 }
 

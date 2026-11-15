@@ -3,6 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter, once } = require('node:events')
 const { Vec3 } = require('vec3')
+const WorldSync = require('prismarine-world/src/worldsync')
 const { goals } = require('mineflayer-pathfinder')
 const mineflayer = require('mineflayer')
 const inventoryPlugin = require('mineflayer/lib/plugins/inventory')
@@ -51,12 +52,12 @@ async function doorBody (t, legacy, contents) {
   wireConnectionSpawn()
   bot.emit('login')
   client.emit('window_items', server.notch(Item, 0))
-  const chestBlock = { name: 'chest', type: CHEST_ID, position: CHEST_AT, getProperties: () => ({ type: 'single', facing: 'north' }) }
+  const chestBlock = { name: 'chest', type: CHEST_ID, position: CHEST_AT, shapes: [[0.0625, 0, 0.0625, 0.9375, 0.875, 0.9375]], getProperties: () => ({ type: 'single', facing: 'north' }) }
   Object.assign(bot, {
     entity: { position: new Vec3(0.5, 64, 0.5) },
-    blockAt: (p) => (p.equals(CHEST_AT) ? chestBlock : { name: 'air', type: 0, position: p }),
+    blockAt: (p) => (p.equals(CHEST_AT) ? chestBlock : p.y < 64 ? { name: 'stone', type: 1, position: p, shapes: [[0, 0, 0, 1, 1, 1]] } : { name: 'air', type: 0, position: p, shapes: [] }),
     findBlocks: () => [CHEST_AT],
-    world: { raycast: () => null },
+    world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => bot.blockAt(p) }, ray) },
     pathfinder: { goto: async () => {}, startCell: (p) => p.floored() },
     openContainer: async () => {
       const opened = once(bot, 'windowOpen')
@@ -83,8 +84,10 @@ async function doorBody (t, legacy, contents) {
     round: (v) => ({ x: v.x, y: v.y, z: v.z }),
     goals,
     seenWorld: () => bot.world,
+    seenBlock: (p) => bot.blockAt(p),
+    Vec3,
     CHEST_RADIUS: botConstant('CHEST_RADIUS'),
-    CHEST_REACH: botConstant('CHEST_REACH')
+    CLICK_REACH: botConstant('CLICK_REACH')
   }
   return { bot, Item, server, env }
 }

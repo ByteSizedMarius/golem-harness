@@ -5,7 +5,8 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
 const WorldSync = require('prismarine-world/src/worldsync')
-const { awaitRoute, routeHandler, botConstant, claimRescue, fakeClock } = require('./helpers')
+const { goals } = require('mineflayer-pathfinder')
+const { awaitRoute, routeHandler, botConstant, claimRescue, fakeClock, floorWorld, PILLAR_TOP, pillarWorld, WALLED, walledWorld, watchedGoto, plannedWalk } = require('./helpers')
 
 const AT = { x: '1', y: '64', z: '0' }
 const AIR = { name: 'air', stateId: 0, shapes: [] }
@@ -15,6 +16,8 @@ const block = (state, position) => ({
   position,
   getProperties: () => Object.fromEntries(['age', 'stage'].filter((k) => state[k] !== undefined).map((k) => [k, String(state[k])]))
 })
+// Without bot.world the click walk sees every point.
+const clickWalkEnv = (bot) => ({ goals, seenWorld: (p) => bot.world || { raycast: () => (bot.blockAt(p).shapes?.length ? bot.blockAt(p) : null) }, seenBlock: (p) => bot.blockAt(p), CLICK_REACH: botConstant('CLICK_REACH') })
 
 // A body beside a seen cell at 1,64,0 holding state, with held in hand. The server answers a block
 // click once the click returns, with an update to the state click(state) gives.
@@ -25,8 +28,8 @@ function useCell (state, held, click) {
     entity: { position: new Vec3(0.5, 64, 0.5) },
     heldItem: { name: held },
     inventory: { items: () => [] },
-    blockAt: (at) => block(at.equals(p) ? cell : AIR, at),
-    pathfinder: { goto: async () => {} },
+    blockAt: (at) => block(at.equals(p) ? cell : at.y < p.y ? STONE : AIR, at),
+    pathfinder: { startCell: (p) => p.floored(), goto: async () => {} },
     lookAt: async () => {},
     activateBlock: async () => {
       setImmediate(() => {
@@ -36,24 +39,25 @@ function useCell (state, held, click) {
       })
     }
   })
-  return { bot, Vec3, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, goals: {}, round: (v) => v, setTimeout, clearTimeout, ok: (res, body) => { res.body = { ok: true, ...body } } }
+  return { bot, Vec3, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, ...clickWalkEnv(bot), round: (v) => v, setTimeout, clearTimeout, ok: (res, body) => { res.body = { ok: true, ...body } } }
 }
 
-// The clicks /use makes on a seen cell holding name, with held in hand.
+// The clicks /use makes on a seen cell at AT holding name, with held in hand.
 async function clicksOn (name, held) {
   const clicks = []
+  const at = new Vec3(1, 64, 0)
   const bot = Object.assign(new EventEmitter(), {
     entity: { position: new Vec3(0.5, 64, 0.5) },
     heldItem: { name: held },
     inventory: { items: () => [] },
-    blockAt: (p) => block({ name, stateId: 1 }, p),
-    pathfinder: { goto: async () => {} },
+    blockAt: (p) => block(p.equals(at) ? { name, stateId: 1 } : p.y < at.y ? STONE : AIR, p),
+    pathfinder: { startCell: (p) => p.floored(), goto: async () => {} },
     lookAt: async () => {},
     activateBlock: async () => { clicks.push('block') },
     activateItem: () => { clicks.push('item') },
     deactivateItem: () => {}
   })
-  await awaitRoute('/use', AT, { bot, Vec3, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, goals: {}, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {} })
+  await awaitRoute('/use', AT, { bot, Vec3, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, ...clickWalkEnv(bot), round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {} })
   return clicks
 }
 
@@ -62,16 +66,18 @@ test('use states what the cell holds now only while the walk into reach left it 
     for (const tills of [true, false]) {
       let walked = false
       let tilled = false
+      const cube = [[0, 0, 0, 1, 1, 1]]
       const bot = Object.assign(new EventEmitter(), {
         entity: { position: new Vec3(0.5, 64, 0.5) },
         heldItem: { name: 'iron_hoe' },
         inventory: { items: () => [] },
-        blockAt: (p) => block(tilled ? { name: 'farmland', stateId: 2 } : { name: 'dirt', stateId: 1 }, p),
-        pathfinder: { goto: async () => { walked = true } },
+        blockAt: (p) => block(p.y > 63 ? AIR : tilled ? { name: 'farmland', stateId: 2, shapes: cube } : { name: 'dirt', stateId: 1, shapes: cube }, p),
+        // The walk ends beside the cell.
+        pathfinder: { startCell: (p) => p.floored(), goto: async () => { walked = true; bot.entity.position = new Vec3(8.5, 64, 0.5) } },
         lookAt: async () => {},
         activateBlock: async () => { tilled = tills }
       })
-      const env = { bot, Vec3, seesLit: () => !walked || inSight, leafInTheWay: () => null, cellKnown: () => true, goals: { GoalNear: class {} }, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {} }
+      const env = { bot, Vec3, seesLit: () => !walked || inSight, leafInTheWay: () => null, cellKnown: () => true, ...clickWalkEnv(bot), round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {} }
       const reply = await awaitRoute('/use', { x: '9', y: '63', z: '0' }, env)
       const label = `in sight ${inSight}, tills ${tills}`
       assert.ok(walked, label)
@@ -89,24 +95,27 @@ test('use clears the goal of a walk into reach that ends short of the cell', asy
       setGoal (goal) { pathfinder.goal = goal },
       stop () {},
       isMoving: () => false,
-      async goto (goal) {
-        pathfinder.goal = goal
-        if (end !== 'an empty plan') throw Object.assign(new Error(end), { name: end })
-      }
+      startCell: (p) => p.floored(),
+      goto: null
     }
     const bot = Object.assign(new EventEmitter(), {
       entity: { position: new Vec3(0.5, 64, 0.5) },
       heldItem: { name: 'iron_hoe' },
       inventory: { items: () => [] },
-      blockAt: (p) => block({ name: 'dirt', stateId: 1 }, p),
+      blockAt: (p) => block(p.y > 63 ? AIR : { name: 'dirt', stateId: 1, shapes: [[0, 0, 0, 1, 1, 1]] }, p),
       pathfinder,
       lookAt: async () => {},
       activateBlock: async () => {}
     })
-    const env = { bot, Vec3, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, goals: { GoalNear: class {} }, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {} }
+    pathfinder.goto = watchedGoto(bot, async (goal) => {
+      pathfinder.goal = goal
+      if (end !== 'an empty plan') throw Object.assign(new Error(end), { name: end })
+    })
+    const env = { bot, Vec3, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, ...clickWalkEnv(bot), round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {} }
     const { handle, res } = routeHandler('/use', env)
     await handle({ query: { x: '9', y: '63', z: '0' } }, res)
     if (end !== 'an empty plan') assert.strictEqual(res.error && res.error.name, end)
+    else assert.match(res.error?.message, /is out of reach or sight from 0,64,0, where the walk ended/)
     assert.strictEqual(pathfinder.goal, null, end)
   }
 })
@@ -135,8 +144,8 @@ function farmland (plant, grow, seen = () => true) {
     entity: { position: new Vec3(0.5, 64, 0.5) },
     heldItem: { name: 'bone_meal' },
     inventory: { items: () => [] },
-    blockAt: (at) => block(cells[at] || AIR, at),
-    pathfinder: { goto: async () => {} },
+    blockAt: (at) => block(cells[at] || (at.y < soil.y ? STONE : AIR), at),
+    pathfinder: { startCell: (p) => p.floored(), goto: async () => {} },
     lookAt: async () => {},
     activateBlock: async (b) => {
       clicked.push(b.position)
@@ -147,7 +156,7 @@ function farmland (plant, grow, seen = () => true) {
       })
     }
   })
-  const env = { bot, Vec3, seesLit: seen, leafInTheWay: () => null, cellKnown: () => true, goals: {}, round: (v) => v, setTimeout, clearTimeout, ok: (res, body) => { res.body = { ok: true, ...body } } }
+  const env = { bot, Vec3, seesLit: seen, leafInTheWay: () => null, cellKnown: () => true, ...clickWalkEnv(bot), round: (v) => v, setTimeout, clearTimeout, ok: (res, body) => { res.body = { ok: true, ...body } } }
   return { env, clicked }
 }
 
@@ -220,7 +229,7 @@ async function bucketUse (cell, hand, { turned = null, turnMs = 0, after = null,
     time: { age: 0 },
     blockAt,
     world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: blockAt }, ray) },
-    pathfinder: { goto: async () => {} },
+    pathfinder: { startCell: (p) => p.floored(), goto: async () => {} },
     lookAt: async () => {},
     activateItem () {
       if (turned) clock.setTimeout(() => setSlot(36, turned), turnMs)
@@ -243,7 +252,7 @@ async function bucketUse (cell, hand, { turned = null, turnMs = 0, after = null,
     seesLit: () => true,
     leafInTheWay: () => null,
     cellKnown: () => true,
-    goals: {},
+    ...clickWalkEnv(bot),
     round: (v) => v,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
@@ -335,7 +344,7 @@ async function pourAt (at, { hand = 'water_bucket', feet = new Vec3(0.5, 64, 0.5
     time: { age: 0 },
     blockAt,
     world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: blockAt }, ray) },
-    pathfinder: { goto: async (goal) => { walks.push(goal); bot.entity.position = walkTo } },
+    pathfinder: { startCell: (p) => p.floored(), goto: async (goal) => { walks.push(goal); bot.entity.position = walkTo } },
     lookAt: async (point) => { looks.push(point) },
     activateItem () {
       if (hand === 'bucket') return
@@ -363,7 +372,8 @@ async function pourAt (at, { hand = 'water_bucket', feet = new Vec3(0.5, 64, 0.5
     seesLit: seen,
     cellKnown: seen,
     leafInTheWay: () => null,
-    goals: { GoalNear: class { constructor (x, y, z, range) { Object.assign(this, { x, y, z, range }) } } },
+    ...clickWalkEnv(bot),
+    goals: { Goal: goals.Goal, GoalNear: class { constructor (x, y, z, range) { Object.assign(this, { x, y, z, range }) } } },
     round: (v) => v,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
@@ -462,10 +472,14 @@ async function sowUse ({ feet = new Vec3(0.5, 64, 0.5), cells = {}, count = 8, h
     },
     pathfinder: {
       movements: { getBlock: (c) => (seen(c) ? {} : { name: 'unknown' }) },
-      goto: () => new Promise((resolve) => {
+      startCell: (p) => p.floored(),
+      goto: (goal) => new Promise((resolve, reject) => {
         log.push('walk')
+        // With walk.ends the walk ends on the end cell of the goal nearest the feet.
+        const end = walk.ends && walk.ends.filter((c) => goal.isEnd(c)).sort((a, b) => a.distanceTo(feet) - b.distanceTo(feet))[0]
+        if (walk.ends && !end) return reject(Object.assign(new Error('No path to the goal!'), { name: 'NoPath' }))
         clock.setTimeout(() => {
-          bot.entity.position = walk.to || new Vec3(0.5, 64, 0.5)
+          bot.entity.position = end ? end.offset(0.5, 0, 0.5) : walk.to || new Vec3(0.5, 64, 0.5)
           for (const k of walk.hides || []) hidden.add(k)
           Object.assign(world, walk.sets)
           if (reflex && !guardState.hand) bot.quickBarSlot = 1
@@ -503,7 +517,7 @@ async function sowUse ({ feet = new Vec3(0.5, 64, 0.5), cells = {}, count = 8, h
     seenNow: seen,
     cellKnown: seen,
     leafInTheWay: () => null,
-    goals: { GoalNear: class {} },
+    goals,
     round: (v) => v,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
@@ -516,7 +530,7 @@ async function sowUse ({ feet = new Vec3(0.5, 64, 0.5), cells = {}, count = 8, h
     ...extra
   }
   const { res, ms } = await useOnClock(clock, env, { x: '1', y: '64', z: '0', item: 'wheat_seeds' })
-  return { reply: res.body, error: res.error, ms, log, guardState, unseenReads, held: bot.heldItem && bot.heldItem.name }
+  return { reply: res.body, error: res.error, ms, log, guardState, unseenReads, held: bot.heldItem && bot.heldItem.name, feet: bot.entity.position }
 }
 
 const PLANTS = [[30, 'soil'], [30, 'crop', WHEAT], [31, 'slot', 7]]
@@ -689,15 +703,15 @@ test('a seed use refused for its stand after the walk leaves the hand as it was'
   assert.deepStrictEqual([log, held], [['walk'], 'iron_sword'])
 })
 
-// A body holding an iron shovel beside a seen dirt cell at 1,64,0, an iron hoe in its pockets, over digLock. done records walks, looks, equips and clicks.
+// A body holding an iron shovel beside a seen dirt cell at 1,64,0, an iron hoe in its pockets, over digLock.
 function rescueBody (digLock) {
   const done = []
   const bot = Object.assign(new EventEmitter(), {
     entity: { position: new Vec3(0.5, 64, 0.5) },
     heldItem: { name: 'iron_shovel' },
     inventory: { items: () => [{ name: 'iron_hoe' }] },
-    blockAt: (p) => block({ name: 'dirt', stateId: 1 }, p),
-    pathfinder: { goto: async () => { done.push('walk') } },
+    blockAt: (p) => block(p.y > 64 || (p.y === 64 && !p.equals(new Vec3(1, 64, 0))) ? AIR : { name: 'dirt', stateId: 1, shapes: [[0, 0, 0, 1, 1, 1]] }, p),
+    pathfinder: { startCell: (p) => p.floored(), goto: async (goal) => { if (!goal.isEnd(bot.entity.position.floored())) done.push('walk') } },
     lookAt: async () => { done.push('look') },
     waitForTicks: async () => {},
     equip: async (it) => { done.push(`equip ${it.name}`); bot.heldItem = it },
@@ -706,7 +720,7 @@ function rescueBody (digLock) {
     deactivateItem: () => {},
     isABed: () => false
   })
-  const env = { bot, Vec3, require, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, goals: { GoalNear: class {} }, round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {}, digLock, LEGACY_1710: false }
+  const env = { bot, Vec3, require, seesLit: () => true, leafInTheWay: () => null, cellKnown: () => true, ...clickWalkEnv(bot), round: (v) => v, setTimeout: (fn) => fn(), clearTimeout () {}, digLock, LEGACY_1710: false }
   return { bot, env, done }
 }
 
@@ -753,4 +767,187 @@ test('fish refuses busy while the buried self-rescue holds the hand and starts n
   digLock.holder = null
   assert.deepStrictEqual(await awaitRoute('/fish', {}, env), { job: 1, casts: 1, aimed: false })
   assert.deepStrictEqual(started, ['fish x1'])
+})
+
+// A body on plannedWalk with an empty hand. Its click on a block records the feet where they can click it.
+async function plannedClick (t, feet, world) {
+  const clicks = []
+  const bot = Object.assign(new EventEmitter(), {
+    heldItem: null,
+    inventory: { items: () => [] },
+    lookAt: async () => {},
+    waitForTicks: async () => {},
+    isABed: () => false
+  })
+  const { walks, pathfinder, unclickable } = await plannedWalk(t, feet, world, bot)
+  bot.activateBlock = async (b) => {
+    const why = unclickable(b.position)
+    if (why) throw new Error(`the ${b.name} is ${why}`)
+    clicks.push(bot.entity.position.clone())
+  }
+  const env = {
+    bot,
+    Vec3,
+    require,
+    seesLit: () => true,
+    seenNow: () => true,
+    leafInTheWay: () => null,
+    cellKnown: () => true,
+    goals,
+    round: (v) => v,
+    setTimeout: (fn) => fn(),
+    clearTimeout () {},
+    LEGACY_1710: false,
+    seenWorld: () => bot.world,
+    seenBlock: (p) => bot.blockAt(p),
+    CLICK_REACH: botConstant('CLICK_REACH')
+  }
+  return { env, clicks, walks, pathfinder }
+}
+
+async function clickWalk (route, at, planned) {
+  const { handle, res } = routeHandler(route, planned.env)
+  await handle({ query: { x: String(at.x), y: String(at.y), z: String(at.z) } }, res)
+  const { x, y, z } = planned.env.bot.entity.position
+  return { clicks: planned.clicks.length, goal: planned.pathfinder.goal, feet: new Vec3(x, y, z), error: res.error && res.error.message }
+}
+
+const FLOOR_LEVER = ['lever', { face: 'floor', facing: 'north', powered: 'false' }]
+const CLICKED = [['/activate', FLOOR_LEVER], ['/use', ['crafting_table', {}]]]
+
+test('activate and a plain use walk from the floor to a cell that clicks a block 2 above it and click it there', async (t) => {
+  for (const [route, block] of CLICKED) {
+    for (const from of [4, 8]) {
+      const planned = await plannedClick(t, new Vec3(from + 0.5, 63, 0.5), pillarWorld(block))
+      const { feet, ...got } = await clickWalk(route, PILLAR_TOP, planned)
+      assert.deepStrictEqual(got, { clicks: 1, goal: null, error: undefined }, `${route} from ${from}, ended at ${feet}`)
+      assert.strictEqual(feet.y, 63, `${route} from ${from} clicked from ${feet}`)
+    }
+  }
+})
+
+test('activate and a plain use walk round a wall to a cell that sees the block behind it and click it there', async (t) => {
+  for (const [route, block] of CLICKED) {
+    const planned = await plannedClick(t, new Vec3(3.5, 63, 0.5), walledWorld(block))
+    const { feet, ...got } = await clickWalk(route, WALLED, planned)
+    assert.deepStrictEqual(got, { clicks: 1, goal: null, error: undefined }, `${route} ended at ${feet}`)
+    assert.ok(feet.x < 1, `${route} clicked from ${feet}, east of the wall`)
+  }
+})
+
+test('activate steps out of the cell of a floor lever or a pressure plate it stands in before it clicks it', async (t) => {
+  const at = new Vec3(0, 63, 0)
+  for (const block of [FLOOR_LEVER, ['stone_pressure_plate', { powered: 'false' }]]) {
+    const planned = await plannedClick(t, new Vec3(0.5, 63, 0.5), floorWorld((x, y, z) => (at.equals(new Vec3(x, y, z)) ? block : null)))
+    const { feet, ...got } = await clickWalk('/activate', at, planned)
+    assert.deepStrictEqual(got, { clicks: 1, goal: null, error: undefined }, `${block[0]} ended at ${feet}`)
+    assert.ok(!feet.floored().equals(at), `${block[0]} clicked from ${feet}`)
+  }
+})
+
+test('activate walks near a floor lever with a leaf on each side and on top, names the leaf in the way and clicks nothing', async (t) => {
+  const at = new Vec3(0, 63, 0)
+  const cage = new Set(['1,63,0', '-1,63,0', '0,63,1', '0,63,-1', '0,64,0'])
+  const world = floorWorld((x, y, z) => at.equals(new Vec3(x, y, z)) ? FLOOR_LEVER : cage.has(`${x},${y},${z}`) ? ['oak_leaves', {}] : null)
+  const planned = await plannedClick(t, new Vec3(6.5, 63, 0.5), world)
+  const { feet, ...got } = await clickWalk('/activate', at, planned)
+  assert.deepStrictEqual(got, { clicks: 0, goal: null, error: 'oak_leaves at 1,63,0 is in the way' }, `ended at ${feet}`)
+  assert.deepStrictEqual(feet, new Vec3(3.5, 63, 0.5))
+})
+
+test('activate and a plain use on a block already in click reach click it without a walk', async (t) => {
+  const at = new Vec3(0, 63, 0)
+  for (const [route, block] of CLICKED) {
+    const planned = await plannedClick(t, new Vec3(2.5, 63, 0.5), floorWorld((x, y, z) => (at.equals(new Vec3(x, y, z)) ? block : null)))
+    const { feet, ...got } = await clickWalk(route, at, planned)
+    assert.deepStrictEqual([got, planned.walks], [{ clicks: 1, goal: null, error: undefined }, []], route)
+  }
+})
+
+test('a fill with an empty bucket from the water the body floats in clicks in place without a walk', async () => {
+  const { refusal, looks, walks } = await pourAt(new Vec3(0, 64, 0), { hand: 'bucket', cells: { '0,64,0': WATER } })
+  assert.deepStrictEqual([refusal, walks.length, looks], [undefined, 0, [new Vec3(0.5, 64.5, 0.5)]])
+})
+
+// A bed facing east with its head at 0,63,0 and its foot at -1,63,0.
+const BED_HEAD = new Vec3(0, 63, 0)
+const bedWorld = () => floorWorld((x, y, z) => (y === 63 && z === 0 && (x === 0 || x === -1) ? ['red_bed', { facing: 'east', part: x === 0 ? 'head' : 'foot' }] : null))
+
+test('activate walks to a bed from 8 away to a stand within 2.5 of the head on x and z, where a 1.7.10 server lets the body sleep', async (t) => {
+  for (const from of [new Vec3(8.5, 63, 0.5), new Vec3(0.5, 63, 8.5)]) {
+    for (const clicked of [BED_HEAD, BED_HEAD.offset(-1, 0, 0)]) {
+      const planned = await plannedClick(t, from, bedWorld())
+      planned.env.bot.isABed = (b) => b.name.endsWith('_bed')
+      Object.assign(planned.env, { shared: { mcData: require('minecraft-data')('1.21.11') }, liveEntities: () => [], HANGS: botConstant('HANGS') })
+      const { feet, ...got } = await clickWalk('/activate', clicked, planned)
+      const label = `${clicked} from ${from}, ended at ${feet}`
+      assert.deepStrictEqual(got, { clicks: 1, goal: null, error: undefined }, label)
+      assert.ok(Math.abs(feet.x - BED_HEAD.x) <= 2.5 && Math.abs(feet.z - BED_HEAD.z) <= 2.5, label)
+    }
+  }
+})
+
+test('activate walks to a bed from 8 away on the foot side to the first stand within 3 of the head block\'s corner', async (t) => {
+  const planned = await plannedClick(t, new Vec3(-7.5, 63, 0.5), bedWorld())
+  planned.env.bot.isABed = (b) => b.name.endsWith('_bed')
+  Object.assign(planned.env, { shared: { mcData: require('minecraft-data')('1.21.11') }, liveEntities: () => [], HANGS: botConstant('HANGS') })
+  const { feet, ...got } = await clickWalk('/activate', BED_HEAD, planned)
+  assert.deepStrictEqual([got, feet], [{ clicks: 1, goal: null, error: undefined }, new Vec3(-2.5, 63, 0.5)])
+})
+
+async function fencedBed (t, moved) {
+  const feet = new Vec3(3.1, 63, 0.5)
+  const bed = bedWorld()
+  const fenced = floorWorld((x, y, z) => (x === 3 && y === 63 && z === 0 ? ['oak_fence', {}] : bed[`${x},${y},${z}`]))
+  const planned = await plannedClick(t, feet, fenced)
+  const { bot } = planned.env
+  bot.isABed = (b) => b.name.endsWith('_bed')
+  const centred = []
+  const centerOnCell = async (cell) => {
+    centred.push(cell)
+    bot.entity.position = moved(cell)
+    return true
+  }
+  Object.assign(planned.env, { shared: { mcData: require('minecraft-data')('1.21.11') }, liveEntities: () => [], HANGS: botConstant('HANGS'), centerOnCell })
+  assert.deepStrictEqual(planned.pathfinder.startCell(feet), new Vec3(2, 63, 0), 'control: the walk starts in the cell beside the fence')
+  const { feet: end, ...got } = await clickWalk('/activate', BED_HEAD, planned)
+  return { ...got, end, centred, walks: planned.walks }
+}
+
+test('activate on a bed never clicks from feet more than 3 from the head block\'s corner where a fence beside them moves the walk\'s start cell', async (t) => {
+  const { end, ...got } = await fencedBed(t, (cell) => cell.offset(0.5, 0, 0.5))
+  assert.deepStrictEqual(got, { clicks: 1, goal: null, error: undefined, centred: [new Vec3(2, 63, 0)], walks: [] }, `ended at ${end}`)
+  assert.ok(Math.abs(end.x - BED_HEAD.x) <= 3, `clicked from ${end}`)
+})
+
+test('activate on a bed refuses with no click when centring on the walk\'s start cell leaves the feet more than 3 from the head block\'s corner', async (t) => {
+  const { end, ...got } = await fencedBed(t, () => new Vec3(3.1, 63, 0.5))
+  assert.deepStrictEqual(got, {
+    clicks: 0,
+    goal: null,
+    error: 'the red_bed at 0,63,0 is out of reach or sight from 2,63,0, where the walk ended',
+    centred: [new Vec3(2, 63, 0)],
+    walks: []
+  }, `ended at ${end}`)
+})
+
+test('control: a pour out of reach walks within 2 of the cell, as a GoalNear', async () => {
+  const { walks } = await pourAt(new Vec3(6, 64, 0), { walkTo: new Vec3(4.5, 64, 0.5) })
+  assert.deepStrictEqual(walks.map((g) => [g.constructor.name, g.x, g.y, g.z, g.range]), [['GoalNear', 6, 64, 0, 2]])
+})
+
+test('a seed out of reach walks to a stand above the farmland top, never to one a level below the bed', async () => {
+  // The floor east of x 1 lies one level below the bed's floor.
+  const cells = {}
+  const ends = []
+  for (let z = -3; z <= 3; z++) {
+    for (let x = -3; x <= 8; x++) {
+      if (x >= 2) cells[`${x},63,${z}`] = AIR
+      if (x !== 1 || z !== 0) ends.push(new Vec3(x, x >= 2 ? 63 : 64, z))
+    }
+  }
+  const { reply, error, log, feet } = await sowUse({ feet: new Vec3(6.5, 63, 0.5), cells, walk: { ends }, answers: PLANTS, env: { goals } })
+  assert.strictEqual(error, undefined, error && error.message)
+  assert.deepStrictEqual([reply.planted, log], [true, ['walk', 'click wheat_seeds on 1,64,0']])
+  assert.ok(feet.y === 64, `sowed from ${feet}`)
 })

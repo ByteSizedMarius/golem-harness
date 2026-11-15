@@ -4,6 +4,7 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
+const WorldSync = require('prismarine-world/src/worldsync')
 const registry = require('prismarine-registry')('1.21.11')
 const Item = require('prismarine-item')(registry)
 const { routeHandler, fakeClock, botConstant } = require('./helpers')
@@ -52,10 +53,12 @@ async function renameRun (pocket, { legacy = true, level = 50, mode = 'survival'
     client.emit(packet, { windowId: 0, ...fields })
   }
   const bot = Object.assign(new EventEmitter(), {
-    entity: { position: new Vec3(0.5, 64, 0.5) },
+    // In click reach of the anvil.
+    entity: { position: new Vec3(3.5, 64, 0.5) },
     findBlocks: ({ matching }) => (matching.includes(145) ? [AT] : []),
-    blockAt: (p) => ({ name: p.equals(AT) ? 'anvil' : 'stone', position: p }),
-    pathfinder: { goto: async (g) => { walks.push([g.x, g.y, g.z]) } },
+    blockAt: (p) => (p.equals(AT) ? { name: 'anvil', position: p, shapes: [[0, 0, 0, 1, 1, 1]] } : p.y < AT.y ? { name: 'stone', position: p, shapes: [[0, 0, 0, 1, 1, 1]] } : { name: 'air', position: p, shapes: [] }),
+    world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => bot.blockAt(p) }, ray) },
+    pathfinder: { startCell: (p) => p.floored(), goto: async (g) => { walks.push(g) } },
     inventory,
     experience: { level },
     game: { gameMode: mode },
@@ -147,7 +150,11 @@ async function renameRun (pocket, { legacy = true, level = 50, mode = 'survival'
     POCKET_SETTLE_MS: botConstant('POCKET_SETTLE_MS'),
     emitEvent () {},
     setTimeout: clock.setTimeout,
-    clearTimeout: clock.clearTimeout
+    clearTimeout: clock.clearTimeout,
+    seenWorld: () => bot.world,
+    seenBlock: (p) => bot.blockAt(p),
+    Vec3,
+    CLICK_REACH: botConstant('CLICK_REACH')
   }
   const { handle, res } = routeHandler('/rename', env)
   await handle({ query: { item: pocket.name, name } }, res)

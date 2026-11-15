@@ -9,10 +9,12 @@ const os = require('node:os')
 const path = require('node:path')
 const { spawn } = require('node:child_process')
 const { EventEmitter, once } = require('node:events')
+const { AsyncLocalStorage } = require('node:async_hooks')
 const vm = require('node:vm')
 const { performance } = require('node:perf_hooks')
 const express = require('express')
 const { Vec3 } = require('vec3')
+const WorldSync = require('prismarine-world/src/worldsync')
 const mineflayer = require('mineflayer')
 const { pathfinder, goals } = require('mineflayer-pathfinder')
 const shelter = require('../lib/shelter')
@@ -24,6 +26,8 @@ const { createApp } = require('../lib/app')
 const { createServer } = require('../mcp/server')
 const { TOOLS } = require('../mcp/tools')
 const { createConnection, bindConnection, wireConnectionSpawn } = require('../lib/bot/connection')
+const { guardWork } = require('../lib/walk')
+const { LEGACY_CLICK_REACH } = require('../lib/bot/legacy-1710')
 
 const ROOT = path.join(__dirname, '..')
 const ALLOW = ['me', 'tell', 'msg', 'w']
@@ -841,6 +845,102 @@ async function walkingBody (t, pos, cells = {}) {
   return { bot, plan, shared: ctx.shared }
 }
 
+// A walkingBody world of stone up to y 62 and air above, except where cell(x, y, z) returns [name, properties].
+function floorWorld (cell) {
+  return new Proxy({}, {
+    get (_, k) {
+      if (typeof k !== 'string') return undefined
+      const [x, y, z] = k.split(',').map(Number)
+      return cell(x, y, z) || [y <= 62 ? 'stone' : 'air', {}]
+    }
+  })
+}
+// A floorWorld with block on a 2-high stone pillar at 0,63,0.
+const PILLAR_TOP = new Vec3(0, 65, 0)
+const pillarWorld = (block) => floorWorld((x, y, z) => x === 0 && z === 0 && y >= 63 && y <= 65 ? (y === 65 ? block : ['stone', {}]) : null)
+// A floorWorld with block at 0,63,0 behind a stone wall 2 high along x 1 from z -3 to 3.
+const WALLED = new Vec3(0, 63, 0)
+const walledWorld = (block) => floorWorld((x, y, z) => {
+  if (x === 0 && y === 63 && z === 0) return block
+  return x === 1 && z >= -3 && z <= 3 && y >= 63 && y <= 64 ? ['stone', {}] : null
+})
+
+// The client's outlines of a floor lever facing north or south and of a pressure plate.
+const OUTLINES = { lever: [[5 / 16, 0, 4 / 16, 11 / 16, 6 / 16, 12 / 16]], stone_pressure_plate: [[1 / 16, 0, 1 / 16, 15 / 16, 1 / 16, 15 / 16]] }
+
+// Whether a ray from the eye to a grid point on a face of p's boxes turned to the eye hits p first.
+function seesFace (eye, p, blockAt) {
+  const target = blockAt(p)
+  const boxes = target.shapes.length ? target.shapes : OUTLINES[target.name]
+  assert.ok(boxes, `no outline for ${target.name}`)
+  if (target.name === 'lever') assert.ok(target.getProperties().face === 'floor' && ['north', 'south'].includes(target.getProperties().facing), 'a floor lever facing north or south')
+  const stops = (b, iter) => iter.intersect(p.equals(iter.block) ? boxes : b.shapes, iter.block) !== null
+  const grid = [0.1, 0.3, 0.5, 0.7, 0.9]
+  return boxes.some((box) => [0, 1, 2].some((k) => [0, 1].some((up) => grid.some((u) => grid.some((v) => {
+    const [i, j] = [(k + 1) % 3, (k + 2) % 3]
+    const q = []
+    q[k] = box[k + 3 * up]
+    q[i] = box[i] + u * (box[i + 3] - box[i])
+    q[j] = box[j] + v * (box[j + 3] - box[j])
+    const point = p.plus(new Vec3(...q))
+    const axis = 'xyz'[k]
+    if ((eye[axis] - point[axis]) * (up ? 1 : -1) <= 0) return false
+    // The ray runs a little past the point, into the box.
+    const hit = WorldSync.prototype.raycast.apply({ getBlock: blockAt }, [eye, point.minus(eye).normalize(), eye.distanceTo(point) + 0.01, stops])
+    return hit !== null && hit.position.equals(p)
+  })))))
+}
+
+function watchedGoto (bot, goto) {
+  const watch = {
+    bot,
+    goals,
+    COLLECT_STALL_MS: botConstant('COLLECT_STALL_MS'),
+    COLLECT_BUDGET_MS: botConstant('COLLECT_BUDGET_MS'),
+    guardWork,
+    watchScope: new AsyncLocalStorage(),
+    reflexes: [{ name: 'unstuck', active: false }],
+    litFuse: () => null
+  }
+  return loadBotFunctions(['watchGoto', 'stopPath'], watch).watchGoto(goto)
+}
+
+// bot on walkingBody's planner over world, with a goto that leaves the goal set where mineflayer-pathfinder's goto does.
+async function plannedWalk (t, feet, world, bot) {
+  const walk = await walkingBody(t, feet, world)
+  const { pathfinder } = walk.bot
+  // The Timeout cases run out this budget.
+  pathfinder.thinkTimeout = 1000
+  const named = (name, message) => Object.assign(new Error(message), { name })
+  const walks = []
+  pathfinder.goto = watchedGoto(walk.bot, async (goal) => {
+    pathfinder.setGoal(goal)
+    let result
+    for (const step of pathfinder.getPathFromTo(pathfinder.movements, bot.entity.position, goal)) result = step.result
+    const { status, path } = result
+    walks.push(path.length)
+    if (!path.length) {
+      if (goal.isEnd(bot.entity.position.floored())) pathfinder.setGoal(null)
+      return
+    }
+    if (status === 'noPath') throw named('NoPath', 'No path to the goal!')
+    if (status === 'timeout') throw named('Timeout', 'Took to long to decide path to goal!')
+    const end = path[path.length - 1]
+    bot.entity.position = new Vec3(end.x, end.y, end.z)
+    pathfinder.setGoal(null)
+  })
+  const { blockAt } = walk.bot
+  const raycast = (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => blockAt(p) }, ray)
+  Object.assign(bot, { entity: walk.bot.entity, blockAt, world: { raycast }, pathfinder })
+  const unclickable = (p) => {
+    const at = bot.entity.position
+    if (!seesFace(at.offset(0, 1.62, 0), p, blockAt)) return `out of sight from ${at}`
+    if (at.distanceTo(p.offset(0.5, 0.5, 0.5)) >= LEGACY_CLICK_REACH) return `out of reach from ${at}`
+    return null
+  }
+  return { walks, pathfinder, unclickable }
+}
+
 let freeNames
 function sourceNames () {
   freeNames ??= new Set([...codeOnly(botSource()).matchAll(/(?<![.\w$])[A-Za-z_$][\w$]*/g)].map((m) => m[0]))
@@ -876,6 +976,10 @@ function loadBotFunctions (names, env, code = '') {
     }
     // Unless env has its own, soleClaim reads a free dig lock.
     if (name === 'soleClaim') env.digLock ??= botConstant('digLock')
+    if (name === 'refuseWhileBuilding' || name === 'craftItem') {
+      env.bunker ??= { building: false }
+      env.BUNKER_WALK ??= botConstant('BUNKER_WALK')
+    }
     if (name === 'seenWorld') env.WorldSync ??= require('prismarine-world/src/worldsync')
     sources.push(body)
     reach(body, name)
@@ -1417,7 +1521,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, blockWorld, sectionWorld, walkingBody, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
+  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, blockWorld, sectionWorld, walkingBody, floorWorld, PILLAR_TOP, pillarWorld, WALLED, walledWorld, seesFace, watchedGoto, plannedWalk, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, laneAt,
   buildVerbEnv, digInProblemWith, facings, digJob, claimRescue, routeJobs

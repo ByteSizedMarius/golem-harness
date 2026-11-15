@@ -4,9 +4,10 @@ const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
+const WorldSync = require('prismarine-world/src/worldsync')
 const { smeltYield, burnItems, COOK_PROBE_TICKS } = require('../lib/furnace')
 const { LEGACY_CLICK_REACH } = require('../lib/bot/legacy-1710')
-const { HUNG, awaitRoute, loadBotFunctions, routeHandler, timed, fakeClock, botConstant } = require('./helpers')
+const { HUNG, awaitRoute, loadBotFunctions, routeHandler, timed, fakeClock, botConstant, floorWorld, PILLAR_TOP, pillarWorld, WALLED, walledWorld, plannedWalk } = require('./helpers')
 
 const IDS = { iron_ore: 1, iron_ingot: 2, coal: 3, sand: 4, glass: 5, stone: 6, stick: 7, blaze_rod: 8, deepslate_bricks: 9, oak_log: 10, charcoal: 11 }
 const stack = (name, count) => ({ name, type: IDS[name], count, stackSize: 64 })
@@ -128,18 +129,21 @@ function furnaceWindow ({ input = null, fuel = null, output = null, pockets = []
 }
 
 // seen tells whether the furnace cell is in lit sight or was seen, and walks collects the goals the pathfinder was sent.
+// The furnace stands at AT on a stone floor with air above.
 function furnaceEnv (f, seen = true) {
   const logs = []
   const walks = []
-  const block = { name: 'furnace', position: AT }
+  const cube = [[0, 0, 0, 1, 1, 1]]
+  const block = { name: 'furnace', position: AT, shapes: cube }
   const env = {
     bot: Object.assign(f.bot, {
       entity: { position: HERE },
       _client: f.client,
       inventory: f.inventory,
       findBlocks: ({ matching }) => (matching.includes(61) ? [AT] : []),
-      blockAt: (p) => (p.equals(AT) ? block : { name: 'stone', position: p }),
-      pathfinder: { goto: async (goal) => { walks.push(goal) } },
+      blockAt: (p) => (p.equals(AT) ? block : p.y < HERE.y ? { name: 'stone', position: p, shapes: cube } : { name: 'air', position: p, shapes: [] }),
+      world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => env.bot.blockAt(p) }, ray) },
+      pathfinder: { goto: async (goal) => { walks.push(goal) }, startCell: (p) => p.floored() },
       openFurnace: async (b) => { assert.strictEqual(b, block); return f.window },
       transfer: async (o) => { assert.strictEqual(o.window, f.window); f.transfer(o) },
       waitForTicks: async (n) => f.window.tick(n)
@@ -155,6 +159,9 @@ function furnaceEnv (f, seen = true) {
     ck: (x, y, z) => x + ',' + y + ',' + z,
     shared: { ready: true },
     goals,
+    seenWorld: () => env.bot.world,
+    seenBlock: (p) => env.bot.blockAt(p),
+    CLICK_REACH: botConstant('CLICK_REACH'),
     Vec3,
     smeltYield,
     burnItems,
@@ -313,9 +320,10 @@ test('smelt neither names nor counts a flame it found burning over an empty fuel
 test('smelt with at walks from the floor into click reach of a furnace stacked two over it', async () => {
   const f = furnaceWindow({ pockets: [stack('iron_ore', 8), stack('coal', 1)] })
   const { env, walks } = furnaceEnv(f)
-  const upper = { name: 'furnace', position: new Vec3(3, 66, 0) }
+  const upper = { name: 'furnace', position: new Vec3(3, 66, 0), shapes: [[0, 0, 0, 1, 1, 1]] }
   const blockAt = env.bot.blockAt
   env.bot.blockAt = (p) => (p.equals(upper.position) ? upper : blockAt(p))
+  env.bot.entity.position = new Vec3(-1.5, 64, 0.5)
   // The walk ends on the nearest floor cell that ends the goal, outside the furnace column.
   env.bot.pathfinder.goto = async (goal) => {
     walks.push(goal)
@@ -330,6 +338,115 @@ test('smelt with at walks from the floor into click reach of a furnace stacked t
   const reply = await awaitRoute('/smelt', { item: 'iron_ore', count: '8', at: '3,66,0' }, env)
   assert.deepStrictEqual([reply.at, reply.input], [{ x: 3, y: 66, z: 0 }, '8 iron_ore'])
   assert.strictEqual(walks.length, 1)
+})
+
+// furnaceEnv on plannedWalk. Its openFurnace opens the furnace at at only where the feet can click it.
+async function plannedFurnaceEnv (t, feet, world, at, f) {
+  const { env } = furnaceEnv(f)
+  const { bot } = env
+  const { walks, pathfinder, unclickable } = await plannedWalk(t, feet, world, bot)
+  const opened = []
+  bot.openFurnace = async (b) => {
+    assert.ok(b.position.equals(at), `opened ${b.position}`)
+    const why = unclickable(at)
+    if (why) throw new Error(`the furnace is ${why}`)
+    opened.push(bot.entity.position.clone())
+    return f.window
+  }
+  return { env, walks, opened, pathfinder }
+}
+
+const FURNACE = ['furnace', { facing: 'west', lit: 'false' }]
+// A furnace at 0,63,0 and a 1-cell room at 2,63,0, the rest stone up to y 65.
+const sealedWorld = () => floorWorld((x, y, z) => {
+  if (x === 0 && y === 63 && z === 0) return FURNACE
+  if (y >= 63 && y <= 65) return x === 2 && z === 0 && y <= 64 ? ['air', {}] : ['stone', {}]
+  return null
+})
+const SLAB = ['stone_slab', { type: 'bottom', waterlogged: false }]
+// A furnace at 0,63,0 in a stone wall filling x <= 0 up to y 66, with a bottom slab in front of it at 1,63,0.
+const slabbedWorld = () => floorWorld((x, y, z) => {
+  if (x === 0 && y === 63 && z === 0) return FURNACE
+  if (x === 1 && y === 63 && z === 0) return SLAB
+  return x <= 0 && y >= 63 && y <= 66 ? ['stone', {}] : null
+})
+// A floor of bottom slabs at y 63 with a 2-deep hole at 0,63,0 and a furnace at its bottom.
+const SUNK = new Vec3(0, 61, 0)
+const sunkWorld = () => floorWorld((x, y, z) => {
+  if (x === 0 && z === 0 && y >= 61 && y <= 63) return y === 61 ? FURNACE : ['air', {}]
+  return y === 63 ? SLAB : null
+})
+
+async function furnaceWalk (route, query, planned) {
+  const { handle, res } = routeHandler(route, planned.env)
+  await handle({ query }, res)
+  const { x, y, z } = planned.env.bot.entity.position
+  return { walks: planned.walks, opened: planned.opened.length, goal: planned.pathfinder.goal, feet: [x, y, z], error: res.error && res.error.message }
+}
+const ROUTES = [['/smelt', { item: 'iron_ore', count: '8' }], ['/furnace', {}]]
+const furnaceStock = () => furnaceWindow({ pockets: [stack('iron_ore', 8), stack('coal', 1)] })
+
+test('the furnace tool walks from the floor to a cell beside a furnace 2 above it and opens it there', async (t) => {
+  for (const [route, query] of ROUTES) {
+    for (const [from, steps] of [[4, 1], [8, 5]]) {
+      const planned = await plannedFurnaceEnv(t, new Vec3(from + 0.5, 63, 0.5), pillarWorld(FURNACE), PILLAR_TOP, furnaceStock())
+      const got = await furnaceWalk(route, { ...query, at: '0,65,0' }, planned)
+      const label = `${route === '/smelt' ? 'control: ' : ''}${route} from ${from}`
+      assert.deepStrictEqual(got, { walks: [steps], opened: 1, goal: null, feet: [3.5, 63, 0.5], error: undefined }, label)
+    }
+  }
+})
+
+test('smelt and the furnace tool open a seen furnace in a wall over the bottom slab in front of it', async (t) => {
+  for (const [route, query] of ROUTES) {
+    const planned = await plannedFurnaceEnv(t, new Vec3(4.5, 63, 0.5), slabbedWorld(), WALLED, furnaceStock())
+    const got = await furnaceWalk(route, { ...query, at: '0,63,0' }, planned)
+    assert.deepStrictEqual(got, { walks: [1], opened: 1, goal: null, feet: [3.5, 63, 0.5], error: undefined }, route)
+  }
+})
+
+test('smelt and the furnace tool walk on bottom slabs to the edge of a hole and open the furnace at its bottom from there', async (t) => {
+  for (const [route, query] of ROUTES) {
+    const planned = await plannedFurnaceEnv(t, new Vec3(4.5, 63.5, 0.5), sunkWorld(), SUNK, furnaceStock())
+    const got = await furnaceWalk(route, { ...query, at: '0,61,0' }, planned)
+    assert.deepStrictEqual(got, { walks: [3], opened: 1, goal: null, feet: [1.5, 63.5, 0.5], error: undefined }, route)
+  }
+})
+
+test('smelt and the furnace tool walk round a wall to a cell that sees a furnace behind it and open it there', async (t) => {
+  for (const [route, query] of ROUTES) {
+    const planned = await plannedFurnaceEnv(t, new Vec3(3.5, 63, 0.5), walledWorld(FURNACE), WALLED, furnaceStock())
+    const { walks, opened, goal, feet, error } = await furnaceWalk(route, { ...query, at: '0,63,0' }, planned)
+    assert.deepStrictEqual([opened, goal, error], [1, null, undefined], `${route} ended at ${feet}`)
+    assert.ok(feet[0] < 1, `${route} opened from ${feet}, east of the wall`)
+    assert.ok(walks[0] > 4, `${route} walked ${walks[0]} steps`)
+  }
+})
+
+test('smelt and the furnace tool refuse a furnace out of sight from where a walk on an empty plan ends, clear its goal and open nothing', async (t) => {
+  for (const [route, query] of ROUTES) {
+    const planned = await plannedFurnaceEnv(t, new Vec3(2.5, 63, 0.5), sealedWorld(), WALLED, furnaceStock())
+    const { error, ...rest } = await furnaceWalk(route, { ...query, at: '0,63,0' }, planned)
+    assert.match(String(error), /the furnace at 0,63,0 is out of reach or sight from 2,63,0, where the walk ended/, route)
+    assert.deepStrictEqual(rest, { walks: [0], opened: 0, goal: null, feet: [2.5, 63, 0.5] }, route)
+  }
+})
+
+// A furnace at 0,64,0 whose top shows only over the wall of a 2-deep unroofed pit at 2,63,0.
+const PIT_FURNACE = new Vec3(0, 64, 0)
+const pitWorld = () => floorWorld((x, y, z) => {
+  if (x === 0 && y === 64 && z === 0) return FURNACE
+  if (y >= 63 && y <= 64) return x === 2 && z === 0 ? ['air', {}] : ['stone', {}]
+  return null
+})
+
+test('smelt and the furnace tool refuse a furnace that shows only over the wall of the unroofed pit the walk ended in', async (t) => {
+  for (const [route, query] of ROUTES) {
+    const planned = await plannedFurnaceEnv(t, new Vec3(2.5, 63, 0.5), pitWorld(), PIT_FURNACE, furnaceStock())
+    const { error, ...rest } = await furnaceWalk(route, { ...query, at: '0,64,0' }, planned)
+    assert.match(String(error), /the furnace at 0,64,0 is out of reach or sight from 2,63,0, where the walk ended/, route)
+    assert.deepStrictEqual(rest, { walks: [0], opened: 0, goal: null, feet: [2.5, 63, 0.5] }, route)
+  }
 })
 
 test('smelt at a remembered furnace in an unloaded chunk refuses it as too far to load', async () => {

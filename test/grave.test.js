@@ -3,8 +3,9 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
+const WorldSync = require('prismarine-world/src/worldsync')
 const { GRAVESTONE } = require('../lib/server-overrides')
-const { awaitRoute, routeHandler, loadBotFunctions, botConstant, claimRescue } = require('./helpers')
+const { awaitRoute, routeHandler, loadBotFunctions, botConstant, claimRescue, floorWorld, pillarWorld, walledWorld, plannedWalk } = require('./helpers')
 const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 
 const GRAVE_ID = 7
@@ -13,6 +14,8 @@ const stack = (name, count) => ({ name, type: IDS[name], count, stackSize: name 
 const GRAVE_SLOTS = 45
 const POCKETS = 36
 const AT = new Vec3(5, 64, 0)
+const IN_REACH = new Vec3(3.5, 64, 0.5)
+const OUT_OF_REACH = new Vec3(0.5, 64, 0.5)
 
 // A 9x5 grave window whose withdraw and count follow mineflayer's.
 function graveWindow (items, pockets = []) {
@@ -53,16 +56,18 @@ function graveWindow (items, pockets = []) {
   return { window, pocket }
 }
 
+// The grave at AT stands in click reach of the body.
 function graveEnv (window, { hidden = false, graves = true } = {}) {
-  const grave = { name: GRAVESTONE, type: GRAVE_ID, position: AT }
+  const grave = { name: GRAVESTONE, type: GRAVE_ID, position: AT, shapes: [[0.375, 0, 0.375, 0.625, 1, 0.625]] }
   const opened = []
   const fight = { busy: false }
   const timers = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) }
   const env = {
     bot: {
-      entity: { position: new Vec3(0.5, 64, 0.5) },
-      blockAt: (p) => (p.equals(AT) ? grave : { name: 'air', type: 0, position: p }),
-      pathfinder: { goto: async () => {} },
+      entity: { position: IN_REACH },
+      blockAt: (p) => (p.equals(AT) ? grave : p.y < AT.y ? { name: 'stone', type: 1, position: p, shapes: [[0, 0, 0, 1, 1, 1]] } : { name: 'air', type: 0, position: p, shapes: [] }),
+      world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => env.bot.blockAt(p) }, ray) },
+      pathfinder: { startCell: (p) => p.floored(), goto: async () => {} },
       _client: { write () {} },
       // mineflayer opens a block with a block_place.
       openBlock: async (b) => {
@@ -86,7 +91,10 @@ function graveEnv (window, { hidden = false, graves = true } = {}) {
     Vec3,
     GRAVESTONE,
     GRAVE_SIGHT: 32,
-    round: (v) => ({ x: v.x, y: v.y, z: v.z })
+    round: (v) => ({ x: v.x, y: v.y, z: v.z }),
+    seenWorld: () => env.bot.world,
+    seenBlock: (p) => env.bot.blockAt(p),
+    CLICK_REACH: botConstant('CLICK_REACH')
   }
   loadBotFunctions(['wireHandLease'], { bot: env.bot, guardState: env.guardState, ...timers }).wireHandLease()
   return { env, opened, fight }
@@ -229,7 +237,11 @@ test('a fight starting during the walk or a stack pause stops the take before it
   assert.deepStrictEqual([leased, env.guardState.hand], [[true], null])
 
   fight.busy = false
-  env.bot.pathfinder.goto = async () => { fight.busy = true }
+  env.bot.entity.position = OUT_OF_REACH
+  env.bot.pathfinder.goto = async () => {
+    fight.busy = true
+    env.bot.entity.position = IN_REACH
+  }
   assert.strictEqual(await refusal({ take: 'all' }, env), 'took nothing: a fight started')
   assert.strictEqual(clicks.length, 1)
 })
@@ -260,12 +272,14 @@ test('a buried self-rescue starting during the walk stops the grave at the hand,
   env.bot.pathfinder.goto = async () => {
     claimRescue(digLock)
     rescue = holdHand(digLock.holder)
+    env.bot.entity.position = IN_REACH
   }
   try {
     for (const query of [{}, { take: 'all' }]) {
       endHand(rescue)
       digLock.holder = null
       g.window.closed = false
+      env.bot.entity.position = OUT_OF_REACH
       assert.strictEqual(await refusal(query, env), 'busy: the buried self-rescue is running, nothing done', JSON.stringify(query))
       assert.ok(g.window.closed, `${JSON.stringify(query)} left the grave open`)
       assert.strictEqual(env.guardState.hand, rescue, `${JSON.stringify(query)} ended the rescue's lease`)
@@ -281,6 +295,7 @@ test('a buried self-rescue that stops the walk to the grave gets it refused busy
   const digLock = botConstant('digLock')
   env.digLock = digLock
   let rescue = false
+  env.bot.entity.position = OUT_OF_REACH
   // The rescue's stopPath clears the goal, and mineflayer-pathfinder's goto fails with GoalChanged.
   env.bot.pathfinder.goto = async () => {
     if (rescue) claimRescue(digLock)
@@ -318,4 +333,61 @@ test('grave refuses a gravestone out of lit sight without naming it or opening i
 test('grave refuses on a server without gravestones', async () => {
   const g = graveWindow([stack('bread', 1)])
   assert.match(await refusal({}, graveEnv(g.window, { graves: false }).env), /no gravestones/)
+})
+
+// graveEnv on plannedWalk. The grave opens only where the feet can click it.
+async function plannedGrave (t, feet, world) {
+  const g = graveWindow([stack('bread', 5)])
+  const { env, opened } = graveEnv(g.window)
+  const { walks, pathfinder, unclickable } = await plannedWalk(t, feet, world, env.bot)
+  const read = env.bot.blockAt
+  env.bot.blockAt = (p) => {
+    const b = read(p)
+    if (b.name === 'end_rod') b.name = GRAVESTONE
+    return b
+  }
+  const open = env.bot.openBlock
+  env.bot.openBlock = async (b) => {
+    const why = unclickable(b.position)
+    if (why) throw new Error(`the gravestone is ${why}`)
+    return open(b)
+  }
+  Object.assign(env, { seenWorld: () => env.bot.world, seenBlock: (p) => env.bot.blockAt(p), CLICK_REACH: botConstant('CLICK_REACH') })
+  return { env, opened, walks, pathfinder }
+}
+
+const GRAVE = ['end_rod', { facing: 'down' }]
+async function graveWalk (query, planned) {
+  const { handle, res } = routeHandler('/grave', planned.env)
+  await handle({ query }, res)
+  const { x, y, z } = planned.env.bot.entity.position
+  return { opened: planned.opened.length, goal: planned.pathfinder.goal, feet: new Vec3(x, y, z), error: res.error && res.error.message }
+}
+
+test('grave walks from the floor to a cell that clicks a gravestone 2 above it and opens it there', async (t) => {
+  for (const from of [4, 8]) {
+    const planned = await plannedGrave(t, new Vec3(from + 0.5, 63, 0.5), pillarWorld(GRAVE))
+    const { feet, ...got } = await graveWalk({ at: '0,65,0' }, planned)
+    assert.deepStrictEqual(got, { opened: 1, goal: null, error: undefined }, `from ${from}, ended at ${feet}`)
+    assert.strictEqual(feet.y, 63, `from ${from} opened from ${feet}`)
+  }
+})
+
+test('grave walks round a wall to a cell that sees the gravestone behind it and opens it there', async (t) => {
+  const planned = await plannedGrave(t, new Vec3(3.5, 63, 0.5), walledWorld(GRAVE))
+  const { feet, ...got } = await graveWalk({ at: '0,63,0' }, planned)
+  assert.deepStrictEqual(got, { opened: 1, goal: null, error: undefined }, `ended at ${feet}`)
+  assert.ok(feet.x < 1, `opened from ${feet}, east of the wall`)
+})
+
+test('grave refuses a gravestone out of sight from where a walk on an empty plan ends, and opens nothing', async (t) => {
+  // A 1-cell room at 2,63,0 in stone up to y 65, with the grave at 0,63,0.
+  const world = floorWorld((x, y, z) => {
+    if (x === 0 && y === 63 && z === 0) return GRAVE
+    if (y >= 63 && y <= 65) return x === 2 && z === 0 && y <= 64 ? ['air', {}] : ['stone', {}]
+    return null
+  })
+  const planned = await plannedGrave(t, new Vec3(2.5, 63, 0.5), world)
+  const { feet, ...got } = await graveWalk({ at: '0,63,0' }, planned)
+  assert.deepStrictEqual(got, { opened: 0, goal: null, error: 'the gravestone at 0,63,0 is out of reach or sight from 2,63,0, where the walk ended' }, `ended at ${feet}`)
 })

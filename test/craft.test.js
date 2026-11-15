@@ -10,7 +10,9 @@ const { Vec3 } = require('vec3')
 const { readServerOverrides, overrideRecipes, craftable } = require('../lib/server-overrides')
 const { LEGACY_CRAFT_SYNC_MS, LEGACY_GRID_SYNC_MS } = require('../lib/bot/legacy-1710')
 const { craftBlocker, bindCraftCheck } = require('../lib/bot/craft-check')
-const { routeHandler } = require('./helpers')
+const { goals } = require('mineflayer-pathfinder')
+const WorldSync = require('prismarine-world/src/worldsync')
+const { routeHandler, botConstant, plannedWalk, PILLAR_TOP, pillarWorld, WALLED, walledWorld } = require('./helpers')
 const registry = require('prismarine-registry')('1.21.11')
 const Item = require('prismarine-item')(registry)
 const windows = require('prismarine-windows')(registry)
@@ -73,12 +75,14 @@ function craftRig ({ items, legacy = true, table = true, walk, during = () => {}
     },
     recipesFor: (id, meta, min, t) => recipeFor(mcData.items[id].name, t),
     findBlocks: ({ maxDistance }) => (table && TABLE_AT.distanceTo(entity.position) <= maxDistance ? [TABLE_AT] : []),
-    blockAt: (p) => ({ name: table && p.equals(TABLE_AT) ? 'crafting_table' : 'air', position: p }),
+    blockAt: (p) => (p.y < TABLE_AT.y ? { name: 'stone', position: p, shapes: [[0, 0, 0, 1, 1, 1]] } : { name: table && p.equals(TABLE_AT) ? 'crafting_table' : 'air', position: p, shapes: table && p.equals(TABLE_AT) ? [[0, 0, 0, 1, 1, 1]] : [] }),
+    world: { raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => bot.blockAt(p) }, ray) },
     pathfinder: {
+      startCell: (p) => p.floored(),
       goto: async (g) => {
-        log.push(`walk ${g.x},${g.y},${g.z}`)
+        log.push('walk')
         if (walk) return walk(g, entity)
-        entity.position = new Vec3(g.x - 2.5, g.y, g.z + 0.5)
+        entity.position = new Vec3(TABLE_AT.x - 2.5, TABLE_AT.y, TABLE_AT.z + 0.5)
       }
     },
     async craft (recipe, n, t, opts) {
@@ -105,13 +109,20 @@ function craftRig ({ items, legacy = true, table = true, walk, during = () => {}
     resolveBlockIds: () => [mcData.blocksByName.crafting_table.id],
     seenNow: () => true,
     STATIONS: new Map(),
-    goals: { GoalNear: function (x, y, z, r) { Object.assign(this, { x, y, z, r }) } },
+    STATION_RE: botConstant('STATION_RE'),
+    ck: (x, y, z) => x + ',' + y + ',' + z,
+    goals,
+    seenWorld: () => bot.world,
+    seenBlock: (p) => bot.blockAt(p),
+    Vec3,
+    CLICK_REACH: botConstant('CLICK_REACH'),
     LEGACY_1710: legacy,
     LEGACY_CRAFT_SYNC_MS,
     LEGACY_GRID_SYNC_MS,
     setTimeout: (fn, ms) => { const t = { fn, ms }; timers.push(t); return t },
     clearTimeout: (t) => { if (t) t.cleared = true }
   }
+  rig.env = env
   rig.run = (query) => {
     const { handle, res } = routeHandler('/craft', env)
     rig.done = handle({ query }, res).then(() => (res.error ? { error: res.error.message } : JSON.parse(JSON.stringify(res.body))))
@@ -135,7 +146,7 @@ test('1.7.10 made and nowHave count the inventory after the window 0 update that
   assert.ok(rig.waiting(), 'a table window set_slot ended the wait')
   rig.packet('set_slot', { windowId: 0, slot: 36 }, (held) => held.set('ladder', 3))
   assert.deepStrictEqual(await rig.done, { crafted: 'ladder', requested: 3, made: 3, usedTable: true, nowHave: 3 })
-  assert.deepStrictEqual(rig.log, ['walk 10,64,0', 'craft ladder table', 'tick 1'])
+  assert.deepStrictEqual(rig.log, ['walk', 'craft ladder table', 'tick 1'])
 })
 
 test('1.7.10 set_player_inventory and window_items for window 0 end the table wait too', async () => {
@@ -203,7 +214,7 @@ test('1.7.10 a first pass the server rejects refuses the craft', async () => {
   assert.deepStrictEqual(await rig.done, { error: 'the server made no stick on pass 1' })
 })
 
-test('1.7.10 a 2x2 recipe crafts in the grid when the walk to a seen table fails, or ends with no table within 4', async () => {
+test('1.7.10 a 2x2 recipe crafts in the grid when the walk to a seen table fails, or ends out of click reach of it', async () => {
   const walks = {
     'no path': async () => { throw new Error('No path to the goal!') },
     'arrived short': async () => {}
@@ -213,21 +224,39 @@ test('1.7.10 a 2x2 recipe crafts in the grid when the walk to a seen table fails
     await rig.armed()
     rig.fire()
     assert.deepStrictEqual(await rig.done, { crafted: 'stick', requested: 4, made: 4, usedTable: false, nowHave: 4, note: FAR }, label)
-    assert.deepStrictEqual(rig.log, ['walk 10,64,0', 'craft stick grid'], label)
+    assert.deepStrictEqual(rig.log, ['walk', 'craft stick grid'], label)
   }
+})
+
+test('1.7.10 a 2x2 recipe crafts in the grid when a block replaced the table by the walk end, a 3x3 recipe is refused', async () => {
+  const gone = (items) => {
+    let walked = false
+    const rig = craftRig({ items, walk: async (g, entity) => { entity.position = new Vec3(TABLE_AT.x - 2.5, TABLE_AT.y, TABLE_AT.z + 0.5); walked = true } })
+    const { blockAt } = rig.bot
+    rig.bot.blockAt = (p) => (walked && p.equals(TABLE_AT) ? { name: 'oak_planks', position: p, shapes: [[0, 0, 0, 1, 1, 1]] } : blockAt(p))
+    return rig
+  }
+  const grid = gone({ oak_planks: 2 }).run({ item: 'stick', count: '4' })
+  // A refusal arms no wait.
+  for (let i = 0; i < 50 && !grid.waiting(); i++) await flush()
+  if (grid.waiting()) grid.fire()
+  const note = 'no crafting table at 10,64,0 any more, crafted in the 2x2 grid'
+  assert.deepStrictEqual([await grid.done, grid.log], [{ crafted: 'stick', requested: 4, made: 4, usedTable: false, nowHave: 4, note }, ['walk', 'craft stick grid']])
+  const table = gone({ stick: 7 }).run({ item: 'ladder', count: '3' })
+  assert.deepStrictEqual([await table.done, table.log], [{ error: 'no crafting table at 10,64,0 any more' }, ['walk']], 'control: a 3x3 recipe')
 })
 
 test('1.7.10 a stop during the walk to the table is rethrown', async () => {
   const stop = async () => { throw Object.assign(new Error('stopped by /stop'), { reason: 'stopped' }) }
   const rig = craftRig({ items: { oak_planks: 2 }, walk: stop }).run({ item: 'stick', count: '4' })
   assert.deepStrictEqual(await rig.done, { error: 'stopped by /stop' })
-  assert.deepStrictEqual(rig.log, ['walk 10,64,0'])
+  assert.deepStrictEqual(rig.log, ['walk'])
 })
 
 test('1.7.10 a 3x3 recipe at an unreachable table is still refused', async () => {
   const rig = craftRig({ items: { stick: 7 }, walk: async () => { throw new Error('No path to the goal!') } }).run({ item: 'ladder', count: '3' })
   assert.deepStrictEqual(await rig.done, { error: 'cannot reach the crafting table at 10,64,0' })
-  assert.deepStrictEqual(rig.log, ['walk 10,64,0'])
+  assert.deepStrictEqual(rig.log, ['walk'])
 })
 
 test('1.21.11 counts the recipe yield at once and refuses an unreachable table for a 2x2 recipe', async () => {
@@ -236,6 +265,23 @@ test('1.21.11 counts the recipe yield at once and refuses an unreachable table f
   assert.deepStrictEqual([rig.timers, rig.bot._client.eventNames()], [[], []])
   const far = craftRig({ items: { oak_planks: 2 }, legacy: false, walk: async () => { throw new Error('No path to the goal!') } }).run({ item: 'stick', count: '4' })
   assert.deepStrictEqual(await far.done, { error: 'cannot reach the crafting table at 10,64,0' })
+})
+
+test('craft at a table already in reach while a bunker is built replies the build refusal and crafts nothing', async () => {
+  const BUNKER_WALK = botConstant('BUNKER_WALK')
+  const beside = (rig, building) => {
+    rig.bot.entity.position = new Vec3(TABLE_AT.x - 2.5, TABLE_AT.y, TABLE_AT.z + 0.5)
+    Object.assign(rig.env, { bunker: { building }, BUNKER_WALK })
+    // The build swaps goto for a refusal.
+    if (building) rig.bot.pathfinder.goto = async () => { rig.log.push('walk'); throw new Error(BUNKER_WALK) }
+    return rig
+  }
+  const control = beside(craftRig({ items: { stick: 7 }, legacy: false }), false).run({ item: 'ladder', count: '3' })
+  assert.deepStrictEqual([await control.done, control.log], [{ crafted: 'ladder', requested: 3, made: 3, usedTable: true, nowHave: 3 }, ['craft ladder table']], 'control: no build')
+  for (const [legacy, item, items] of [[false, 'ladder', { stick: 7 }], [true, 'stick', { oak_planks: 2 }]]) {
+    const rig = beside(craftRig({ items, legacy }), true).run({ item, count: '1' })
+    assert.deepStrictEqual([await rig.done, rig.log], [{ error: BUNKER_WALK }, []], `legacy ${legacy}`)
+  }
 })
 
 // From pass from on, the rig's craft takes the materials and lands no result in the pockets.
@@ -417,4 +463,35 @@ test('a craft whose result would find no free pocket slot is refused before the 
     assert.deepStrictEqual(await rig.done, { error: NO_POCKET }, `legacy ${legacy}`)
     assert.deepStrictEqual(rig.log, [], `legacy ${legacy}`)
   }
+})
+
+// A 1.21.11 ladder craft whose bot.craft throws where the feet cannot click the table at at.
+async function plannedLadder (t, feet, world, at) {
+  const rig = craftRig({ items: { stick: 7 }, legacy: false })
+  const { bot } = rig
+  const { pathfinder, unclickable } = await plannedWalk(t, feet, world, bot)
+  const craft = bot.craft
+  bot.craft = async (recipe, n, table, opts) => {
+    const why = unclickable(at)
+    if (why) throw new Error(`the crafting table is ${why}`)
+    return craft(recipe, n, table, opts)
+  }
+  bot.findBlocks = ({ maxDistance }) => (at.distanceTo(bot.entity.position) <= maxDistance ? [at] : [])
+  const reply = await rig.run({ item: 'ladder', count: '3' }).done
+  const { x, y, z } = bot.entity.position
+  return { reply, goal: pathfinder.goal, feet: new Vec3(x, y, z) }
+}
+
+test('craft walks from the floor to a cell that clicks a crafting table 2 above it and crafts there', async (t) => {
+  for (const from of [4, 8]) {
+    const { reply, goal, feet } = await plannedLadder(t, new Vec3(from + 0.5, 63, 0.5), pillarWorld(['crafting_table', {}]), PILLAR_TOP)
+    assert.deepStrictEqual([reply, goal], [{ crafted: 'ladder', requested: 3, made: 3, usedTable: true, nowHave: 3 }, null], `from ${from}, ended at ${feet}`)
+    assert.strictEqual(feet.y, 63, `from ${from} crafted from ${feet}`)
+  }
+})
+
+test('craft walks round a wall to a cell that sees a crafting table behind it and crafts there', async (t) => {
+  const { reply, goal, feet } = await plannedLadder(t, new Vec3(3.5, 63, 0.5), walledWorld(['crafting_table', {}]), WALLED)
+  assert.deepStrictEqual([reply, goal], [{ crafted: 'ladder', requested: 3, made: 3, usedTable: true, nowHave: 3 }, null], `ended at ${feet}`)
+  assert.ok(feet.x < 1, `crafted from ${feet}, east of the wall`)
 })
