@@ -1162,7 +1162,7 @@ test('a goto with trample lets every goal it plans and walks, its hops included,
   assert.deepStrictEqual([(await marks({ x: 5, z: 5 }, {}))[2], (await marks({ player: 'Steve' }, {}, tagged, steve))[2]], [false, false], 'without trample')
 })
 
-const BED_HINT = 'the only known way lands a drop or a jump on the farmland at 3,63,0 and would trample it: pick another point, or walk it with trample if it is the only way off this spot'
+const BED_HINT = 'the only known way lands a drop or a jump on the farmland at 3,63,0 and would trample it: pick another point, or if it is the only way off this spot, goto a point just past that block with trample and walk on from there without it, since trample lets the whole walk land on farmland'
 
 // Plans: the first `found` succeed, later ones find no way, and a strand probe's lands on the farmland at 3,63,0.
 function strandPlanner (TRAMPLE, { found = 0, probes = [], landing = true } = {}) {

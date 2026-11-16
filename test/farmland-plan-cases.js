@@ -274,6 +274,20 @@ function fieldPlanCases (differ = {}) {
     assert.strictEqual(await unseenWay(zombie(8.5, 62)), 'noPath')
   })
 
+  test('a reach walk whose only way is a jump up out of water onto farmland is not counted as a way through unseen cells', async (t) => {
+    const statusOf = async (ring) => {
+      const cells = { '0,63,0': ['water', {}] }
+      for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++) if (x || z) cells[`${x},63,${z}`] = ring
+      const { bot } = await walkingBody(t, new Vec3(0.5, 63, 0.5), cells)
+      bot.pathfinder.tickTimeout = bot.pathfinder.thinkTimeout
+      const env = { bot, Vec3, Movements, goals, shared: {}, LEGACY_1710: false, HITBOX_1710, LEGACY_SNEAK_EYE, SWING_REACH, UNSEEN_PLAN_MS: botConstant('UNSEEN_PLAN_MS') }
+      const { unseenWay } = loadBotFunctions(['unseenWay'], env)
+      return unseenWay({ id: 3, name: 'zombie', width: 0.6, height: 1.95, position: new Vec3(5.5, 64, 0.5) })
+    }
+    assert.strictEqual(await statusOf(STONE), 'success', 'control: a ring of stone')
+    assert.strictEqual(await statusOf(FARMLAND), 'noPath')
+  })
+
   test('a strand probe names the bed the first farmland drop of a way down the terraces lands on, and nothing for a goal no way reaches', async (t) => {
     const cells = terraces(false)
     const { bot, plan, TRAMPLE } = await walkingBody(t, START, cells)
