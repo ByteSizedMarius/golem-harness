@@ -133,7 +133,7 @@ const DEFAULT = 'default'
 const PACE_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'lib', 'pace.js'), 'utf8')
 // The pacePlacements of lib/pace.js on a fake clock.
 const pacedOn = (clock) => vm.runInNewContext(`${PACE_SOURCE}\npacePlacements`, { module: {}, setTimeout: clock.setTimeout, Date: { now: clock.now } })
-const { PLACE_GAP_MS } = require('../lib/pace')
+const { PLACE_GAP_MS, PLACE_JITTER_MS } = require('../lib/pace')
 
 // Runs /sow `runs` times on a fake clock over stone below y 64 and air above, with blocks keyed by 'x,y,z'.
 // A job it replaced runs until `replaced` ms and holds the movements named `inPlace` until then.
@@ -275,6 +275,8 @@ async function sowJob ({ query = {}, blocks = {}, feet = new Vec3(0.5, 64, 1.5),
     SEED_ANSWER_CAP_MS: botConstant('SEED_ANSWER_CAP_MS'),
     SEED_DROP_MS: botConstant('SEED_DROP_MS'),
     SOW_BAND: botConstant('SOW_BAND'),
+    PLACE_GAP_MS,
+    PLACE_JITTER_MS,
     stopPath: () => {
       log.push('stopPath')
       bot.pathfinder.goal = null
@@ -499,10 +501,10 @@ const takeHand = (holdMs, onEnd = () => {}) => (n, bot, env) => {
   setTimeout(() => endHand(lease), holdMs)
 }
 
-test('sow tries a plot again only after the action that took the hand ended its lease', async () => {
+test('sow tries a plot again only a click gap after the action that took the hand ended its lease', async () => {
   const ends = []
   const { result, clicks, looks } = await sowJob({ blocks: BED, pockets: ['bread'], onLook: takeHand(800, (t) => ends.push(t)) })
-  assert.deepStrictEqual([ends.map((t) => t - looks[0].at), looks[1].at >= ends[0]], [[800], true])
+  assert.deepStrictEqual([ends.map((t) => t - looks[0].at), looks[1].at - ends[0] >= PLACE_GAP_MS], [[800], true], looks.map((l) => l.at).join(' '))
   assert.deepStrictEqual([result.sown, result.refused, clicks.length, new Set(clicks).size, looks[1].plot], [9, [], 9, 9, looks[0].plot])
 })
 
