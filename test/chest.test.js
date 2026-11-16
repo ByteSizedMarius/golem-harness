@@ -6,7 +6,7 @@ const mineflayer = require('mineflayer')
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const WorldSync = require('prismarine-world/src/worldsync')
-const { awaitRoute, routeHandler, botConstant, loadBotFunctions, claimRescue, plannedWalk, groundMemory, blockWorld } = require('./helpers')
+const { awaitRoute, routeHandler, botConstant, loadBotFunctions, claimRescue, plannedWalk, groundMemory, blockWorld, floorWorld } = require('./helpers')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const { stackPause, STACK_GAP_MS, STACK_JITTER_MS } = require('../lib/pace')
 const { LEGACY_CLICK_REACH } = require('../lib/bot/legacy-1710')
@@ -1045,4 +1045,13 @@ test('chest, withdraw and deposit leave no goal set after a walk that ends in No
       assert.deepStrictEqual(rest, { walks: [steps], opened: [], goal: null, feet: [feet.x, feet.y, feet.z] }, `${outcome} ${route}`)
     }
   }
+})
+
+test('chest walks on past a stand where only leaves hide the chest to one a step aside that sees it, and opens it there', async (t) => {
+  const at = new Vec3(0, 63, 0)
+  const leaves = ['1,63,0', '1,64,0']
+  const world = floorWorld((x, y, z) => (at.equals(new Vec3(x, y, z)) ? SINGLE : leaves.includes(`${x},${y},${z}`) ? ['oak_leaves', {}] : null))
+  const { opened, goal, error, feet } = await chestWalk('/chest', cellQuery(at), await plannedChestEnv(t, new Vec3(6.5, 63, 0.5), world, at))
+  // 3,63,0 is the first stand on the way where only the leaves hide the chest.
+  assert.deepStrictEqual({ opened, goal, error, feet }, { opened: ['0,63,0'], goal: null, error: undefined, feet: [3.5, 63, -0.5] })
 })

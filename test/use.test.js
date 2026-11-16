@@ -920,12 +920,12 @@ test('activate on a bed never clicks from feet more than 3 from the head block\'
   assert.ok(Math.abs(end.x - BED_HEAD.x) <= 3, `clicked from ${end}`)
 })
 
-test('activate on a bed refuses with no click when centring on the walk\'s start cell leaves the feet more than 3 from the head block\'s corner', async (t) => {
+test('activate on a bed refuses with no click, naming the sleep range, when centring on the walk\'s start cell leaves the feet more than 3 from the head block\'s corner', async (t) => {
   const { end, ...got } = await fencedBed(t, () => new Vec3(3.1, 63, 0.5))
   assert.deepStrictEqual(got, {
     clicks: 0,
     goal: null,
-    error: 'the red_bed at 0,63,0 is out of reach or sight from 2,63,0, where the walk ended',
+    error: 'the red_bed at 0,63,0 is out of sleep range from 2,63,0, where the walk ended',
     centred: [new Vec3(2, 63, 0)],
     walks: []
   }, `ended at ${end}`)
