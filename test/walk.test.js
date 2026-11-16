@@ -16,28 +16,17 @@ const { SPRINT_FLOOR, sprintAllowed } = require('../lib/sprint')
 const { isDoor, panelAcross, doorCrossing, partnerLeaf, PLATE_WAIT_TICKS } = require('../lib/doors')
 const registry = require('prismarine-registry')('1.21.11')
 const Item = require('prismarine-item')(registry)
-const { loadBotFunctions, botConstant, botObject, startApp, fakeClock, combatReflexIn, claimRescue } = require('./helpers')
+const { loadBotFunctions, botConstant, botObject, startApp, fakeClock, combatReflexIn, claimRescue, farmlandTop } = require('./helpers')
+const { block, AIR, STONE, ground, world, cellOf, farmlandStandCases } = require('./farmland-stand-cases')
 
 const { UNLOADED, UNKNOWN, standCell, targetKind, resolveTarget, crumbCentre, arrivedAt, watchProgress, walkAttempt, routeDeadline } = walk
 
-const block = (name, boundingBox, height) => ({ name, boundingBox, shapes: height ? [[0, 0, 0, 1, height, 1]] : [] })
-const AIR = block('air', 'empty')
-const STONE = block('stone', 'block', 1)
-const FARMLAND = block('farmland', 'block', 0.9375)
-
-const ground = (top, cells = {}) => (y) => cells[y] || (y <= top ? STONE : AIR)
 const rock = () => STONE
 const air = (...ys) => Object.fromEntries(ys.map((y) => [y, AIR]))
 
-// columns: { 'x,z': (y) => block }. Every other column is unloaded.
-function world (columns) {
-  return (p) => {
-    const col = columns[`${p.x},${p.z}`]
-    return col ? col(p.y) : null
-  }
-}
-
-const cellOf = (v) => v && { x: v.x, y: v.y, z: v.z }
+test('farmland is the version data\'s 0.9375 high in this file, no shapes override applied', () => {
+  assert.strictEqual(farmlandTop(), 0.9375)
+})
 
 test('standCell puts a drop resting on its floor block onto the cell above it', () => {
   const blockAt = world({ '0,0': ground(63) })
@@ -61,10 +50,7 @@ test('standCell picks the nearer of two stacked tunnels 3 apart', () => {
   assert.deepStrictEqual(cellOf(standCell(blockAt, 0, 0, 44)), { x: 0, y: 43, z: 0 })
 })
 
-test('standCell stands on farmland from feet sunk into it', () => {
-  const blockAt = world({ '0,0': ground(62, { 63: FARMLAND }) })
-  assert.deepStrictEqual(cellOf(standCell(blockAt, 0.5, 0.5, 63.94)), { x: 0, y: 64, z: 0 })
-})
+farmlandStandCases()
 
 test('standCell returns null for a loaded column of solid rock', () => {
   const pocket = world({ '0,0': ground(100, air(50, 51)) })
@@ -112,12 +98,6 @@ test('standCell clamps an absurd y hint into the column', () => {
   assert.deepStrictEqual(cellOf(standCell(blockAt, 0, 0, 1e9)), { x: 0, y: 64, z: 0 })
   assert.deepStrictEqual(cellOf(standCell(blockAt, 0, 0, -1e9)), { x: 0, y: 64, z: 0 })
   assert.ok(performance.now() - t0 < 250, `${Math.round(performance.now() - t0)} ms`)
-})
-
-test('arrivedAt counts feet sunk into farmland as standing on the cell above it', () => {
-  const goal = new goals.GoalBlock(0, 64, 0)
-  assert.strictEqual(arrivedAt(goal, { x: 0.5, y: 63.94, z: 0.5 }), true)
-  assert.strictEqual(arrivedAt(goal, { x: 1.5, y: 63.94, z: 0.5 }), false, 'a cell to the side')
 })
 
 test('targetKind accepts exactly one target form', () => {

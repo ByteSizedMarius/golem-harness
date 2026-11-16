@@ -8,7 +8,8 @@ const { QUIET_MS, LONG_QUIET_MS, legLedger, takenText, laneBlocks } = require('.
 const { routeDeadline } = require('../lib/walk')
 const { isDoor, doorCrossing, panelAcross } = require('../lib/doors')
 const { entityInCell } = require('../lib/shelter')
-const Block = require('prismarine-block')('1.21.11')
+const registry = require('prismarine-registry')('1.21.11')
+const Block = require('prismarine-block')(registry)
 const { SPRINT_FLOOR } = require('../lib/sprint')
 const { loadBotFunctions, combatReflexIn, awaitRoute, routeHandler, laneAt, botConstant, walkingBody, wireListeners } = require('./helpers')
 
@@ -305,6 +306,7 @@ function senses ({ pos = new Vec3(0.5, 64, 0.5), cells = {}, lit = () => true, l
   const irons = Object.keys(cells).filter((k) => cells[k][0] === 'iron_door').map((k) => new Vec3(...k.split(',').map(Number))).filter(lit)
   const bot = {
     entity: { position: pos, width: 0.6, height: 1.8 },
+    registry,
     blockAt (p) {
       const c = new Vec3(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z))
       const [name, props] = cells[`${c.x},${c.y},${c.z}`] || [c.y <= 63 ? 'stone' : 'air', {}]

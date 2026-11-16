@@ -4,6 +4,59 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-16: walks keep off farmland and end in reach of the block they click
+
+Only the `sow` job's walks kept off farmland, so a `goto` or a `gather` across a terraced field
+could drop or jump onto a plot and trample it. No walk now plans a move that comes down hard on
+farmland the bot has seen: a drop, a jump across a gap or a jump up out of water. Walking across a
+field on its own level and stepping up onto it from dry ground still plan. A `goto` whose only way
+comes down on farmland ends with reason `farmland` and names the first farmland block it would land
+on, and `trample=1` walks it anyway. Fleeing a mob, taking cover and backing off from lava ignore
+the rule.
+
+A drop onto a path beside a field often came down on the field. The walk counted the drop's cell as
+reached while the body was still falling toward it and steered on to the next cell, a plot on the
+path's level, so the body touched down on the plot from a block up, in 7 of 12 such drops. Where
+the cell after a drop is farmland on the same level, the walk now steers at the drop's cell until
+the body has landed on it, and it does not sprint into the drop. This patches
+mineflayer-pathfinder's walk executor. Carpet, snow or a waterlogged slab on the path can still let
+the body come down on the farmland, a block placed into the landing cell while the body falls
+stalls the walk for about 3.6 seconds, and a `follow` whose player turns back at the edge can step
+down onto the path.
+
+A 1.7.10 server collides farmland as a full block, where the bot's 1.21 data has it 15/16 high, so
+the bot reported its feet 1/16 inside every plot it stood on. The `GOLEM_SERVER_OVERRIDES` file
+takes a new `shapes` key that gives blocks their collision boxes as `[x1, y1, z1, x2, y2, z2]`
+lists, and `"shapes": {"farmland": [[0, 0, 0, 1, 1, 1]]}` makes farmland a full block for walking,
+standing and planning. A box outside its cell, or over 1.5 high, is refused when the file is read.
+Torch support and opacity still go by the version's own boxes.
+
+`/furnace` walked to within 2 blocks of a furnace, `/smelt` within 4, and `/grave`, `/enchant` and
+`/rename` within 2 of their block, then clicked wherever the walk ended, even on a cell behind a
+wall. A furnace two blocks above the floor had no cell within 2, and the walk searched for its full
+10 seconds. These routes, `/activate`, `/use` other than sowing or pouring and `craft`'s walk to
+its table now walk as the chest routes do: to a cell where the block is within a player's reach
+and a face of it is in sight, judged on the block's own box, so a grave post or a pressure plate
+behind a 1-high block counts only where it shows. A walk that ends anywhere else replies that the
+block is out of reach or sight from where it ended, and where only leaves hide the block it names
+the first leaf in the way. The walk to a bed ends close enough to the head for a 1.7.10 server to
+let the body sleep.
+
+Walking round the end of a wall, sliding along one or bumping into it moved the body into the block
+at some coordinates, such as faces at x or z 2, 32 or 512. The server held the body there with
+position corrections, it took suffocation damage, and the buried rescue took over and ended the
+walk. After a collision prismarine-physics rebuilds the body's box from its stored position, and
+rounding left that box a hair inside the face, where the collision no longer stopped it. A box that
+close to a face now counts as touching it. This patches prismarine-physics' collision code.
+
+A `sow` job ended at the first plot whose click never went out, such as one where a reflex took the
+hand or the seed would not equip. It now tries that plot again a full click gap later, once the
+hand is free, up to three times, then lists it in the new `refused` with the reason, and a run of
+three such plots stops the job. A fight or a bunker build still ends it. The job counted the
+columns it never saw as `unseen` without saying where they were, and `unseenAt` now lists them as
+x,z runs such as `46..54,-39`. Ground below a step's edge or at the bottom of a narrow hole stays
+unseen after a fully planted bed.
+
 ## 2026-11-14: a seed click reports what the server did, and `sow` plants a whole bed
 
 The pilot planted a terraced field plot by plot and counted about 90 seeds sown while a fifth of

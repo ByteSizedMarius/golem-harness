@@ -33,6 +33,7 @@ function diggingBot (head, feet, cells, { hold = false, look = () => {}, pos = n
   const noop = () => {}
   const bot = Object.assign(new EventEmitter(), {
     entity: { position: pos },
+    registry,
     oxygenLevel: 20,
     heldItem: null,
     targetDigBlock: null,

@@ -17,6 +17,7 @@ const { Vec3 } = require('vec3')
 const WorldSync = require('prismarine-world/src/worldsync')
 const mineflayer = require('mineflayer')
 const { pathfinder, goals } = require('mineflayer-pathfinder')
+const { Physics, PlayerState } = require('prismarine-physics')
 const shelter = require('../lib/shelter')
 const { legLedger, takenText } = require('../lib/leg-ledger')
 const { createLane, bindLane } = require('../lib/bot/lane')
@@ -847,6 +848,30 @@ async function walkingBody (t, pos, cells = {}) {
   return { bot, plan, shared: ctx.shared, TRAMPLE, farmlandRule, trampleGoal }
 }
 
+// Drops a walkingBody at pos over cells and returns the y its feet come to rest at, no keys held.
+async function restingY (t, pos, cells) {
+  const { bot } = await walkingBody(t, pos, cells)
+  const world = { getBlock: (p) => bot.blockAt(p) }
+  const physics = Physics(bot.registry, world)
+  const controls = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false }
+  Object.assign(bot.entity, { yaw: 0, pitch: 0, effects: {}, attributes: {}, onGround: false, isCollidedHorizontally: false, isInWater: false })
+  Object.assign(bot, { jumpTicks: 0, jumpQueued: false, food: 20, inventory: { items: () => [], slots: [] } })
+  let still = 0
+  for (let tick = 0; tick < 200 && still < 20; tick++) {
+    const y = bot.entity.position.y
+    physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot)
+    still = bot.entity.onGround && bot.entity.position.y === y ? still + 1 : 0
+  }
+  assert.strictEqual(still, 20, 'the body never came to rest')
+  return bot.entity.position.y
+}
+
+// The top of farmland's collision box in this process's 1.21.11 registries.
+function farmlandTop () {
+  const { blockCollisionShapes: c } = require('prismarine-registry')('1.21.11')
+  return Math.max(...c.shapes[c.blocks.farmland].map((box) => box[4]))
+}
+
 // A walkingBody world of stone up to y 62 and air above, except where cell(x, y, z) returns [name, properties].
 function floorWorld (cell) {
   return new Proxy({}, {
@@ -1527,7 +1552,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, blockWorld, sectionWorld, walkingBody, floorWorld, PILLAR_TOP, pillarWorld, WALLED, walledWorld, seesFace, watchedGoto, plannedWalk, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
+  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, blockWorld, sectionWorld, walkingBody, restingY, farmlandTop, floorWorld, PILLAR_TOP, pillarWorld, WALLED, walledWorld, seesFace, watchedGoto, plannedWalk, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, laneAt,
   buildVerbEnv, digInProblemWith, facings, digJob, claimRescue, routeJobs

@@ -9,7 +9,7 @@ const { Vec3 } = require('vec3')
 const { readServerOverrides, renameBlocks, overrideRecipes, craftable } = require('../lib/server-overrides')
 const { goals } = require('mineflayer-pathfinder')
 const WorldSync = require('prismarine-world/src/worldsync')
-const { awaitRoute, loadBotFunctions, botConstant } = require('./helpers')
+const { awaitRoute, loadBotFunctions, botConstant, restingY } = require('./helpers')
 
 const id = (name) => mcData.itemsByName[name].id
 const TABLE = { name: 'crafting_table', position: new Vec3(2, 64, 0), shapes: [[0, 0, 0, 1, 1, 1]] }
@@ -37,6 +37,10 @@ function overridesFile (t, spec = OVERRIDES) {
 }
 
 const recipesOf = (t, spec) => readServerOverrides(overridesFile(t, spec)).recipes
+
+test('a body let go over farmland rests on the version data\'s 0.9375 high box, no shapes override applied in this file', async (t) => {
+  assert.strictEqual(await restingY(t, new Vec3(0.5, 65, 0.5), { '0,63,0': ['farmland', { moisture: 7 }] }), 63.9375)
+})
 
 function crafter (items) {
   const held = new Map(Object.entries(items).map(([name, n]) => [id(name), n]))
@@ -207,6 +211,29 @@ test('an overrides file with a malformed enchanting entry is refused at start', 
     { lapisCost: [0, 2, 3], levelCost: [1, 2, 3] }, { lapisCost: [1, 2, 3], levelCost: [1, 0, 3] }
   ]) {
     assert.throws(() => readServerOverrides(overridesFile(t, { ...OVERRIDES, enchanting })), /GOLEM_SERVER_OVERRIDES .*enchanting/, JSON.stringify(enchanting))
+  }
+})
+
+test('a shapes entry reaches the bot as block names to boxes, and a file without one reads the same with no shapes', (t) => {
+  const shapes = { farmland: [[0, 0, 0, 1, 1, 1]], oak_fence: [[0.375, 0, 0.375, 0.625, 1.5, 0.625]], cobweb: [] }
+  const read = readServerOverrides(overridesFile(t, { ...OVERRIDES, shapes }))
+  assert.deepStrictEqual([...read.shapes], Object.entries(shapes))
+  const plain = readServerOverrides(overridesFile(t))
+  assert.deepStrictEqual([...plain.shapes], [])
+  const { shapes: _, ...rest } = read
+  const { shapes: __, ...plainRest } = plain
+  assert.deepStrictEqual(rest, plainRest)
+})
+
+test('a shapes entry with a box that is not six numbers inside the cell, y up to 1.5, each low below its high, is refused at start', (t) => {
+  for (const shapes of [
+    null, [], { farmland: null }, { farmland: [0, 0, 0, 1, 1, 1] }, { farmland: [[0, 0, 0, 1, 1]] },
+    { farmland: [[0, 0, 0, 1, 1, 1, 1]] }, { farmland: [[0, 0, 0, 1, '1', 1]] }, { farmland: [[0, 0, null, 1, 1, 1]] },
+    { farmland: [[-0.1, 0, 0, 1, 1, 1]] }, { farmland: [[0, -0.5, 0, 1, 1, 1]] }, { farmland: [[0, 0, 0, 1.1, 1, 1]] },
+    { farmland: [[0, 0, 0, 1, 1.6, 1]] }, { farmland: [[0, 0, 0, 1, 1, 1.5]] }, { farmland: [[0.5, 0, 0, 0.5, 1, 1]] },
+    { farmland: [[0, 1, 0, 1, 0.5, 1]] }, { farmland: [[0, 0, 0, 1, 1, 1], 'box'] }
+  ]) {
+    assert.throws(() => readServerOverrides(overridesFile(t, { ...OVERRIDES, shapes })), /GOLEM_SERVER_OVERRIDES .*shapes/, JSON.stringify(shapes))
   }
 })
 

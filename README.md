@@ -61,7 +61,7 @@ survival server with other players, where something went wrong and the harness c
 - A memory for the pilot: notes shown at every `boot`, a todo list with priorities, and notebooks
   kept in in-game books.
 - Underneath: `bot.js` broken up into `lib/`, a test suite that runs without a server, and fixes to
-  eight packages of the PrismarineJS stack in `patches/`.
+  nine packages of the PrismarineJS stack in `patches/`.
 
 Gone from upstream: the viewer with its film rig, and the sample pilot memory system.
 
@@ -129,7 +129,9 @@ shield, no off-hand, and the old hitboxes, sounds and underwater light. The 1.7.
 - `GOLEM_SERVER_OVERRIDES` names a JSON file of recipe overrides, block and item renames and
   enchanting costs, for a server whose recipes or blocks differ from what the bot knows. A block
   renamed to `gravestone` turns on the `grave` tool, and `enchant` is refused on 1.7.10 until the
-  file has an `enchanting` entry. `.env.example` shows the format.
+  file has an `enchanting` entry. `.env.example` shows the format. A `shapes` entry maps block
+  names to the server's collision boxes, as `[x1, y1, z1, x2, y2, z2]` lists. A 1.7.10 server
+  collides farmland as a full block, where the bot's data has it 15/16 high.
 - `GOLEM_CHAT_MAX` (100 to 256) sets the longest chat line the bot sends, by default 100 here and
   256 on 1.21.11. Raising it only helps when the proxy lets longer lines through.
 
@@ -141,10 +143,11 @@ Node 22 or newer.
 npm install
 ```
 
-The install applies `patches/` with patch-package: fixes to eight packages of the PrismarineJS
-stack (mineflayer, mineflayer-pathfinder, minecraft-protocol and five prismarine packages). They
-cover path planning around doors, walls and farmland, velocity decoding from 1.21.9 on, chunk
-light, dig times, enchantment data, the block search and inventory click prediction.
+The install applies `patches/` with patch-package: fixes to nine packages of the PrismarineJS
+stack (mineflayer, mineflayer-pathfinder, minecraft-protocol and six prismarine packages). They
+cover path planning around doors, walls and farmland, collision with block faces, velocity decoding
+from 1.21.9 on, chunk light, dig times, enchantment data, the block search and inventory click
+prediction.
 
 ## Running it
 

@@ -3,6 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const EventEmitter = require('node:events')
 const { Vec3 } = require('vec3')
+const registry = require('prismarine-registry')('1.21.11')
 const { loadBotFunctions, botConstant } = require('./helpers')
 
 // Facing west, toward a body at the origin from the east.
@@ -122,7 +123,7 @@ async function swingHit ({ yaw = WEST, swings = [9600, 10000], hostileX = -2.5, 
   const zombie = { id: 3, name: 'zombie', position: new Vec3(hostileX, 64, 0.5) }
   const blockAt = (p) => (p.x === 0 && p.z === 0 && { 64: cells.feet, 65: cells.head }[p.y]) || null
   const game = { dimension: leftEnd ? 'the_end' : 'overworld' }
-  const bot = Object.assign(new EventEmitter(), { entity: body, entities: {}, _client: new EventEmitter(), blockAt, health, game })
+  const bot = Object.assign(new EventEmitter(), { entity: body, entities: {}, _client: new EventEmitter(), blockAt, health, game, registry })
   const fill = { cells: new Set() }
   const timers = []
   const ctx = loadBotFunctions(['wireArmSwings', 'wireDamageAttribution'], {
