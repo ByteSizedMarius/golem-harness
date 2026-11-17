@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-17: gather and the scene's ore veins find blocks in sight behind buried ones
+
+`gather` took the 40 matching blocks nearest the bot and only then kept the ones in sight, so a
+block in plain view never came up behind 40 buried blocks, blocks it had given up on, blocks past
+its climb or drop limits or blocks under water. The ore veins in `scene` missed ore in sight behind
+512 buried ores the same way. Both now search the blocks in sight nearest first, as `mine` and
+`find` do, and a `gather` whose search stops early with nothing to dig says so.
+
 ## 2026-11-16: walks keep off farmland and end in reach of the block they click
 
 Only the `sow` job's walks kept off farmland, so a `goto` or a `gather` across a terraced field

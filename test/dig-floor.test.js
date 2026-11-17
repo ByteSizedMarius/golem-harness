@@ -7,7 +7,7 @@ const { Vec3 } = require('vec3')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const registry = require('prismarine-registry')('1.21.11')
 const Block = require('prismarine-block')(registry)
-const { loadBotFunctions, botConstant, routeHandler } = require('./helpers')
+const { loadBotFunctions, botConstant, cellSearch, routeHandler } = require('./helpers')
 const { entityInCell } = require('../lib/shelter')
 
 // The floor ore every case digs.
@@ -237,6 +237,9 @@ async function gather (pos) {
     resolveBlockIds: (name) => [registry.blocksByName[name].id],
     jobs: { start: (name, fn) => { job = fn({ cancelled: false, progress () {} }); return { id: 1 } } },
     emitEvent () {},
+    nearestCells: cellSearch(w.bot, () => [ORE]),
+    eyeDist: () => 0,
+    lightReach: () => 15,
     seesLit: () => true,
     GATHER_MAX_DROP: 2,
     GATHER_MAX_RISE: 4,
@@ -251,7 +254,6 @@ async function gather (pos) {
       await w.bot.dig(b)
     }
   })
-  w.bot.findBlocks = () => (w.bot.blockAt(ORE).name === 'iron_ore' ? [ORE] : [])
   const { handle, res } = routeHandler('/gather', w.env)
   handle({ query: { resource: 'iron_ore', amount: '1' } }, res)
   assert.strictEqual(res.error, undefined, res.error && res.error.message)

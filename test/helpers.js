@@ -804,6 +804,17 @@ function sectionWorld (env, keys) {
   return env
 }
 
+// A nearestCells stub over the cells cells() returns, nearest the eye first.
+function cellSearch (bot, cells) {
+  return (matching, point, maxDist, sight, deadline, visit) => {
+    const e = bot.entity.position.offset(0, 1.62, 0)
+    const gap = (v, lo) => Math.max(lo - v, 0, v - lo - 1)
+    const eye = (p) => Math.hypot(gap(e.x, p.x), gap(e.y, p.y), gap(e.z, p.z))
+    const takes = Array.isArray(matching) ? (b) => !!b && matching.includes(b.type) : matching
+    return cells().filter((p) => takes(bot.blockAt(p))).sort((a, b) => eye(a) - eye(b)).some((p) => visit(p))
+  }
+}
+
 // A body at pos on the real pathfinder with the walk's legs under the farmland rule, over a stone floor plus cells ('x,y,z' -> [name, properties]).
 async function walkingBody (t, pos, cells = {}) {
   const client = new EventEmitter()
@@ -1552,7 +1563,7 @@ module.exports = {
   fakeBot, mcpServer, manualFixture, callReq, call, rpc, isToolError, isRpcError, assertOk, textOf, errorText,
   LOCAL_TOOLS, routedTools, validValue, requiredArgs, toolNamed, chatTool, paramsOfType, mcpChatControl, assertSigned,
   baseEnv, runEntry, assertEntryServes, assertEntryRefuses,
-  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, blockWorld, sectionWorld, walkingBody, restingY, farmlandTop, floorWorld, PILLAR_TOP, pillarWorld, WALLED, walledWorld, seesFace, watchedGoto, plannedWalk, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
+  botSource, codeOnly, wiredSource, functionSource, balanced, botConstant, botObject, groundMemory, blockWorld, sectionWorld, cellSearch, walkingBody, restingY, farmlandTop, floorWorld, PILLAR_TOP, pillarWorld, WALLED, walledWorld, seesFace, watchedGoto, plannedWalk, loadBotFunctions, routeHandler, fakeFile, runRoute, awaitRoute, hookedRoute, reflexIn, bunkerReflexIn, combatReflexIn, wireListeners,
   HERE, shelterInputsAmong, shelterEnv, pillarProblemWith, column,
   BUILD_HIT, threat, buildHarness, halt, HALT_REASONS, digHarness, pillarHarness, bunkerDecider, actAfter, stoppedBuild, laneAt,
   buildVerbEnv, digInProblemWith, facings, digJob, claimRescue, routeJobs

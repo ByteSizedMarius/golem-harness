@@ -8,7 +8,7 @@ const { goals, Movements, startCell } = require('mineflayer-pathfinder')
 const registry = require('prismarine-registry')('1.21.11')
 const Block = require('prismarine-block')(registry)
 const Item = require('prismarine-item')(registry)
-const { botConstant, claimRescue, routeHandler, routeJobs } = require('./helpers')
+const { botConstant, cellSearch, claimRescue, routeHandler, routeJobs } = require('./helpers')
 const { entityInCell } = require('../lib/shelter')
 
 const inLake = (c) => c.x >= 1 && c.x <= 12 && c.z >= -4 && c.z <= 4
@@ -36,8 +36,6 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
     inventory: { items: () => [pocket, ...carried] },
     waitForTicks: async () => {},
     blockAt,
-    findBlocks: ({ matching }) => [...cells.keys()].map((k) => new Vec3(...k.split(',').map(Number)))
-      .filter((p) => typeof matching === 'function' ? matching(blockAt(p)) : matching.includes(blockAt(p).type)),
     world: {
       // The ray passes through water.
       raycast (from, dir, range) {
@@ -88,6 +86,9 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
     // The exact block, else every block holding it as whole _-separated words.
     resolveBlockIds: (name) => registry.blocksByName[name] ? [registry.blocksByName[name].id] : Object.values(registry.blocksByName).filter((b) => `_${b.name}_`.includes(`_${name}_`)).map((b) => b.id),
     emitEvent () {},
+    nearestCells: cellSearch(bot, () => [...cells.keys()].map((k) => new Vec3(...k.split(',').map(Number)))),
+    eyeDist: () => 0,
+    lightReach: () => 15,
     seesLit: () => true,
     leafInTheWay: () => null,
     cellKnown: () => true,
@@ -115,8 +116,10 @@ function lakeWorld (feet, dirt, { hidden, blocks, walk, onGround = true, carried
   return { env, log }
 }
 
-async function gather (feet, dirt, { amount = 1, hidden = [], blocks = {}, walk, onGround, carried, query = {} } = {}) {
+// rig(w) changes the world before the gather starts.
+async function gather (feet, dirt, { amount = 1, hidden = [], blocks = {}, walk, onGround, carried, query = {}, rig = () => {} } = {}) {
   const w = lakeWorld(feet, dirt, { hidden, blocks, walk, onGround, carried })
+  rig(w)
   let job = null
   const progress = []
   w.env.jobs = { start: (name, fn) => { job = fn({ name, cancelled: false, progress: (m) => progress.push(m) }); return { id: 1 } } }
@@ -351,4 +354,78 @@ test('gather during the buried self-rescue answers busy naming it and starts no 
   const r = await routeJobs('/gather', query, env)
   assert.deepStrictEqual([r.error && r.error.reason, r.started], ['busy', []])
   assert.match(r.error.message, /^busy: the buried self-rescue is running\b/)
+})
+
+const cell = (p) => `${p.x},${p.y},${p.z}`
+// 40 dirt cells in the shore west of the body, each nearer it than FAR_DIRT.
+const NEAR_40 = [-6, -5, -4, -3].flatMap((x) => [62, 63].flatMap((y) => [-2, -1, 0, 1, 2].map((z) => new Vec3(x, y, z))))
+const FAR_DIRT = new Vec3(-9, 63, 0)
+
+test('gather digs dirt in sight past 40 buried dirt nearer the body', async () => {
+  const buried = new Set(NEAR_40.map(cell))
+  const r = await gather(SHORE, [...NEAR_40, FAR_DIRT], { rig: (w) => { w.env.seesLit = (p) => !buried.has(cell(p)) } })
+  assert.deepStrictEqual(r.digs, [{ at: '-9,63,0', head: 'air' }], r.progress.join('\n'))
+  assert.strictEqual(r.result.gathered, 1)
+})
+
+test('gather digs dirt in sight past 40 dirt nearer the body that it gave up on', async () => {
+  const r = await gather(SHORE, [...NEAR_40, FAR_DIRT], {
+    rig: (w) => {
+      const goto = w.env.bot.pathfinder.goto
+      let walks = 0
+      // The walks to the 40 nearer cells find no path.
+      w.env.bot.pathfinder.goto = (goal) => walks++ < 40 ? Promise.reject(new Error('No path to the goal!')) : goto(goal)
+    }
+  })
+  assert.strictEqual(r.progress.filter((m) => m.endsWith(': No path to the goal!')).length, 40, r.progress.join('\n'))
+  assert.deepStrictEqual(r.digs, [{ at: '-9,63,0', head: 'air' }], r.progress.join('\n'))
+})
+
+test('gather digs dirt in sight past 40 dirt nearer the body but too far below the feet', async () => {
+  const r = await gather(SHORE, [...NEAR_40.map((p) => p.offset(0, -2, 0)), FAR_DIRT])
+  assert.deepStrictEqual(r.digs, [{ at: '-9,63,0', head: 'air' }], r.progress.join('\n'))
+})
+
+// 40 dirt cells on the lakebed, each nearer the body than FARTHER_DIRT.
+const WET_40 = [1, 2, 3, 4, 5].flatMap((x) => [-4, -3, -2, -1, 0, 1, 2, 3].map((z) => new Vec3(x, 62, z)))
+const FARTHER_DIRT = new Vec3(-11, 63, 0)
+
+test('gather digs dry dirt past 40 dirt under water nearer the body and counts all 40', async () => {
+  const r = await gather(SHORE, [...WET_40, FARTHER_DIRT], { amount: 2 })
+  assert.deepStrictEqual(r.digs, [{ at: '-11,63,0', head: 'air' }], r.progress.join('\n'))
+  assert.strictEqual(r.result.reason, 'no dirt among the nearest I see that I can dig without diving, 40 seen under water (gathered 1/2)')
+})
+
+test('gather whose search stops early with nothing to dig says so, never that none is reachable', async () => {
+  const r = await gather(SHORE, [], { rig: (w) => { w.env.nearestCells = () => true } })
+  assert.deepStrictEqual(r.digs, [])
+  assert.strictEqual(r.result.reason, 'the search for dirt within 40 of the start stopped early (gathered 0/1)')
+})
+
+test('gather whose search stops early with nothing to dig counts the dirt it saw under water', async () => {
+  const r = await gather(SHORE, [LAKEBED, LAKEBED.offset(1, 0, 0)], {
+    rig: (w) => {
+      const search = w.env.nearestCells
+      // The search visits every cell, then reports it stopped early.
+      w.env.nearestCells = (...args) => { search(...args); return true }
+    }
+  })
+  assert.deepStrictEqual(r.digs, [])
+  assert.strictEqual(r.result.reason, 'the search for dirt within 40 of the start stopped early, 2 dirt seen under water (gathered 0/1)')
+})
+
+// Unripe wheat on farmland level with the feet, above the climb limit and below the drop limit.
+const UNRIPE = {
+  '-4,63,0': 'farmland', '-4,64,0': ['wheat', { age: '3' }],
+  '-4,69,0': 'farmland', '-4,70,0': ['wheat', { age: '3' }],
+  '-4,60,0': 'farmland', '-4,61,0': ['wheat', { age: '3' }]
+}
+
+test('gather counts unripe wheat past its climb and drop limits', async () => {
+  const query = { resource: 'wheat' }
+  const none = await gather(SHORE, [], { blocks: UNRIPE, query })
+  assert.deepStrictEqual([none.result.unripe, none.result.reason], [3, 'no ripe wheat left, 3 unripe (gathered 0/1)'])
+  const ripe = { ...UNRIPE, '-6,63,0': 'farmland', '-6,64,0': ['wheat', { age: '7' }] }
+  const failed = await gather(SHORE, [], { blocks: ripe, walk: 'noPath', query })
+  assert.deepStrictEqual([failed.result.unripe, failed.result.reason], [3, 'no reachable wheat left, 3 unripe (gathered 0/1)'])
 })

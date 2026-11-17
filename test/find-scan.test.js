@@ -4,7 +4,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 const { EventEmitter } = require('node:events')
 const { Vec3 } = require('vec3')
-const { loadBotFunctions } = require('./helpers')
+const { botConstant, loadBotFunctions } = require('./helpers')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const registry = require('prismarine-registry')('1.21.11')
 const Chunk = require('prismarine-chunk')(registry)
@@ -99,7 +99,7 @@ const steps = (maxDistance) => Math.ceil((maxDistance + 8) / 16)
 test('the search returns the cells findBlocks finds that show a face to sight, nearest the eye first, plus those of the sections findBlocks never reaches', () => {
   for (const seed of [1, 2, 3, 4]) {
     const bot = generated(seed)
-    const s = sight(bot, ['nearestCells', 'nearPoint', 'floodPassable', 'isFence', 'isLeaves', 'eyeDist'])
+    const s = sight(bot, ['nearestCells', 'floodPassable', 'isFence', 'isLeaves', 'eyeDist'])
     const mixed = bot.world.getColumn(1, 1).sections[9]
     assert.ok(!mixed.palette && !('value' in mixed.data), 'control: a section without a palette')
     assert.ok('value' in bot.world.getColumn(-1, -1).sections[6].data, 'control: a section of one state')
@@ -117,7 +117,9 @@ test('the search returns the cells findBlocks finds that show a face to sight, n
     for (const { ids, maxDist, point = BODY } of cases) {
       const label = `seed ${seed}, ${typeof ids === 'function' ? 'a matcher' : ids.join('+')} within ${maxDist} of ${point}`
       const range = maxDist + BODY.distanceTo(point)
-      const matching = point === BODY ? ids : s.nearPoint(ids, point, maxDist)
+      // findBlocks tries a palette state, which has no position, before the cells holding it.
+      const near = (b) => (Array.isArray(ids) ? !!b && ids.includes(b.type) : ids(b)) && (!b?.position || b.position.distanceTo(point.floored()) <= maxDist)
+      const matching = point === BODY ? ids : near
       const expected = bot.findBlocks({ matching, maxDistance: range, count: Infinity }).filter(faced)
       const found = []
       s.nearestCells(ids, point, maxDist, range, Infinity, (p) => { found.push(p) })
@@ -192,4 +194,73 @@ test('findVisible marks its result partial when the search stops at the cap', ()
   const found = (crowded) => sight(coalRig(crowded), ['findVisible'], { Date: { now: () => 0 } }).findVisible([ID('coal_ore')], 64, 100000)
   assert.strictEqual(Object.hasOwn(found(false), 'partial'), false, 'control: a search that ends')
   assert.strictEqual(found(true).partial, true)
+})
+
+test('the search visits the same cells in the same order for a matcher as for its ids, and never asks the matcher about a buried cell', () => {
+  for (const seed of [1, 2]) {
+    const bot = generated(seed)
+    const s = sight(bot, ['nearestCells', 'floodPassable', 'isFence', 'isLeaves'])
+    const faced = (p) => [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].some(([dx, dy, dz]) => {
+      const n = bot.blockAt(p.offset(dx, dy, dz))
+      return s.floodPassable(n) || s.isFence(n) || s.isLeaves(n)
+    })
+    const ids = [ID('coal_ore'), ID('iron_ore')]
+    const buried = []
+    const matcher = (b) => {
+      if (b?.position && !faced(b.position)) buried.push(ck(b.position.x, b.position.y, b.position.z))
+      return !!b && ids.includes(b.type)
+    }
+    const visits = (matching) => {
+      const found = []
+      s.nearestCells(matching, BODY, 24, 24, Infinity, (p) => { found.push(ck(p.x, p.y, p.z)) })
+      return found
+    }
+    const byIds = visits(ids)
+    assert.ok(byIds.length > 0, `control: ${byIds.length} cells, seed ${seed}`)
+    assert.deepStrictEqual(visits(matcher), byIds, `seed ${seed}`)
+    assert.deepStrictEqual(buried, [], `seed ${seed}`)
+  }
+})
+
+// A clock that stands still, so the scan never reaches its deadline.
+const veins = (bot, env = {}) => sight(bot, ['veinScan'], { shared: { mcData: registry }, VEIN_SENSE_R: botConstant('VEIN_SENSE_R'), VEIN_SCAN_MS: botConstant('VEIN_SCAN_MS'), Date: { now: () => 0 }, ...env }).veinScan()
+
+test('the veins name iron in lit sight past 1000 coal sealed in stone nearer the body', () => {
+  const bot = realBot((set) => {
+    for (let x = -6; x <= 5; x++) {
+      for (let y = 51; y <= 62; y++) {
+        for (let z = -6; z <= 5; z++) set(x, y, z, [x, z].some((v) => v === -6 || v === 5) || y === 51 || y === 62 ? 'stone' : 'coal_ore')
+      }
+    }
+    set(18, 64, 0, 'iron_ore')
+  })
+  assert.strictEqual(veins(bot), 'iron E ~18')
+})
+
+test('the veins check the sight of only the nearest ore of a kind the eye sees', () => {
+  const bot = realBot((set) => {
+    set(4, 64, 0, 'coal_ore')
+    set(0, 64, 7, 'coal_ore')
+  })
+  const { seesLit } = sight(bot, ['seesLit'])
+  const checked = []
+  const scene = veins(bot, { seesLit: (p, r) => { checked.push(ck(p.x, p.y, p.z)); return seesLit(p, r) } })
+  assert.strictEqual(scene, 'coal E ~4')
+  assert.deepStrictEqual(checked, ['4,64,0'])
+})
+
+test('the veins past their deadline name the kinds found so far', () => {
+  const bot = realBot((set) => {
+    set(4, 64, 0, 'coal_ore')
+    set(0, 64, 7, 'iron_ore')
+  })
+  assert.strictEqual(veins(bot), 'coal E ~4, iron S ~7', 'control: both in sight')
+  const { seesLit } = sight(bot, ['seesLit'])
+  // The clock jumps past the deadline once the first ore in sight is found.
+  let late = false
+  const scene = veins(bot, {
+    Date: { now: () => late ? 1000 : 0 },
+    seesLit: (p, r) => { late = seesLit(p, r); return late }
+  })
+  assert.strictEqual(scene, 'coal E ~4')
 })

@@ -962,7 +962,7 @@ test('collect finds a drop in sight in a lit room, never one around the corner',
 
 test('the veins of scene name ore in lit sight, never ore around a corner or in the dark', () => {
   const veins = (light, at) => {
-    const env = { ...cave(light, at), VEIN_SENSE_R: botConstant('VEIN_SENSE_R') }
+    const env = { ...cave(light, at), VEIN_SENSE_R: botConstant('VEIN_SENSE_R'), VEIN_SCAN_MS: botConstant('VEIN_SCAN_MS') }
     return loadBotFunctions(['veinScan'], env).veinScan()
   }
   assert.strictEqual(veins(LIT), 'coal W ~1', 'control: in sight')
@@ -1170,7 +1170,7 @@ test('an unlit ore and an unlit block stay unnamed in every reply, the tunnel re
   assert.doesNotMatch(JSON.stringify(dark), leak)
   assert.deepStrictEqual(dark, replies(sideTunnel(-5)))
   assert.strictEqual(runRoute('/find', { name: 'diamond' }, stocked()).count, 0)
-  assert.strictEqual(loadBotFunctions(['veinScan'], { ...stocked(), VEIN_SENSE_R: botConstant('VEIN_SENSE_R') }).veinScan(), null)
+  assert.strictEqual(loadBotFunctions(['veinScan'], { ...stocked(), VEIN_SENSE_R: botConstant('VEIN_SENSE_R'), VEIN_SCAN_MS: botConstant('VEIN_SCAN_MS') }).veinScan(), null)
   const events = []
   loadBotFunctions(['oreCallout'], { ...stocked(), ORE_IDS: [4], ORE_ANNOUNCED: new Map(), sameVein, emitEvent: (kind, msg) => events.push(msg) }).oreCallout()
   assert.deepStrictEqual(events, [])

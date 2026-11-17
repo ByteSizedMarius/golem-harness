@@ -17,7 +17,7 @@ const { deathLedger } = require('../lib/deaths')
 const { entityInCell } = require('../lib/shelter')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const { legLedger, takenText } = require('../lib/leg-ledger')
-const { HUNG, awaitRoute, botConstant, claimRescue, fakeClock, groundMemory, loadBotFunctions, routeHandler, runRoute, sectionWorld, timed, waitFor } = require('./helpers')
+const { HUNG, awaitRoute, botConstant, cellSearch, claimRescue, fakeClock, groundMemory, loadBotFunctions, routeHandler, runRoute, sectionWorld, timed, waitFor } = require('./helpers')
 
 // The collect plugin switches on the class names.
 class Block {
@@ -702,7 +702,7 @@ test('mine counts a dig the server answers after its collect threw, and walks to
 test('a gather walks again to a drop whose walk the unstuck reflex ended and gathers on', async (t) => {
   const c = unreachedRig(t, { out: 0, ores: 2, drop: OFF_CENTRE, rig: jobRig })
   const left = () => Object.values(c.blocks).filter((b) => b.type)
-  c.bot.findBlocks = () => left().map((b) => b.position)
+  c.cells = () => left().map((b) => b.position)
   c.bot.world = { raycast: () => ({ position: left()[0]?.position }) }
   // A walk route ends once the legs were taken since it began.
   Object.assign(c.env, { walkRoute: () => ({ mark: c.env.legs.mark(), end () {} }), routeEnd: (route) => c.env.legs.mark() !== route.mark ? 'stopped' : null })
@@ -941,7 +941,7 @@ test('tidy reclaims a scaffold block whose collect walk the unstuck reflex stopp
 function gatherOres (t, ores, opts = {}) {
   const c = unreachedRig(t, { out: 0, ores, rig: jobRig, ...opts })
   const left = () => Object.values(c.blocks).filter((b) => b.type)
-  c.bot.findBlocks = () => left().map((b) => b.position)
+  c.cells = () => left().map((b) => b.position)
   c.bot.world = { raycast: () => ({ position: left()[0]?.position }) }
   c.bot.pathfinder.startCell = (p) => p.floored()
   return c
@@ -1056,7 +1056,7 @@ test('a gather whose block changes during its walk runs no collect on it, takes 
   Object.assign(c.blocks, { '4,64,0': near, '-5,64,0': new Block('iron_ore', new Vec3(-5, 64, 0)) })
   c.bot.entity = { width: 0.6, height: 1.8, position: new Vec3(0, 64, 0) }
   const standing = () => Object.values(c.blocks).filter((b) => b.type)
-  c.bot.findBlocks = () => standing().map((b) => b.position)
+  c.cells = () => standing().map((b) => b.position)
   c.bot.world = { raycast: (from) => ({ position: standing().sort((a, b) => from.distanceTo(a.position) - from.distanceTo(b.position))[0]?.position }) }
   c.bot.pathfinder.startCell = (p) => p.floored()
   // The ore comes back with the dig of the other one.
@@ -1093,7 +1093,7 @@ function walkDigRig (t, xs) {
   })
   c.bot.entity = { width: 0.6, height: 1.8, position: new Vec3(0, 64, 0) }
   const standing = () => Object.values(c.blocks).filter((b) => b.type)
-  c.bot.findBlocks = () => standing().map((b) => b.position)
+  c.cells = () => standing().map((b) => b.position)
   c.bot.world = { raycast: (from) => ({ position: standing().sort((a, b) => from.distanceTo(a.position) - from.distanceTo(b.position))[0]?.position }) }
   c.bot.pathfinder.startCell = (p) => p.floored()
   return c
@@ -1102,9 +1102,9 @@ function walkDigRig (t, xs) {
 test('a gather whose walk digs the block picks up its drop and counts that pass as progress', async (t) => {
   const c = walkDigRig(t, [4])
   // The first two searches find cells that changed since, two passes with nothing gathered. A third would end the gather as tapped out.
-  const findBlocks = c.bot.findBlocks
+  const nearestCells = c.env.nearestCells
   let searches = 0
-  c.bot.findBlocks = (o) => ++searches <= 2 ? [new Vec3(searches + 1, 64, 0)] : findBlocks(o)
+  c.env.nearestCells = (matching, point, maxDist, sight, deadline, visit) => ++searches <= 2 ? visit(new Vec3(searches + 1, 64, 0)) : nearestCells(matching, point, maxDist, sight, deadline, visit)
   const collects = collectCells(c)
   const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
   assert.deepStrictEqual(await jobResult(c, job), { gathered: 1, dug: 1, requested: 2, inventoryMatching: 1, reason: 'no reachable iron_ore left (gathered 1/2)' })
@@ -1270,10 +1270,14 @@ test('tidy counts a dug scaffold block whose drop it cannot reach as reclaimed a
 // A collector for test t over the rig options that runs gather jobs, wired to stop as bot.js wires them, and answers /stop.
 function jobRig (t, rig = { blocks: ORE, reach: () => true, holdDig: true }) {
   const c = collector(t, rig)
-  c.bot.findBlocks = () => [new Vec3(1, 64, 0)]
+  // The cells the search matches against.
+  c.cells = () => [new Vec3(1, 64, 0)]
   c.bot.world = { raycast: () => ({ position: new Vec3(1, 64, 0) }) }
   c.bot.clearControlStates = () => {}
   Object.assign(c.env, {
+    nearestCells: cellSearch(c.bot, () => c.cells()),
+    eyeDist: () => 0,
+    lightReach: () => 15,
     seesLit: () => true,
     emitEvent: () => {},
     // The ore sits level with the feet.
@@ -1340,7 +1344,7 @@ test('a gather counts a dug block whose drop it cannot reach', async (t) => {
 test('a gather walks again to a drop collectblock could not reach once its next dig is confirmed and gathers it', async (t) => {
   const c = unreachedRig(t, { out: 1, ores: 2, rig: jobRig, chase: () => !c.blocks['2,64,0'].type })
   const left = () => Object.values(c.blocks).filter((b) => b.type)
-  c.bot.findBlocks = () => left().map((b) => b.position)
+  c.cells = () => left().map((b) => b.position)
   c.bot.world = { raycast: () => ({ position: left()[0]?.position }) }
   const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
   assert.deepStrictEqual(await jobResult(c, job), { gathered: 2, dug: 2, requested: 2, inventoryMatching: 2 })
@@ -1511,8 +1515,9 @@ function potatoRig (t, field, rig = collector) {
     if (![...new Set(cells.map((p) => at(p).stateId))].some((s) => matches(PBlock.fromStateId(s, 0)))) return []
     return cells.filter((p) => matches(at(p))).slice(0, count)
   }
-  // Every potato shows a lit face, leaving findVisible's cap of 256 sight lines as the only filter.
-  const findVisible = (matching, radius, count) => c.bot.findBlocks({ matching, count: 4096 }).slice(0, 256).slice(0, count)
+  // Every potato shows a lit face, leaving findVisible's cap of 256 sight lines and accept as the only filters.
+  const findVisible = (matching, radius, count, point, accept = null) => c.bot.findBlocks({ matching, count: 4096 }).slice(0, 256)
+    .filter((pos) => !accept || accept(pos)).slice(0, count)
     .map((pos) => ({ pos, dist: pos.distanceTo(c.bot.entity.position) }))
   c.env.shared.mcData = registry
   Object.assign(c.env, {
@@ -1626,7 +1631,7 @@ function silkGatherRig (t, refusal) {
   const diamond = new Block('diamond_ore', new Vec3(1, 64, 0))
   const coal = new Block('coal_ore', new Vec3(0, 64, 2))
   Object.assign(c.blocks, { '1,64,0': diamond, '0,64,2': coal })
-  c.bot.findBlocks = () => [diamond.position, coal.position]
+  c.cells = () => [diamond.position, coal.position]
   // The first non-air block on the ray.
   c.bot.world.raycast = (from, dir, range) => {
     for (let d = 0; d <= range; d += 0.05) {
@@ -1900,11 +1905,11 @@ test('a gather counts a pickup whose slot update lands after its wait for one, a
     c.bot.emit('playerCollect', c.bot.entity, g.entity)
     setImmediate(() => c.bot.emit('entityGone', g.entity))
   })
-  const findBlocks = c.bot.findBlocks
+  const nearestCells = c.env.nearestCells
   let searches = 0
-  c.bot.findBlocks = (o) => {
+  c.env.nearestCells = (...search) => {
     if (++searches === 2) c.pockets.push({ name: 'raw_iron', count: 1 })
-    return findBlocks(o)
+    return nearestCells(...search)
   }
   const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
   assert.deepStrictEqual(await jobResult(c, job), { gathered: 1, dug: 1, requested: 1, inventoryMatching: 1 })
@@ -1914,21 +1919,21 @@ test('a gather counts a pickup whose slot update lands after its wait for one, a
 test('a gather waits at its end for the pickup of a drop of its dig that lies within reach of the body', async (t) => {
   const c = jobRig(t, { blocks: ORE, reach: () => true, drop: () => null })
   const drop = new Entity(new Vec3(1.2, 64.1, 0.3))
-  const findBlocks = c.bot.findBlocks
+  const nearestCells = c.env.nearestCells
   let searches = 0
-  c.bot.findBlocks = (o) => {
+  c.env.nearestCells = (...search) => {
     // The drop of the dig spawns late, during the next search, beside the body.
     if (++searches === 2) {
       c.bot.entities[drop.id] = drop
       c.bot.emit('itemDrop', drop)
     }
-    return findBlocks(o)
+    return nearestCells(...search)
   }
   const waitForTicks = c.bot.waitForTicks
   let waits = 0
   c.bot.waitForTicks = (n) => {
     // The server collects it on the second tick the job waits after its last search.
-    if (searches === 3 && ++waits === 2) {
+    if (searches === 2 && ++waits === 2) {
       c.pockets.push({ name: 'raw_iron', count: 1 })
       c.bot.emit('playerCollect', c.bot.entity, drop)
       c.bot.emit('entityGone', drop)
@@ -1937,7 +1942,7 @@ test('a gather waits at its end for the pickup of a drop of its dig that lies wi
   }
   const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
   assert.deepStrictEqual(await jobResult(c, job), { gathered: 1, dug: 1, requested: 1, inventoryMatching: 1 })
-  assert.strictEqual(searches, 3, 'control: the job searched once more after the dig, and once to find nothing')
+  assert.strictEqual(searches, 2, 'control: the job searched once more after the dig, finding nothing')
 })
 
 test('a gather walks to a drop that spawns after the collect returned', async (t) => {
