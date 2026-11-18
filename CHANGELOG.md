@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-18: a gather that sees nothing looks again from where it last saw something
+
+A `gather` on a terraced field followed a drop into a pit beside a bed and stopped at 17 of 30 with
+`no reachable wheat left`. From down there the bed's own edge hid every crop, and the search runs
+from wherever the body stands. Before it stops on an empty search, `gather` now walks back to the
+place its last search with a result ran from and searches once more.
+
 ## 2026-11-18: a drop in a closed pocket is given up without a search
 
 A `gather` of dirt dug under a tree trunk, and its drops fell into a trench closed by the trunk

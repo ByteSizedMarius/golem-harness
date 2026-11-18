@@ -105,6 +105,7 @@ function collector (t, { blocks, reach, plan = () => ({ status: 'success', path:
     setMovements (m) { this.movements = m },
     isMoving: () => false,
     isMining: () => false,
+    startCell: (p) => p.floored(),
     stop () { seen.stops++ },
     setGoal (g) {
       this.goal = g
@@ -1125,6 +1126,91 @@ test('a gather searches again from where the walk to the drops of a block its wa
   const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
   assert.deepStrictEqual(await jobResult(c, job), { gathered: 2, dug: 2, requested: 2, inventoryMatching: 2 })
   assert.deepStrictEqual(collects, ['9,64,0'])
+})
+
+// Where the walk to the first drop ends, 2 below the ore row.
+const PIT = new Vec3(5, 62, 2)
+
+// A gather rig over ores at x on the row level with the feet at 0,64,0, whose job walk to the first drop ends in pit.
+function pitRig (t, xs, { pit = PIT, sees = (c) => !c.bot.entity.position.equals(pit), back = (g, c) => { c.bot.entity.position = new Vec3(g.x, g.y, g.z); return true } } = {}) {
+  const c = unreachedRig(t, {
+    ores: 0,
+    rig: jobRig,
+    reach: (g) => {
+      if (g instanceof goals.GoalFollow) return g.entity !== c.seen.drops[0]
+      if (g instanceof goals.GoalBlock) return back(g, c)
+      if (g instanceof goals.GoalNear && !g.isEnd(c.bot.entity.position.floored())) c.bot.entity.position = new Vec3(g.x, 64, g.z + 1)
+      return true
+    }
+  })
+  for (const x of xs) c.blocks[`${x},64,0`] = new Block('iron_ore', new Vec3(x, 64, 0))
+  c.blocks['0,64,0'] = air(0, 64, 0)
+  c.bot.entity = { width: 0.6, height: 1.8, position: new Vec3(0, 64, 0) }
+  const standing = () => Object.values(c.blocks).filter((b) => b.type)
+  c.cells = () => standing().map((b) => b.position)
+  c.bot.world = { raycast: (from) => ({ position: standing().sort((a, b) => from.distanceTo(a.position) - from.distanceTo(b.position))[0]?.position }) }
+  c.env.seesLit = () => sees(c)
+  const stagedGoto = c.env.stagedGoto
+  c.env.stagedGoto = async (goal, route) => {
+    const r = await stagedGoto(goal, route)
+    if (pit) c.bot.entity.position = pit
+    return r
+  }
+  c.backs = []
+  c.bot.on('goal_updated', (g) => { if (g instanceof goals.GoalBlock && g.x === 0 && g.y === 64 && g.z === 0) c.backs.push(g) })
+  return c
+}
+
+const NONE_LEFT = { gathered: 1, dug: 1, requested: 2, inventoryMatching: 1, reason: 'no reachable iron_ore left (gathered 1/2)' }
+
+test('a gather whose drop walk ends where it sees no ore walks back to where it last saw some, searches again and gathers on', async (t) => {
+  const c = pitRig(t, [2, 3])
+  const collects = collectCells(c)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 2, dug: 2, requested: 2, inventoryMatching: 2 })
+  assert.deepStrictEqual(collects, ['2,64,0', '3,64,0'])
+  assert.strictEqual(c.backs.length, 1)
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('a gather whose search comes up empty where it last saw ore stops with no walk back', async (t) => {
+  const c = pitRig(t, [2], { pit: null, sees: () => true })
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), NONE_LEFT)
+  assert.deepStrictEqual(c.backs, [])
+})
+
+test('a gather whose walk back to where it last saw ore finds no path stops as having none left and clears that walk\'s goal', async (t) => {
+  const c = pitRig(t, [2, 3], { back: () => false })
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), NONE_LEFT)
+  assert.strictEqual(c.seen.digs, 1)
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('a gather that sees no ore from where it last saw some stops as having none left after one walk back at most', async (t) => {
+  const c = pitRig(t, [2, 3], { sees: (c) => !c.seen.chases.length })
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), NONE_LEFT)
+  assert.ok(c.backs.length <= 1, `${c.backs.length} walks back`)
+  assert.strictEqual(c.bot.pathfinder.goal, null)
+})
+
+test('a gather whose first search sees no ore stops with no walk', async (t) => {
+  const c = pitRig(t, [2], { sees: () => false })
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 0, dug: 0, requested: 1, inventoryMatching: 0, ok: false, reason: 'no reachable iron_ore left (gathered 0/1)' })
+  assert.deepStrictEqual(c.backs, [])
+})
+
+test('a /stop during the walk back to where a gather last saw ore ends the gather cancelled with no further dig', async (t) => {
+  let id = null
+  const c = pitRig(t, [2, 3], { back: () => { c.env.jobs.stop(id); return false } })
+  id = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env).job
+  assert.deepStrictEqual(await jobResult(c, id), { ...NONE_LEFT, reason: 'cancelled' })
+  assert.strictEqual(c.env.jobs.get(id).status, 'cancelled')
+  assert.strictEqual(c.seen.digs, 1)
+  assert.strictEqual(c.bot.pathfinder.goal, null)
 })
 
 test('mine stops its walk to the block when the walk finds no path', async (t) => {
