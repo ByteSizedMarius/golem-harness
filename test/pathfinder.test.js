@@ -445,6 +445,131 @@ test('the goto precheck leaves a pickup walk to a drop on open ground 12 blocks 
   assert.deepStrictEqual(verdicts, ['connected', 'connected'])
 })
 
+// ground walled in by stone, which ends a plan with no way out.
+const roomed = (ground) => (c) => (c.x < -3 || c.x > 9 || c.z < -5 || c.z > 7 ? STONE : ground(c))
+const buriedIn = (ground, cells) => {
+  const name = (p) => (cells[`${p.x},${p.y},${p.z}`] || ground(p))[0]
+  return (p) => name(p) !== 'air' && [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].every(([dx, dy, dz]) => name(p.offset(dx, dy, dz)) !== 'air')
+}
+const rayWorld = (bot) => ({ raycast: (...ray) => WorldSync.prototype.raycast.apply({ getBlock: (p) => bot.blockAt(p) }, ray) })
+// The gather's walk goal for the block at p with no open top, without its dry-head check.
+function gatherGoal (p, bot) {
+  const goal = new goals.GoalNear(p.x, p.y, p.z, 2)
+  const near = goal.isEnd.bind(goal)
+  const sees = new goals.GoalLookAtBlock(p, rayWorld(bot))
+  goal.isEnd = (node) => near(node) && sees.isEnd(node)
+  return goal
+}
+const TRENCH_WALL = new Vec3(4, 64, 1)
+// The plan's status and the block walk check's verdict for the walk to the block at at, from feet at noon with the cells within 5 of at seen.
+async function blockVerdicts (at, { feet = TRENCH_FEET, ground = roomed(trench), cells = { '3,66,1': LOG }, forestry = false, unknown = () => false, outline = () => null, goal: build = (bot) => gatherGoal(at, bot), box = { reach: 2 }, checked = (g) => g, throws = false } = {}) {
+  const { bot, moves, fns, env, plan } = await lit(feet, new Map(Object.entries(cells)), ground, () => 15)
+  seeAll(env, [at.x - 5, at.y - 5, at.z - 5], [at.x + 5, at.y + 5, at.z + 5])
+  if (forestry) {
+    moves.canDig = true
+    moves.blocksCantBreak = new Set(bot.registry.blocksArray.filter((b) => !/(_log|_wood|_leaves)$/.test(b.name)).map((b) => b.id))
+  }
+  bot.pathfinder.setMovements(moves)
+  const planKnown = fns.planKnown
+  fns.planKnown = (p) => (unknown(p) ? null : outline(p) || planKnown(p))
+  const lines = []
+  env.console = { log: (line) => lines.push(line) }
+  const { blockWalkClosed } = loadBotFunctions(['blockWalkClosed'], env)
+  const goal = build(bot)
+  const verdicts = [plan(goal).status, blockWalkClosed(checked(goal), at, box)]
+  if (!throws) assert.deepStrictEqual(lines.filter((l) => l.startsWith('[path] block walk')).map((l) => /: closed, \d+ ms$/.test(l)), verdicts[1] ? [true] : [])
+  return { verdicts, lines, moves, goal }
+}
+
+test('the block walk check refuses a trench wall block with the buried ground unknown to the planner', async () => {
+  const { verdicts, moves } = await blockVerdicts(TRENCH_WALL, { unknown: buriedIn(roomed(trench), { '3,66,1': LOG }) })
+  assert.strictEqual(moves.getBlock(new Vec3(5, 64, 1), 0, 0, 0).name, 'unknown', 'control: the ground east of the block reads unknown')
+  assert.deepStrictEqual(verdicts, ['noPath', true])
+})
+
+test('the block walk check refuses a block with no cell a body fits in that a walk could end in', async () => {
+  const { verdicts, goal } = await blockVerdicts(new Vec3(4, 64, 2))
+  assert.strictEqual(goal.isEnd(new Vec3(3, 64, 1)), false, 'control: the trench cell beside it sees no face of it')
+  assert.deepStrictEqual(verdicts, ['noPath', true])
+})
+
+test('the block walk check refuses a block whose only end cell lies in the trench closed by a log the legs cannot break', async () => {
+  const { verdicts, goal } = await blockVerdicts(TRENCH_WALL)
+  assert.ok(goal.isEnd(new Vec3(3, 64, 1)), 'control: the trench cell is an end')
+  assert.deepStrictEqual(verdicts, ['noPath', true])
+})
+
+test('the block walk check leaves a block whose only end cell lies in the trench to the plan once the trench has a way in', async () => {
+  assert.deepStrictEqual((await blockVerdicts(TRENCH_WALL, { cells: {} })).verdicts, ['success', false])
+})
+
+test('the block walk check leaves a block without shapes to the plan when its only end cell lies 3 from it', async () => {
+  const corridor = (c) => (c.z === 0 && c.x >= 0 && c.x <= 7 && (c.y === 64 || c.y === 65) ? AIR : STONE)
+  const torch = new Vec3(10, 64, 0)
+  const opts = { feet: START, ground: corridor, cells: { '10,64,0': ['torch', {}] }, goal: () => new goals.GoalNear(10, 64, 0, 3) }
+  assert.deepStrictEqual((await blockVerdicts(torch, { ...opts, box: { reach: 2 } })).verdicts, ['success', true], 'control: a box of 2 holds no end cell')
+  assert.deepStrictEqual((await blockVerdicts(torch, { ...opts, box: { reach: 3 } })).verdicts, ['success', false])
+})
+
+test('the block walk check leaves a block to the plan whose look goal ends only 5 below it', async () => {
+  const corridor = (c) => (c.z === 0 && c.x >= 0 && c.x <= 6 && (c.y === 64 || c.y === 65) ? AIR : STONE)
+  const ore = new Vec3(3, 69, 0)
+  const cells = { '3,66,0': ['cobweb', {}], '3,67,0': ['cobweb', {}], '3,68,0': ['cobweb', {}], '3,69,0': ['coal_ore', {}] }
+  const opts = { feet: START, ground: corridor, cells, goal: (bot) => new goals.GoalLookAtBlock(ore, rayWorld(bot)) }
+  const eyeless = await blockVerdicts(ore, { ...opts, box: { reach: 4.5 } })
+  assert.ok(eyeless.goal.isEnd(new Vec3(3, 64, 0)), 'control: the corridor cell under the shaft is an end')
+  assert.deepStrictEqual(eyeless.verdicts, ['success', true], 'control: a box with the eye at the feet reaches 4 below')
+  assert.deepStrictEqual((await blockVerdicts(ore, { ...opts, box: { reach: 4.5, eye: 1.1 } })).verdicts, ['success', false])
+})
+
+test('the block walk check leaves a block in the trench to the plan under legs that may break the log', async () => {
+  assert.deepStrictEqual((await blockVerdicts(TRENCH_WALL, { forestry: true })).verdicts, ['success', false])
+})
+
+test('the block walk check reads a cell the planner makes out only by its outline as that outline', async () => {
+  const at = (p) => p.x === 3 && p.y === 66 && p.z === 1
+  const air = await blockVerdicts(TRENCH_WALL, { outline: (p) => (at(p) ? 'air' : null) })
+  const cell = air.moves.getBlock(new Vec3(3, 66, 1), 0, 0, 0)
+  assert.deepStrictEqual([cell.type, cell.name], [null, 'air'], 'control: the log reads as the outline air')
+  assert.deepStrictEqual(air.verdicts, ['success', false], 'made out as air')
+  assert.deepStrictEqual((await blockVerdicts(TRENCH_WALL, { outline: (p) => (at(p) ? 'solid' : null) })).verdicts, ['noPath', true], 'made out as solid')
+})
+
+test('the block walk check answers closed for a block whose every look ray stops at a known leaf, as the plan finds no path', async () => {
+  const leaf = ['oak_leaves', { distance: '1', persistent: 'true', waterlogged: 'false' }]
+  const ore = new Vec3(4, 64, 0)
+  const cells = { '4,64,0': ['coal_ore', {}] }
+  const opts = { feet: START, ground: roomed((c) => (c.y <= 63 ? STONE : AIR)) }
+  assert.deepStrictEqual((await blockVerdicts(ore, { ...opts, cells })).verdicts, ['success', false], 'control: the ore without its leaves')
+  for (const k of ['4,65,0', '3,64,0', '5,64,0', '4,64,1', '4,64,-1']) cells[k] = leaf
+  assert.deepStrictEqual((await blockVerdicts(ore, { ...opts, cells })).verdicts, ['noPath', true])
+})
+
+test('the block walk check leaves a block on open ground to the plan after one look', async () => {
+  const flat = (c) => (c.y <= 63 ? STONE : AIR)
+  let looks = 0
+  const counted = (g) => ({ isEnd: (node) => { looks++; return g.isEnd(node) } })
+  const { verdicts } = await blockVerdicts(new Vec3(12, 63, 0), { feet: START, ground: flat, cells: {}, checked: counted })
+  assert.deepStrictEqual(verdicts, ['success', false])
+  assert.strictEqual(looks, 1)
+})
+
+test('a block walk check that throws leaves the block to the plan and logs why', async () => {
+  const failing = () => ({ isEnd: () => { throw new Error('ray failed') } })
+  const { verdicts, lines } = await blockVerdicts(TRENCH_WALL, { checked: failing, throws: true })
+  assert.deepStrictEqual(verdicts, ['noPath', false])
+  assert.match(lines.at(-1), /^\[path\] block walk to 4,64,1: open, \d+ ms, check failed: ray failed$/)
+})
+
+test('the block walk check leaves a block to the plan without a look for a box with no reach', async () => {
+  for (const box of [null, { reach: NaN }, { reach: 0 }]) {
+    let looks = 0
+    const counted = (g) => ({ isEnd: (node) => { looks++; return g.isEnd(node) } })
+    const { verdicts } = await blockVerdicts(TRENCH_WALL, { box, checked: counted })
+    assert.deepStrictEqual([verdicts, looks], [['noPath', false], 0], `reach ${box?.reach}`)
+  }
+})
+
 // The plan to 7,64,0 past block in cells, the floor and x 7 to 8 seen, digging only coal ore with cage.
 async function planPast (cells, block, { cage = false, seen = [] } = {}) {
   const { plan, moves, fns, env } = await midnight(START, Object.fromEntries(cells.map((k) => [k, block])))

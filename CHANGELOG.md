@@ -4,6 +4,19 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-18: a gather or a mine skips a block it has no seen way to
+
+A `gather` of dirt beside a trench walked to wall blocks it had no spot to dig them from. Each walk
+searched for a path for the full 10 s before the block was skipped, so two such blocks took 20 s of a
+30 s job. A `mine` walk to such a block ran the same search, and its timeout ended the whole call.
+Before a gather walks to a block, and before a mine walks to one itself (a block with open sky above
+it, something above it that would fall, or no shape), it now checks whether a spot to dig it from
+connects to where the bot stands through ground the bot has seen. If none does, the block is skipped
+for now and comes back once one of the digs lands or the bot stands somewhere else. A gather that
+runs out of other blocks or trips its circuit breaker while such blocks wait adds how many it saw
+with no seen way to them, and no longer says that none is ripe or natural. A mine that finds no
+other block says the same, and a mine ends that way after 41 skips with no dig landing in between.
+
 ## 2026-11-18: a walk to a drop gives up on its first search that runs out of time
 
 A walk to a drop it had no way to, on a roof or across a ravine, ran three path searches of 10 s

@@ -1203,6 +1203,250 @@ test('a gather whose first search sees no ore stops with no walk', async (t) => 
   assert.deepStrictEqual(c.backs, [])
 })
 
+// A gather rig with iron ore at keys, the feet at 0,64,0, walks that end beside their block and a block walk check that answers closed(at).
+function closedRig (t, keys, closed) {
+  const c = unreachedRig(t, {
+    ores: 0,
+    rig: jobRig,
+    reach: (g) => {
+      if (g instanceof goals.GoalNear) c.bot.entity.position = new Vec3(g.x, 64, g.z + 1)
+      return true
+    }
+  })
+  for (const k of keys) c.blocks[k] = new Block('iron_ore', new Vec3(...k.split(',').map(Number)))
+  c.bot.entity = { width: 0.6, height: 1.8, position: new Vec3(0, 64, 0) }
+  const ores = () => Object.values(c.blocks).filter((b) => b.name === 'iron_ore')
+  c.cells = () => ores().map((b) => b.position)
+  c.bot.world = { raycast: (from) => ({ position: ores().sort((a, b) => from.distanceTo(a.position) - from.distanceTo(b.position))[0]?.position }) }
+  c.bot.pathfinder.startCell = (p) => p.floored()
+  c.checks = []
+  c.env.blockWalkClosed = (goal, at, box) => {
+    c.checks.push({ at: `${at.x},${at.y},${at.z}`, box })
+    return closed(at, box)
+  }
+  c.walks = []
+  c.bot.on('goal_updated', (g) => { if (g instanceof goals.GoalNear) c.walks.push(`${g.x},${g.y},${g.z}`) })
+  c.notes = []
+  const start = c.env.jobs.start
+  c.env.jobs.start = (name, fn) => start(name, (job) => {
+    const progress = job.progress
+    job.progress = (msg) => {
+      c.notes.push(msg)
+      progress(msg)
+    }
+    return fn(job)
+  })
+  return c
+}
+
+const NO_WAY = 'no way to it through ground I have seen'
+
+test('a gather skips a block with no seen way to it for now without a walk, and walks to it and digs it once the dig beside it opened one', async (t) => {
+  const c = closedRig(t, ['4,64,0', '-5,64,0'], (at) => at.x === 4 && !!c.blocks['-5,64,0'].type)
+  const collects = collectCells(c)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 2, dug: 2, requested: 2, inventoryMatching: 2 })
+  assert.ok(c.notes.includes(`skip for now @ 4,64,0: ${NO_WAY}`), c.notes.join(' | '))
+  assert.deepStrictEqual(c.walks, ['-5,64,0', '4,64,0'])
+  assert.deepStrictEqual(collects, ['-5,64,0', '4,64,0'])
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(c.checks)), ['4,64,0', '-5,64,0', '4,64,0'].map((at) => ({ at, box: { reach: 2 } })))
+})
+
+test('a gather digs a block behind the 40 nearest with no seen way to them and does not stop for having none left', async (t) => {
+  const grid = []
+  for (let x = 3; x <= 7; x++) for (let z = -4; z <= 3; z++) grid.push(`${x},64,${z}`)
+  const c = closedRig(t, [...grid, '-9,64,0'], (at) => at.x !== -9)
+  const collects = collectCells(c)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 1, dug: 1, requested: 1, inventoryMatching: 1 })
+  assert.deepStrictEqual([c.walks, collects, c.checks.length], [['-9,64,0'], ['-9,64,0'], 41])
+})
+
+// closedRig over an ore at 7,64,0 with open sky over it and a known leaf beside it. Its walk goal asks the check with an eye, the leaf retry's walk within 2 without one.
+// It lists the goal of each clearLeaves call and every goal set.
+function leafRetryRig (t, closed) {
+  const c = closedRig(t, ['7,64,0'], closed)
+  Object.assign(c.blocks, { '7,65,0': air(7, 65, 0), '7,66,0': air(7, 66, 0), '8,64,0': new Block('oak_leaves', new Vec3(8, 64, 0), 2) })
+  c.clears = []
+  c.env.clearLeaves = async (b, what, goal) => {
+    c.clears.push(goal)
+    return null
+  }
+  c.goals = []
+  c.bot.on('goal_updated', (g) => { if (g) c.goals.push(g) })
+  return c
+}
+
+test('a gather takes a block with no seen way to it and a known leaf beside it straight to the leaf retry when a spot within 2 of it has one', async (t) => {
+  const c = leafRetryRig(t, (at, box) => !!box.eye)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 1, dug: 1, requested: 1, inventoryMatching: 1 })
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(c.checks)), [{ at: '7,64,0', box: { reach: 4.5, eye: 1.1 } }, { at: '7,64,0', box: { reach: 2 } }])
+  assert.deepStrictEqual(c.walks, ['7,64,0'], 'the retry walks within 2 first')
+  assert.ok(c.clears.at(-1) instanceof goals.GoalLookAtBlock, 'the retry clears the leaves toward the walk goal')
+  assert.ok(!c.notes.some((n) => n.includes(NO_WAY)), c.notes.join(' | '))
+})
+
+test('a gather skips a block with no seen way to it or to a spot within 2 of it for now, with no walk and no leaf clearing, though a known leaf lies beside it', async (t) => {
+  const c = leafRetryRig(t, () => true)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
+  const result = await jobResult(c, job)
+  assert.deepStrictEqual(c.goals, [], 'no walk')
+  assert.deepStrictEqual(c.clears, [undefined], 'only the clearing with no walk goal')
+  assert.ok(c.notes.includes(`skip for now @ 7,64,0: ${NO_WAY}`), c.notes.join(' | '))
+  assert.deepStrictEqual(result, {
+    gathered: 0, dug: 0, requested: 1, inventoryMatching: 0, ok: false, reason: 'no reachable iron_ore left, 1 in sight with no seen way to them (gathered 0/1)'
+  })
+})
+
+test('a gather whose blocks in sight all have no seen way to them stops as having none left and counts them', async (t) => {
+  const c = closedRig(t, ['4,64,0', '-5,64,0'], () => true)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), {
+    gathered: 0, dug: 0, requested: 2, inventoryMatching: 0, ok: false, reason: 'no reachable iron_ore left, 2 in sight with no seen way to them (gathered 0/2)'
+  })
+  assert.deepStrictEqual(c.walks, [])
+})
+
+function checkedFrom (c) {
+  const check = c.env.blockWalkClosed
+  const from = []
+  c.env.blockWalkClosed = (goal, at, box) => {
+    from.push(`${at.x},${at.y},${at.z} from ${c.bot.entity.position.floored()}`)
+    return check(goal, at, box)
+  }
+  return from
+}
+
+test('a gather takes a block skipped for now again once a dig of the job lands, with the start cell at the search unchanged', async (t) => {
+  const c = closedRig(t, ['4,64,0', '-5,64,0'], (at) => at.x === 4 && !!c.blocks['-5,64,0'].type)
+  c.bot.on('diggingCompleted', () => { c.bot.entity.position = new Vec3(0, 64, 0) })
+  const from = checkedFrom(c)
+  const collects = collectCells(c)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '2' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 2, dug: 2, requested: 2, inventoryMatching: 2 })
+  assert.deepStrictEqual(from, ['4,64,0 from (0, 64, 0)', '-5,64,0 from (0, 64, 0)', '4,64,0 from (0, 64, 0)'])
+  assert.deepStrictEqual(collects, ['-5,64,0', '4,64,0'])
+})
+
+test('a gather takes a block skipped for now again once the start cell changed, with no dig landed', async (t) => {
+  // Another player digs the block at -5,64,0 as the walk to it starts.
+  const c = closedRig(t, ['4,64,0', '-5,64,0'], (at) => at.x === 4 && c.bot.entity.position.x === 0)
+  c.bot.on('goal_updated', (g) => { if (g instanceof goals.GoalNear && g.x === -5) c.blocks['-5,64,0'] = air(-5, 64, 0) })
+  const from = checkedFrom(c)
+  const collects = collectCells(c)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), { gathered: 1, dug: 1, requested: 1, inventoryMatching: 1 })
+  assert.deepStrictEqual(from, ['4,64,0 from (0, 64, 0)', '-5,64,0 from (0, 64, 0)', '4,64,0 from (-5, 64, 1)'])
+  assert.deepStrictEqual(collects, ['4,64,0'])
+})
+
+test('a gather asks the block walk check with the look goal\'s reach and eye for a block with shapes and open sky over it', async (t) => {
+  const c = closedRig(t, ['7,64,0'], () => true)
+  Object.assign(c.blocks, { '7,65,0': air(7, 65, 0), '7,66,0': air(7, 66, 0) })
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
+  assert.deepStrictEqual((await jobResult(c, job)).reason, 'no reachable iron_ore left, 1 in sight with no seen way to them (gathered 0/1)')
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(c.checks)), [{ at: '7,64,0', box: { reach: 4.5, eye: 1.1 } }])
+})
+
+test('a gather asks the block walk check with a reach of 3 for a block without shapes and open sky over it', async (t) => {
+  const c = closedRig(t, ['7,64,0'], () => true)
+  c.blocks['7,64,0'].shapes = []
+  Object.assign(c.blocks, { '7,65,0': air(7, 65, 0), '7,66,0': air(7, 66, 0) })
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
+  assert.deepStrictEqual((await jobResult(c, job)).reason, 'no reachable iron_ore left, 1 in sight with no seen way to them (gathered 0/1)')
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(c.checks)), [{ at: '7,64,0', box: { reach: 3 } }])
+})
+
+test('a gather that ends by the circuit breaker after skipping a block for now counts it in the stop text', async (t) => {
+  const c = closedRig(t, ['4,64,0'], () => true)
+  // Every search also finds 2,64,0, a cell that no longer holds ore.
+  const nearestCells = c.env.nearestCells
+  c.env.nearestCells = (matching, point, maxDist, sight, deadline, visit) => visit(new Vec3(2, 64, 0)) || nearestCells(matching, point, maxDist, sight, deadline, visit)
+  const { job } = runRoute('/gather', { resource: 'iron_ore', amount: '1' }, c.env)
+  assert.deepStrictEqual(await jobResult(c, job), {
+    gathered: 0, dug: 0, requested: 1, inventoryMatching: 0, ok: false, reason: 'spot tapped out — no reachable iron_ore in 3 passes, 1 in sight with no seen way to them (gathered 0/1)'
+  })
+  assert.deepStrictEqual([c.checks.length, c.walks], [1, []])
+})
+
+// closedRig for /mine with open sky over each ore and the real nearestVisible.
+function mineClosedRig (t, keys, closed) {
+  const c = closedRig(t, keys, closed)
+  for (const k of keys) {
+    const [x, y, z] = k.split(',').map(Number)
+    Object.assign(c.blocks, { [`${x},${y + 1},${z}`]: air(x, y + 1, z), [`${x},${y + 2},${z}`]: air(x, y + 2, z) })
+  }
+  delete c.env.nearestVisible
+  c.lines = []
+  c.env.console = { log: (line) => c.lines.push(line) }
+  c.looks = []
+  c.bot.on('goal_updated', (g) => { if (g instanceof goals.GoalLookAtBlock) c.looks.push(`${g.pos.x},${g.pos.y},${g.pos.z}`) })
+  return c
+}
+
+test('mine skips a block with no seen way to it without a walk to it and mines the next', async (t) => {
+  const c = mineClosedRig(t, ['6,64,0', '-8,64,0'], (at) => at.x === 6)
+  const collects = collectCells(c)
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
+  assert.deepStrictEqual([reply.mined, reply.reason], [1, null])
+  assert.deepStrictEqual(collects, ['-8,64,0'])
+  assert.ok(!c.looks.includes('6,64,0'), c.looks.join(' | '))
+  assert.ok(c.lines.includes(`[mine] skip for now @ 6,64,0: ${NO_WAY}`), c.lines.join(' | '))
+})
+
+test('mine takes a block with no seen way to it once a dig lands that opens one', async (t) => {
+  const c = mineClosedRig(t, ['6,64,0', '-8,64,0'], (at) => at.x === 6 && !!c.blocks['-8,64,0'].type)
+  const collects = collectCells(c)
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '2' }, c.env))
+  assert.deepStrictEqual([reply.mined, reply.reason], [2, null])
+  assert.deepStrictEqual(collects, ['-8,64,0', '6,64,0'])
+  assert.deepStrictEqual(c.checks.map((k) => k.at), ['6,64,0', '-8,64,0', '6,64,0'])
+})
+
+test('mine whose blocks in sight all have no seen way to them walks to none and says how many it saw', async (t) => {
+  const c = mineClosedRig(t, ['6,64,0', '-8,64,0'], () => true)
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '2' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 0, requested: 2, gathered: 0, reason: 'no reachable iron_ore within 64 of the start, 2 in sight with no seen way to them' })
+  assert.deepStrictEqual([c.looks, c.seen.digs], [[], 0])
+})
+
+test('mine skips a block with no seen way to it and a known leaf beside it and mines the next', async (t) => {
+  const c = mineClosedRig(t, ['6,64,0', '-8,64,0'], (at) => at.x === 6)
+  c.blocks['7,64,0'] = new Block('oak_leaves', new Vec3(7, 64, 0), 2)
+  const collects = collectCells(c)
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
+  assert.deepStrictEqual([reply.mined, reply.reason], [1, null])
+  assert.deepStrictEqual(collects, ['-8,64,0'])
+  assert.ok(!c.looks.includes('6,64,0'), c.looks.join(' | '))
+  assert.ok(c.lines.includes(`[mine] skip for now @ 6,64,0: ${NO_WAY}`), c.lines.join(' | '))
+})
+
+test('mine whose blocks in sight all have no seen way to them while the start cell changes at every check ends after 41 skips', async (t) => {
+  const c = mineClosedRig(t, ['6,64,0', '-8,64,0'], () => {
+    const p = c.bot.entity.position
+    c.bot.entity.position = new Vec3(p.x, p.y, 1 - p.z)
+    return true
+  })
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore', count: '2' }, c.env))
+  assert.deepStrictEqual(reply, { mined: 0, requested: 2, gathered: 0, reason: 'no reachable iron_ore within 64 of the start, 1 in sight with no seen way to them' })
+  assert.deepStrictEqual([c.checks.length, c.looks, c.seen.digs], [41, [], 0])
+})
+
+test('mine takes a block skipped for now again from the cell the body moved to before the next skip, with no dig landed', async (t) => {
+  const c = mineClosedRig(t, ['6,64,0', '-8,64,0'], (at) => {
+    const shut = c.bot.entity.position.z === 0
+    if (at.x === -8) c.bot.entity.position = new Vec3(0, 64, 2)
+    return shut
+  })
+  const from = checkedFrom(c)
+  const collects = collectCells(c)
+  const reply = await within(awaitRoute('/mine', { name: 'iron_ore' }, c.env))
+  assert.deepStrictEqual([reply.mined, reply.reason], [1, null])
+  assert.deepStrictEqual(from, ['6,64,0 from (0, 64, 0)', '-8,64,0 from (0, 64, 0)', '6,64,0 from (0, 64, 2)'])
+  assert.deepStrictEqual(collects, ['6,64,0'])
+})
+
 test('a /stop during the walk back to where a gather last saw ore ends the gather cancelled with no further dig', async (t) => {
   let id = null
   const c = pitRig(t, [2, 3], { back: () => { c.env.jobs.stop(id); return false } })
@@ -1691,6 +1935,15 @@ test('mine with only unripe potatoes in sight says none is ripe', async (t) => {
 test('a gather with only unripe potatoes in sight says none is ripe', async (t) => {
   const c = potatoRig(t, row(3, 3), jobRig)
   assert.deepStrictEqual(await potatoGather(c, {}, false), { gathered: 0, dug: 0, requested: 1, inventoryMatching: 0, unripe: 2, ok: false, reason: 'no ripe potatoes left, 2 unripe (gathered 0/1)' })
+  assert.strictEqual(c.seen.digs, 0)
+})
+
+test('a gather with unripe potatoes in sight and a ripe one skipped for now says none is reachable, never that none is ripe', async (t) => {
+  const c = potatoRig(t, [[1, 0, 3], [8, 0, 7]], jobRig)
+  c.env.blockWalkClosed = () => true
+  assert.deepStrictEqual(await potatoGather(c, {}, false), {
+    gathered: 0, dug: 0, requested: 1, inventoryMatching: 0, unripe: 1, ok: false, reason: 'no reachable potatoes left, 1 unripe, 1 in sight with no seen way to them (gathered 0/1)'
+  })
   assert.strictEqual(c.seen.digs, 0)
 })
 
