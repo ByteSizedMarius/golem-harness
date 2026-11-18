@@ -16,7 +16,7 @@ const { SPRINT_FLOOR, sprintAllowed } = require('../lib/sprint')
 const { isDoor, panelAcross, doorCrossing, partnerLeaf, PLATE_WAIT_TICKS } = require('../lib/doors')
 const registry = require('prismarine-registry')('1.21.11')
 const Item = require('prismarine-item')(registry)
-const { loadBotFunctions, botConstant, botObject, startApp, fakeClock, combatReflexIn, claimRescue, farmlandTop } = require('./helpers')
+const { loadBotFunctions, botConstant, botObject, startApp, fakeClock, combatReflexIn, claimRescue, farmlandTop, walkingBody } = require('./helpers')
 const { block, AIR, STONE, ground, world, cellOf, farmlandStandCases } = require('./farmland-stand-cases')
 
 const { UNLOADED, UNKNOWN, standCell, targetKind, resolveTarget, crumbCentre, arrivedAt, watchProgress, walkAttempt, routeDeadline } = walk
@@ -926,6 +926,58 @@ test('a /goto walks past open ground it has not seen, and the same way under roc
   assert.strictEqual((await replyFor(false)).arrived, true)
   const buried = await replyFor(true)
   assert.deepStrictEqual([buried.arrived, buried.reason, buried.edge], [false, 'unseen-way', { x: 16, y: 64, z: 0 }])
+})
+
+// Grass at y 64 and at y 65 from x 3 east, with a trench at x 3 from z 0 to 2 open at 3,65,1 under a spruce log.
+function trenchCells () {
+  const cells = {}
+  for (let x = -2; x <= 6; x++) {
+    for (let z = -2; z <= 4; z++) {
+      cells[`${x},64,${z}`] = ['grass_block', { snowy: 'false' }]
+      if (x >= 3) cells[`${x},65,${z}`] = ['grass_block', { snowy: 'false' }]
+    }
+  }
+  for (const k of ['3,64,0', '3,64,1', '3,64,2', '3,65,1']) cells[k] = ['air', {}]
+  cells['3,66,1'] = ['spruce_log', { axis: 'y' }]
+  return cells
+}
+
+// The reply reason, plan count and walk count of a stagedGoto for q beside the trench, every plan and walk finding no path.
+async function trenchGoto (t, q, { buried = false } = {}) {
+  const { bot: body } = await walkingBody(t, new Vec3(2.5, 65, 1.5), trenchCells())
+  if (buried) {
+    // The legs read the ground as knownMoves reads a cell no eye has seen.
+    const m = body.pathfinder.movements
+    const getBlock = m.getBlock.bind(m)
+    m.getBlock = (pos, dx, dy, dz) => {
+      const b = getBlock(pos, dx, dy, dz)
+      return ['grass_block', 'stone'].includes(b.name) ? { position: b.position, type: null, name: 'unknown', safe: false, physical: false } : b
+    }
+  }
+  let searches = 0
+  let precheck = null
+  const setup = (bot) => {
+    Object.assign(bot, { entity: body.entity, blockAt: (p) => body.blockAt(p) })
+    Object.assign(bot.pathfinder, { movements: body.pathfinder.movements, startCell: body.pathfinder.startCell })
+    precheck = loadBotFunctions(['airPrecheck'], { bot, cellKnown: () => true, heldLight: (p, b) => b, ck: (x, y, z) => x + ',' + y + ',' + z, Vec3 }).airPrecheck
+  }
+  const planPath = async () => { searches++; return { status: 'noPath', path: [] } }
+  const { r, walks } = await plannedGoto(q, {}, { setup, answer: update('noPath'), over: { planPath, airPrecheck: (...a) => precheck(...a) } })
+  return [r.reason, searches, walks]
+}
+
+const TRENCH_DROP = { drop: { position: new Vec3(3.81, 63.84, 1.75) } }
+
+test('a pickup walk into a trench whose only opening lies under a log replies no-path before any plan or walk', async (t) => {
+  assert.deepStrictEqual(await trenchGoto(t, TRENCH_DROP), ['no-path', 0, 0])
+})
+
+test('a pickup walk from the rim into the trench with its ground unknown to the planner replies no-path before any plan or walk', async (t) => {
+  assert.deepStrictEqual(await trenchGoto(t, TRENCH_DROP, { buried: true }), ['no-path', 0, 0])
+})
+
+test('a goto to a cell inside the closed trench plans and walks', async (t) => {
+  assert.deepStrictEqual(await trenchGoto(t, { x: 3, y: 64, z: 1 }), ['no-path', 2, 1])
 })
 
 test('a /goto into a rock column beside the bot replies no-floor only when it knows the column, else unseen-way with the target as edge', async () => {

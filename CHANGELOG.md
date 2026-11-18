@@ -4,6 +4,15 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-18: a drop in a closed pocket is given up without a search
+
+A `gather` of dirt dug under a tree trunk, and its drops fell into a trench closed by the trunk
+over the only way in. The walk to each drop searched for a path three times, 10 s each, and again
+after every dig, so the job took 131 to 203 s for one or two dirt. Before a walk to a drop plans,
+the harness now checks whether a body could get from the drop to where the bot stands without
+digging. If none could, the walk answers `no-path` at once and the drop stays listed as
+`unreached`. The same job takes 11 to 31 s.
+
 ## 2026-11-18: gather and mine keep track of their own drops while they fall
 
 `gather` and `mine` counted a drop of their own dig as seen only within a block of the dug cell.

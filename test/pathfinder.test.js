@@ -6,6 +6,7 @@ const { goals } = require('mineflayer-pathfinder')
 const WorldSync = require('prismarine-world/src/worldsync')
 const { GRAVESTONE } = require('../lib/server-overrides')
 const { panelAcross } = require('../lib/doors')
+const { GoalPickup } = require('../lib/walk')
 const { CREEPER_ZONE_SLACK, inCreeperZone, zoneCrossed, summarizePlan } = require('../lib/plan')
 const { botConstant, groundMemory, blockWorld, loadBotFunctions, farmlandTop } = require('./helpers')
 const { body, knowing, legsOf, START, STONE, fieldPlanCases, fieldMoveCases } = require('./farmland-plan-cases')
@@ -334,6 +335,114 @@ test('a goto climbs a ladder made out in the dark within 16 blocks, as one seen'
   }
   assert.deepStrictEqual(await both(true), ['success', 'connected'], 'control: the ladder seen')
   assert.deepStrictEqual(await both(false), ['success', 'connected'])
+})
+
+const GRASS = ['grass_block', { snowy: 'false' }]
+const LOG = ['spruce_log', { axis: 'y' }]
+// Grass at y 64 and on a step at x 3 and east of it at y 65, with a trench in the step at x 3 from z 0 to 2 open at 3,65,1.
+const trench = (c) => {
+  if (c.y <= 63) return STONE
+  if (c.x === 3 && ((c.y === 64 && c.z >= 0 && c.z <= 2) || (c.y === 65 && c.z === 1))) return AIR
+  return c.y === 64 || (c.y === 65 && c.x >= 3) ? GRASS : AIR
+}
+const TRENCH_FEET = new Vec3(2.5, 65, 1.5)
+const TRENCH_DROP = new Vec3(3.81, 63.84, 1.75)
+const TRENCH_END = new Vec3(3, 64, 1)
+// The precheck's verdicts with and without the pickup goal, for a body at feet at noon with the cells round end seen.
+async function pickupVerdicts ({ feet = TRENCH_FEET, drop = TRENCH_DROP, end = TRENCH_END, ground = trench, cells = { '3,66,1': LOG }, forestry = false, unknown = () => false, outline = () => false, stale = null, entities = {} } = {}) {
+  const { bot, moves, fns, env } = await lit(feet, new Map(Object.entries(cells)), ground, () => 15)
+  seeAll(env, [end.x - 2, end.y - 3, end.z - 2], [end.x + 2, end.y + 3, end.z + 2])
+  if (forestry) {
+    moves.canDig = true
+    moves.blocksCantBreak = new Set(bot.registry.blocksArray.filter((b) => !/(_log|_wood|_leaves)$/.test(b.name)).map((b) => b.id))
+  }
+  bot.pathfinder.setMovements(moves)
+  if (stale) moves.entityIntersections[stale] = 1
+  Object.assign(bot.entities, entities)
+  const planKnown = fns.planKnown
+  fns.planKnown = (p) => (unknown(p) ? null : outline(p) ? 'air' : planKnown(p))
+  const goal = new GoalPickup({ position: drop }, { blockAt: (p) => bot.blockAt(p), known: () => true })
+  assert.ok(goal.isEnd(end), 'control: the end cell is a pickup end')
+  return { verdicts: [fns.airPrecheck(end, 0, goal).verdict, fns.airPrecheck(end, 0).verdict], moves, goal }
+}
+
+test('the goto precheck refuses a pickup walk into a trench whose only opening lies under a log the legs cannot break', async () => {
+  const { verdicts } = await pickupVerdicts()
+  assert.deepStrictEqual(verdicts, ['no-path', 'connected'])
+})
+
+test('the goto precheck refuses a pickup walk into a trench closed by a block no body stands in that is no full cube', async () => {
+  for (const [name, over] of [['a bottom slab', ['stone_slab', { type: 'bottom', waterlogged: 'false' }]], ['a fence', ['oak_fence', { east: 'false', north: 'false', south: 'false', west: 'false', waterlogged: 'false' }]]]) {
+    const { verdicts } = await pickupVerdicts({ cells: { '3,66,1': over } })
+    assert.deepStrictEqual(verdicts, ['no-path', 'connected'], name)
+  }
+})
+
+// A body 2.8 flat from the centre of the pickup cell, whose start cell the pickup goal estimates at 0.
+const MARCH_FEET = new Vec3(1.5, 65, 3.5)
+
+test('the goto precheck refuses a pickup walk into the trench with its closing cells unknown to the planner for a body on the rim, not for one that can march', async () => {
+  const closing = (p) => (p.x === 3 && p.y === 66 && p.z === 1) || (p.x === 3 && p.y === 65 && p.z !== 1)
+  const rim = await pickupVerdicts({ unknown: closing })
+  assert.strictEqual(rim.moves.getBlock(new Vec3(3, 66, 1), 0, 0, 0).name, 'unknown', 'control: the log reads unknown')
+  assert.deepStrictEqual(rim.verdicts, ['no-path', 'inconclusive'], 'on the rim')
+  assert.deepStrictEqual((await pickupVerdicts({ feet: MARCH_FEET, unknown: closing })).verdicts, ['inconclusive', 'inconclusive'], 'more than 2 flat from the pickup cell')
+})
+
+test('the goto precheck leaves a pickup walk into the trench to the plan when the way in runs through a cell the planner makes out as air, for a body on the rim', async () => {
+  const { verdicts, moves, goal } = await pickupVerdicts({ outline: (p) => p.x === 3 && p.y === 66 && p.z === 1 })
+  const cell = moves.getBlock(new Vec3(3, 66, 1), 0, 0, 0)
+  assert.deepStrictEqual([cell.type, cell.name, cell.safe], [null, 'air', true], 'control: the log reads as the outline air')
+  assert.strictEqual(goal.heuristic(new Vec3(2, 65, 1)), 0, 'control: the start cell estimate')
+  assert.notStrictEqual(verdicts[0], 'no-path')
+})
+
+const buried = (p) => trench(p) !== AIR
+
+test('the goto precheck refuses a pickup walk into the trench with its ground unknown to the planner for a body on the rim', async () => {
+  const { verdicts, goal } = await pickupVerdicts({ unknown: buried })
+  assert.strictEqual(goal.heuristic(new Vec3(2, 65, 1)), 0, 'control: the start cell estimate')
+  assert.deepStrictEqual(verdicts, ['no-path', 'inconclusive'])
+})
+
+test('the goto precheck leaves a pickup walk into the trench with its ground unknown to the planner to the plan for a body more than 2 flat from the pickup cell', async () => {
+  const { verdicts, goal } = await pickupVerdicts({ feet: MARCH_FEET, unknown: buried })
+  assert.strictEqual(goal.heuristic(new Vec3(1, 65, 3)), 0, 'control: the start cell estimate')
+  assert.deepStrictEqual(verdicts, ['inconclusive', 'inconclusive'])
+})
+
+test('the goto precheck leaves a pickup walk into the trench with its ground unknown to the planner to the plan for a start cell the goal estimates above 0', async () => {
+  // A stone pillar beside the trench, the body on top of it.
+  const { verdicts, goal } = await pickupVerdicts({ feet: new Vec3(2.5, 67, 1.5), cells: { '3,66,1': LOG, '2,65,1': STONE, '2,66,1': STONE }, unknown: buried })
+  assert.ok(goal.heuristic(new Vec3(2, 67, 1)) > 0, 'control: the start cell estimate')
+  assert.deepStrictEqual(verdicts, ['inconclusive', 'inconclusive'])
+})
+
+test('the goto precheck leaves a pickup walk into the trench to the plan under legs that may break the log', async () => {
+  assert.deepStrictEqual((await pickupVerdicts({ forestry: true })).verdicts, ['connected', 'connected'])
+})
+
+test('the goto precheck reads the entities over the log as they stand now, under legs that may break it', async () => {
+  assert.deepStrictEqual((await pickupVerdicts({ forestry: true, stale: '3,67,1' })).verdicts, ['connected', 'connected'], 'an entity the index holds that has gone')
+  const zombie = { id: 7, name: 'zombie', position: new Vec3(3.5, 67, 1.5), width: 0.6, height: 1.95 }
+  assert.deepStrictEqual((await pickupVerdicts({ forestry: true, entities: { 7: zombie } })).verdicts, ['no-path', 'connected'], 'control: an entity standing on the log')
+})
+
+test('the goto precheck leaves a pickup walk to the plan for a body whose head cell holds stone, a step from the drop', async () => {
+  // A closed corridor at z 0 from x 0 to 2 with stone in the body's head cell.
+  const corridor = (c) => (c.z === 0 && c.x >= 0 && c.x <= 2 && (c.y === 64 || c.y === 65) && !(c.x === 0 && c.y === 65) ? AIR : STONE)
+  const { verdicts } = await pickupVerdicts({ feet: new Vec3(0.5, 64, 0.5), drop: new Vec3(2.6, 63.9, 0.5), end: new Vec3(1, 64, 0), ground: corridor, cells: {} })
+  assert.deepStrictEqual(verdicts, ['connected', 'connected'])
+})
+
+test('the goto precheck leaves a pickup walk to the plan for a body already in a pickup end cell of the trench', async () => {
+  assert.deepStrictEqual((await pickupVerdicts({ feet: new Vec3(3.5, 64, 1.5) })).verdicts, ['connected', 'connected'])
+})
+
+test('the goto precheck leaves a pickup walk to a drop on open ground 12 blocks away to the plan', async () => {
+  const flat = (c) => (c.y <= 63 ? STONE : AIR)
+  const { verdicts } = await pickupVerdicts({ feet: START, drop: new Vec3(12.5, 63.9, 0.5), end: new Vec3(12, 64, 0), ground: flat, cells: {} })
+  assert.deepStrictEqual(verdicts, ['connected', 'connected'])
 })
 
 // The plan to 7,64,0 past block in cells, the floor and x 7 to 8 seen, digging only coal ore with cage.
