@@ -1412,6 +1412,53 @@ test('a goto with no way round a watched creeper replies creeper with the creepe
   assert.deepStrictEqual([wandered.walks, wandered.r.reason], [1, 'no-path'], 'a failed search blames no creeper')
 })
 
+const FAR_DROP = { drop: { position: new Vec3(10.5, 64, 0.5) } }
+const TIMED_OUT = { status: 'timeout', path: [] }
+const onto = (g) => ({ status: 'success', path: [pathNode(g.x, g.y, g.z)] })
+
+// A stagedGoto whose every plan answers plan(goal), whose walks to the target time out and whose march hops stop 2 short of their cell.
+async function timedOutGoto (q, plan, { moves, watched } = {}) {
+  let plans = 0
+  const walked = []
+  const search = async (g) => { plans++; return plan(g) }
+  const answer = (bot, g) => {
+    if (!(g instanceof goals.GoalNear)) {
+      walked.push('target')
+      return update('timeout')(bot)
+    }
+    walked.push('hop')
+    bot.entity.position = new Vec3(g.x - 1.5, g.y, g.z + 0.5)
+    bot.emit('goal_reached', g)
+  }
+  const { r } = watched
+    ? await watchedGoto(q, {}, { moves, watched, search, answer })
+    : await plannedGoto(q, {}, { answer, over: { planPath: search } })
+  return { reason: r.reason, plans, walked }
+}
+
+test('a pickup walk whose search times out with no path replies no-path without a walk', async () => {
+  assert.deepStrictEqual(await timedOutGoto(FAR_DROP, () => TIMED_OUT), { reason: 'no-path', plans: 1, walked: [] })
+})
+
+test('a pickup walk whose search times out on a partial path walks it once and replies no-path without a march', async () => {
+  const partial = () => ({ status: 'timeout', path: [pathNode(1, 64, 0), pathNode(2, 64, 0)] })
+  assert.deepStrictEqual(await timedOutGoto(FAR_DROP, partial), { reason: 'no-path', plans: 1, walked: ['target'] })
+})
+
+test('a pickup walk whose walk times out replies no-path without a march or a second walk', async () => {
+  assert.deepStrictEqual(await timedOutGoto(FAR_DROP, onto), { reason: 'no-path', plans: 1, walked: ['target'] })
+})
+
+test('a pickup walk with no way round a watched creeper and a search past it that times out with no path replies no-path without a walk', async () => {
+  const east = new EastMoves()
+  const plan = () => (offered(east).length ? TIMED_OUT : { status: 'noPath', path: [] })
+  assert.deepStrictEqual(await timedOutGoto(FAR_DROP, plan, { moves: east, watched: [WATCHED] }), { reason: 'no-path', plans: 2, walked: [] })
+})
+
+test('a goto to a coordinate whose walk times out marches toward it and walks once more', async () => {
+  assert.deepStrictEqual(await timedOutGoto({ x: 10, z: 0 }, onto), { reason: 'no-path', plans: 2, walked: ['target', 'hop', 'target'] })
+})
+
 test('a goto with accept walks past a watched creeper on the moves as they are', async () => {
   const moves = new OfferedMoves()
   const during = []

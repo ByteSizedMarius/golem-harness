@@ -4,6 +4,14 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-18: a walk to a drop gives up on its first search that runs out of time
+
+A walk to a drop it had no way to, on a roof or across a ravine, ran three path searches of 10 s
+each, with a march toward the drop between the last two, before it answered `no-path`. A walk to a
+drop now answers `no-path` at once when its first search runs out of time with no path at all. When
+that search found a way or part of one, the bot walks it, and a search that runs out of time on that
+walk ends it. Walks to coordinates, blocks, waypoints and players keep the march and the second try.
+
 ## 2026-11-18: a gather that sees nothing looks again from where it last saw something
 
 A `gather` on a terraced field followed a drop into a pit beside a bed and stopped at 17 of 30 with
