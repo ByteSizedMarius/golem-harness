@@ -393,8 +393,8 @@ test('mine chases the drop of its last dig that collectblock could not reach, an
   assert.deepStrictEqual(rig.seen.chases.map((c) => c.drop), [rig.seen.drops[0]])
 })
 
-test('mine chases its own drop as watched while it lies within 1 of the dug cell, and as unwatched once it rolled further', async (t) => {
-  for (const [label, rest, watched] of [['beside the cell', new Vec3(2.2, 63.97, 0.5), true], ['1.5 past the cell', new Vec3(3.5, 63.97, 0.5), false]]) {
+test('mine chases its own drop as watched beside the dug cell, and 1.5 past it after a roll without a rest', async (t) => {
+  for (const [label, rest, watched] of [['beside the cell', new Vec3(2.2, 63.97, 0.5), true], ['1.5 past the cell', new Vec3(3.5, 63.97, 0.5), true]]) {
     const rig = mineRig(t, { blocks: ore(1, 64, 0), chase: () => true })
     rig.bot.once('itemDrop', (d) => setImmediate(() => {
       d.position = rest
@@ -402,6 +402,93 @@ test('mine chases its own drop as watched while it lies within 1 of the dug cell
     }))
     await mine(rig, { name: 'iron_ore' })
     assert.deepStrictEqual(rig.seen.chases.map((c) => [c.at.x, c.watched]), [[rest.x, watched]], label)
+  }
+})
+
+test('mine walks to its own drop that rolled without a rest 1.5 past the dug cell, out of the eye ray, and picks it up', async (t) => {
+  const rig = mineRig(t, { blocks: ore(1, 64, 0), chase: () => true })
+  rig.bot.once('itemDrop', (d) => setImmediate(() => {
+    d.position = new Vec3(3.5, 63.97, 0.5)
+    rig.bot.emit('entityMoved', d)
+  }))
+  // The drop is out of sight and every cell is known only from earlier sight.
+  const blind = sourcesAt([0, 1], rig.bot.entity.position, { blockAt: (p) => (p.y <= 63 ? solid : open), known: () => false, seenNow: () => false })
+  const chase = rig.env.stagedGoto
+  const resolved = []
+  rig.env.stagedGoto = async (q, route) => {
+    const r = resolveTarget(q, blind)
+    resolved.push(r.reason ?? 'goal')
+    return r.reason ? { arrived: false, reason: r.reason } : chase(q, route)
+  }
+  const reply = await mine(rig, { name: 'iron_ore' })
+  assert.deepStrictEqual({ resolved, reply }, { resolved: ['goal'], reply: { mined: 1, requested: 1, gathered: 1, reason: null } })
+})
+
+// A ledger's dig of the ore at 1,64,0, its drop, and move(ms, p), which reports the drop at p once ms have passed since its spawn.
+async function ownDrop (t) {
+  const rig = mineRig(t, { blocks: ore(1, 64, 0), chase: () => true })
+  const ledger = loadBotFunctions(['digLedger'], rig.env).digLedger([1])
+  t.after(() => ledger.stop())
+  let born
+  rig.bot.once('itemDrop', () => { born = rig.clock.now })
+  await ledger.run(() => rig.bot.dig(rig.bot.blockAt(new Vec3(1, 64, 0))))
+  const drop = rig.seen.drops[0]
+  const move = (ms, p) => {
+    rig.clock.now = born + ms
+    drop.position = p
+    rig.bot.emit('entityMoved', drop)
+  }
+  return { ledger, drop, move }
+}
+
+const near = new Vec3(2.2, 63.97, 0.5)
+const far = new Vec3(3.5, 63.97, 0.5)
+
+test('an own drop that rolls on from its dug cell without a rest counts as seen more than 1 from that cell', async (t) => {
+  const { ledger, drop, move } = await ownDrop(t)
+  move(500, new Vec3(2.6, 64.2, 0.5))
+  move(1000, far)
+  assert.strictEqual(ledger.watched(drop), true, 'after the roll')
+  move(4000, far.offset(1 / 32, 0, 0))
+  assert.strictEqual(ledger.watched(drop), true, 'a report that moves it under 4/32 after a rest')
+})
+
+test('an own drop more than 1 from its dug cell counts as seen after a 2/32 shift 2000 ms after its last report', async (t) => {
+  const { ledger, drop, move } = await ownDrop(t)
+  move(1000, far)
+  move(3000, far.offset(2 / 32, 0, 0))
+  assert.strictEqual(ledger.watched(drop), true)
+})
+
+test('an own drop that rolls on with 1150 ms between reports counts as seen more than 1 from its dug cell', async (t) => {
+  const { ledger, drop, move } = await ownDrop(t)
+  move(1150, new Vec3(2.6, 64.2, 0.5))
+  move(2300, far)
+  assert.strictEqual(ledger.watched(drop), true)
+})
+
+test('an own drop that moves 4/32 3000 ms after its last report no longer counts as seen more than 1 from its dug cell, for good', async (t) => {
+  const { ledger, drop, move } = await ownDrop(t)
+  move(1000, far)
+  move(4000, far.offset(4 / 32, 0, 0))
+  assert.strictEqual(ledger.watched(drop), false, 'after the shift')
+  move(4500, far.offset(8 / 32, 0, 0))
+  assert.strictEqual(ledger.watched(drop), false, 'after a roll on')
+})
+
+test('an own drop that rested and then moved more than 1 from its dug cell no longer counts as seen, for good', async (t) => {
+  for (const [label, moves] of [['rest from the spawn', [[3000, far]]], ['rest after a move', [[300, near], [3300, far]]], ['back near and off again', [[3000, far], [3100, near], [3200, far]]]]) {
+    const { ledger, drop, move } = await ownDrop(t)
+    for (const [ms, p] of moves) move(ms, p)
+    assert.strictEqual(ledger.watched(drop), false, label)
+  }
+})
+
+test('an own drop within 1 of its dug cell counts as seen after any motion', async (t) => {
+  for (const [label, moves] of [['moved after a rest', [[3000, near]]], ['rolled far, rested, moved back', [[300, far], [3300, near]]]]) {
+    const { ledger, drop, move } = await ownDrop(t)
+    for (const [ms, p] of moves) move(ms, p)
+    assert.strictEqual(ledger.watched(drop), true, label)
   }
 })
 

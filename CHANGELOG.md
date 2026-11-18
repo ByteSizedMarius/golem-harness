@@ -4,6 +4,13 @@ Changes to the harness, newest first. Most entries exist because something went 
 and each says what happened and what the harness does now. A heading's date is the play session,
 or the day of a release or removal, and the commit messages carry the detail.
 
+## 2026-11-18: gather and mine keep track of their own drops while they fall
+
+`gather` and `mine` counted a drop of their own dig as seen only within a block of the dug cell.
+Wheat seeds that rolled down a terrace step were refused as unseen and left behind. A drop now
+counts as seen from the dig until it has come to rest and moves again, as a player who watched it
+fall knows where it went.
+
 ## 2026-11-17: gather and the scene's ore veins find blocks in sight behind buried ones
 
 `gather` took the 40 matching blocks nearest the bot and only then kept the ones in sight, so a
